@@ -1,0 +1,6 @@
+/target
+# vcpkg generated files
+vcpkg_installed/
+buildtrees/
+packages/
+downloads/

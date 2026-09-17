@@ -1,0 +1,53 @@
+[package]
+name = "vs-imageseqs"
+version = "0.1.0"
+edition = "2024"
+authors = ["noaione <noaione@n4o.xyz>"]
+license = "MIT OR Apache-2.0"
+keywords = ["vapoursynth", "image-reader"]
+description = "Rust-based image sequences reader for VapourSynth"
+repository = "https://github.com/noaione/vs-imageseqs"
+homepage = "https://github.com/noaione/vs-imageseqs"
+rust-version = "1.88.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+vapoursynth4-rs = { version = "0.5.1", default-features = false, features = ["vs-42", "vsscript-43"] }
+
+# image stuff
+image = { version = "0.25.10", default-features = false, features = [
+    # formats
+    "avif-native",
+    "bmp",
+    "exr",
+    "gif",
+    "ico",
+    "jpeg",
+    "png",
+    "pnm",
+    "qoi",
+    "tga",
+    "tiff",
+    "webp",
+    # other
+    "hdr",
+    "rayon"
+] }
+libheif-rs = { version = "3.0.0", default-features = false, features = ["image", "v1_23", "embedded-libheif"] }
+jxl-image-rs-integration = "0.7.3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+panic = "abort"
+incremental = false
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
