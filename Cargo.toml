@@ -47,7 +47,7 @@ libheif-rs = { version = "3.0.0", default-features = false, features = [
 jxl-image-rs-integration = "0.7.3"
 
 [profile.release]
-opt-level = 3
+opt-level = "s"
 lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
