@@ -2,6 +2,7 @@
 name = "vapoursynth-imageseqs"
 version = "0.1.0"
 description = "VapourSynth image sequence reader plugin"
+readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MPL-2.0" }
 authors = [
@@ -40,6 +41,7 @@ include = [
     "src/**/*.rs",
     "hatch_build.py",
     "pyproject.toml",
+    "README.md",
     "docs/**/*.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES",
