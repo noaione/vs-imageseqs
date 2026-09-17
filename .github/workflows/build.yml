@@ -68,12 +68,19 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install cmake ninja pkg-config dav1d libde265
 
+      - name: prepare vcpkg cache directory
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path (Join-Path $env:GITHUB_WORKSPACE 'vcpkg_installed') | Out-Null
+
       - name: cache vcpkg dependencies
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: runner.os == 'Windows'
         with:
-          path: C:\vcpkg\installed
-          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          path: vcpkg_installed
+          key: vcpkg-${{ runner.os }}-${{ runner.arch }}-x64-windows-static-md-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ runner.arch }}-x64-windows-static-md-
 
       - name: install windows dependencies
         if: runner.os == 'Windows'
