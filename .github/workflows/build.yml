@@ -118,8 +118,15 @@ jobs:
           $installed = $installRoot
           New-Item -ItemType Directory -Force -Path $adapter | Out-Null
           New-Item -ItemType File -Force -Path (Join-Path $adapter '.vcpkg-root') | Out-Null
+          # A restored Rust target cache can contain a stale file or junction
+          # at this path. Remove it before creating the adapter junction.
+          $adapterInstalled = Join-Path $adapter 'installed'
+          $existingAdapterInstalled = Get-Item -LiteralPath $adapterInstalled -Force -ErrorAction SilentlyContinue
+          if ($null -ne $existingAdapterInstalled) {
+            Remove-Item -LiteralPath $adapterInstalled -Force -Recurse
+          }
           New-Item -ItemType Junction -Force `
-            -Path (Join-Path $adapter 'installed') `
+            -Path $adapterInstalled `
             -Target $installed | Out-Null
 
           $pkgconf = Join-Path $installed 'x64-windows\tools\pkgconf'
