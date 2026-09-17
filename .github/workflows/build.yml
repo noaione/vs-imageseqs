@@ -2,10 +2,25 @@ name: build
 
 on:
   push:
+    paths-ignore:
+      - 'README.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.vscode/**'
   pull_request:
+    paths-ignore:
+      - 'README.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.vscode/**'
 
+env:
+  CARGO_TERM_COLOR: always
 permissions:
-  contents: read
+  contents: write
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   wheels:
@@ -33,6 +48,9 @@ jobs:
 
       - name: set up rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: cache rust dependencies
+        uses: Swatinem/rust-cache@v2
 
       - name: set up msvc
         if: runner.os == 'Windows'
