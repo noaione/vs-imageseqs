@@ -1,14 +1,17 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+mod color;
+mod decoder;
+mod error;
+mod pixel;
+mod source;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+use source::ImageSequence;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+vapoursynth4_rs::declare_plugin!(
+    c"xyz.n4o.imgseqs",
+    c"imgseqs",
+    c"Rust-based image sequence reader",
+    (0, 1),
+    vapoursynth4_rs::VAPOURSYNTH_API_VERSION,
+    0,
+    (ImageSequence, None)
+);
