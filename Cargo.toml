@@ -15,7 +15,10 @@ rust-version = "1.88.0"
 crate-type = ["cdylib"]
 
 [dependencies]
-vapoursynth4-rs = { version = "0.5.1", default-features = false, features = ["vs-42", "vsscript-43"] }
+vapoursynth4-rs = { version = "0.5.1", default-features = false, features = [
+    "vs-42", # >=R74
+    "vsscript-43" # >=R79
+] }
 
 # image stuff
 image = { version = "0.25.10", default-features = false, features = [
@@ -36,7 +39,11 @@ image = { version = "0.25.10", default-features = false, features = [
     "hdr",
     "rayon"
 ] }
-libheif-rs = { version = "3.0.0", default-features = false, features = ["image", "v1_23", "embedded-libheif"] }
+libheif-rs = { version = "3.0.0", default-features = false, features = [
+    "image",
+    "v1_23", # target libheif v1.23.x
+    "embedded-libheif" # build on linux (v1.23.0)
+] }
 jxl-image-rs-integration = "0.7.3"
 
 [profile.release]
