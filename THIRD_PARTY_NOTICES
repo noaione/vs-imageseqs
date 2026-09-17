@@ -1,0 +1,83 @@
+vs-imageseqs third-party notices
+================================
+
+This distribution contains the vs-imageseqs VapourSynth plugin and native
+code from the projects listed below. The files in LICENSES/ are part of the
+distribution and preserve the applicable license texts and notices.
+
+The exact native inputs recorded here are from the x64-windows-static-md
+vcpkg installation used to build the Windows wheel:
+
+  * libheif 1.23.1
+  * libde265 1.1.1
+  * dav1d 1.5.3
+
+The native dependency versions and license expressions used by this build
+are recorded below. Rust crate licenses are intentionally out of scope for
+this first notice bundle.
+
+Project
+-------
+
+vs-imageseqs is Copyright (c) noaione and is distributed under the Mozilla
+Public License Version 2.0. See LICENSE.
+
+Native components
+-----------------
+
+dav1d 1.5.3
+  License: BSD 2-Clause "Simplified" License
+  Linkage: statically linked through the Rust dav1d decoder dependency
+  Notice: LICENSES/dav1d-COPYING.txt
+  Upstream: https://code.videolan.org/videolan/dav1d
+
+libheif 1.23.1
+  License: GNU Lesser General Public License, version 3
+  Linkage: statically linked
+  Notice and license text: LICENSES/libheif-COPYING.txt
+  Upstream: https://github.com/strukturag/libheif
+
+libde265 1.1.1
+  License: GNU Lesser General Public License, version 3
+  Linkage: statically linked through libheif
+  Notice and license text: LICENSES/libde265-COPYING.txt
+  Upstream: https://github.com/strukturag/libde265
+
+The current vcpkg manifest disables libheif default features, so x265 is not
+selected. The refreshed install contains no x265 library. Older generated
+build metadata may still mention x265; always verify the final native link
+output after changing the vcpkg feature set.
+
+Static-linking release checklist
+---------------------------------
+
+The license files and notices above satisfy the accompanying-text part of
+the distribution. They do not by themselves satisfy every source and
+relinking requirement that can apply to a statically linked LGPL library.
+Before publishing a wheel containing this DLL, the release should also:
+
+  1. Make the Corresponding Source for the exact libheif and libde265
+     binaries available, including the build configuration and any changes.
+  2. Provide the Corresponding Application Code and a practical way for a
+     recipient to relink the application/plugin with a modified LGPL library,
+     as required by the chosen LGPLv3 distribution route.
+  3. Preserve the copyright notices, license texts, warranty disclaimers,
+     and source information for all components.
+The current source distribution contains this plugin's source and build
+metadata, but the ignored vcpkg_installed directory is not itself a
+Corresponding Source archive. Arrange an exact-source archive or a valid
+written offer/source URL for every published binary as part of release work.
+
+License URLs
+------------
+
+The authoritative license texts are also available from these upstream
+sources. The copies in LICENSES/ are the texts shipped with the exact local
+dependency installation used for this build.
+
+  * GNU LGPLv3: https://www.gnu.org/licenses/lgpl-3.0.html
+  * GNU GPLv3: https://www.gnu.org/licenses/gpl-3.0.html
+  * GNU GPLv2: https://www.gnu.org/licenses/old-licenses/gpl-2.0.html
+  * dav1d: https://code.videolan.org/videolan/dav1d/-/blob/master/COPYING
+  * libheif: https://github.com/strukturag/libheif/blob/master/COPYING
+  * libde265: https://github.com/strukturag/libde265/blob/master/COPYING

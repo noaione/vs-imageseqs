@@ -1,6 +1,17 @@
 /target
+/build/
+/dist/
+*.egg-info/
+__pycache__/
+*.py[cod]
 # vcpkg generated files
 vcpkg_installed/
 buildtrees/
 packages/
 downloads/
+
+__pycache__
+dist/
+out/
+build/
+.venv/

@@ -2,7 +2,10 @@
   "name": "imgseqs-native-deps",
   "version-string": "0.1.0",
   "dependencies": [
-    "libheif",
+    {
+      "name": "libheif",
+      "default-features": false
+    },
     "dav1d"
   ],
   "overrides": [

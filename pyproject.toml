@@ -1,0 +1,47 @@
+[project]
+name = "vapoursynth-imageseqs"
+version = "0.1.0"
+description = "VapourSynth image sequence reader plugin"
+requires-python = ">=3.12"
+license = { text = "MPL-2.0" }
+authors = [
+    { name = "noaione", email = "noaione@n4o.xyz" },
+]
+keywords = ["vapoursynth", "image-reader"]
+
+[project.optional-dependencies]
+dev = [
+    "build>=1.2",
+    "hatchling>=1.27",
+    "packaging>=26.3",
+    "VapourSynth>=79,<81",
+]
+
+[build-system]
+requires = ["hatchling>=1.27", "packaging"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+include = ["vapoursynth/plugins"]
+artifacts = [
+    "vapoursynth/plugins/*.dll",
+    "vapoursynth/plugins/*.so",
+    "vapoursynth/plugins/*.dylib",
+]
+
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "vcpkg.json",
+    "src/**/*.rs",
+    "hatch_build.py",
+    "pyproject.toml",
+    "docs/**/*.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES",
+    "LICENSES/**",
+]
