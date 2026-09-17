@@ -22,6 +22,24 @@ finds plugins in this directory. if it does not, load the file explicitly:
 core.std.LoadPlugin(r"path/to/vs_imageseqs.dll")
 ```
 
+## install without python packaging
+
+download the matching `*-plugin` artifact from a ci run and copy its file to
+your vapoursynth plugin directory. each artifact also includes the license
+and notice files. the native files are:
+
+- windows: `vs_imageseqs.dll`
+- linux: `libvs_imageseqs.so`
+- macos arm64: `libvs_imageseqs.dylib`
+
+you can also keep the file anywhere and load it explicitly in your script:
+
+```python
+core.std.LoadPlugin(r"path/to/vs_imageseqs.dll")
+```
+
+then use `core.imgseqs.Read` as shown below.
+
 ## use
 
 pass the files in the order they should become frames:

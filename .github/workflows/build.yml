@@ -68,6 +68,13 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install cmake ninja pkg-config dav1d libde265
 
+      - name: cache vcpkg dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: runner.os == 'Windows'
+        with:
+          path: C:\vcpkg\installed
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+
       - name: install windows dependencies
         if: runner.os == 'Windows'
         shell: pwsh
@@ -125,17 +132,49 @@ jobs:
       - name: install build tools
         run: python -m pip install --upgrade pip build
 
-      - name: run rust tests
-        run: cargo test --locked
-
       - name: build wheel
         run: python -m build --wheel --outdir dist
+
+      - name: stage native plugin on unix
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p native
+          case "$RUNNER_OS" in
+            Linux) plugin="target/release/libvs_imageseqs.so" ;;
+            macOS) plugin="target/release/libvs_imageseqs.dylib" ;;
+            *) echo "unsupported runner: $RUNNER_OS" >&2; exit 1 ;;
+          esac
+          test -f "$plugin"
+          cp "$plugin" native/
+          cp LICENSE THIRD_PARTY_NOTICES native/
+          cp -R LICENSES native/
+
+      - name: stage native plugin on windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $source = Join-Path $env:GITHUB_WORKSPACE 'target\release\vs_imageseqs.dll'
+          if (-not (Test-Path -LiteralPath $source)) {
+            throw "native plugin was not found at $source"
+          }
+          New-Item -ItemType Directory -Force -Path native | Out-Null
+          Copy-Item -LiteralPath $source -Destination native
+          Copy-Item -LiteralPath LICENSE, THIRD_PARTY_NOTICES -Destination native
+          Copy-Item -LiteralPath LICENSES -Destination native -Recurse
 
       - name: upload wheel
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.name }}
+          name: ${{ matrix.name }}-wheels
           path: dist/*.whl
+          if-no-files-found: error
+
+      - name: upload native plugin
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.name }}-plugins
+          path: native/**
           if-no-files-found: error
 
   source:

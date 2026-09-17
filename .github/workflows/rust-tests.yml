@@ -1,0 +1,48 @@
+name: rust tests
+
+on:
+  push:
+    paths-ignore:
+      - 'README.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.vscode/**'
+  pull_request:
+    paths-ignore:
+      - 'README.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.vscode/**'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: cargo test
+    runs-on: ubuntu-26.04
+
+    steps:
+      - name: check out source
+        uses: actions/checkout@v7
+
+      - name: set up rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cache rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes cmake ninja-build pkg-config libdav1d-dev libde265-dev
+
+      - name: run rust tests
+        run: cargo test --locked
