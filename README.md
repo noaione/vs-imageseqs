@@ -90,7 +90,7 @@ common supported inputs include:
 - `tiff`
 - `webp`
 - `avif` - via dav1d
-- `heif`/`heic` - via libheif/libde265
+- `heif`/`heic` - via libheif/libde265, monochrome pages as `Gray8`
 - `jxl (jpeg xl)` - via jxl-rs
 - `exr`
 - `hdr`

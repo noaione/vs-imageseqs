@@ -9,6 +9,7 @@ use image::{ColorType, ExtendedColorType, ImageDecoder, ImageReader};
 
 use crate::{
     error::{ImgSeqError, Result},
+    formats,
     pixel::PixelFormat,
 };
 
@@ -20,6 +21,15 @@ fn register_decoder_hooks() {
         libheif_rs::integration::image::register_heif_decoding_hook();
         libheif_rs::integration::image::register_heic_decoding_hook();
     });
+}
+
+/// Format modules that decode what the registered hooks cannot; see
+/// [`crate::formats`].
+fn format_decoder(info: &ImageInfo) -> Option<Result<DecodedImage>> {
+    if formats::heif::handles(info) {
+        return Some(formats::heif::decode(info));
+    }
+    None
 }
 
 #[derive(Clone, Debug)]
@@ -62,7 +72,9 @@ fn open_decoder(path: &Path) -> Result<impl ImageDecoder> {
         .map_err(|error| image_error("create decoder for", path, error))
 }
 
-fn image_error(action: &str, path: &Path, error: impl std::fmt::Display) -> ImgSeqError {
+/// Builds the error every decoder path reports, so the format modules in
+/// [`crate::formats`] word theirs the same way.
+pub(crate) fn image_error(action: &str, path: &Path, error: impl std::fmt::Display) -> ImgSeqError {
     ImgSeqError::new(format!(
         "failed to {action} image '{}': {error}",
         path.display()
@@ -101,6 +113,10 @@ pub fn probe(path: &Path) -> Result<ImageInfo> {
 }
 
 pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
+    if let Some(decoded) = format_decoder(info) {
+        return decoded;
+    }
+
     let open_started = Instant::now();
     let decoder = open_decoder(&info.path)?;
     let open = open_started.elapsed();

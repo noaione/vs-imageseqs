@@ -48,8 +48,7 @@ set; what imgseqs makes of them depends on the container:
 | set | what imgseqs returns | decoded |
 | --- | --- | --- |
 | webp, avif | 35 `RGB24` frames | 1928 MiB, one 44.7 MiB frame and 34 of 55.4 MiB |
-| jpeg, png, jxl | 31 `Gray8` frames of 18.5 MiB and 4 `RGB24` | 784 MiB |
-| heic | the 4 colour pages only | the 31 monochrome ones fail, see [05](improvements/05-monochrome-heif.md) |
+| jpeg, png, jxl, heic | 31 `Gray8` frames of 18.5 MiB and 4 `RGB24` | 784 MiB |
 
 every set needs `mismatch=True` for this, and those frame sizes (18.5 to
 55.4 MiB) are what the 192 MiB lookahead budget is up against: it holds ten of
@@ -68,7 +67,7 @@ frames, best pass of three:
 | png | 0.66 s | 0.89 s | imgseqs 1.36x faster, 2.88x including the open |
 | jxl | 6.42 s | cannot read | 3.02x over imgseqs's own serial row |
 | avif | 9.25 s | cannot open | 1.22x over imgseqs's own serial row |
-| heic | fails at `p003` | cannot open | neither plugin reads the set |
+| heic | 7.50 s | cannot open | 3.21x over imgseqs's own serial row |
 
 one pattern holds across all of them: the cheaper a frame is to decode, the more
 a deep lookahead is worth, so `prefetch=16` wins on jpeg and jxl and loses by 2x
@@ -188,20 +187,24 @@ the least of any set, and `prefetch=16` is 2x slower than the default.
 
 ## heic
 
-35 files, 236 MB, and neither plugin can read the sequence.
+35 files, 236 MB, and bestsource cannot open the set. imgseqs reads all 35: 31
+monochrome pages of 18.5 MiB decoded as `Gray8`, three colour pages of 55.4 MiB
+and `p000` at 44.7 MiB as `RGB24`. it is the only set here whose frames mix
+formats and sizes.
 
-imgseqs decodes four files, `p000`, `p001`, `p002` and `p018`, and fails on the
-other 31 with:
+| reading the set | frames | median frame | open | total |
+| --- | --- | --- | --- | --- |
+| imgseqs `Read` | 7.50 s | 206.3 ms | 0.006 s | 7.51 s |
+| imgseqs `Read`, `prefetch=0` | 24.11 s | 709.6 ms | 0.006 s | 24.12 s |
+| imgseqs `Read`, `prefetch=16` | 7.92 s | 11.5 ms | 0.006 s | 7.93 s |
 
-```text
-failed to decode image 'snek - p003.heic': Format error decoding `heif`:
-Image is not interleaved.
-```
-
-the four that decode are exactly the colour pages and the 31 that fail are the
-monochrome ones, so this is a limit of the heif integration rather than of the
-codec. see [05](improvements/05-monochrome-heif.md). bestsource fails one step
-earlier, with `Couldn't open`, because its ffmpeg build has no heif demuxer.
+three of the frames are ten times the cost of the rest, so the median and the
+total disagree: the lookahead is worth 3.21x over the serial row, and the median
+frame falls from 709.6 ms to 11.5 ms at `prefetch=16`, which is the cheapest
+median here, though the total says sixteen workers are not better than the
+default four. the monochrome pages are also the one place where the decode is
+not the `image` crate's: they go through `libheif` directly, see
+[05](improvements/05-monochrome-heif.md).
 
 ## per stage cost
 
@@ -231,6 +234,6 @@ the lookahead pool decoding frames it cannot keep, and the copy into the frame
 running on the requesting thread. the per-frame cost of each, and the plans for
 changing them, are written up in [improvements](improvements/README.md).
 
-separately from the speed work, the sandbox found one format that does not work
-at all: 31 of its 35 heic files fail to decode because they are monochrome,
-written up in [05 monochrome heif](improvements/05-monochrome-heif.md).
+separately from the speed work, the sandbox found one format that used not to
+work at all: the 31 monochrome heic files failed to decode, and they now read as
+`Gray8` through [05 monochrome heif](improvements/05-monochrome-heif.md).

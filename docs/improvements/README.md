@@ -4,7 +4,8 @@ one file per change, each with the evidence, the intended edit, and how to
 check the result. the measurements come from [benchmarks](../BENCH.md) and from
 the probes described there.
 
-none of this is implemented yet. every entry is a proposal to review.
+05 is implemented in `src/formats/heif.rs`. every other entry is a proposal to
+review.
 
 ## evidence in short
 
@@ -46,7 +47,7 @@ part plan 04 can remove rather than shorten.
 | [02 frame write path](02-frame-write-path.md) | `src/decoder.rs`, `src/source.rs`, `src/pixel.rs` | a few ms per frame from the buffer, and up to 1.6x on webp if the copy leaves the requesting thread | medium, frame lifetime | proposed |
 | [03 yuv output for lossy webp](03-webp-yuv-output.md) | decoder path, `src/pixel.rs`, `src/source.rs`, `src/color.rs` | webp ~25-30 ms/frame, half the bytes per frame | medium, changes the output | proposed, needs 04 |
 | [04 webp decoder](04-webp-decoder.md) | `Cargo.toml`, `vcpkg.json`, notices, `LICENSES/`, `src/decoder.rs` | decode 265 → ~150 ms per frame, and it enables 02 and 03 | medium, native dependency | proposed |
-| [05 monochrome heif](05-monochrome-heif.md) | `src/decoder.rs` | the 31 monochrome heic files in `sandbox/heic` decode as `Gray8` instead of failing | low, repairs an always-failing path | proposed |
+| [05 monochrome heif](05-monochrome-heif.md) | `src/formats/heif.rs` | the 31 monochrome heic files in `sandbox/heic` decode as `Gray8` instead of failing | low, used to repair an always-failing path | implemented |
 
 01 and 02 are independent of each other. 03 needs 04. 05 is independent of all
 of them and is the only one that fixes correctness rather than speed, so it does

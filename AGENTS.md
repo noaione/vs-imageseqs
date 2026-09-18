@@ -38,6 +38,9 @@ half the logical cores (capped at four) and `0` disables lookahead decoding.
 - `src/lib.rs`: plugin declaration and registration.
 - `src/source.rs`: `Read` and `ReadAlpha` filter creation, validation, and frame requests.
 - `src/decoder.rs`: image probing and lazy decoding.
+- `src/formats/`: per-format decode paths that the `image` crate cannot express,
+  one module per container and picked by extension (`heif.rs` for monochrome
+  heif/heic).
 - `src/pixel.rs`: supported pixel formats and planar frame writes.
 - `src/color.rs`: frame properties and color metadata.
 - `src/error.rs`: errors returned through the VapourSynth boundary.

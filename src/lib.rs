@@ -1,6 +1,7 @@
 mod color;
 mod decoder;
 mod error;
+mod formats;
 mod pixel;
 mod prefetch;
 mod source;

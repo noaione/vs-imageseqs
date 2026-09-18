@@ -342,6 +342,10 @@ x64-windows-static-md
 
 HEIC decoding uses the HEVC decoder provided by the `libheif` dependency stack; HEVC encoding support is not required for this plugin.
 
+Colour HEIF/HEIC is read through the `image-rs` decoding hook that `libheif-rs` ships (`libheif_rs::integration::image`), registered once in `src/decoder.rs`. That hook decodes into an interleaved buffer and requires `planes.interleaved` to exist, so it cannot return a monochrome image, which decodes into a single luma plane.
+
+Monochrome HEIF/HEIC is therefore decoded directly through `libheif-rs` in `src/formats/heif.rs`, which asks for `ColorSpace::Monochrome` and packs the planes into the same interleaved layout the frame writer accepts. `src/formats/` holds one module per container that the `image` crate cannot express; `decoder::decode` asks each module whether it handles the image before falling back to `image-rs`.
+
 ### Decoder Abstraction
 
 Keep all decoder-specific code behind a common internal interface:
