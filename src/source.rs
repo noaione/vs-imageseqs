@@ -1,4 +1,9 @@
-use std::{ffi::c_void, path::PathBuf};
+use std::{
+    ffi::{CString, c_void},
+    fmt::Display,
+    path::PathBuf,
+    time::Instant,
+};
 
 use vapoursynth4_rs::{
     ColorFamily, SampleType, VideoInfo,
@@ -19,6 +24,7 @@ use crate::{
 
 pub struct ImageSequence {
     images: Box<[ImageInfo]>,
+    debug: bool,
 }
 
 impl Filter for ImageSequence {
@@ -28,7 +34,7 @@ impl Filter for ImageSequence {
 
     const NAME: &'static std::ffi::CStr = c"Read";
     const ARGS: &'static std::ffi::CStr =
-        c"files:data[];fpsnum:int:opt;fpsden:int:opt;mismatch:int:opt;";
+        c"files:data[];fpsnum:int:opt;fpsden:int:opt;mismatch:int:opt;debug:int:opt;";
     const RETURN_TYPE: &'static std::ffi::CStr = c"clip:vnode;";
 
     fn create(
@@ -37,25 +43,35 @@ impl Filter for ImageSequence {
         _data: Option<Box<Self::FilterData>>,
         mut core: CoreRef,
     ) -> Result<()> {
+        let setup_started = Instant::now();
         let files = read_files(&input)?;
         let fps_num = read_optional_int(&input, key!(c"fpsnum"), "fpsnum")?.unwrap_or(24);
         let fps_den = read_optional_int(&input, key!(c"fpsden"), "fpsden")?.unwrap_or(1);
         let mismatch = read_optional_int(&input, key!(c"mismatch"), "mismatch")?.unwrap_or(0) != 0;
+        let debug = read_optional_int(&input, key!(c"debug"), "debug")?.unwrap_or(0) != 0;
         let (fps_num, fps_den) = reduce_fps(fps_num, fps_den)?;
+
+        let probe_started = Instant::now();
         let images = files
             .iter()
             .map(|path| decoder::probe(path))
             .collect::<Result<Vec<_>>>()?;
+        let probe = probe_started.elapsed();
+
+        let validate_started = Instant::now();
         let images = validate_images(images, mismatch)?;
+        let validate = validate_started.elapsed();
         let num_frames = i32::try_from(images.len())
             .map_err(|_| ImgSeqError::new("the image sequence has too many frames"))?;
         let variable = mismatch && has_format_mismatch(&images);
 
+        let format_started = Instant::now();
         let format = if variable {
             undefined_video_format()
         } else {
             query_format(&core, images[0].format)
         };
+        let format_time = format_started.elapsed();
         let (width, height) = if variable {
             (0, 0)
         } else {
@@ -76,12 +92,26 @@ impl Filter for ImageSequence {
             num_frames,
         };
         let dependencies = Dependencies::new(&[]).expect("an empty dependency list is valid");
+        if debug {
+            log_debug(
+                &mut core,
+                format_args!(
+                    "create: frames={} probe={} validate={} format={} total={}",
+                    images.len(),
+                    format_duration(probe),
+                    format_duration(validate),
+                    format_duration(format_time),
+                    format_duration(setup_started.elapsed()),
+                ),
+            );
+        }
         core.create_video_filter(
             output,
             Self::NAME,
             &video_info,
             Box::new(Self {
                 images: images.into_boxed_slice(),
+                debug,
             }),
             dependencies,
         );
@@ -94,11 +124,12 @@ impl Filter for ImageSequence {
         activation_reason: ffi::VSActivationReason,
         _frame_data: *mut *mut c_void,
         _frame_ctx: FrameContext,
-        core: CoreRef,
+        mut core: CoreRef,
     ) -> Result<Option<Self::FrameType>> {
         if activation_reason != ffi::VSActivationReason::Initial {
             return Ok(None);
         }
+        let frame_started = Instant::now();
         let index = usize::try_from(n)
             .map_err(|_| ImgSeqError::new(format!("requested invalid frame {n}")))?;
         let image = self.images.get(index).ok_or_else(|| {
@@ -107,9 +138,15 @@ impl Filter for ImageSequence {
                 self.images.len()
             ))
         })?;
+        let decode_started = Instant::now();
         let decoded = decoder::decode(image)?;
+        let decode = decode_started.elapsed();
 
+        let format_started = Instant::now();
         let format = query_format(&core, image.format);
+        let format_time = format_started.elapsed();
+
+        let allocation_started = Instant::now();
         let mut frame = core.new_video_frame(
             &format,
             i32::try_from(decoded.width)
@@ -118,16 +155,53 @@ impl Filter for ImageSequence {
                 .map_err(|_| ImgSeqError::new("image height does not fit VapourSynth"))?,
             None,
         );
-        write_planar(
+        let allocation = allocation_started.elapsed();
+
+        let write_timings = write_planar(
             &mut frame,
             decoded.color_type,
             decoded.width,
             decoded.height,
             &decoded.pixels,
         )?;
+        let properties_started = Instant::now();
         set_frame_properties(&mut frame, image, index)?;
+        let properties = properties_started.elapsed();
+
+        if self.debug {
+            log_debug(
+                &mut core,
+                format_args!(
+                    "frame {} '{}': decode={} (open={} metadata={} buffer={} read={}) format={} allocate={} planarize={} copy={} properties={} total={}",
+                    n,
+                    image.path.display(),
+                    format_duration(decode),
+                    format_duration(decoded.timings.open),
+                    format_duration(decoded.timings.metadata),
+                    format_duration(decoded.timings.buffer),
+                    format_duration(decoded.timings.read),
+                    format_duration(format_time),
+                    format_duration(allocation),
+                    format_duration(write_timings.planarize),
+                    format_duration(write_timings.copy),
+                    format_duration(properties),
+                    format_duration(frame_started.elapsed()),
+                ),
+            );
+        }
         Ok(Some(frame))
     }
+}
+
+fn log_debug(core: &mut CoreRef<'_>, message: impl Display) {
+    let Ok(message) = CString::new(format!("[imgseqs][debug] {message}")) else {
+        return;
+    };
+    core.log(ffi::VSMessageType::Information, &message);
+}
+
+fn format_duration(duration: std::time::Duration) -> String {
+    format!("{:.3} ms", duration.as_secs_f64() * 1000.0)
 }
 
 fn read_files(input: &MapRef) -> Result<Vec<PathBuf>> {

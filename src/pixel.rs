@@ -1,4 +1,7 @@
-use std::slice;
+use std::{
+    slice,
+    time::{Duration, Instant},
+};
 
 use image::ColorType;
 use vapoursynth4_rs::frame::VideoFrame;
@@ -13,6 +16,12 @@ pub enum PixelFormat {
     Rgb8,
     Rgb16,
     Rgb32F,
+}
+
+#[derive(Debug)]
+pub struct WriteTimings {
+    pub planarize: Duration,
+    pub copy: Duration,
 }
 
 impl PixelFormat {
@@ -143,10 +152,12 @@ pub fn write_planar(
     width: u32,
     height: u32,
     pixels: &[u8],
-) -> Result<()> {
+) -> Result<WriteTimings> {
     let format = PixelFormat::from_color_type(color_type)
         .ok_or_else(|| ImgSeqError::new(format!("unsupported image color type {color_type:?}")))?;
+    let planarize_started = Instant::now();
     let planes = planarize(color_type, width, height, pixels)?;
+    let planarize = planarize_started.elapsed();
     let width = usize::try_from(width)
         .map_err(|_| ImgSeqError::new("image width does not fit in memory"))?;
     let height = usize::try_from(height)
@@ -155,6 +166,7 @@ pub fn write_planar(
         .checked_mul(format.bytes_per_sample())
         .ok_or_else(|| ImgSeqError::new("image row is too large"))?;
 
+    let copy_started = Instant::now();
     for (plane, data) in planes.iter().enumerate() {
         let plane = i32::try_from(plane).expect("plane count fits in i32");
         let stride = frame.stride(plane);
@@ -182,7 +194,10 @@ pub fn write_planar(
         }
     }
 
-    Ok(())
+    Ok(WriteTimings {
+        planarize,
+        copy: copy_started.elapsed(),
+    })
 }
 
 #[cfg(test)]

@@ -14,7 +14,8 @@ identity unchanged:
 
 the plugin accepts an ordered `files:data[]` list and returns one frame per
 file. `fpsnum` and `fpsden` default to `24/1`. `mismatch` defaults to false;
-when true, variable dimensions and formats are allowed.
+when true, variable dimensions and formats are allowed. `debug` defaults to
+false and emits VapourSynth log timings when enabled.
 
 ## repository rules
 

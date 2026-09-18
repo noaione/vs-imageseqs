@@ -143,7 +143,7 @@ impl Filter for ImageSequence {
     const NAME: &'static CStr = c"Read";
 
     const ARGS: &'static CStr =
-        c"files:data[];fpsnum:int:opt;fpsden:int:opt;mismatch:int:opt;";
+        c"files:data[];fpsnum:int:opt;fpsden:int:opt;mismatch:int:opt;debug:int:opt;";
 
     const RETURN_TYPE: &'static CStr =
         c"clip:vnode;";
@@ -189,6 +189,7 @@ core.imgseqs.Read(
     fpsnum=24,
     fpsden=1,
     mismatch=False,
+    debug=False,
 )
 ```
 
@@ -200,6 +201,7 @@ Read(
     fpsnum:int:opt;
     fpsden:int:opt;
     mismatch:int:opt;
+    debug:int:opt;
 ) -> clip:vnode
 ```
 
@@ -420,6 +422,42 @@ return
 ```
 
 This allows extremely large image sequences without loading all image data into memory.
+
+---
+
+# Debug Timings
+
+`debug=True` keeps the normal output unchanged and emits information-level
+messages through the VapourSynth log. The messages are opt-in because they
+add one log entry per requested frame.
+
+At creation time, report:
+
+```text
+image probing
+format validation
+video-format selection
+total setup time
+```
+
+For each frame, report:
+
+```text
+decoder open
+decoder metadata
+decoded-buffer allocation
+image read
+frame-format lookup
+frame allocation
+planar conversion
+copy into VapourSynth planes
+frame-property writes
+total frame time
+```
+
+These are wall-clock timings intended for diagnosing a script or decoder.
+They are not a replacement for a controlled benchmark because VapourSynth's
+cache and scheduler affect the result.
 
 ---
 
@@ -809,6 +847,37 @@ RGBA8
 ```
 
 The same pattern works for 16-bit and float images.
+
+## RGBA implementation plan
+
+Keep `Read()` compatible: it continues to return the RGB or gray clip and
+ignores alpha. Do not represent alpha as a fourth VapourSynth RGB plane.
+
+Add a separate `ReadAlpha()` entry point with the same file, frame-rate,
+mismatch, and debug options. Its planned result is:
+
+```text
+RGB/GRAY clip + GRAY alpha clip
+```
+
+The RGB/gray clip and alpha clip must share frame count, dimensions, frame
+rate, and frame index. Alpha should keep the source sample depth: 8-bit input
+produces GRAY8, 16-bit input produces GRAY16, and float input produces GRAYS.
+For LA input, the first channel is the image and the second is alpha; for
+RGBA input, the fourth channel is alpha.
+
+Implementation steps:
+
+1. preserve the alpha-channel description in the internal decoded-image data;
+2. split RGB/gray and alpha in one conversion pass where practical;
+3. create the second clip through the plugin's multi-output function API;
+4. apply the existing mismatch rules to both outputs;
+5. copy the existing source properties to both clips and add an alpha marker;
+6. add tests for LA/RGBA 8/16-bit and float data, including variable-format
+   sequences.
+
+This keeps the current `Read()` behavior stable while leaving room for a
+proper alpha output instead of silently changing the meaning of RGB clips.
 
 ---
 

@@ -56,6 +56,7 @@ clip = core.imgseqs.Read(
     files=[str(path) for path in files],
     fpsnum=24,
     fpsden=1,
+    debug=False,
 )
 ```
 
@@ -64,10 +65,15 @@ clip = core.imgseqs.Read(
 - `files`: required, ordered image paths.
 - `fpsnum` and `fpsden`: frame rate. defaults to `24/1`.
 - `mismatch`: set to `True` to allow different sizes or pixel formats.
+- `debug`: set to `True` to log create and per-frame timing information.
 
 by default, every image must have the same size and pixel format. with
 `mismatch=True`, the clip uses variable format information and each frame
 keeps its own size and format.
+
+with `debug=True`, timing messages are sent to the VapourSynth log. they
+include probing, decoding, frame allocation, planar conversion, frame copy,
+properties, and total frame time.
 
 supported output formats are gray 8/16-bit, rgb 8/16-bit, and rgb 32-bit
 float. alpha channels are ignored.

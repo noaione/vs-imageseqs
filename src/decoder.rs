@@ -1,6 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     sync::Once,
+    time::{Duration, Instant},
 };
 
 use image::metadata::Orientation;
@@ -34,11 +35,20 @@ pub struct ImageInfo {
 }
 
 #[derive(Debug)]
+pub struct DecodeTimings {
+    pub open: Duration,
+    pub metadata: Duration,
+    pub buffer: Duration,
+    pub read: Duration,
+}
+
+#[derive(Debug)]
 pub struct DecodedImage {
     pub width: u32,
     pub height: u32,
     pub color_type: ColorType,
     pub pixels: Vec<u8>,
+    pub timings: DecodeTimings,
 }
 
 fn open_decoder(path: &Path) -> Result<impl ImageDecoder> {
@@ -91,9 +101,14 @@ pub fn probe(path: &Path) -> Result<ImageInfo> {
 }
 
 pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
+    let open_started = Instant::now();
     let decoder = open_decoder(&info.path)?;
+    let open = open_started.elapsed();
+
+    let metadata_started = Instant::now();
     let (width, height) = decoder.dimensions();
     let color_type = decoder.color_type();
+    let metadata = metadata_started.elapsed();
     if (width, height, color_type) != (info.width, info.height, info.color_type) {
         return Err(ImgSeqError::new(format!(
             "image '{}' changed after probing (was {old_width}x{old_height} {old:?}, now {new_width}x{new_height} {new:?})",
@@ -113,15 +128,25 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
             info.path.display()
         ))
     })?;
+    let buffer_started = Instant::now();
     let mut pixels = vec![0; size];
+    let buffer = buffer_started.elapsed();
+    let read_started = Instant::now();
     decoder
         .read_image(&mut pixels)
         .map_err(|error| image_error("decode", &info.path, error))?;
+    let read = read_started.elapsed();
 
     Ok(DecodedImage {
         width,
         height,
         color_type,
         pixels,
+        timings: DecodeTimings {
+            open,
+            metadata,
+            buffer,
+            read,
+        },
     })
 }
