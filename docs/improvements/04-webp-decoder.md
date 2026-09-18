@@ -31,11 +31,16 @@ threaded per image, just with simd and a lower constant).
   "features": ["simd"] }`. the manifest already builds dav1d, libheif and
   libde265, and the check that x265 stays disabled is unchanged.
 - `build.rs` finds it: `vcpkg::find_package("libwebp")` on windows through the
-  same local adapter the other native dependencies use, and
-  `pkg_config::Config::new().atleast_version("1.2.0").probe("libwebp")`
-  elsewhere. `vcpkg` and `pkg-config` are build dependencies of their platform
-  only, under `[target.'cfg(windows)'.build-dependencies]` and its
-  `not(windows)` twin.
+  same local adapter the other native dependencies use; elsewhere `pkg-config`
+  is asked for libwebp 1.2.0 or newer and its answer is turned into link flags
+  by hand, preferring the `static` form of every library that has an archive on
+  disk. `pkg_config::Config::probe` cannot be used for that: it keeps a library
+  shared whenever its archive sits under a system prefix such as `/usr/lib`,
+  which is where `libwebp-dev` installs `libwebp.a` (measured: the flags come
+  out as `-lwebp` and the plugin ends up with `NEEDED libwebp.so.7`). A build
+  that only finds the shared library still links, with a cargo warning.
+  `vcpkg` and `pkg-config` are build dependencies of their platform only, under
+  `[target.'cfg(windows)'.build-dependencies]` and its `not(windows)` twin.
 - the four entry points used are declared by hand in `src/formats/webp.rs`:
   `WebPGetInfo`, `WebPDecodeRGBInto`, `WebPDecodeRGBAInto` and
   `WebPDecodeYUVInto`. they have kept their signatures since libwebp 0.4, so a

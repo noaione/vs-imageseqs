@@ -240,6 +240,10 @@ sudo apt-get install --yes cmake ninja-build pkg-config libdav1d-dev libde265-de
 brew install cmake ninja pkg-config dav1d libde265 webp
 ```
 
+libwebp is linked from its static archive when the development package installs
+one, which both of the packages above do, so the plugin does not need libwebp at
+run time; dav1d and libde265 stay shared libraries.
+
 see [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) and [LICENSES](LICENSES) for
 the native dependency obligations.
 

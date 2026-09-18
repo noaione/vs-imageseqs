@@ -125,6 +125,14 @@ the bsd-2-clause license and libwebp uses bsd-3-clause. libheif and libde265
 are lgplv3 and are statically linked. keep the exact upstream texts in
 `LICENSES/`.
 
+on windows the vcpkg `x64-windows-static-md` triplet makes every native
+library static. on unix `build.rs` links libwebp from its archive when the
+development package installs one (`libwebp-dev` and homebrew's `webp` both
+do), and the `embedded-libheif` feature builds libheif into the plugin, so
+libheif is static there as well; dav1d and libde265 are the system shared
+libraries. the static lgpl obligation below therefore applies to libheif on
+every platform and to libde265 on windows only.
+
 if x265 or another codec is enabled, inspect the actual linker output and add
 its license text and distribution obligations before shipping a wheel. for
 static lgpl linkage, notices alone are not enough; provide the applicable

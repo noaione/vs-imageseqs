@@ -149,6 +149,30 @@ jobs:
       - name: build wheel
         run: python -m build --wheel --outdir dist
 
+      - name: check the unix plugin links libwebp statically
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux)
+              plugin=target/release/libvs_imageseqs.so
+              dependencies=$(readelf -d "$plugin")
+              ;;
+            macOS)
+              plugin=target/release/libvs_imageseqs.dylib
+              dependencies=$(otool -L "$plugin")
+              ;;
+            *)
+              echo "unsupported runner: $RUNNER_OS" >&2
+              exit 1
+              ;;
+          esac
+          if echo "$dependencies" | grep -E 'libwebp|libsharpyuv'; then
+            echo "the plugin still needs libwebp from the system at run time" >&2
+            exit 1
+          fi
+          echo "libwebp is linked into the plugin"
+
       - name: stage native plugin on unix
         if: runner.os != 'Windows'
         shell: bash
