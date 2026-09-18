@@ -5,7 +5,7 @@ mod pixel;
 mod prefetch;
 mod source;
 
-use source::ImageSequence;
+use source::{Read, ReadAlpha};
 
 vapoursynth4_rs::declare_plugin!(
     c"xyz.n4o.imgseqs",
@@ -14,5 +14,6 @@ vapoursynth4_rs::declare_plugin!(
     (0, 1),
     vapoursynth4_rs::VAPOURSYNTH_API_VERSION,
     0,
-    (ImageSequence, None)
+    (Read, None),
+    (ReadAlpha, None)
 );

@@ -13,6 +13,7 @@ use crate::error::{ImgSeqError, Result};
 pub enum PixelFormat {
     Gray8,
     Gray16,
+    Gray32F,
     Rgb8,
     Rgb16,
     Rgb32F,
@@ -30,9 +31,18 @@ impl PixelFormat {
         }
     }
 
+    /// Gray format that carries the alpha channel of this format.
+    pub const fn alpha_format(self) -> Self {
+        match self {
+            Self::Gray8 | Self::Rgb8 => Self::Gray8,
+            Self::Gray16 | Self::Rgb16 => Self::Gray16,
+            Self::Gray32F | Self::Rgb32F => Self::Gray32F,
+        }
+    }
+
     pub const fn color_family(self) -> ColorFamily {
         match self {
-            Self::Gray8 | Self::Gray16 => ColorFamily::Gray,
+            Self::Gray8 | Self::Gray16 | Self::Gray32F => ColorFamily::Gray,
             Self::Rgb8 | Self::Rgb16 | Self::Rgb32F => ColorFamily::RGB,
         }
     }
@@ -40,7 +50,7 @@ impl PixelFormat {
     pub const fn sample_type(self) -> SampleType {
         match self {
             Self::Gray8 | Self::Gray16 | Self::Rgb8 | Self::Rgb16 => SampleType::Integer,
-            Self::Rgb32F => SampleType::Float,
+            Self::Gray32F | Self::Rgb32F => SampleType::Float,
         }
     }
 
@@ -48,7 +58,7 @@ impl PixelFormat {
         match self {
             Self::Gray8 | Self::Rgb8 => 8,
             Self::Gray16 | Self::Rgb16 => 16,
-            Self::Rgb32F => 32,
+            Self::Gray32F | Self::Rgb32F => 32,
         }
     }
 
@@ -56,13 +66,13 @@ impl PixelFormat {
         match self {
             Self::Gray8 | Self::Rgb8 => 1,
             Self::Gray16 | Self::Rgb16 => 2,
-            Self::Rgb32F => 4,
+            Self::Gray32F | Self::Rgb32F => 4,
         }
     }
 
     pub const fn plane_count(self) -> usize {
         match self {
-            Self::Gray8 | Self::Gray16 => 1,
+            Self::Gray8 | Self::Gray16 | Self::Gray32F => 1,
             Self::Rgb8 | Self::Rgb16 | Self::Rgb32F => 3,
         }
     }
@@ -71,10 +81,20 @@ impl PixelFormat {
         match self {
             Self::Gray8 => "Gray8",
             Self::Gray16 => "Gray16",
+            Self::Gray32F => "GrayS",
             Self::Rgb8 => "RGB24",
             Self::Rgb16 => "RGB48",
             Self::Rgb32F => "RGBS",
         }
+    }
+}
+
+/// Interleaved channel that carries alpha when the color type has one.
+pub const fn alpha_channel(color_type: ColorType) -> Option<usize> {
+    match color_type {
+        ColorType::La8 | ColorType::La16 => Some(1),
+        ColorType::Rgba8 | ColorType::Rgba16 | ColorType::Rgba32F => Some(3),
+        _ => None,
     }
 }
 
@@ -197,9 +217,11 @@ fn extract_channel<T: Sample, const CHANNELS: usize, const CHANNEL: usize>(
 ) {
     let source_stride = CHANNELS * T::SIZE;
     let sample_start = CHANNEL * T::SIZE;
+    // The destination row holds exactly one sample per source group, so
+    // `chunks_mut` never yields a partial sample.
     for (group, sample) in source
         .chunks_exact(source_stride)
-        .zip(destination.chunks_exact_mut(T::SIZE))
+        .zip(destination.chunks_mut(T::SIZE))
     {
         T::store(
             T::load(&group[sample_start..sample_start + T::SIZE]),
@@ -318,10 +340,103 @@ pub fn write_planar(
     })
 }
 
+/// Write the alpha channel of one decoded image into a gray VapourSynth frame.
+///
+/// Sources without an alpha channel produce an opaque plane, so an alpha clip
+/// always has a meaningful value for every frame.
+pub fn write_alpha(
+    frame: &mut VideoFrame,
+    color_type: ColorType,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+) -> Result<WriteTimings> {
+    let layout = image_layout(color_type, width, height, pixels)?;
+    let started = Instant::now();
+    match (layout.format.bytes_per_sample(), alpha_channel(color_type)) {
+        (1, Some(1)) => write_alpha_plane::<u8, 2, 1>(frame, &layout, pixels)?,
+        (2, Some(1)) => write_alpha_plane::<u16, 2, 1>(frame, &layout, pixels)?,
+        (1, Some(3)) => write_alpha_plane::<u8, 4, 3>(frame, &layout, pixels)?,
+        (2, Some(3)) => write_alpha_plane::<u16, 4, 3>(frame, &layout, pixels)?,
+        (4, Some(3)) => write_alpha_plane::<f32, 4, 3>(frame, &layout, pixels)?,
+        (1, None) => fill_alpha_plane::<u8>(frame, &layout, u8::MAX)?,
+        (2, None) => fill_alpha_plane::<u16>(frame, &layout, u16::MAX)?,
+        (4, None) => fill_alpha_plane::<f32>(frame, &layout, 1.0)?,
+        (bytes_per_sample, channel) => {
+            return Err(ImgSeqError::new(format!(
+                "unsupported alpha source for {bytes_per_sample}-byte samples with channel {channel:?}"
+            )));
+        }
+    }
+
+    Ok(WriteTimings {
+        deinterleave: started.elapsed(),
+    })
+}
+
+fn alpha_plane_row_bytes<T: Sample>(layout: &ImageLayout) -> Result<usize> {
+    layout
+        .width
+        .checked_mul(T::SIZE)
+        .ok_or_else(|| ImgSeqError::new("image plane row is too large"))
+}
+
+/// Write the alpha channel into the single plane of a gray frame.
+fn write_alpha_plane<T: Sample, const CHANNELS: usize, const CHANNEL: usize>(
+    frame: &mut VideoFrame,
+    layout: &ImageLayout,
+    pixels: &[u8],
+) -> Result<()> {
+    let plane_row_bytes = alpha_plane_row_bytes::<T>(layout)?;
+    write_channel::<T, CHANNELS, CHANNEL>(
+        frame.plane_mut(0),
+        frame.stride(0),
+        pixels,
+        layout,
+        plane_row_bytes,
+    )
+}
+
+/// Fill the single plane of a gray frame with one value.
+fn fill_alpha_plane<T: Sample>(
+    frame: &mut VideoFrame,
+    layout: &ImageLayout,
+    value: T,
+) -> Result<()> {
+    let plane_row_bytes = alpha_plane_row_bytes::<T>(layout)?;
+    let stride = frame.stride(0);
+    let mut destination = frame.plane_mut(0);
+    if destination.is_null() {
+        return Err(ImgSeqError::new(
+            "VapourSynth returned a null pointer for the alpha plane",
+        ));
+    }
+    if stride < plane_row_bytes as isize {
+        return Err(ImgSeqError::new(format!(
+            "VapourSynth alpha plane stride {stride} is smaller than row size {plane_row_bytes}"
+        )));
+    }
+
+    for _ in 0..layout.height {
+        // Safety: `new_video_frame` returns writable planes with at least
+        // `stride * height` bytes, so every active row fits in the plane.
+        let target = unsafe { slice::from_raw_parts_mut(destination, plane_row_bytes) };
+        // `plane_row_bytes` is a whole number of samples, so no partial chunk
+        // is ever handed to `Sample::store`.
+        for sample in target.chunks_mut(T::SIZE) {
+            value.store(sample);
+        }
+        destination = unsafe { destination.offset(stride) };
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PixelFormat, extract_channel, image_layout};
+    use super::{PixelFormat, alpha_channel, extract_channel, image_layout};
     use image::ColorType;
+    use vapoursynth4_rs::{ColorFamily, SampleType};
 
     #[test]
     fn maps_supported_color_types() {
@@ -368,5 +483,68 @@ mod tests {
         assert!(image_layout(ColorType::Rgb8, 2, 1, &[0; 5]).is_err());
         assert!(image_layout(ColorType::Rgb8, 2, 1, &[0; 6]).is_ok());
         assert!(image_layout(ColorType::Rgba8, 2, 1, &[0; 8]).is_ok());
+    }
+
+    #[test]
+    fn maps_alpha_formats() {
+        assert_eq!(PixelFormat::Gray8.alpha_format(), PixelFormat::Gray8);
+        assert_eq!(PixelFormat::Gray16.alpha_format(), PixelFormat::Gray16);
+        assert_eq!(PixelFormat::Rgb8.alpha_format(), PixelFormat::Gray8);
+        assert_eq!(PixelFormat::Rgb16.alpha_format(), PixelFormat::Gray16);
+        assert_eq!(PixelFormat::Rgb32F.alpha_format(), PixelFormat::Gray32F);
+        assert_eq!(PixelFormat::Gray32F.color_family(), ColorFamily::Gray);
+        assert_eq!(PixelFormat::Gray32F.sample_type(), SampleType::Float);
+        assert_eq!(PixelFormat::Gray32F.bits_per_sample(), 32);
+        assert_eq!(PixelFormat::Gray32F.plane_count(), 1);
+        assert_eq!(PixelFormat::Gray32F.name(), "GrayS");
+    }
+
+    #[test]
+    fn locates_alpha_channels() {
+        assert_eq!(alpha_channel(ColorType::L8), None);
+        assert_eq!(alpha_channel(ColorType::L16), None);
+        assert_eq!(alpha_channel(ColorType::La8), Some(1));
+        assert_eq!(alpha_channel(ColorType::La16), Some(1));
+        assert_eq!(alpha_channel(ColorType::Rgb8), None);
+        assert_eq!(alpha_channel(ColorType::Rgb16), None);
+        assert_eq!(alpha_channel(ColorType::Rgb32F), None);
+        assert_eq!(alpha_channel(ColorType::Rgba8), Some(3));
+        assert_eq!(alpha_channel(ColorType::Rgba16), Some(3));
+        assert_eq!(alpha_channel(ColorType::Rgba32F), Some(3));
+    }
+
+    #[test]
+    fn extracts_alpha_channels() {
+        let gray_alpha = [10, 99, 20, 98];
+        let mut alpha = [0; 2];
+        extract_channel::<u8, 2, 1>(&gray_alpha, &mut alpha);
+        assert_eq!(alpha, [99, 98]);
+
+        let rgba = [1, 2, 3, 4, 5, 6, 7, 8];
+        extract_channel::<u8, 4, 3>(&rgba, &mut alpha);
+        assert_eq!(alpha, [4, 8]);
+
+        let rgba16 = [
+            0, 1, 0, 2, 0, 3, 0, 4, //
+            0, 5, 0, 6, 0, 7, 0, 8,
+        ];
+        let mut alpha = [0; 4];
+        extract_channel::<u16, 4, 3>(&rgba16, &mut alpha);
+        assert_eq!(alpha, [0, 4, 0, 8]);
+
+        let mut rgba32f = Vec::new();
+        for value in [1.0_f32, 2.0, 3.0, 0.25, 4.0, 5.0, 6.0, 0.75] {
+            rgba32f.extend_from_slice(&value.to_ne_bytes());
+        }
+        let mut alpha = [0; 8];
+        extract_channel::<f32, 4, 3>(&rgba32f, &mut alpha);
+        assert_eq!(
+            f32::from_ne_bytes(alpha[0..4].try_into().unwrap()),
+            0.25_f32
+        );
+        assert_eq!(
+            f32::from_ne_bytes(alpha[4..8].try_into().unwrap()),
+            0.75_f32
+        );
     }
 }

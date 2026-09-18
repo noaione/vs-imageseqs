@@ -499,9 +499,9 @@ worker 2 -> frame 12 -> JXL decoder
 worker 3 -> frame 13 -> AVIF decoder
 ```
 
-The persistent `ImageSequence` state should therefore be immutable apart
-from the prefetch pool described below; frame data itself is never shared
-between requests.
+The persistent `Sequence` state should therefore be immutable apart from the
+prefetch pool described below. Decoded frames are cached as shared immutable
+buffers, so the clips of one call never decode a file twice.
 
 ## Lookahead prefetching
 
@@ -530,7 +530,10 @@ sequential requests only   a seek clears the queue and invalidates old results
 bounded worker count       prefetch=N, 0 disables it, default half the logical
                            cores capped at four, at most sixteen workers
 small lookahead window     two frames beyond the worker count, at most sixteen
-decoded-byte budget        192 MiB of ready frames
+entry and byte budget      a small number of cached frames and 192 MiB of
+                           ready frames, entries behind the request dropped first
+shared between clips       a cached frame is handed out again, so `ReadAlpha`
+                           decodes each file once for both clips
 always forward progress    a consumer can decode its own frame if workers are busy
 ```
 
@@ -875,13 +878,16 @@ Ordinary VapourSynth RGB clips do not represent alpha as a fourth RGB plane.
 
 Do not silently invent an RGBA video format.
 
-For the initial `Read()` implementation, alpha may simply be ignored.
-
-Later an API can expose alpha separately:
+`Read()` keeps its behavior: it returns the RGB or gray clip and ignores
+alpha. Alpha is exposed separately:
 
 ```python
-clip, alpha = core.imgseqs.ReadAlpha(files)
+result = core.imgseqs.ReadAlpha(files=files)
+clip, alpha = result["clip"], result["alpha"]
 ```
+
+A plugin function with several outputs returns a dictionary in Python, keyed
+by the names of its declared return type (`clip` and `alpha`).
 
 Internally:
 
@@ -895,36 +901,64 @@ RGBA8
 
 The same pattern works for 16-bit and float images.
 
-## RGBA implementation plan
+## Implemented design
 
-Keep `Read()` compatible: it continues to return the RGB or gray clip and
-ignores alpha. Do not represent alpha as a fourth VapourSynth RGB plane.
-
-Add a separate `ReadAlpha()` entry point with the same file, frame-rate,
-mismatch, and debug options. Its planned result is:
+`ReadAlpha` accepts exactly the same arguments as `Read` (`files`, `fpsnum`,
+`fpsden`, `mismatch`, `debug`, `prefetch`) and declares
+`clip:vnode;alpha:vnode;`.
 
 ```text
-RGB/GRAY clip + GRAY alpha clip
+input      color clip   alpha clip
+L8         GRAY8        GRAY8  (opaque)
+L16        GRAY16       GRAY16 (opaque)
+LA8        GRAY8        GRAY8
+LA16       GRAY16       GRAY16
+RGB8       RGB24        GRAY8  (opaque)
+RGB16      RGB48        GRAY16 (opaque)
+RGB32F     RGBS         GRAYS  (opaque)
+RGBA8      RGB24        GRAY8
+RGBA16     RGB48        GRAY16
+RGBA32F    RGBS         GRAYS
 ```
 
-The RGB/gray clip and alpha clip must share frame count, dimensions, frame
-rate, and frame index. Alpha should keep the source sample depth: 8-bit input
-produces GRAY8, 16-bit input produces GRAY16, and float input produces GRAYS.
-For LA input, the first channel is the image and the second is alpha; for
-RGBA input, the fourth channel is alpha.
+Alpha keeps the sample depth of the source and is taken from the second
+channel of `LA` input and the fourth channel of `RGBA` input. Sources without
+an alpha channel produce an opaque plane (`255`, `65535`, or `1.0`), so every
+frame of an alpha clip carries a meaningful value.
 
-Implementation steps:
+Both clips share frame count, dimensions, frame rate, and frame indexes, and
+both are built from one `Sequence`. The prefetch pool caches decoded frames as
+shared immutable buffers, so a file is decoded once even when both clips ask
+for the same frame. With `mismatch=True`, both clips use variable format
+information and a frame whose file has no alpha still yields an opaque plane.
 
-1. preserve the alpha-channel description in the internal decoded-image data;
-2. split RGB/gray and alpha in one conversion pass where practical;
-3. create the second clip through the plugin's multi-output function API;
-4. apply the existing mismatch rules to both outputs;
-5. copy the existing source properties to both clips and add an alpha marker;
-6. add tests for LA/RGBA 8/16-bit and float data, including variable-format
-   sequences.
+The alpha clip is marked with `ImgSeqAlpha=1`; the color clip is not, and the
+alpha clip never gets `_Matrix` because it is not an RGB clip. Both clips keep
+the usual `ImgSeq*` properties, and `Read` output is unchanged.
 
-This keeps the current `Read()` behavior stable while leaving room for a
-proper alpha output instead of silently changing the meaning of RGB clips.
+## Second output node
+
+`vapoursynth4-rs` 0.5.1 can only create a node through
+`Core::create_video_filter`, which stores it under the fixed `clip` key of the
+output map, and its `VideoNode::new` helper has an inverted null check that
+makes it unusable. `ReadAlpha` therefore:
+
+1. creates the alpha node first and reads it back with `get_video_node("clip", 0)`;
+2. deletes that key, which releases the reference the map held;
+3. creates the color node, which takes over the primary `clip` key;
+4. publishes the alpha node again with `consume_node("alpha", …)`.
+
+The reference counts stay balanced and no dependency has to be patched or
+vendored.
+
+## Validation
+
+`cargo test` covers the pixel plumbing, the prefetch pool (one decode shared by
+two consumers, failed decodes retried, frames of a variable sequence kept
+apart), and the clip format mapping. `tests/readalpha.vpy` covers the plugin
+itself against the fixtures written by `tests/make-alpha-fixtures.py`: LA/RGBA
+8/16-bit and float, opaque fills, mixed alpha presence, variable depth,
+`ImgSeqAlpha`, `_Matrix`, prefetch variants, and the shared decode.
 
 ---
 
@@ -986,8 +1020,9 @@ lib.rs
     function registration
 
 source.rs
-    ImageSequence
-    Filter implementation
+    Sequence
+    Read / ReadAlpha filters
+    Filter implementations
     VSVideoInfo handling
 
 decoder.rs
@@ -1029,11 +1064,11 @@ Implement:
 10. `ImgSeqPath` and `ImgSeqIndex`.
 11. VapourSynth-managed frame-level concurrency.
 12. Keep the `image-rs` Rayon feature enabled initially.
+13. `ReadAlpha` for a separate alpha clip.
 
 Defer:
 
 ```text
-alpha output
 full ICC color management
 GPU/Vulkan output
 manual SIMD
@@ -1053,16 +1088,17 @@ Python
   │
   │ explicit ordered file list
   ▼
-core.imgseqs.Read()
+core.imgseqs.Read() / core.imgseqs.ReadAlpha()
   │
   ▼
-ImageSequence
+Sequence (shared by every clip of one call)
   │
   ├── immutable ImageInfo[]
   │
   ├── bounded lookahead prefetch pool
+  │       └── cached decoded frames (shared between clips)
   │
-  └── VSVideoInfo
+  └── VSVideoInfo per clip
          │
          │ VapourSynth requests frame N
          ▼

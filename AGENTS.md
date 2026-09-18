@@ -8,12 +8,14 @@ identity unchanged:
 - project name: `vapoursynth-imageseqs`
 - namespace: `xyz.n4o.imgseqs`
 - namespace name: `imgseqs`
-- filter: `Read`
+- filter: `Read`, `ReadAlpha`
 - crate: `vs-imageseqs`
 - python distribution: `vapoursynth-imageseqs`
 
 the plugin accepts an ordered `files:data[]` list and returns one frame per
-file. `fpsnum` and `fpsden` default to `24/1`. `mismatch` defaults to false;
+file. `Read` returns the color clip, `ReadAlpha` returns the color clip and a
+separate gray alpha clip that is opaque for files without an alpha channel.
+`fpsnum` and `fpsden` default to `24/1`. `mismatch` defaults to false;
 when true, variable dimensions and formats are allowed. `debug` defaults to
 false and emits VapourSynth log timings when enabled. `prefetch` selects the
 number of background decode workers used for sequential reads; it defaults to
@@ -34,7 +36,7 @@ half the logical cores (capped at four) and `0` disables lookahead decoding.
 ## source layout
 
 - `src/lib.rs`: plugin declaration and registration.
-- `src/source.rs`: `Read` filter creation, validation, and frame requests.
+- `src/source.rs`: `Read` and `ReadAlpha` filter creation, validation, and frame requests.
 - `src/decoder.rs`: image probing and lazy decoding.
 - `src/pixel.rs`: supported pixel formats and planar frame writes.
 - `src/color.rs`: frame properties and color metadata.
@@ -101,6 +103,7 @@ after changes, run the narrowest relevant checks:
 
 ```powershell
 cargo test --locked
+.\.venv\Scripts\python.exe tests\readalpha.vpy
 C:\Python314\python.exe -c "import pathlib, tomllib; tomllib.loads(pathlib.Path('pyproject.toml').read_text())"
 C:\Python314\python.exe -m build
 ```

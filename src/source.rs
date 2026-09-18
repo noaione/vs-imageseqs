@@ -1,9 +1,9 @@
 use std::{
-    ffi::{CString, c_void},
+    ffi::{CStr, CString, c_void},
     fmt::Display,
     path::PathBuf,
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use vapoursynth4_rs::{
@@ -12,7 +12,7 @@ use vapoursynth4_rs::{
     ffi,
     frame::{FrameContext, VideoFrame},
     key,
-    map::{MapPropertyError, MapRef},
+    map::{AppendMode, MapPropertyError, MapRef},
     node::{Dependencies, Filter},
 };
 
@@ -20,40 +20,104 @@ use crate::{
     color::set_frame_properties,
     decoder::{self, ImageInfo},
     error::{ImgSeqError, Result},
-    pixel::{PixelFormat, write_planar},
+    pixel::{PixelFormat, write_alpha, write_planar},
     prefetch::{self, Prefetcher},
 };
 
-pub struct ImageSequence {
+/// Arguments accepted by `Read` and `ReadAlpha`.
+const SEQUENCE_ARGS: &CStr =
+    c"files:data[];fpsnum:int:opt;fpsden:int:opt;mismatch:int:opt;debug:int:opt;prefetch:int:opt;";
+
+/// One of the clips an image sequence hands out.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Clip {
+    /// Color planes of every frame.
+    Color,
+    /// Alpha plane of every frame, filled with the opaque value when the file
+    /// has no alpha channel.
+    Alpha,
+}
+
+impl Clip {
+    /// Pixel format this clip uses for an image decoded as `format`.
+    const fn pixel_format(self, format: PixelFormat) -> PixelFormat {
+        match self {
+            Self::Color => format,
+            Self::Alpha => format.alpha_format(),
+        }
+    }
+
+    /// `ImgSeqAlpha` property of this clip's frames; color clips have none.
+    const fn alpha_marker(self) -> Option<bool> {
+        match self {
+            Self::Color => None,
+            Self::Alpha => Some(true),
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Color => "color",
+            Self::Alpha => "alpha",
+        }
+    }
+}
+
+/// `Read` filter instance: the color clip of one image sequence.
+pub struct Read {
+    sequence: Arc<Sequence>,
+}
+
+/// `ReadAlpha` filter instance: the alpha clip of one image sequence.
+///
+/// The color clip of the same call is built from the same [`Sequence`], so a
+/// file is decoded once no matter how many clips ask for it.
+pub struct ReadAlpha {
+    sequence: Arc<Sequence>,
+}
+
+/// State shared by every clip of one `Read` or `ReadAlpha` call.
+struct Sequence {
     images: Arc<[ImageInfo]>,
-    prefetcher: Prefetcher,
+    prefetcher: Arc<Prefetcher>,
     debug: bool,
 }
 
-impl Filter for ImageSequence {
-    type Error = ImgSeqError;
-    type FrameType = VideoFrame;
-    type FilterData = ();
+/// Timings of the work done while one instance is created.
+struct SetupTimings {
+    probe: Duration,
+    validate: Duration,
+    total: Duration,
+}
 
-    const NAME: &'static std::ffi::CStr = c"Read";
-    const ARGS: &'static std::ffi::CStr =
-        c"files:data[];fpsnum:int:opt;fpsden:int:opt;mismatch:int:opt;debug:int:opt;prefetch:int:opt;";
-    const RETURN_TYPE: &'static std::ffi::CStr = c"clip:vnode;";
+/// Validated arguments of one `Read` or `ReadAlpha` call.
+struct SequenceArgs {
+    images: Arc<[ImageInfo]>,
+    prefetcher: Arc<Prefetcher>,
+    format: PixelFormat,
+    width: i32,
+    height: i32,
+    fps_num: i64,
+    fps_den: i64,
+    num_frames: i32,
+    /// True when the sequence is not one single size and format.
+    variable: bool,
+    debug: bool,
+    prefetch_workers: usize,
+    timings: SetupTimings,
+}
 
-    fn create(
-        input: MapRef,
-        output: MapRef,
-        _data: Option<Box<Self::FilterData>>,
-        mut core: CoreRef,
-    ) -> Result<()> {
+impl SequenceArgs {
+    /// Reads, probes, and validates the arguments of one call.
+    fn read(input: &MapRef) -> Result<Self> {
         let setup_started = Instant::now();
-        let files = read_files(&input)?;
-        let fps_num = read_optional_int(&input, key!(c"fpsnum"), "fpsnum")?.unwrap_or(24);
-        let fps_den = read_optional_int(&input, key!(c"fpsden"), "fpsden")?.unwrap_or(1);
-        let mismatch = read_optional_int(&input, key!(c"mismatch"), "mismatch")?.unwrap_or(0) != 0;
-        let debug = read_optional_int(&input, key!(c"debug"), "debug")?.unwrap_or(0) != 0;
+        let files = read_files(input)?;
+        let fps_num = read_optional_int(input, key!(c"fpsnum"), "fpsnum")?.unwrap_or(24);
+        let fps_den = read_optional_int(input, key!(c"fpsden"), "fpsden")?.unwrap_or(1);
+        let mismatch = read_optional_int(input, key!(c"mismatch"), "mismatch")?.unwrap_or(0) != 0;
+        let debug = read_optional_int(input, key!(c"debug"), "debug")?.unwrap_or(0) != 0;
         let prefetch_workers =
-            resolve_prefetch_workers(read_optional_int(&input, key!(c"prefetch"), "prefetch")?)?;
+            resolve_prefetch_workers(read_optional_int(input, key!(c"prefetch"), "prefetch")?)?;
         let (fps_num, fps_den) = reduce_fps(fps_num, fps_den)?;
 
         let probe_started = Instant::now();
@@ -69,14 +133,6 @@ impl Filter for ImageSequence {
         let num_frames = i32::try_from(images.len())
             .map_err(|_| ImgSeqError::new("the image sequence has too many frames"))?;
         let variable = mismatch && has_format_mismatch(&images);
-
-        let format_started = Instant::now();
-        let format = if variable {
-            undefined_video_format()
-        } else {
-            query_format(&core, images[0].format)
-        };
-        let format_time = format_started.elapsed();
         let (width, height) = if variable {
             (0, 0)
         } else {
@@ -88,39 +144,84 @@ impl Filter for ImageSequence {
             )
         };
 
-        let video_info = VideoInfo {
-            format,
-            fps_num,
-            fps_den,
+        Ok(Self {
+            format: images[0].format,
+            prefetcher: Arc::new(Prefetcher::new(Arc::clone(&images), prefetch_workers)),
+            images,
             width,
             height,
+            fps_num,
+            fps_den,
             num_frames,
-        };
-        let dependencies = Dependencies::new(&[]).expect("an empty dependency list is valid");
-        if debug {
-            log_debug(
-                &mut core,
-                format_args!(
-                    "create: frames={} probe={} validate={} format={} prefetch={} total={}",
-                    images.len(),
-                    format_duration(probe),
-                    format_duration(validate),
-                    format_duration(format_time),
-                    prefetch_workers,
-                    format_duration(setup_started.elapsed()),
-                ),
-            );
+            variable,
+            debug,
+            prefetch_workers,
+            timings: SetupTimings {
+                probe,
+                validate,
+                total: setup_started.elapsed(),
+            },
+        })
+    }
+
+    /// Output format of one clip of this sequence.
+    fn video_info(&self, core: &CoreRef, clip: Clip) -> VideoInfo {
+        if self.variable {
+            return VideoInfo {
+                format: undefined_video_format(),
+                fps_num: self.fps_num,
+                fps_den: self.fps_den,
+                width: 0,
+                height: 0,
+                num_frames: self.num_frames,
+            };
         }
-        core.create_video_filter(
+        VideoInfo {
+            format: query_format(core, clip.pixel_format(self.format)),
+            fps_num: self.fps_num,
+            fps_den: self.fps_den,
+            width: self.width,
+            height: self.height,
+            num_frames: self.num_frames,
+        }
+    }
+
+    /// Keeps the state frame requests need and drops the setup-only fields.
+    fn into_sequence(self) -> Arc<Sequence> {
+        Arc::new(Sequence {
+            images: self.images,
+            prefetcher: self.prefetcher,
+            debug: self.debug,
+        })
+    }
+}
+
+impl Filter for Read {
+    type Error = ImgSeqError;
+    type FrameType = VideoFrame;
+    type FilterData = ();
+
+    const NAME: &'static CStr = c"Read";
+    const ARGS: &'static CStr = SEQUENCE_ARGS;
+    const RETURN_TYPE: &'static CStr = c"clip:vnode;";
+
+    fn create(
+        input: MapRef,
+        output: MapRef,
+        _data: Option<Box<Self::FilterData>>,
+        mut core: CoreRef,
+    ) -> Result<()> {
+        let args = SequenceArgs::read(&input)?;
+        log_create(&mut core, &args, &[Clip::Color]);
+        let info = args.video_info(&core, Clip::Color);
+        add_filter(
+            &mut core,
             output,
             Self::NAME,
-            &video_info,
-            Box::new(Self {
-                prefetcher: Prefetcher::new(Arc::clone(&images), prefetch_workers),
-                images,
-                debug,
-            }),
-            dependencies,
+            &info,
+            Read {
+                sequence: args.into_sequence(),
+            },
         );
         Ok(())
     }
@@ -131,72 +232,188 @@ impl Filter for ImageSequence {
         activation_reason: ffi::VSActivationReason,
         _frame_data: *mut *mut c_void,
         _frame_ctx: FrameContext,
-        mut core: CoreRef,
+        core: CoreRef,
     ) -> Result<Option<Self::FrameType>> {
-        if activation_reason != ffi::VSActivationReason::Initial {
-            return Ok(None);
-        }
-        let frame_started = Instant::now();
-        let index = usize::try_from(n)
-            .map_err(|_| ImgSeqError::new(format!("requested invalid frame {n}")))?;
-        let image = self.images.get(index).ok_or_else(|| {
-            ImgSeqError::new(format!(
-                "requested frame {n}, but the clip has {} frames",
-                self.images.len()
-            ))
-        })?;
-        let decode_started = Instant::now();
-        let decoded = self.prefetcher.fetch(n)?;
-        let decode = decode_started.elapsed();
+        clip_frame(&self.sequence, Clip::Color, n, activation_reason, core)
+    }
+}
 
-        let format_started = Instant::now();
-        let format = query_format(&core, image.format);
-        let format_time = format_started.elapsed();
+impl Filter for ReadAlpha {
+    type Error = ImgSeqError;
+    type FrameType = VideoFrame;
+    type FilterData = ();
 
-        let allocation_started = Instant::now();
-        let mut frame = core.new_video_frame(
-            &format,
-            i32::try_from(decoded.width)
-                .map_err(|_| ImgSeqError::new("image width does not fit VapourSynth"))?,
-            i32::try_from(decoded.height)
-                .map_err(|_| ImgSeqError::new("image height does not fit VapourSynth"))?,
-            None,
+    const NAME: &'static CStr = c"ReadAlpha";
+    const ARGS: &'static CStr = SEQUENCE_ARGS;
+    const RETURN_TYPE: &'static CStr = c"clip:vnode;alpha:vnode;";
+
+    fn create(
+        input: MapRef,
+        mut output: MapRef,
+        _data: Option<Box<Self::FilterData>>,
+        mut core: CoreRef,
+    ) -> Result<()> {
+        let args = SequenceArgs::read(&input)?;
+        log_create(&mut core, &args, &[Clip::Color, Clip::Alpha]);
+        let color_info = args.video_info(&core, Clip::Color);
+        let alpha_info = args.video_info(&core, Clip::Alpha);
+        let sequence = args.into_sequence();
+
+        // A filter node can only be created under the "clip" key, so the alpha
+        // clip is built first, taken out of the output map, and published once
+        // the color clip owns the primary key.
+        add_filter(
+            &mut core,
+            output,
+            Self::NAME,
+            &alpha_info,
+            ReadAlpha {
+                sequence: Arc::clone(&sequence),
+            },
         );
-        let allocation = allocation_started.elapsed();
+        let alpha_node = output
+            .get_video_node(key!(c"clip"), 0)
+            .map_err(ImgSeqError::from_display)?;
+        output.delete_key(key!(c"clip"));
+        add_filter(
+            &mut core,
+            output,
+            Self::NAME,
+            &color_info,
+            Read { sequence },
+        );
+        output
+            .consume_node(key!(c"alpha"), alpha_node, AppendMode::Replace)
+            .map_err(ImgSeqError::from_display)?;
+        Ok(())
+    }
 
-        let write_timings = write_planar(
+    fn get_frame(
+        &self,
+        n: i32,
+        activation_reason: ffi::VSActivationReason,
+        _frame_data: *mut *mut c_void,
+        _frame_ctx: FrameContext,
+        core: CoreRef,
+    ) -> Result<Option<Self::FrameType>> {
+        clip_frame(&self.sequence, Clip::Alpha, n, activation_reason, core)
+    }
+}
+
+/// Adds the node that produces one clip of a sequence to the output map.
+fn add_filter<F: Filter>(
+    core: &mut CoreRef<'_>,
+    output: MapRef,
+    name: &CStr,
+    info: &VideoInfo,
+    filter: F,
+) {
+    let dependencies = Dependencies::new(&[]).expect("an empty dependency list is valid");
+    core.create_video_filter(output, name, info, Box::new(filter), dependencies);
+}
+
+/// Writes one frame of `clip` from the state the clips of a call share.
+fn clip_frame(
+    sequence: &Sequence,
+    clip: Clip,
+    n: i32,
+    activation_reason: ffi::VSActivationReason,
+    mut core: CoreRef,
+) -> Result<Option<VideoFrame>> {
+    if activation_reason != ffi::VSActivationReason::Initial {
+        return Ok(None);
+    }
+    let frame_started = Instant::now();
+    let index =
+        usize::try_from(n).map_err(|_| ImgSeqError::new(format!("requested invalid frame {n}")))?;
+    let image = sequence.images.get(index).ok_or_else(|| {
+        ImgSeqError::new(format!(
+            "requested frame {n}, but the clip has {} frames",
+            sequence.images.len()
+        ))
+    })?;
+    let decode_started = Instant::now();
+    let decoded = sequence.prefetcher.fetch(n)?;
+    let decode = decode_started.elapsed();
+
+    let format = clip.pixel_format(image.format);
+    let allocation_started = Instant::now();
+    let mut frame = core.new_video_frame(
+        &query_format(&core, format),
+        i32::try_from(decoded.width)
+            .map_err(|_| ImgSeqError::new("image width does not fit VapourSynth"))?,
+        i32::try_from(decoded.height)
+            .map_err(|_| ImgSeqError::new("image height does not fit VapourSynth"))?,
+        None,
+    );
+    let allocation = allocation_started.elapsed();
+
+    let write_timings = match clip {
+        Clip::Color => write_planar(
             &mut frame,
             decoded.color_type,
             decoded.width,
             decoded.height,
             &decoded.pixels,
-        )?;
-        let properties_started = Instant::now();
-        set_frame_properties(&mut frame, image, index)?;
-        let properties = properties_started.elapsed();
+        )?,
+        Clip::Alpha => write_alpha(
+            &mut frame,
+            decoded.color_type,
+            decoded.width,
+            decoded.height,
+            &decoded.pixels,
+        )?,
+    };
+    let properties_started = Instant::now();
+    set_frame_properties(&mut frame, image, index, format, clip.alpha_marker())?;
+    let properties = properties_started.elapsed();
 
-        if self.debug {
-            log_debug(
-                &mut core,
-                format_args!(
-                    "frame {} '{}': decode={} (open={} metadata={} buffer={} read={}) format={} allocate={} convert={} properties={} total={}",
-                    n,
-                    image.path.display(),
-                    format_duration(decode),
-                    format_duration(decoded.timings.open),
-                    format_duration(decoded.timings.metadata),
-                    format_duration(decoded.timings.buffer),
-                    format_duration(decoded.timings.read),
-                    format_duration(format_time),
-                    format_duration(allocation),
-                    format_duration(write_timings.deinterleave),
-                    format_duration(properties),
-                    format_duration(frame_started.elapsed()),
-                ),
-            );
-        }
-        Ok(Some(frame))
+    if sequence.debug {
+        log_debug(
+            &mut core,
+            format_args!(
+                "frame {} '{}' ({}): decode={} (open={} metadata={} buffer={} read={}) format={} allocate={} convert={} properties={} total={}",
+                n,
+                image.path.display(),
+                clip.name(),
+                format_duration(decode),
+                format_duration(decoded.timings.open),
+                format_duration(decoded.timings.metadata),
+                format_duration(decoded.timings.buffer),
+                format_duration(decoded.timings.read),
+                format.name(),
+                format_duration(allocation),
+                format_duration(write_timings.deinterleave),
+                format_duration(properties),
+                format_duration(frame_started.elapsed()),
+            ),
+        );
     }
+    Ok(Some(frame))
+}
+
+/// Reports how long setting up one instance took.
+fn log_create(core: &mut CoreRef<'_>, args: &SequenceArgs, clips: &[Clip]) {
+    if !args.debug {
+        return;
+    }
+    let clips = clips
+        .iter()
+        .map(|clip| clip.name())
+        .collect::<Vec<_>>()
+        .join("+");
+    log_debug(
+        core,
+        format_args!(
+            "create: frames={} clips={} probe={} validate={} prefetch={} total={}",
+            args.images.len(),
+            clips,
+            format_duration(args.timings.probe),
+            format_duration(args.timings.validate),
+            args.prefetch_workers,
+            format_duration(args.timings.total),
+        ),
+    );
 }
 
 fn log_debug(core: &mut CoreRef<'_>, message: impl Display) {
@@ -333,8 +550,27 @@ fn undefined_video_format() -> vapoursynth4_rs::frame::VideoFormat {
 
 #[cfg(test)]
 mod tests {
-    use super::{gcd, reduce_fps, resolve_prefetch_workers};
-    use crate::prefetch;
+    use super::{Clip, gcd, reduce_fps, resolve_prefetch_workers};
+    use crate::{pixel::PixelFormat, prefetch};
+
+    #[test]
+    fn maps_clip_formats() {
+        assert_eq!(
+            Clip::Color.pixel_format(PixelFormat::Rgb8),
+            PixelFormat::Rgb8
+        );
+        assert_eq!(
+            Clip::Alpha.pixel_format(PixelFormat::Rgb8),
+            PixelFormat::Gray8
+        );
+        assert_eq!(
+            Clip::Alpha.pixel_format(PixelFormat::Rgb32F),
+            PixelFormat::Gray32F
+        );
+        assert_eq!(Clip::Color.alpha_marker(), None);
+        assert_eq!(Clip::Alpha.alpha_marker(), Some(true));
+        assert_eq!(Clip::Alpha.name(), "alpha");
+    }
 
     #[test]
     fn reduces_frame_rate() {

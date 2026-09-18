@@ -1,6 +1,6 @@
 # vapoursynth-imageseqs
 
-a rust vapoursynth plugin for reading an ordered list of images as a clip.
+a (quite-fast) rust vapoursynth plugin for reading an ordered list of images as a clip.
 
 ## install
 
@@ -79,7 +79,7 @@ include probing, decoding, frame allocation, planar conversion, frame
 properties, and total frame time.
 
 supported output formats are gray 8/16-bit, rgb 8/16-bit, and rgb 32-bit
-float. alpha channels are ignored.
+float. `Read` ignores alpha channels; use `ReadAlpha` to read them.
 
 common supported inputs include:
 - `png`
@@ -105,6 +105,31 @@ frames include these properties:
 - `ImgSeqOriginalColorType` - the original image color type
 - `ImgSeqHasICC` - whether the original image had an ICC profile
 - `ImgSeqOrientation` - the original image orientation, if any
+- `ImgSeqAlpha` - `1` on frames of a clip created by `ReadAlpha`
+
+### alpha clips
+
+`ReadAlpha` accepts the same arguments as `Read` and returns the color clip
+plus a separate gray alpha clip:
+
+```python
+result = core.imgseqs.ReadAlpha(files=[str(path) for path in files])
+clip, alpha = result["clip"], result["alpha"]
+```
+
+a plugin function with several outputs returns a dictionary in python, keyed
+by the names of its return type (`clip` and `alpha`).
+
+alpha keeps the sample depth of the source: 8-bit input becomes `GRAY8`,
+16-bit input becomes `GRAY16`, and float input becomes `GRAYS`. the alpha of
+`LA` input is its second channel and the alpha of `RGBA` input is its fourth.
+files without an alpha channel produce an opaque plane (`255`, `65535`, or
+`1.0`), so an alpha clip always has a meaningful value.
+
+both clips share the frame count, the frame rate, and the frame indexes, and
+both are read from one decode per file, so asking for the alpha clip does not
+decode the images twice. `mismatch` applies to both clips. the alpha clip is
+marked with the `ImgSeqAlpha` property.
 
 ## build
 

@@ -1,13 +1,25 @@
 use vapoursynth4_rs::frame::{Frame, VideoFrame};
 use vapoursynth4_rs::map::{AppendMode, Value};
-use vapoursynth4_rs::{ffi, key};
+use vapoursynth4_rs::{ColorFamily, ffi, key};
 
 use crate::{
     decoder::ImageInfo,
     error::{ImgSeqError, Result},
+    pixel::PixelFormat,
 };
 
-pub fn set_frame_properties(frame: &mut VideoFrame, image: &ImageInfo, index: usize) -> Result<()> {
+/// Attaches the source metadata of `image` to a frame of `format`.
+///
+/// `format` is the pixel format of the clip that owns the frame, so an alpha
+/// clip is never described as RGB, and `alpha_marker` is only set when the
+/// frame belongs to an alpha clip.
+pub fn set_frame_properties(
+    frame: &mut VideoFrame,
+    image: &ImageInfo,
+    index: usize,
+    format: PixelFormat,
+    alpha_marker: Option<bool>,
+) -> Result<()> {
     let Some(mut properties) = frame.properties_mut() else {
         return Err(ImgSeqError::new("VapourSynth frame has no property map"));
     };
@@ -54,14 +66,21 @@ pub fn set_frame_properties(frame: &mut VideoFrame, image: &ImageInfo, index: us
         .set(key!(c"_FieldBased"), Value::Int(0), AppendMode::Replace)
         .map_err(ImgSeqError::from_display)?;
 
-    if matches!(
-        image.format.color_family(),
-        vapoursynth4_rs::ColorFamily::RGB
-    ) {
+    if matches!(format.color_family(), ColorFamily::RGB) {
         properties
             .set(
                 key!(c"_Matrix"),
                 Value::Int(i64::from(ffi::VSMatrixCoefficients::VSC_MATRIX_RGB as i32)),
+                AppendMode::Replace,
+            )
+            .map_err(ImgSeqError::from_display)?;
+    }
+
+    if let Some(alpha) = alpha_marker {
+        properties
+            .set(
+                key!(c"ImgSeqAlpha"),
+                Value::Int(i64::from(alpha)),
                 AppendMode::Replace,
             )
             .map_err(ImgSeqError::from_display)?;
