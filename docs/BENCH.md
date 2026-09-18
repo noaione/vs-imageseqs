@@ -7,7 +7,7 @@ cannot favour one of them. the numbers below are the best pass of three unless
 the row says otherwise.
 
 ```console
-.venv/Scripts/python.exe tests/bench-imgseqs-vs-bestsource.vpy --reps 3
+.venv/Scripts/python.exe tests/bench-imgseqs-vs-bestsource.vpy --reps 3 --dir sandbox/webp --pattern "snek - p%03d.webp"
 ```
 
 `--extra` adds the single-worker variants, `--prefetch N` adds an imgseqs run
@@ -27,118 +27,133 @@ their own defaults unless the row says otherwise.
   the defaults, and `threads=1` is the row that matches `prefetch=0`.
 - bestsource is never given `fpsnum`/`fpsden` for an image sequence: ffmpeg
   reads image sequences at 25 fps, so any other rate resamples and silently
-  drops every 25th image (163 files become 156 frames).
-- the two plugins do not produce the same frames. imgseqs writes `RGB24` for
-the webp and jpeg sets and `GRAY8` for the grayscale png set, while bestsource
-keeps whatever format its decoder emits: `YUV420P8` for webp, `YUV444P8` for
-jpeg, and a variable format for the png set. this compares read throughput, not
-identical output.
+  drops every 25th image.
+- the two plugins do not produce the same frames. imgseqs returns the image's
+  own format when the file has one (`GRAY8` for monochrome jpeg, png and jxl
+  pages, `RGB24` for colour ones) and converts the yuv containers to `RGB24`,
+  while bestsource keeps whatever format its decoder emits: `YUV420P8` for
+  webp, `YUV444P8` for jpeg, a variable format for a mixed folder. this compares
+  read throughput, not identical output.
 - `open` is the time to create the clip. bestsource indexes the sequence while
   the clip is created, which for images means reading every file once.
 
+## sandbox corpus
+
+`sandbox/` holds the same 35 pages in six containers, so the formats can be
+compared like for like. the pages are not uniform: `p000` is 3312x4717 and the
+other 34 are 3672x5274, of which 31 are monochrome. it is the same four colour
+pages (`p000`, `p001`, `p002`, `p018`) and the same 31 monochrome ones in every
+set; what imgseqs makes of them depends on the container:
+
+| set | what imgseqs returns | decoded |
+| --- | --- | --- |
+| webp, avif | 35 `RGB24` frames | 1928 MiB, one 44.7 MiB frame and 34 of 55.4 MiB |
+| jpeg, png, jxl | 31 `Gray8` frames of 18.5 MiB and 4 `RGB24` | 784 MiB |
+| heic | the 4 colour pages only | the 31 monochrome ones fail, see [05](improvements/05-monochrome-heif.md) |
+
+every set needs `mismatch=True` for this, and those frame sizes (18.5 to
+55.4 MiB) are what the 192 MiB lookahead budget is up against: it holds ten of
+the gray frames but only three and a half of the colour ones.
+
+```console
+.venv/Scripts/python.exe tests/bench-imgseqs-vs-bestsource.vpy --reps 3 --extra --prefetch 16 --dir sandbox/webp --pattern "snek - p%03d.webp"
+```
+
+frames, best pass of three:
+
+| set | imgseqs | bestsource | verdict |
+| --- | --- | --- | --- |
+| webp | 5.88 s | 2.17 s | bestsource 2.71x faster, 1.28x including the open |
+| jpeg | 2.87 s | 7.52 s | imgseqs 2.62x faster, 4.81x including the open |
+| png | 0.66 s | 0.89 s | imgseqs 1.36x faster, 2.88x including the open |
+| jxl | 6.42 s | cannot read | 3.02x over imgseqs's own serial row |
+| avif | 9.25 s | cannot open | 1.22x over imgseqs's own serial row |
+| heic | fails at `p003` | cannot open | neither plugin reads the set |
+
+one pattern holds across all of them: the cheaper a frame is to decode, the more
+a deep lookahead is worth, so `prefetch=16` wins on jpeg and jxl and loses by 2x
+on webp and avif. the sections below have the detail.
+
 ## webp
 
-163 files of 2903x4128, about 1 MB each, with a few different widths, so
-`mismatch=True`.
+35 files, 146 MB, all colour: `p000` is 3312x4717, 44.7 MiB decoded, and the
+other 34 are 3672x5274 at 55.4 MiB.
 
 | reading the set | frames | median frame | open | total |
 | --- | --- | --- | --- | --- |
-| imgseqs `Read` | 15.80 s | 68 ms | 0.01 s | 15.81 s |
-| imgseqs `Read`, `prefetch=0` | 54.29 s | 331 ms | 0.01 s | 54.30 s |
-| imgseqs `Read`, `prefetch=16` | 27.53 s | 84 ms | 0.01 s | 27.54 s |
-| bestsource `VideoSource` | 5.96 s | 15 ms | 5.95 s | 11.90 s |
-| bestsource `VideoSource`, `threads=1` | 30.41 s | 177 ms | 29.29 s | 59.70 s |
+| imgseqs `Read` | 5.88 s | 103.6 ms | 0.003 s | 5.89 s |
+| imgseqs `Read`, `prefetch=0` | 20.21 s | 617.0 ms | 0.004 s | 20.22 s |
+| imgseqs `Read`, `prefetch=16` | 11.36 s | 107.4 ms | 0.004 s | 11.36 s |
+| bestsource `VideoSource` | 2.17 s | 23.9 ms | 2.42 s | 4.59 s |
+| bestsource `VideoSource`, `threads=1` | 11.92 s | 371.4 ms | 11.81 s | 23.74 s |
 
-bestsource wins on the decoder: ffmpeg spreads one vp8 frame across every core,
-so `threads=0` turns 177 ms per frame into 15 ms, while imgseqs decodes a frame
-in a single pure rust thread. its indexing pass is what keeps the totals close:
-with one worker each, imgseqs finishes sooner, 54.30 s against 59.70 s.
+bestsource is 2.71x faster on frames and 1.28x including the open, and its
+decoder is the whole reason: ffmpeg spreads one vp8 frame over every core, so
+`threads=1` to `threads=0` turns 371 ms per frame into 24 ms, while imgseqs
+decodes a frame in a single pure rust thread. imgseqs turns its own lookahead
+into 3.4x over its serial row, which is not enough to close that gap. this is
+the set [04](improvements/04-webp-decoder.md) is for.
 
-lookahead depth, first 32 files, wall and process CPU per frame:
+lookahead depth, first 16 files, wall clock and process CPU per delivered frame
+(one serial frame is 590 ms of CPU):
 
-| prefetch | wall | cpu | cpu over one decode |
-| --- | --- | --- | --- |
-| 0 | 272.5 ms | 268.1 ms | 1.00x |
-| 1 | 227.6 ms | 262.2 ms | 0.98x |
-| 2 | 128.5 ms | 285.6 ms | 1.07x |
-| 4 | 88.8 ms | 360.8 ms | 1.35x |
-| 6 | 78.2 ms | 431.2 ms | 1.61x |
-| 8 | 95.6 ms | 595.7 ms | 2.22x |
-| 12 | 112.6 ms | 752.9 ms | 2.81x |
-| 16 | 136.2 ms | 925.3 ms | 3.45x |
+| prefetch | wall | cpu | cores busy | cpu over serial |
+| --- | --- | --- | --- | --- |
+| 0 | 590.4 ms | 585.0 ms | 0.99 | 1.00x |
+| 2 | 329.4 ms | 685.5 ms | 2.08 | 1.17x |
+| 4 | 169.1 ms | 680.7 ms | 4.02 | 1.16x |
+| 8 | 245.4 ms | 1232.4 ms | 5.02 | 2.10x |
+| 16 | 297.4 ms | 1513.7 ms | 5.09 | 2.58x |
 
-one frame is 36 MB, so the 192 MiB decode budget holds about five of them while
-the pool queues `workers + 2` frames ahead. past four workers the queue outruns
-the budget: finished frames are evicted before they are used and decoded again,
-which is why the CPU column climbs to several decodes per delivered frame, and
-why `prefetch=16` ends up slower than `prefetch=4`.
+at the default the pool is fully busy and wastes little; at 16 it is busy
+re-decoding frames that were evicted before anyone asked for them. a colour
+frame is 55.4 MiB, so the 192 MiB budget holds three and a half of them and the
+wall time stops improving past 4: the budget caps what the consumer can be
+handed, which is what [01](improvements/01-lookahead-scheduling.md) changes.
 
 ## jpeg
 
-130 files of 1404x2000, about 0.5 MB each.
+35 files, 213 MB. 31 of the pages are monochrome and come out as `Gray8` of
+18.5 MiB; the four colour ones are `RGB24` (`p000` at 44.7 MiB, `p001`, `p002`
+and `p018` at 55.4 MiB).
 
 | reading the set | frames | median frame | open | total |
 | --- | --- | --- | --- | --- |
-| imgseqs `Read` | 1.26 s | 9.6 ms | 0.04 s | 1.30 s |
-| imgseqs `Read`, `prefetch=0` | 2.89 s | 22.4 ms | 0.05 s | 2.94 s |
-| bestsource `VideoSource` | 2.21 s | 17.2 ms | 1.73 s | 3.93 s |
-| bestsource `VideoSource`, `threads=1` | 2.17 s | 16.3 ms | 1.85 s | 4.03 s |
+| imgseqs `Read` | 2.87 s | 44.3 ms | 0.20 s | 3.07 s |
+| imgseqs `Read`, `prefetch=0` | 9.42 s | 261.8 ms | 0.20 s | 9.62 s |
+| imgseqs `Read`, `prefetch=16` | 2.36 s | 11.7 ms | 0.20 s | 2.56 s |
+| bestsource `VideoSource` | 7.52 s | 210.2 ms | 7.22 s | 14.74 s |
+| bestsource `VideoSource`, `threads=1` | 7.54 s | 211.8 ms | 7.21 s | 14.75 s |
 
-imgseqs wins here, 1.75x on frames and 3.02x including the open. the two
-single-worker rows show why: ffmpeg still decodes a jpeg frame a little faster
-than `zune-jpeg` does (16.3 ms against 22.4 ms) and bestsource gains nothing
-from its threads for jpeg, while imgseqs turns its lookahead into a 2.3x
-speedup over its own serial path. the win comes from parallelism, not from a
-faster decoder.
-
-lookahead depth, first 64 files:
-
-| prefetch | wall | cpu | cpu over one decode |
-| --- | --- | --- | --- |
-| 0 | 23.9 ms | 22.9 ms | 1.00x |
-| 1 | 10.9 ms | 15.6 ms | 0.68x |
-| 2 | 10.1 ms | 23.4 ms | 1.02x |
-| 4 | 10.8 ms | 26.4 ms | 1.15x |
-| 8 | 11.2 ms | 28.6 ms | 1.25x |
-| 16 | 12.1 ms | 27.8 ms | 1.21x |
-
-a jpeg frame is 8 MB, so the same budget holds about 22 of them and nothing has
-to be evicted: CPU per frame stays near a single decode at every depth. the wall
-time still flattens at roughly 10 ms per frame, the part of the path that cannot
-overlap, which is copying the decoded pixels into the VapourSynth frame and the
-per-frame bookkeeping.
+the strongest result of the six containers: 2.62x faster than bestsource on
+frames and 4.81x including the open. bestsource reads all 35 files while it
+creates the clip, 7.22 s against imgseqs's 0.20 s, and gains nothing from its
+threads here (7.52 s against 7.54 s with one), so the win is imgseqs's
+lookahead, 3.3x over its own serial row. at `prefetch=16` the gap against
+bestsource widens to 3.2x on frames, and a frame costs 11.7 ms.
 
 ## png
 
-130 files of 1404x2000, grayscale scans (`Gray8`), about 800 KB each.
+35 files, 66 MB: 31 monochrome pages of 18.5 MiB (`Gray8`) and four colour ones
+(`RGB24`, one of 44.7 MiB and three of 55.4 MiB).
 
 | reading the set | frames | median frame | open | total |
 | --- | --- | --- | --- | --- |
-| imgseqs `Read` | 0.91 s | 9.0 ms | 0.01 s | 0.92 s |
-| imgseqs `Read`, `prefetch=0` | 2.06 s | 16.5 ms | 0.01 s | 2.07 s |
-| bestsource `VideoSource` | 0.80 s | 6.3 ms | 0.41 s | 1.21 s |
-| bestsource `VideoSource`, `threads=1` | 2.03 s | 16.2 ms | 1.57 s | 3.60 s |
+| imgseqs `Read` | 0.66 s | 9.4 ms | 0.004 s | 0.66 s |
+| imgseqs `Read`, `prefetch=0` | 1.43 s | 29.0 ms | 0.004 s | 1.43 s |
+| imgseqs `Read`, `prefetch=16` | 0.89 s | 12.0 ms | 0.004 s | 0.89 s |
+| bestsource `VideoSource` | 0.89 s | 15.4 ms | 1.01 s | 1.90 s |
+| bestsource `VideoSource`, `threads=1` | 2.23 s | 49.7 ms | 2.30 s | 4.53 s |
 
-the closest match of the four sets. one decode worker each is a dead heat,
-16.5 ms against 16.2 ms, so the 1.14x bestsource lead on frames is its own
-parallelism, and imgseqs takes the total back to 1.32x because it skips the
-indexing pass.
-
-the same folder also holds two jpeg pages, `p000.jpg` and `p131.jpg`, in front
-of and behind the 130 png pages. imgseqs reads all 132 as one clip at 0.90 s,
-7.96 ms per frame; they share a size but not a format, so it needs
-`mismatch=True`. bestsource cannot open that sequence at all, because one
-printf pattern describes one extension. the bench says so and reports the
-imgseqs numbers on their own:
-
-```console
-.venv/Scripts/python.exe tests/bench-imgseqs-vs-bestsource.vpy --reps 3 --extra --dir "target/folder" --select "p*.*"
-```
+the closest of the six. imgseqs is 1.36x faster on frames and 2.88x including
+the open, and it is the only set where it wins the serial comparison as well as
+the parallel one (1.43 s against 2.23 s), so here the margin is the decoder and
+the skipped indexing pass rather than the lookahead: sixteen workers buy nothing
+on a set this cheap (0.89 s against 0.66 s).
 
 ## jxl
 
-29 files of 1500x2500 and 1500x824, manhua pages, so `mismatch=True`.
-about 300 KB each.
+35 files, 174 MB, same manga pages, again 31 `Gray8` and four `RGB24`.
 
 bestsource cannot read this set at all: `bs.VideoSource` fails with
 `Video codec not found`, because that ffmpeg build has no jpeg xl decoder. the
@@ -146,34 +161,76 @@ bench reports the failure and then measures imgseqs on its own.
 
 | reading the set | frames | median frame | open | total |
 | --- | --- | --- | --- | --- |
-| imgseqs `Read` | 0.83 s | 15.2 ms | 0.00 s | 0.84 s |
-| imgseqs `Read`, `prefetch=0` | 2.45 s | 88.1 ms | 0.00 s | 2.46 s |
+| imgseqs `Read` | 6.42 s | 137.7 ms | 0.003 s | 6.42 s |
+| imgseqs `Read`, `prefetch=0` | 19.36 s | 557.8 ms | 0.003 s | 19.37 s |
+| imgseqs `Read`, `prefetch=16` | 5.68 s | 25.4 ms | 0.003 s | 5.68 s |
 
-the lookahead is worth 2.95x here. a frame costs 85 ms of decoding and 13 ms of
-copying, which per pixel is the same rate as the pure rust webp decoder and
-about three times slower than `zune-jpeg`.
+jxl has the most expensive frame of the six (137.7 ms median) and gets the most
+from lookahead, 3.02x over its serial row, with a median frame that drops from
+557.8 ms to 25.4 ms. `prefetch=16` is its best row, and opening the clip is free
+because the probe only reads the header.
+
+## avif
+
+35 files, 130 MB, all colour and therefore all `RGB24` like the webp set, 1928
+MiB decoded. bestsource cannot open it.
+
+| reading the set | frames | median frame | open | total |
+| --- | --- | --- | --- | --- |
+| imgseqs `Read` | 9.25 s | 151.2 ms | 6.10 s | 15.35 s |
+| imgseqs `Read`, `prefetch=0` | 11.30 s | 327.9 ms | 6.15 s | 17.45 s |
+| imgseqs `Read`, `prefetch=16` | 19.11 s | 202.8 ms | 6.09 s | 25.20 s |
+
+two costs stand out. creating the clip takes 6.10 s, which is 174 ms for each
+of the 35 files, and the decode reports another ~150 ms of container parsing per
+frame on top of the av1 decode itself. the lookahead is worth only 1.22x here,
+the least of any set, and `prefetch=16` is 2x slower than the default.
+
+## heic
+
+35 files, 236 MB, and neither plugin can read the sequence.
+
+imgseqs decodes four files, `p000`, `p001`, `p002` and `p018`, and fails on the
+other 31 with:
+
+```text
+failed to decode image 'snek - p003.heic': Format error decoding `heif`:
+Image is not interleaved.
+```
+
+the four that decode are exactly the colour pages and the 31 that fail are the
+monochrome ones, so this is a limit of the heif integration rather than of the
+codec. see [05](improvements/05-monochrome-heif.md). bestsource fails one step
+earlier, with `Couldn't open`, because its ffmpeg build has no heif demuxer.
 
 ## per stage cost
 
-`debug=True` with `prefetch=0`, averaged over the first frames of each set:
+`debug=True` with `prefetch=0`, averaged over the first four files of each
+sandbox set, which are three of the colour pages plus the first monochrome one
+where the set has any:
 
 | set | decode | copy into the frame | total |
 | --- | --- | --- | --- |
-| webp 2903x4128 | 265 ms | 48 ms | 314 ms |
-| jpeg 1404x2000 | 18 ms | 12 ms | 30 ms |
-| png 1404x2000 | 9 ms | 3 ms | 12 ms |
-| jxl 1500x2500 | 85 ms | 13 ms | 98 ms |
+| webp 3672x5274 | 520 ms | 86 ms | 607 ms |
+| jpeg 3672x5274 | 535 ms | 51 ms | 586 ms |
+| png 3672x5274 | 132 ms | 59 ms | 191 ms |
+| jxl 3672x5274 | 751 ms | 63 ms | 814 ms |
+| avif 3672x5274 | 263 ms | 81 ms | 345 ms |
 
 the decode figure includes the first-touch page faults of the decode buffer,
-36 MB for the webp set and 2.8 MB for the grayscale png set, which is why
-allocating that buffer measures as ~0 ms on its own.
+55.4 MiB for a colour frame and 18.5 MiB for a monochrome one, which is why
+allocating that buffer measures as ~0 ms on its own. avif is the one row holding
+a second cost: 150 ms of its 263 ms is parsing the container, before any av1
+decoding happens. jxl is the slowest of the five, and it is the format whose
+frames the lookahead helps most.
 
 ## known headroom
 
-- the webp decoder is pure rust and single threaded, so a native decoder
-  (libwebp, or ffmpeg) is the only way to close the per-frame gap there.
-- the lookahead queues more frames than the byte budget can hold, so the same
-  frames get decoded twice. sizing the window from the budget, instead of from
-  the worker count, would remove that.
-- the copy into the frame runs on the requesting thread. for jpeg it is already
-  the floor of the curve above.
+the numbers point at three things: the pure rust single threaded webp decoder,
+the lookahead pool decoding frames it cannot keep, and the copy into the frame
+running on the requesting thread. the per-frame cost of each, and the plans for
+changing them, are written up in [improvements](improvements/README.md).
+
+separately from the speed work, the sandbox found one format that does not work
+at all: 31 of its 35 heic files fail to decode because they are monochrome,
+written up in [05 monochrome heif](improvements/05-monochrome-heif.md).

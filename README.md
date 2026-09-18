@@ -138,17 +138,18 @@ and with [bestsource](https://github.com/vapoursynth/bestsource), timing every
 `get_frame` and printing a per-frame table plus the totals:
 
 ```console
-.venv/Scripts/python.exe tests/bench-imgseqs-vs-bestsource.vpy --reps 3
-.venv/Scripts/python.exe tests/bench-imgseqs-vs-bestsource.vpy --reps 3 --dir "I:/Manga/Yuri Love Story/source/v02" --pattern "Yuri Love Story - v02 - p%03d.jpg"
+.venv/Scripts/python.exe tests/bench-imgseqs-vs-bestsource.vpy --reps 3 --dir images --pattern "i_%04d.webp"
+.venv/Scripts/python.exe tests/bench-imgseqs-vs-bestsource.vpy --reps 3 --extra --prefetch 16 --dir sandbox/webp --pattern "snek - p%03d.webp"
 ```
 
 the measured results, split per image format, are in
-[benchmarks](docs/BENCH.md). in short: imgseqs reads a 130 file jpeg set 1.75x
-faster than bestsource and a 130 file png set 1.32x faster once the open is
-counted, while a 163 file webp set goes the other way, because ffmpeg threads a
-single vp8 frame across every core and `webp` is decoded in one pure rust
-thread. it also reads a folder that mixes jpeg and png pages as one clip, and
-reads `jxl`, which this bestsource build cannot open at all.
+[benchmarks](docs/BENCH.md). in short, on the same 35 pages saved in six
+containers: imgseqs is 2.62x faster than bestsource on `jpeg` (4.81x once the
+open is counted), 1.36x faster on `png`, and 2.71x slower on `webp`, where
+ffmpeg threads a single vp8 frame across every core while `webp` is decoded in
+one pure rust thread. bestsource cannot open `avif`, `heic` or `jxl` at all in
+that build, and imgseqs reads a folder that mixes jpeg and png pages as one
+clip.
 
 when comparing with bestsource, open it with `cachemode=0` and
 `apply_rotation=False`, and do not pass `fpsnum`/`fpsden` for image sequences:
