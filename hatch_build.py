@@ -5,7 +5,6 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
 
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 from packaging import tags
@@ -82,7 +81,11 @@ def build_plugin(root: Path, environment: dict[str, str]) -> Path:
     return artifact
 
 
-class NativePluginHook(BuildHookInterface[Any]):
+# Do not subscript ``BuildHookInterface``: hatchling 1.27-1.32.2 declare it
+# with one type parameter and 1.32.3 added a second one, so any fixed
+# subscript makes the hook unloadable for the other releases. The plain class
+# is accepted by every version and the hook never needs the specialization.
+class NativePluginHook(BuildHookInterface):  # type: ignore[type-arg]
     """Build the Cargo plugin and place it in VapourSynth's plugin tree."""
 
     plugin_directory = Path("vapoursynth") / "plugins"
