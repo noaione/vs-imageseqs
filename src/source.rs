@@ -172,7 +172,7 @@ impl Filter for ImageSequence {
             log_debug(
                 &mut core,
                 format_args!(
-                    "frame {} '{}': decode={} (open={} metadata={} buffer={} read={}) format={} allocate={} planarize={} copy={} properties={} total={}",
+                    "frame {} '{}': decode={} (open={} metadata={} buffer={} read={}) format={} allocate={} convert={} properties={} total={}",
                     n,
                     image.path.display(),
                     format_duration(decode),
@@ -182,8 +182,7 @@ impl Filter for ImageSequence {
                     format_duration(decoded.timings.read),
                     format_duration(format_time),
                     format_duration(allocation),
-                    format_duration(write_timings.planarize),
-                    format_duration(write_timings.copy),
+                    format_duration(write_timings.deinterleave),
                     format_duration(properties),
                     format_duration(frame_started.elapsed()),
                 ),
