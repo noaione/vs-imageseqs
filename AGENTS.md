@@ -20,6 +20,9 @@ when true, variable dimensions and formats are allowed. `debug` defaults to
 false and emits VapourSynth log timings when enabled. `prefetch` selects the
 number of background decode workers used for sequential reads; it defaults to
 half the logical cores (capped at four) and `0` disables lookahead decoding.
+`prefetch_memory` is the lookahead budget in MiB; it defaults to the larger of
+192 MiB and one frame of the largest image per worker, and `0` is rejected
+because `prefetch=0` is how lookahead is disabled.
 
 ## repository rules
 

@@ -151,7 +151,7 @@ macro_rules! native_sample {
 native_sample!(u16, 2);
 native_sample!(f32, 4);
 
-fn channel_count(color_type: ColorType) -> Result<usize> {
+pub(crate) fn channel_count(color_type: ColorType) -> Result<usize> {
     match color_type {
         ColorType::L8 | ColorType::L16 => Ok(1),
         ColorType::La8 | ColorType::La16 => Ok(2),

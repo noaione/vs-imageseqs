@@ -25,8 +25,7 @@ use crate::{
 };
 
 /// Arguments accepted by `Read` and `ReadAlpha`.
-const SEQUENCE_ARGS: &CStr =
-    c"files:data[];fpsnum:int:opt;fpsden:int:opt;mismatch:int:opt;debug:int:opt;prefetch:int:opt;";
+const SEQUENCE_ARGS: &CStr = c"files:data[];fpsnum:int:opt;fpsden:int:opt;mismatch:int:opt;debug:int:opt;prefetch:int:opt;prefetch_memory:int:opt;";
 
 /// One of the clips an image sequence hands out.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -118,6 +117,11 @@ impl SequenceArgs {
         let debug = read_optional_int(input, key!(c"debug"), "debug")?.unwrap_or(0) != 0;
         let prefetch_workers =
             resolve_prefetch_workers(read_optional_int(input, key!(c"prefetch"), "prefetch")?)?;
+        let prefetch_memory = resolve_prefetch_memory(read_optional_int(
+            input,
+            key!(c"prefetch_memory"),
+            "prefetch_memory",
+        )?)?;
         let (fps_num, fps_den) = reduce_fps(fps_num, fps_den)?;
 
         let probe_started = Instant::now();
@@ -146,7 +150,11 @@ impl SequenceArgs {
 
         Ok(Self {
             format: images[0].format,
-            prefetcher: Arc::new(Prefetcher::new(Arc::clone(&images), prefetch_workers)),
+            prefetcher: Arc::new(Prefetcher::new(
+                Arc::clone(&images),
+                prefetch_workers,
+                prefetch_memory,
+            )),
             images,
             width,
             height,
@@ -405,12 +413,13 @@ fn log_create(core: &mut CoreRef<'_>, args: &SequenceArgs, clips: &[Clip]) {
     log_debug(
         core,
         format_args!(
-            "create: frames={} clips={} probe={} validate={} prefetch={} total={}",
+            "create: frames={} clips={} probe={} validate={} prefetch={} prefetch_memory={} total={}",
             args.images.len(),
             clips,
             format_duration(args.timings.probe),
             format_duration(args.timings.validate),
             args.prefetch_workers,
+            format_memory(args.prefetcher.byte_budget()),
             format_duration(args.timings.total),
         ),
     );
@@ -425,6 +434,10 @@ fn log_debug(core: &mut CoreRef<'_>, message: impl Display) {
 
 fn format_duration(duration: std::time::Duration) -> String {
     format!("{:.3} ms", duration.as_secs_f64() * 1000.0)
+}
+
+fn format_memory(bytes: usize) -> String {
+    format!("{:.0} MiB", bytes as f64 / (1024.0 * 1024.0))
 }
 
 fn read_files(input: &MapRef) -> Result<Vec<PathBuf>> {
@@ -482,6 +495,24 @@ fn resolve_prefetch_workers(requested: Option<i64>) -> Result<usize> {
         Some(value) => Ok(usize::try_from(value)
             .unwrap_or(usize::MAX)
             .min(prefetch::MAX_WORKERS)),
+    }
+}
+
+/// Decoded data budget for the lookahead pool, in bytes.
+///
+/// `None` lets the pool size it from the worker count and the largest frame of
+/// the sequence, which is what `prefetch_memory` exists to override.
+fn resolve_prefetch_memory(requested: Option<i64>) -> Result<Option<usize>> {
+    match requested {
+        None => Ok(None),
+        Some(value) if value < 1 => Err(ImgSeqError::new(format!(
+            "prefetch_memory must be at least 1 MiB, got {value}; use prefetch=0 to disable lookahead decoding"
+        ))),
+        Some(value) => Ok(Some(
+            usize::try_from(value)
+                .unwrap_or(usize::MAX)
+                .saturating_mul(1024 * 1024),
+        )),
     }
 }
 
@@ -550,7 +581,7 @@ fn undefined_video_format() -> vapoursynth4_rs::frame::VideoFormat {
 
 #[cfg(test)]
 mod tests {
-    use super::{Clip, gcd, reduce_fps, resolve_prefetch_workers};
+    use super::{Clip, gcd, reduce_fps, resolve_prefetch_memory, resolve_prefetch_workers};
     use crate::{pixel::PixelFormat, prefetch};
 
     #[test]
@@ -589,5 +620,16 @@ mod tests {
         );
         assert!(resolve_prefetch_workers(Some(-1)).is_err());
         assert!(resolve_prefetch_workers(None).unwrap() <= prefetch::AUTO_MAX_WORKERS);
+    }
+
+    #[test]
+    fn resolves_prefetch_memory() {
+        assert_eq!(resolve_prefetch_memory(None).unwrap(), None);
+        assert_eq!(
+            resolve_prefetch_memory(Some(64)).unwrap(),
+            Some(64 * 1024 * 1024)
+        );
+        assert!(resolve_prefetch_memory(Some(0)).is_err());
+        assert!(resolve_prefetch_memory(Some(-1)).is_err());
     }
 }

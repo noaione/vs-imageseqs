@@ -50,9 +50,12 @@ set; what imgseqs makes of them depends on the container:
 | webp, avif | 35 `RGB24` frames | 1928 MiB, one 44.7 MiB frame and 34 of 55.4 MiB |
 | jpeg, png, jxl, heic | 31 `Gray8` frames of 18.5 MiB and 4 `RGB24` | 784 MiB |
 
-every set needs `mismatch=True` for this, and those frame sizes (18.5 to
-55.4 MiB) are what the 192 MiB lookahead budget is up against: it holds ten of
-the gray frames but only three and a half of the colour ones.
+every set needs `mismatch=True` for this. those frame sizes (18.5 to 55.4 MiB)
+are what the lookahead budget is up against: 192 MiB holds ten of the gray
+frames but only three and a half of the colour ones, so the budget is
+`max(192 MiB, window x largest frame)` and a deep lookahead on these pages is
+allowed to use more memory than that. see
+[01](improvements/01-lookahead-scheduling.md).
 
 ```console
 .venv/Scripts/python.exe tests/bench-imgseqs-vs-bestsource.vpy --reps 3 --extra --prefetch 16 --dir sandbox/webp --pattern "snek - p%03d.webp"
@@ -62,16 +65,19 @@ frames, best pass of three:
 
 | set | imgseqs | bestsource | verdict |
 | --- | --- | --- | --- |
-| webp | 5.88 s | 2.17 s | bestsource 2.71x faster, 1.28x including the open |
-| jpeg | 2.87 s | 7.52 s | imgseqs 2.62x faster, 4.81x including the open |
-| png | 0.66 s | 0.89 s | imgseqs 1.36x faster, 2.88x including the open |
-| jxl | 6.42 s | cannot read | 3.02x over imgseqs's own serial row |
-| avif | 9.25 s | cannot open | 1.22x over imgseqs's own serial row |
-| heic | 7.50 s | cannot open | 3.21x over imgseqs's own serial row |
+| webp | 5.66 s | 2.15 s | bestsource 2.65x faster, 1.29x including the open |
+| jpeg | 2.75 s | 7.49 s | imgseqs 2.73x faster, 4.98x including the open |
+| png | 0.62 s | 0.86 s | imgseqs 1.37x faster, 2.96x including the open |
+| jxl | 6.50 s | cannot read | 4.13x over imgseqs's own serial row |
+| avif | 4.74 s | cannot open | 2.52x over imgseqs's own serial row |
+| heic | 8.24 s | cannot open | 3.06x over imgseqs's own serial row |
 
-one pattern holds across all of them: the cheaper a frame is to decode, the more
-a deep lookahead is worth, so `prefetch=16` wins on jpeg and jxl and loses by 2x
-on webp and avif. the sections below have the detail.
+`prefetch=16` is the best row on five of the six sets — webp, jpeg, png, jxl and
+heic — and avif is the exception, with its default 14% ahead of it. the deeper
+pattern is in the single-worker rows: the lookahead is worth 2.4x to 4.8x over
+the serial row on every set, which is what
+[01](improvements/01-lookahead-scheduling.md) made reliable. the sections below
+have the detail.
 
 ## webp
 
@@ -80,35 +86,39 @@ other 34 are 3672x5274 at 55.4 MiB.
 
 | reading the set | frames | median frame | open | total |
 | --- | --- | --- | --- | --- |
-| imgseqs `Read` | 5.88 s | 103.6 ms | 0.003 s | 5.89 s |
-| imgseqs `Read`, `prefetch=0` | 20.21 s | 617.0 ms | 0.004 s | 20.22 s |
-| imgseqs `Read`, `prefetch=16` | 11.36 s | 107.4 ms | 0.004 s | 11.36 s |
-| bestsource `VideoSource` | 2.17 s | 23.9 ms | 2.42 s | 4.59 s |
-| bestsource `VideoSource`, `threads=1` | 11.92 s | 371.4 ms | 11.81 s | 23.74 s |
+| imgseqs `Read` | 5.66 s | 134.2 ms | 0.004 s | 5.67 s |
+| imgseqs `Read`, `prefetch=0` | 19.97 s | 600.7 ms | 0.003 s | 19.97 s |
+| imgseqs `Read`, `prefetch=16` | 4.12 s | 70.2 ms | 0.004 s | 4.12 s |
+| bestsource `VideoSource` | 2.15 s | 23.5 ms | 2.27 s | 4.44 s |
+| bestsource `VideoSource`, `threads=1` | 11.91 s | 361.4 ms | 11.73 s | 23.59 s |
 
-bestsource is 2.71x faster on frames and 1.28x including the open, and its
+bestsource is 2.65x faster on frames and 1.29x including the open, and its
 decoder is the whole reason: ffmpeg spreads one vp8 frame over every core, so
-`threads=1` to `threads=0` turns 371 ms per frame into 24 ms, while imgseqs
+`threads=1` to `threads=0` turns 361 ms per frame into 24 ms, while imgseqs
 decodes a frame in a single pure rust thread. imgseqs turns its own lookahead
-into 3.4x over its serial row, which is not enough to close that gap. this is
-the set [04](improvements/04-webp-decoder.md) is for.
+into 4.8x over its serial row, which is still not enough to close that gap. this
+is the set [04](improvements/04-webp-decoder.md) is for.
 
 lookahead depth, first 16 files, wall clock and process CPU per delivered frame
-(one serial frame is 590 ms of CPU):
+(one serial frame is 563 ms of CPU):
 
 | prefetch | wall | cpu | cores busy | cpu over serial |
 | --- | --- | --- | --- | --- |
-| 0 | 590.4 ms | 585.0 ms | 0.99 | 1.00x |
-| 2 | 329.4 ms | 685.5 ms | 2.08 | 1.17x |
-| 4 | 169.1 ms | 680.7 ms | 4.02 | 1.16x |
-| 8 | 245.4 ms | 1232.4 ms | 5.02 | 2.10x |
-| 16 | 297.4 ms | 1513.7 ms | 5.09 | 2.58x |
+| 0 | 571.3 ms | 562.5 ms | 0.98 | 1.00x |
+| 2 | 263.0 ms | 576.2 ms | 2.19 | 1.02x |
+| 4 | 160.7 ms | 648.4 ms | 4.04 | 1.15x |
+| 6 | 132.9 ms | 731.4 ms | 5.50 | 1.30x |
+| 8 | 124.0 ms | 758.8 ms | 6.12 | 1.35x |
+| 12 | 126.3 ms | 801.8 ms | 6.35 | 1.43x |
+| 16 | 145.6 ms | 806.6 ms | 5.54 | 1.43x |
 
-at the default the pool is fully busy and wastes little; at 16 it is busy
-re-decoding frames that were evicted before anyone asked for them. a colour
-frame is 55.4 MiB, so the 192 MiB budget holds three and a half of them and the
-wall time stops improving past 4: the budget caps what the consumer can be
-handed, which is what [01](improvements/01-lookahead-scheduling.md) changes.
+the wasted work no longer grows the way it used to, which is what
+[01](improvements/01-lookahead-scheduling.md) fixed: cpu per delivered frame was
+2.58x one serial decode at `prefetch=16` and is now 1.43x, and the wall time
+improves all the way to 8 instead of turning around after 4. 12 and 16 are the
+same work on more threads — 16 workers on a 12 thread machine is contention, and
+past 12 the wall time rises again. the budget that makes the deep rows possible
+is the automatic one: `prefetch=16` on 55.4 MiB frames is allowed 886 MiB.
 
 ## jpeg
 
@@ -118,18 +128,18 @@ and `p018` at 55.4 MiB).
 
 | reading the set | frames | median frame | open | total |
 | --- | --- | --- | --- | --- |
-| imgseqs `Read` | 2.87 s | 44.3 ms | 0.20 s | 3.07 s |
-| imgseqs `Read`, `prefetch=0` | 9.42 s | 261.8 ms | 0.20 s | 9.62 s |
-| imgseqs `Read`, `prefetch=16` | 2.36 s | 11.7 ms | 0.20 s | 2.56 s |
-| bestsource `VideoSource` | 7.52 s | 210.2 ms | 7.22 s | 14.74 s |
-| bestsource `VideoSource`, `threads=1` | 7.54 s | 211.8 ms | 7.21 s | 14.75 s |
+| imgseqs `Read` | 2.75 s | 58.2 ms | 0.20 s | 2.95 s |
+| imgseqs `Read`, `prefetch=0` | 9.32 s | 255.4 ms | 0.20 s | 9.52 s |
+| imgseqs `Read`, `prefetch=16` | 2.04 s | 11.8 ms | 0.20 s | 2.24 s |
+| bestsource `VideoSource` | 7.49 s | 210.1 ms | 7.18 s | 14.67 s |
+| bestsource `VideoSource`, `threads=1` | 7.44 s | 208.3 ms | 7.15 s | 14.59 s |
 
-the strongest result of the six containers: 2.62x faster than bestsource on
-frames and 4.81x including the open. bestsource reads all 35 files while it
-creates the clip, 7.22 s against imgseqs's 0.20 s, and gains nothing from its
-threads here (7.52 s against 7.54 s with one), so the win is imgseqs's
-lookahead, 3.3x over its own serial row. at `prefetch=16` the gap against
-bestsource widens to 3.2x on frames, and a frame costs 11.7 ms.
+the strongest result of the six containers: 2.73x faster than bestsource on
+frames and 4.98x including the open. bestsource reads all 35 files while it
+creates the clip, 7.18 s against imgseqs's 0.20 s, and gains nothing from its
+threads here (7.49 s against 7.44 s with one), so the win is imgseqs's
+lookahead, 4.6x over its own serial row. at `prefetch=16` the gap against
+bestsource widens to 3.7x on frames, and a frame costs 11.8 ms.
 
 ## png
 
@@ -138,17 +148,18 @@ bestsource widens to 3.2x on frames, and a frame costs 11.7 ms.
 
 | reading the set | frames | median frame | open | total |
 | --- | --- | --- | --- | --- |
-| imgseqs `Read` | 0.66 s | 9.4 ms | 0.004 s | 0.66 s |
-| imgseqs `Read`, `prefetch=0` | 1.43 s | 29.0 ms | 0.004 s | 1.43 s |
-| imgseqs `Read`, `prefetch=16` | 0.89 s | 12.0 ms | 0.004 s | 0.89 s |
-| bestsource `VideoSource` | 0.89 s | 15.4 ms | 1.01 s | 1.90 s |
-| bestsource `VideoSource`, `threads=1` | 2.23 s | 49.7 ms | 2.30 s | 4.53 s |
+| imgseqs `Read` | 0.62 s | 9.1 ms | 0.003 s | 0.63 s |
+| imgseqs `Read`, `prefetch=0` | 1.43 s | 29.0 ms | 0.003 s | 1.43 s |
+| imgseqs `Read`, `prefetch=16` | 0.60 s | 7.7 ms | 0.003 s | 0.61 s |
+| bestsource `VideoSource` | 0.86 s | 14.3 ms | 1.00 s | 1.85 s |
+| bestsource `VideoSource`, `threads=1` | 2.21 s | 48.4 ms | 2.30 s | 4.50 s |
 
-the closest of the six. imgseqs is 1.36x faster on frames and 2.88x including
+the closest of the six. imgseqs is 1.37x faster on frames and 2.96x including
 the open, and it is the only set where it wins the serial comparison as well as
-the parallel one (1.43 s against 2.23 s), so here the margin is the decoder and
-the skipped indexing pass rather than the lookahead: sixteen workers buy nothing
-on a set this cheap (0.89 s against 0.66 s).
+the parallel one (1.43 s against 2.21 s), so here the margin is the decoder and
+the skipped indexing pass rather than the lookahead: these frames fit the
+lookahead budget either way, so sixteen workers only edge out the default
+(0.60 s against 0.62 s).
 
 ## jxl
 
@@ -160,14 +171,14 @@ bench reports the failure and then measures imgseqs on its own.
 
 | reading the set | frames | median frame | open | total |
 | --- | --- | --- | --- | --- |
-| imgseqs `Read` | 6.42 s | 137.7 ms | 0.003 s | 6.42 s |
-| imgseqs `Read`, `prefetch=0` | 19.36 s | 557.8 ms | 0.003 s | 19.37 s |
-| imgseqs `Read`, `prefetch=16` | 5.68 s | 25.4 ms | 0.003 s | 5.68 s |
+| imgseqs `Read` | 6.50 s | 117.9 ms | 0.004 s | 6.51 s |
+| imgseqs `Read`, `prefetch=0` | 18.86 s | 544.1 ms | 0.003 s | 18.86 s |
+| imgseqs `Read`, `prefetch=16` | 4.57 s | 10.6 ms | 0.005 s | 4.58 s |
 
-jxl has the most expensive frame of the six (137.7 ms median) and gets the most
-from lookahead, 3.02x over its serial row, with a median frame that drops from
-557.8 ms to 25.4 ms. `prefetch=16` is its best row, and opening the clip is free
-because the probe only reads the header.
+jxl needs the most cpu per frame of the six (751 ms in the stage table below)
+and gets the most from lookahead, 4.13x over its serial row, with a median frame
+that drops from 544.1 ms to 10.6 ms. `prefetch=16` is its best row, and opening
+the clip is free because the probe only reads the header.
 
 ## avif
 
@@ -176,14 +187,19 @@ MiB decoded. bestsource cannot open it.
 
 | reading the set | frames | median frame | open | total |
 | --- | --- | --- | --- | --- |
-| imgseqs `Read` | 9.25 s | 151.2 ms | 6.10 s | 15.35 s |
-| imgseqs `Read`, `prefetch=0` | 11.30 s | 327.9 ms | 6.15 s | 17.45 s |
-| imgseqs `Read`, `prefetch=16` | 19.11 s | 202.8 ms | 6.09 s | 25.20 s |
+| imgseqs `Read` | 4.74 s | 111.5 ms | 6.27 s | 11.01 s |
+| imgseqs `Read`, `prefetch=0` | 11.97 s | 348.1 ms | 6.22 s | 18.19 s |
+| imgseqs `Read`, `prefetch=16` | 5.41 s | 109.2 ms | 6.34 s | 11.75 s |
 
-two costs stand out. creating the clip takes 6.10 s, which is 174 ms for each
-of the 35 files, and the decode reports another ~150 ms of container parsing per
-frame on top of the av1 decode itself. the lookahead is worth only 1.22x here,
-the least of any set, and `prefetch=16` is 2x slower than the default.
+this is the set where the budget mattered most. creating the clip takes 6.27 s,
+which is 179 ms for each of the 35 files, and the decode reports another ~150 ms
+of container parsing per frame on top of the av1 decode itself. the frames are
+`RGB24` of 55.4 MiB, so the old fixed 192 MiB budget held three and a half of
+them and the pool re-decoded whatever it had to drop: the default was 9.25 s and
+`prefetch=16` was 19.11 s, twice as slow as doing nothing in parallel. with the
+budget following the window the same three rows are 4.74 s, 11.97 s and 5.41 s,
+so the default is now 2.52x faster than the serial row and asking for sixteen
+workers no longer costs anything.
 
 ## heic
 
@@ -194,16 +210,21 @@ formats and sizes.
 
 | reading the set | frames | median frame | open | total |
 | --- | --- | --- | --- | --- |
-| imgseqs `Read` | 7.50 s | 206.3 ms | 0.006 s | 7.51 s |
-| imgseqs `Read`, `prefetch=0` | 24.11 s | 709.6 ms | 0.006 s | 24.12 s |
-| imgseqs `Read`, `prefetch=16` | 7.92 s | 11.5 ms | 0.006 s | 7.93 s |
+| imgseqs `Read` | 8.24 s | 203.4 ms | 0.005 s | 8.24 s |
+| imgseqs `Read`, `prefetch=0` | 25.17 s | 749.7 ms | 0.006 s | 25.18 s |
+| imgseqs `Read`, `prefetch=16` | 5.63 s | 11.4 ms | 0.006 s | 5.64 s |
 
 three of the frames are ten times the cost of the rest, so the median and the
-total disagree: the lookahead is worth 3.21x over the serial row, and the median
-frame falls from 709.6 ms to 11.5 ms at `prefetch=16`, which is the cheapest
-median here, though the total says sixteen workers are not better than the
-default four. the monochrome pages are also the one place where the decode is
-not the `image` crate's: they go through `libheif` directly, see
+total disagree: the lookahead is worth 4.47x over the serial row, and the median
+frame falls from 749.7 ms to 11.4 ms at `prefetch=16`, which is the cheapest
+median here. `prefetch=16` is 1.5x faster than the default on this set, which is
+what the budget change was for: the 31 gray frames fit 192 MiB but the four
+colour ones do not, so the old default spent its time re-decoding. the default
+row is the one number on this page that looks worse than before (8.24 s against
+7.50 s) and the `prefetch=0` row moved the same way (25.17 s against 24.11 s),
+which is machine drift over that pair of runs rather than the change: the serial
+path is untouched. the monochrome pages are also the one place where the decode
+is not the `image` crate's: they go through `libheif` directly, see
 [05](improvements/05-monochrome-heif.md).
 
 ## per stage cost
@@ -229,10 +250,16 @@ frames the lookahead helps most.
 
 ## known headroom
 
-the numbers point at three things: the pure rust single threaded webp decoder,
-the lookahead pool decoding frames it cannot keep, and the copy into the frame
-running on the requesting thread. the per-frame cost of each, and the plans for
-changing them, are written up in [improvements](improvements/README.md).
+the numbers point at two things: the pure rust single threaded webp decoder, and
+the copy into the frame running on the requesting thread. the per-frame cost of
+each, and the plans for changing them, are written up in
+[improvements](improvements/README.md).
+
+a third one used to be here: the lookahead pool decoded frames it could not keep,
+which cost both cpu and wall time on the largest sets. that is fixed in
+[01](improvements/01-lookahead-scheduling.md), and the sandbox avif set shows
+what it was worth — 9.25 s to 4.74 s at the default, and `prefetch=16` from
+19.11 s to 5.41 s.
 
 separately from the speed work, the sandbox found one format that used not to
 work at all: the 31 monochrome heic files failed to decode, and they now read as

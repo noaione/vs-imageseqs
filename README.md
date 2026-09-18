@@ -69,6 +69,10 @@ clip = core.imgseqs.Read(
 - `prefetch`: number of background worker threads used to decode upcoming
   frames while the clip is read sequentially. `0` disables lookahead decoding.
   defaults to half the logical cores, capped at four.
+- `prefetch_memory`: lookahead memory budget in MiB. defaults to the larger of
+  192 MiB and one frame of the biggest image in the sequence per worker, so a
+  deep lookahead on large images is not starved by a fixed ceiling. `0` is
+  rejected; use `prefetch=0` to disable lookahead decoding.
 
 by default, every image must have the same size and pixel format. with
 `mismatch=True`, the clip uses variable format information and each frame
@@ -144,8 +148,8 @@ and with [bestsource](https://github.com/vapoursynth/bestsource), timing every
 
 the measured results, split per image format, are in
 [benchmarks](docs/BENCH.md). in short, on the same 35 pages saved in six
-containers: imgseqs is 2.62x faster than bestsource on `jpeg` (4.81x once the
-open is counted), 1.36x faster on `png`, and 2.71x slower on `webp`, where
+containers: imgseqs is 2.73x faster than bestsource on `jpeg` (4.98x once the
+open is counted), 1.37x faster on `png`, and 2.65x slower on `webp`, where
 ffmpeg threads a single vp8 frame across every core while `webp` is decoded in
 one pure rust thread. bestsource cannot open `avif`, `heic` or `jxl` at all in
 that build, and imgseqs reads a folder that mixes jpeg and png pages as one

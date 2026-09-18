@@ -533,9 +533,12 @@ The pool is intentionally conservative:
 sequential requests only   a seek clears the queue and invalidates old results
 bounded worker count       prefetch=N, 0 disables it, default half the logical
                            cores capped at four, at most sixteen workers
-small lookahead window     two frames beyond the worker count, at most sixteen
-entry and byte budget      a small number of cached frames and 192 MiB of
-                           ready frames, entries behind the request dropped first
+small lookahead window     two frames beyond the worker count, at most sixteen,
+                           further capped by the byte budget
+byte budget                what is ready, queued and being decoded shares one
+                           budget: max(192 MiB, window x largest frame) by
+                           default, prefetch_memory=N to override it, entries
+                           behind the request dropped first
 shared between clips       a cached frame is handed out again, so `ReadAlpha`
                            decodes each file once for both clips
 always forward progress    a consumer can decode its own frame if workers are busy
@@ -544,10 +547,19 @@ always forward progress    a consumer can decode its own frame if workers are bu
 The worker count is configurable per filter instance:
 
 ```python
-core.imgseqs.Read(files, prefetch=0)   # decode synchronously
-core.imgseqs.Read(files, prefetch=6)   # six background decode workers
-core.imgseqs.Read(files)               # automatic worker count
+core.imgseqs.Read(files, prefetch=0)                  # decode synchronously
+core.imgseqs.Read(files, prefetch=6)                  # six background decode workers
+core.imgseqs.Read(files)                              # automatic worker count
+core.imgseqs.Read(files, prefetch_memory=512)         # cap the lookahead at 512 MiB
 ```
+
+The byte budget is what actually limits the window: a frame is only queued when
+it fits, so on very large frames a wide window deepens nothing. The default
+budget therefore follows the window (`max(192 MiB, window x largest frame)`),
+and `prefetch_memory` replaces it with a fixed number of MiB for callers who
+would rather bound memory than depth. `prefetch_memory=0` is rejected: disabling
+lookahead is what `prefetch=0` means. `debug=True` prints the resolved budget on
+the `create:` line.
 
 Worker threads are joined when the filter instance is freed.
 
@@ -908,7 +920,7 @@ The same pattern works for 16-bit and float images.
 ## Implemented design
 
 `ReadAlpha` accepts exactly the same arguments as `Read` (`files`, `fpsnum`,
-`fpsden`, `mismatch`, `debug`, `prefetch`) and declares
+`fpsden`, `mismatch`, `debug`, `prefetch`, `prefetch_memory`) and declares
 `clip:vnode;alpha:vnode;`.
 
 ```text
