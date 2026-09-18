@@ -449,15 +449,16 @@ decoded-buffer allocation
 image read
 frame-format lookup
 frame allocation
-planar conversion
-copy into VapourSynth planes
+planar conversion (directly into the VapourSynth planes)
 frame-property writes
 total frame time
 ```
 
 These are wall-clock timings intended for diagnosing a script or decoder.
 They are not a replacement for a controlled benchmark because VapourSynth's
-cache and scheduler affect the result.
+cache and scheduler affect the result. The per-frame `decode` value includes
+waiting for the lookahead pool, so a near-zero value means the frame was
+already decoded in the background.
 
 ---
 
@@ -498,7 +499,41 @@ worker 2 -> frame 12 -> JXL decoder
 worker 3 -> frame 13 -> AVIF decoder
 ```
 
-The persistent `ImageSequence` state should therefore be effectively immutable.
+The persistent `ImageSequence` state should therefore be immutable apart
+from the prefetch pool described below; frame data itself is never shared
+between requests.
+
+## Lookahead prefetching
+
+VapourSynth only drives parallel decoding when its client already requests
+several frames at once. Clients that walk a clip sequentially, including a
+plain `for n in range(clip.num_frames): clip.get_frame(n)` loop, would leave
+every core but one idle for expensive formats such as lossless WebP.
+
+The plugin therefore keeps a small bounded lookahead pool inside the source
+filter:
+
+```text
+fetch(n)
+   │
+   ├─ ready frame from the pool -> return immediately
+   │
+   ├─ otherwise decode n on the calling thread
+   │
+   └─ queue n+1 .. n+window for the worker threads
+```
+
+The pool is intentionally conservative:
+
+```text
+sequential requests only   a seek clears the queue and invalidates old results
+half the logical cores     at most four worker threads
+small lookahead window     at most six frames ahead
+decoded-byte budget        192 MiB of ready frames
+always forward progress    a consumer can decode its own frame if workers are busy
+```
+
+Worker threads are joined when the filter instance is freed.
 
 ---
 
@@ -518,6 +553,8 @@ VapourSynth frame-level parallelism: YES
 image-rs rayon feature:           YES
 
 custom Rayon inside get_frame():  NO
+
+lookahead prefetch pool:          YES (bounded, sequential access only)
 ```
 
 In other words, allow a decoder to internally use Rayon where useful, but do not manually parallelize every `get_frame()` operation using another Rayon job.
@@ -534,7 +571,8 @@ decode AVIF
 decoder internally uses Rayon
 ```
 
-This is valid.
+This is valid. The lookahead pool uses plain worker threads rather than
+Rayon jobs, so a decoder's own internal parallelism is unaffected.
 
 The only possible concern is CPU oversubscription and performance, not correctness.
 
@@ -1013,6 +1051,8 @@ ImageSequence
   │
   ├── immutable ImageInfo[]
   │
+  ├── bounded lookahead prefetch pool
+  │
   └── VSVideoInfo
          │
          │ VapourSynth requests frame N
@@ -1042,6 +1082,8 @@ VapourSynth VideoFrame
 
 The central design principle is:
 
-> Let VapourSynth schedule frames, let image-rs decode individual images, and keep each frame completely independent.
+> Let VapourSynth schedule frames, let image-rs decode individual images,
+> keep each frame completely independent, and only overlap decoding when a
+> client walks the clip sequentially.
 
 This gives the plugin simple random access, good multicore scaling, minimal shared state, and a mostly safe Rust implementation.

@@ -2,6 +2,7 @@ use std::{
     ffi::{CString, c_void},
     fmt::Display,
     path::PathBuf,
+    sync::Arc,
     time::Instant,
 };
 
@@ -20,10 +21,12 @@ use crate::{
     decoder::{self, ImageInfo},
     error::{ImgSeqError, Result},
     pixel::{PixelFormat, write_planar},
+    prefetch::Prefetcher,
 };
 
 pub struct ImageSequence {
-    images: Box<[ImageInfo]>,
+    images: Arc<[ImageInfo]>,
+    prefetcher: Prefetcher,
     debug: bool,
 }
 
@@ -59,7 +62,7 @@ impl Filter for ImageSequence {
         let probe = probe_started.elapsed();
 
         let validate_started = Instant::now();
-        let images = validate_images(images, mismatch)?;
+        let images: Arc<[ImageInfo]> = validate_images(images, mismatch)?.into();
         let validate = validate_started.elapsed();
         let num_frames = i32::try_from(images.len())
             .map_err(|_| ImgSeqError::new("the image sequence has too many frames"))?;
@@ -110,7 +113,8 @@ impl Filter for ImageSequence {
             Self::NAME,
             &video_info,
             Box::new(Self {
-                images: images.into_boxed_slice(),
+                prefetcher: Prefetcher::new(Arc::clone(&images)),
+                images,
                 debug,
             }),
             dependencies,
@@ -139,7 +143,7 @@ impl Filter for ImageSequence {
             ))
         })?;
         let decode_started = Instant::now();
-        let decoded = decoder::decode(image)?;
+        let decoded = self.prefetcher.fetch(n)?;
         let decode = decode_started.elapsed();
 
         let format_started = Instant::now();

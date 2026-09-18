@@ -2,6 +2,7 @@ mod color;
 mod decoder;
 mod error;
 mod pixel;
+mod prefetch;
 mod source;
 
 use source::ImageSequence;

@@ -72,7 +72,7 @@ by default, every image must have the same size and pixel format. with
 keeps its own size and format.
 
 with `debug=True`, timing messages are sent to the VapourSynth log. they
-include probing, decoding, frame allocation, planar conversion, frame copy,
+include probing, decoding, frame allocation, planar conversion, frame
 properties, and total frame time.
 
 supported output formats are gray 8/16-bit, rgb 8/16-bit, and rgb 32-bit
