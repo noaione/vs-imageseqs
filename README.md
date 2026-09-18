@@ -66,6 +66,9 @@ clip = core.imgseqs.Read(
 - `fpsnum` and `fpsden`: frame rate. defaults to `24/1`.
 - `mismatch`: set to `True` to allow different sizes or pixel formats.
 - `debug`: set to `True` to log create and per-frame timing information.
+- `prefetch`: number of background worker threads used to decode upcoming
+  frames while the clip is read sequentially. `0` disables lookahead decoding.
+  defaults to half the logical cores, capped at four.
 
 by default, every image must have the same size and pixel format. with
 `mismatch=True`, the clip uses variable format information and each frame

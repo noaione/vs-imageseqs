@@ -527,10 +527,19 @@ The pool is intentionally conservative:
 
 ```text
 sequential requests only   a seek clears the queue and invalidates old results
-half the logical cores     at most four worker threads
-small lookahead window     at most six frames ahead
+bounded worker count       prefetch=N, 0 disables it, default half the logical
+                           cores capped at four, at most sixteen workers
+small lookahead window     two frames beyond the worker count, at most sixteen
 decoded-byte budget        192 MiB of ready frames
 always forward progress    a consumer can decode its own frame if workers are busy
+```
+
+The worker count is configurable per filter instance:
+
+```python
+core.imgseqs.Read(files, prefetch=0)   # decode synchronously
+core.imgseqs.Read(files, prefetch=6)   # six background decode workers
+core.imgseqs.Read(files)               # automatic worker count
 ```
 
 Worker threads are joined when the filter instance is freed.

@@ -15,7 +15,9 @@ identity unchanged:
 the plugin accepts an ordered `files:data[]` list and returns one frame per
 file. `fpsnum` and `fpsden` default to `24/1`. `mismatch` defaults to false;
 when true, variable dimensions and formats are allowed. `debug` defaults to
-false and emits VapourSynth log timings when enabled.
+false and emits VapourSynth log timings when enabled. `prefetch` selects the
+number of background decode workers used for sequential reads; it defaults to
+half the logical cores (capped at four) and `0` disables lookahead decoding.
 
 ## repository rules
 

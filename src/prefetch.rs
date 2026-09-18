@@ -16,9 +16,29 @@ use crate::{
 /// Upper bound on the decoded data kept ready ahead of the last request.
 const READY_BYTE_BUDGET: usize = 192 * 1024 * 1024;
 /// Upper bound on the lookahead window, regardless of the worker count.
-const MAX_WINDOW: usize = 6;
+const MAX_WINDOW: usize = 16;
+/// Upper bound on the number of workers a `prefetch` argument can request.
+pub const MAX_WORKERS: usize = 16;
+/// Upper bound on the automatically selected worker count.
+pub const AUTO_MAX_WORKERS: usize = 4;
 /// Safety net for consumers that end up waiting for an in-flight decode.
 const WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Worker count used when the `prefetch` argument is omitted.
+///
+/// Leaves headroom for the requesting thread and the rest of the graph by
+/// using half of the logical cores, clamped to a small number of workers.
+#[must_use]
+pub fn automatic_workers() -> usize {
+    let parallelism = thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1);
+    if parallelism >= 2 {
+        (parallelism / 2).clamp(1, AUTO_MAX_WORKERS)
+    } else {
+        0
+    }
+}
 
 struct Shared {
     state: Mutex<State>,
@@ -57,16 +77,11 @@ pub struct Prefetcher {
 }
 
 impl Prefetcher {
-    pub fn new(images: Arc<[ImageInfo]>) -> Self {
-        let parallelism = thread::available_parallelism()
-            .map(|value| value.get())
-            .unwrap_or(1);
-        // Leave headroom for the requesting thread and the rest of the graph.
-        let workers = if parallelism >= 2 {
-            (parallelism / 2).clamp(1, 4)
-        } else {
-            0
-        };
+    /// Creates a pool with `workers` background decoders. A worker count of
+    /// zero disables lookahead decoding and makes [`Prefetcher::fetch`]
+    /// decode on the calling thread.
+    pub fn new(images: Arc<[ImageInfo]>, workers: usize) -> Self {
+        let workers = workers.min(MAX_WORKERS);
         let window = if workers == 0 {
             0
         } else {

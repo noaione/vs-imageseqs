@@ -21,7 +21,7 @@ use crate::{
     decoder::{self, ImageInfo},
     error::{ImgSeqError, Result},
     pixel::{PixelFormat, write_planar},
-    prefetch::Prefetcher,
+    prefetch::{self, Prefetcher},
 };
 
 pub struct ImageSequence {
@@ -37,7 +37,7 @@ impl Filter for ImageSequence {
 
     const NAME: &'static std::ffi::CStr = c"Read";
     const ARGS: &'static std::ffi::CStr =
-        c"files:data[];fpsnum:int:opt;fpsden:int:opt;mismatch:int:opt;debug:int:opt;";
+        c"files:data[];fpsnum:int:opt;fpsden:int:opt;mismatch:int:opt;debug:int:opt;prefetch:int:opt;";
     const RETURN_TYPE: &'static std::ffi::CStr = c"clip:vnode;";
 
     fn create(
@@ -52,6 +52,8 @@ impl Filter for ImageSequence {
         let fps_den = read_optional_int(&input, key!(c"fpsden"), "fpsden")?.unwrap_or(1);
         let mismatch = read_optional_int(&input, key!(c"mismatch"), "mismatch")?.unwrap_or(0) != 0;
         let debug = read_optional_int(&input, key!(c"debug"), "debug")?.unwrap_or(0) != 0;
+        let prefetch_workers =
+            resolve_prefetch_workers(read_optional_int(&input, key!(c"prefetch"), "prefetch")?)?;
         let (fps_num, fps_den) = reduce_fps(fps_num, fps_den)?;
 
         let probe_started = Instant::now();
@@ -99,11 +101,12 @@ impl Filter for ImageSequence {
             log_debug(
                 &mut core,
                 format_args!(
-                    "create: frames={} probe={} validate={} format={} total={}",
+                    "create: frames={} probe={} validate={} format={} prefetch={} total={}",
                     images.len(),
                     format_duration(probe),
                     format_duration(validate),
                     format_duration(format_time),
+                    prefetch_workers,
                     format_duration(setup_started.elapsed()),
                 ),
             );
@@ -113,7 +116,7 @@ impl Filter for ImageSequence {
             Self::NAME,
             &video_info,
             Box::new(Self {
-                prefetcher: Prefetcher::new(Arc::clone(&images)),
+                prefetcher: Prefetcher::new(Arc::clone(&images), prefetch_workers),
                 images,
                 debug,
             }),
@@ -252,6 +255,19 @@ fn reduce_fps(fps_num: i64, fps_den: i64) -> Result<(i64, i64)> {
     Ok((fps_num / divisor, fps_den / divisor))
 }
 
+fn resolve_prefetch_workers(requested: Option<i64>) -> Result<usize> {
+    match requested {
+        None => Ok(prefetch::automatic_workers()),
+        Some(value) if value < 0 => Err(ImgSeqError::new(format!(
+            "prefetch must be zero or a positive number of worker threads, got {value}"
+        ))),
+        Some(0) => Ok(0),
+        Some(value) => Ok(usize::try_from(value)
+            .unwrap_or(usize::MAX)
+            .min(prefetch::MAX_WORKERS)),
+    }
+}
+
 fn gcd(mut left: i64, mut right: i64) -> i64 {
     while right != 0 {
         (left, right) = (right, left % right);
@@ -317,12 +333,25 @@ fn undefined_video_format() -> vapoursynth4_rs::frame::VideoFormat {
 
 #[cfg(test)]
 mod tests {
-    use super::{gcd, reduce_fps};
+    use super::{gcd, reduce_fps, resolve_prefetch_workers};
+    use crate::prefetch;
 
     #[test]
     fn reduces_frame_rate() {
         assert_eq!(reduce_fps(60000, 1001).unwrap(), (60000, 1001));
         assert_eq!(reduce_fps(120, 4).unwrap(), (30, 1));
         assert_eq!(gcd(24, 18), 6);
+    }
+
+    #[test]
+    fn resolves_prefetch_workers() {
+        assert_eq!(resolve_prefetch_workers(Some(0)).unwrap(), 0);
+        assert_eq!(resolve_prefetch_workers(Some(3)).unwrap(), 3);
+        assert_eq!(
+            resolve_prefetch_workers(Some(10_000)).unwrap(),
+            prefetch::MAX_WORKERS
+        );
+        assert!(resolve_prefetch_workers(Some(-1)).is_err());
+        assert!(resolve_prefetch_workers(None).unwrap() <= prefetch::AUTO_MAX_WORKERS);
     }
 }
