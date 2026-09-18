@@ -131,6 +131,42 @@ both are read from one decode per file, so asking for the alpha clip does not
 decode the images twice. `mismatch` applies to both clips. the alpha clip is
 marked with the `ImgSeqAlpha` property.
 
+## performance
+
+`tests/bench-imgseqs-vs-bestsource.vpy` times every `get_frame` of one image
+sequence with `Read` and with
+[bestsource](https://github.com/vapoursynth/bestsource), alternating the passes
+so machine noise cannot favour either of them, and prints a per-frame table
+plus the totals:
+
+```console
+.venv/Scripts/python.exe tests/bench-imgseqs-vs-bestsource.vpy --reps 3
+.venv/Scripts/python.exe tests/bench-imgseqs-vs-bestsource.vpy --frames 25 --extra
+```
+
+measured over 163 webp images of 2903x4128, windows 11, i5-11400h (12 threads),
+best of three passes, plugin defaults on both sides:
+
+| reading 163 webp | frames | median frame | open | total |
+| --- | --- | --- | --- | --- |
+| `imgseqs.Read` | 15.80 s | 68 ms | 0.01 s | 15.81 s |
+| `bs.VideoSource` | 5.96 s | 15 ms | 5.95 s | 11.90 s |
+| `imgseqs.Read`, `prefetch=0` | 54.29 s | 331 ms | 0.01 s | 54.30 s |
+| `bs.VideoSource`, `threads=1` | 30.41 s | 177 ms | 29.29 s | 59.70 s |
+| `imgseqs.Read`, `prefetch=16` | 27.53 s | 84 ms | 0.01 s | 27.54 s |
+
+bestsource decodes faster per image and wins end to end, but it indexes the
+sequence while the clip is created, which for images means reading every file
+once, while imgseqs probes in milliseconds. with one decode worker each the
+per-frame gap stays and the indexing pass is what decides the total.
+
+`prefetch` stops at four workers for a reason: `prefetch=16` is slower here,
+because the larger lookahead does not fit the decode budget of images this
+size. when comparing with bestsource, open it with `cachemode=0` and
+`apply_rotation=False`, and do not pass `fpsnum`/`fpsden` for image sequences:
+ffmpeg reads them at 25 fps, so any other rate resamples and silently drops
+every 25th image.
+
 ## build
 
 the project needs rust/cargo, a local vcpkg install, and python 3.12 or
