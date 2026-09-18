@@ -17,6 +17,8 @@ pub enum PixelFormat {
     Rgb8,
     Rgb16,
     Rgb32F,
+    /// Planar 4:2:0 8 bit, the format lossy webp is decoded into.
+    Yuv420P8,
 }
 
 impl PixelFormat {
@@ -31,10 +33,16 @@ impl PixelFormat {
         }
     }
 
+    /// Whether one decoded frame of this format is laid out as one buffer per
+    /// plane instead of one interleaved buffer.
+    pub const fn decodes_to_planes(self) -> bool {
+        matches!(self, Self::Yuv420P8)
+    }
+
     /// Gray format that carries the alpha channel of this format.
     pub const fn alpha_format(self) -> Self {
         match self {
-            Self::Gray8 | Self::Rgb8 => Self::Gray8,
+            Self::Gray8 | Self::Rgb8 | Self::Yuv420P8 => Self::Gray8,
             Self::Gray16 | Self::Rgb16 => Self::Gray16,
             Self::Gray32F | Self::Rgb32F => Self::Gray32F,
         }
@@ -44,19 +52,22 @@ impl PixelFormat {
         match self {
             Self::Gray8 | Self::Gray16 | Self::Gray32F => ColorFamily::Gray,
             Self::Rgb8 | Self::Rgb16 | Self::Rgb32F => ColorFamily::RGB,
+            Self::Yuv420P8 => ColorFamily::YUV,
         }
     }
 
     pub const fn sample_type(self) -> SampleType {
         match self {
-            Self::Gray8 | Self::Gray16 | Self::Rgb8 | Self::Rgb16 => SampleType::Integer,
+            Self::Gray8 | Self::Gray16 | Self::Rgb8 | Self::Rgb16 | Self::Yuv420P8 => {
+                SampleType::Integer
+            }
             Self::Gray32F | Self::Rgb32F => SampleType::Float,
         }
     }
 
     pub const fn bits_per_sample(self) -> i32 {
         match self {
-            Self::Gray8 | Self::Rgb8 => 8,
+            Self::Gray8 | Self::Rgb8 | Self::Yuv420P8 => 8,
             Self::Gray16 | Self::Rgb16 => 16,
             Self::Gray32F | Self::Rgb32F => 32,
         }
@@ -64,7 +75,7 @@ impl PixelFormat {
 
     pub const fn bytes_per_sample(self) -> usize {
         match self {
-            Self::Gray8 | Self::Rgb8 => 1,
+            Self::Gray8 | Self::Rgb8 | Self::Yuv420P8 => 1,
             Self::Gray16 | Self::Rgb16 => 2,
             Self::Gray32F | Self::Rgb32F => 4,
         }
@@ -73,8 +84,64 @@ impl PixelFormat {
     pub const fn plane_count(self) -> usize {
         match self {
             Self::Gray8 | Self::Gray16 | Self::Gray32F => 1,
-            Self::Rgb8 | Self::Rgb16 | Self::Rgb32F => 3,
+            Self::Rgb8 | Self::Rgb16 | Self::Rgb32F | Self::Yuv420P8 => 3,
         }
+    }
+
+    /// Chroma subsampling of this format, as VapourSynth reports it.
+    pub const fn sub_sampling(self) -> (i32, i32) {
+        match self {
+            Self::Yuv420P8 => (1, 1),
+            _ => (0, 0),
+        }
+    }
+
+    /// Width and height of one plane of a `width` x `height` frame as a
+    /// decoder lays it out, which rounds a half size plane up.
+    ///
+    /// VapourSynth rounds the other way, so on an odd size the two disagree by
+    /// one row or column; [`Self::frame_plane_dimensions`] is the size a frame
+    /// actually holds.
+    pub fn plane_dimensions(self, plane: usize, width: usize, height: usize) -> (usize, usize) {
+        match self {
+            Self::Yuv420P8 if plane > 0 => (width.div_ceil(2), height.div_ceil(2)),
+            _ => (width, height),
+        }
+    }
+
+    /// Width and height of one plane of a `width` x `height` VapourSynth frame.
+    ///
+    /// A subsampled plane is half the size of the frame, truncated, whatever
+    /// the decoder produced, because that is what the frame holds.
+    pub fn frame_plane_dimensions(
+        self,
+        plane: usize,
+        width: usize,
+        height: usize,
+    ) -> (usize, usize) {
+        match self {
+            Self::Yuv420P8 if plane > 0 => (width / 2, height / 2),
+            _ => (width, height),
+        }
+    }
+
+    /// Bytes one plane of a `width` x `height` frame occupies when it is
+    /// tightly packed, which is how the decoder buffers are laid out.
+    pub fn plane_bytes(self, plane: usize, width: usize, height: usize) -> usize {
+        if plane >= self.plane_count() {
+            return 0;
+        }
+        let (width, height) = self.plane_dimensions(plane, width, height);
+        width
+            .saturating_mul(height)
+            .saturating_mul(self.bytes_per_sample())
+    }
+
+    /// Bytes every plane of a `width` x `height` frame occupies together.
+    pub fn planes_bytes(self, width: usize, height: usize) -> usize {
+        (0..self.plane_count())
+            .map(|plane| self.plane_bytes(plane, width, height))
+            .fold(0, usize::saturating_add)
     }
 
     pub const fn name(self) -> &'static str {
@@ -85,6 +152,7 @@ impl PixelFormat {
             Self::Rgb8 => "RGB24",
             Self::Rgb16 => "RGB48",
             Self::Rgb32F => "RGBS",
+            Self::Yuv420P8 => "YUV420P8",
         }
     }
 }
@@ -331,6 +399,158 @@ pub fn write_planar(
         (bytes_per_sample, channels) => {
             return Err(ImgSeqError::new(format!(
                 "unsupported sample size {bytes_per_sample} with {channels} channels"
+            )));
+        }
+    }
+
+    Ok(WriteTimings {
+        deinterleave: started.elapsed(),
+    })
+}
+
+/// Copy one tightly packed decoder buffer per plane into the VapourSynth
+/// planes.
+///
+/// Unlike [`write_planar`] the buffers already have the plane layout, so this
+/// only moves whole rows around the frame padding, which is what makes the
+/// planar formats cheaper to write: there is no per sample work at all.
+pub fn write_decoded_planes(
+    frame: &mut VideoFrame,
+    format: PixelFormat,
+    width: u32,
+    height: u32,
+    planes: &[Vec<u8>],
+) -> Result<WriteTimings> {
+    if planes.len() != format.plane_count() {
+        return Err(ImgSeqError::new(format!(
+            "decoder returned {} planes, {} has {}",
+            planes.len(),
+            format.name(),
+            format.plane_count(),
+        )));
+    }
+    let width = usize::try_from(width)
+        .map_err(|_| ImgSeqError::new("image width does not fit in memory"))?;
+    let height = usize::try_from(height)
+        .map_err(|_| ImgSeqError::new("image height does not fit in memory"))?;
+    let sample_bytes = format.bytes_per_sample();
+    let started = Instant::now();
+
+    for (index, buffer) in planes.iter().enumerate() {
+        let (decoded_width, decoded_height) = format.plane_dimensions(index, width, height);
+        let decoded_row = decoded_width
+            .checked_mul(sample_bytes)
+            .ok_or_else(|| ImgSeqError::new("image plane row is too large"))?;
+        let expected = decoded_row
+            .checked_mul(decoded_height)
+            .ok_or_else(|| ImgSeqError::new("image plane is too large"))?;
+        if buffer.len() != expected {
+            return Err(ImgSeqError::new(format!(
+                "decoder returned {actual} bytes for plane {index}, expected {expected}",
+                actual = buffer.len(),
+            )));
+        }
+
+        // The frame can be a row or a column smaller than the decoder's plane
+        // on an odd size, and the extra samples have nowhere to go.
+        let (frame_width, frame_height) = format.frame_plane_dimensions(index, width, height);
+        let row_bytes = frame_width
+            .checked_mul(sample_bytes)
+            .ok_or_else(|| ImgSeqError::new("image plane row is too large"))?;
+        if decoded_height < frame_height || decoded_row < row_bytes {
+            return Err(ImgSeqError::new(format!(
+                "decoder returned a {decoded_width}x{decoded_height} plane {index}, which is smaller than the {frame_width}x{frame_height} the frame holds"
+            )));
+        }
+
+        let plane = i32::try_from(index).expect("the plane count fits in i32");
+        let stride = frame.stride(plane);
+        let destination = frame.plane_mut(plane);
+        if destination.is_null() {
+            return Err(ImgSeqError::new(format!(
+                "VapourSynth returned a null pointer for plane {index}"
+            )));
+        }
+        if stride < row_bytes as isize {
+            return Err(ImgSeqError::new(format!(
+                "VapourSynth plane {index} stride {stride} is smaller than row size {row_bytes}"
+            )));
+        }
+
+        for row in 0..frame_height {
+            // Every row of the decoder buffer is `decoded_row` bytes wide, and
+            // the frame keeps the first `row_bytes` of it.
+            let source = &buffer[row * decoded_row..row * decoded_row + row_bytes];
+            // Safety: the plane holds at least `stride * frame_height` bytes,
+            // so every active row fits in it.
+            let target = unsafe {
+                slice::from_raw_parts_mut(destination.offset(stride * row as isize), row_bytes)
+            };
+            target.copy_from_slice(source);
+        }
+    }
+
+    Ok(WriteTimings {
+        deinterleave: started.elapsed(),
+    })
+}
+
+/// Fill one gray plane of `height` rows of `row_bytes` bytes with `value`.
+fn fill_plane<T: Sample>(
+    mut destination: *mut u8,
+    stride: isize,
+    row_bytes: usize,
+    height: usize,
+    value: T,
+) {
+    for _ in 0..height {
+        // Safety: the plane holds at least `stride * height` bytes, so every
+        // active row fits in it, and `row_bytes` is a whole number of samples.
+        let target = unsafe { slice::from_raw_parts_mut(destination, row_bytes) };
+        for sample in target.chunks_mut(T::SIZE) {
+            value.store(sample);
+        }
+        destination = unsafe { destination.offset(stride) };
+    }
+}
+
+/// Fill the single plane of a gray frame with the opaque value.
+///
+/// Sources that decode to planes have no alpha channel to write, so their
+/// alpha clip is opaque everywhere.
+pub fn write_opaque_alpha(
+    frame: &mut VideoFrame,
+    format: PixelFormat,
+    width: u32,
+    height: u32,
+) -> Result<WriteTimings> {
+    let width = usize::try_from(width)
+        .map_err(|_| ImgSeqError::new("image width does not fit in memory"))?;
+    let height = usize::try_from(height)
+        .map_err(|_| ImgSeqError::new("image height does not fit in memory"))?;
+    let row_bytes = width
+        .checked_mul(format.bytes_per_sample())
+        .ok_or_else(|| ImgSeqError::new("image plane row is too large"))?;
+    let stride = frame.stride(0);
+    let destination = frame.plane_mut(0);
+    if destination.is_null() {
+        return Err(ImgSeqError::new(
+            "VapourSynth returned a null pointer for the alpha plane",
+        ));
+    }
+    if stride < row_bytes as isize {
+        return Err(ImgSeqError::new(format!(
+            "VapourSynth alpha plane stride {stride} is smaller than row size {row_bytes}"
+        )));
+    }
+    let started = Instant::now();
+    match format.bytes_per_sample() {
+        1 => fill_plane::<u8>(destination, stride, row_bytes, height, u8::MAX),
+        2 => fill_plane::<u16>(destination, stride, row_bytes, height, u16::MAX),
+        4 => fill_plane::<f32>(destination, stride, row_bytes, height, 1.0),
+        bytes => {
+            return Err(ImgSeqError::new(format!(
+                "unsupported alpha sample size {bytes}"
             )));
         }
     }

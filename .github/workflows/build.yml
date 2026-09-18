@@ -62,11 +62,11 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes cmake ninja-build pkg-config libdav1d-dev libde265-dev
+          sudo apt-get install --yes cmake ninja-build pkg-config libdav1d-dev libde265-dev libwebp-dev
 
       - name: install macos dependencies
         if: runner.os == 'macOS'
-        run: brew install cmake ninja pkg-config dav1d libde265
+        run: brew install cmake ninja pkg-config dav1d libde265 webp
 
       - name: prepare vcpkg cache directory
         if: runner.os == 'Windows'
@@ -208,6 +208,21 @@ jobs:
 
       - name: build source distribution
         run: python -m build --sdist --outdir dist
+
+      - name: check the source distribution has the build inputs
+        run: |
+          sdist=$(ls dist/*.tar.gz)
+          echo "checking $sdist"
+          for file in build.rs Cargo.toml Cargo.lock vcpkg.json hatch_build.py pyproject.toml; do
+            tar -tzf "$sdist" | grep -Eq "/${file}\$" || {
+              echo "missing ${file} in $sdist"
+              exit 1
+            }
+          done
+          tar -tzf "$sdist" | grep -Eq '/src/.*\.rs$' || {
+            echo "missing the rust sources in $sdist"
+            exit 1
+          }
 
       - name: upload source distribution
         uses: actions/upload-artifact@v7

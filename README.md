@@ -82,17 +82,19 @@ with `debug=True`, timing messages are sent to the VapourSynth log. they
 include probing, decoding, frame allocation, planar conversion, frame
 properties, and total frame time.
 
-supported output formats are gray 8/16-bit, rgb 8/16-bit, and rgb 32-bit
-float. `Read` ignores alpha channels; use `ReadAlpha` to read them.
+supported output formats are gray 8/16-bit, rgb 8/16-bit, rgb 32-bit float,
+and `YUV420P8` for a lossy webp file. `Read` ignores alpha channels; use
+`ReadAlpha` to read them.
 
-common supported inputs include:
+### common inputs
+
 - `png`
 - `jpeg`
 - `bmp`
 - `gif`
 - `ico`
 - `tiff`
-- `webp`
+- `webp` - via libwebp, lossy files without alpha as `YUV420P8`, see below
 - `avif` - via dav1d
 - `heif`/`heic` - via libheif/libde265, monochrome pages as `Gray8`
 - `jxl (jpeg xl)` - via jxl-rs
@@ -102,7 +104,65 @@ common supported inputs include:
 - `qoi`
 - `tga`
 
-frames include these properties:
+### lossy webp comes back as yuv
+
+a lossy webp with no alpha channel decodes into its own planes and comes back as
+`YUV420P8`, tagged `_Matrix=5` (bt470bg) and `_Range=0` (limited), because that
+is what the bitstream holds. lossless webp, a webp with an alpha channel, and
+every other format keep the `RGB24`/`Gray8` output they always had.
+
+a graph that needs rgb converts back once:
+
+```python
+clip = core.resize.Bicubic(clip, format=vs.RGB24, matrix_in_s="470bg", range_in_s="limited")
+```
+
+that one line already covers a folder in any mix of formats and sizes: `zimg`
+converts a variable clip frame by frame, at each page's own size, and the
+arguments are ignored for `RGB24` and `Gray8` frames. the exception is an odd
+sized `4:2:0` page, which `zimg` refuses with `Resize error 1027`. this chain
+handles those per frame and clamps the result to one format, which a filter that
+needs a constant one (`std.GPUUpload`, and so `ogsov.AnalyzeVk`) requires:
+
+```python
+source = core.imgseqs.Read(files=files, mismatch=True)  # the clip the chain reads from
+plain_rgb = core.resize.Bicubic(
+    source, format=vs.RGB24, matrix_in_s="470bg", range_in_s="limited"
+)
+
+
+def chain(n=0, **_):  # FrameEval passes the frame number as a keyword
+    frame = source.get_frame(n)  # this frame's format and size
+    right = frame.width % 2 if frame.format.subsampling_w else 0
+    bottom = frame.height % 2 if frame.format.subsampling_h else 0
+    if not right and not bottom:
+        return plain_rgb
+    even = core.std.CropAbs(source, width=frame.width - right, height=frame.height - bottom)
+    rgb = core.resize.Bicubic(even, format=vs.RGB24, matrix_in_s="470bg", range_in_s="limited")
+    return core.std.AddBorders(rgb, right=right, bottom=bottom)
+
+
+rgb = core.std.FrameEval(source, chain)
+rgb = core.resize.Bicubic(rgb, format=vs.RGB24)  # FrameEval cannot promise a format
+```
+
+it costs 3 ms per frame over the plain read on `sandbox/mixed` and 5 ms on the
+odd page webp set. keep `source` in its own variable and never rebind it: the
+chain asks that clip for frames, so a chain that closes over a clip built on the
+`FrameEval` (the analysed clip, say) asks the node producing the frame for that
+frame, and the request hangs instead of raising. a clip of one format and one
+size could crop with `std.Crop` instead of `std.CropAbs`; a `mismatch` clip
+cannot, because `Crop` and `AddBorders` both want one constant format and size,
+so such a folder is grouped in python by format *and* size first. the restored
+border is black: stack the last real column and row on
+(`StackHorizontal([rgb, core.std.Crop(rgb, left=rgb.width - 1)])`, then the same
+vertically) to extend the edge instead.
+
+a decoded frame already drops the last chroma row and column of an odd sized
+page, because a `4:2:0` plane in a VapourSynth frame is `floor(size / 2)`.
+[BENCH.md](docs/BENCH.md) has the measurements.
+
+### frame properties
 
 - `ImgSeqPath` - the original file path
 - `ImgSeqIndex` - the frame index in the input list
@@ -168,6 +228,16 @@ newer. the development extra contains the python build tools:
 ```console
 python -m pip install ".[dev]"
 python -m build
+```
+
+on linux and macos the native dependencies come from the system package
+manager instead of vcpkg, the same list the ci installs:
+
+```console
+# debian/ubuntu
+sudo apt-get install --yes cmake ninja-build pkg-config libdav1d-dev libde265-dev libwebp-dev
+# macos, with homebrew
+brew install cmake ninja pkg-config dav1d libde265 webp
 ```
 
 see [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) and [LICENSES](LICENSES) for

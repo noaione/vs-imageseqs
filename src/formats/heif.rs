@@ -22,7 +22,7 @@ use image::ColorType;
 use libheif_rs::{ColorSpace, HeifContext, LibHeif, Plane};
 
 use crate::{
-    decoder::{DecodeTimings, DecodedImage, ImageInfo, image_error},
+    decoder::{DecodeTimings, DecodedImage, ImageInfo, Pixels, image_error},
     error::{ImgSeqError, Result},
 };
 
@@ -136,8 +136,11 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     Ok(DecodedImage {
         width: info.width,
         height: info.height,
-        color_type: info.color_type,
-        pixels,
+        format: info.format,
+        pixels: Pixels::Interleaved {
+            color_type: info.color_type,
+            buffer: pixels,
+        },
         timings: DecodeTimings {
             open,
             metadata,

@@ -29,7 +29,16 @@ fn format_decoder(info: &ImageInfo) -> Option<Result<DecodedImage>> {
     if formats::heif::handles(info) {
         return Some(formats::heif::decode(info));
     }
+    if formats::webp::handles(info) {
+        return Some(formats::webp::decode(info));
+    }
     None
+}
+
+/// Format a module decodes this file into, when it is not the one the probed
+/// color type suggests; see [`crate::formats`].
+fn format_override(path: &Path, color_type: ColorType) -> Option<PixelFormat> {
+    formats::webp::output_format(path, color_type)
 }
 
 #[derive(Clone, Debug)]
@@ -47,13 +56,17 @@ pub struct ImageInfo {
 impl ImageInfo {
     /// Size of the buffer this image decodes into.
     ///
-    /// The decode paths hand back one interleaved buffer that holds every
-    /// channel of the color type, so the lookahead pool can size its budget
-    /// from the probe alone, without decoding anything.
+    /// A planar decode hands back one buffer per plane, everything else hands
+    /// back one interleaved buffer that holds every channel of the color type,
+    /// so the lookahead pool can size its budget from the probe alone, without
+    /// decoding anything.
     #[must_use]
     pub fn frame_bytes(&self) -> usize {
         let width = usize::try_from(self.width).unwrap_or(usize::MAX);
         let height = usize::try_from(self.height).unwrap_or(usize::MAX);
+        if self.format.decodes_to_planes() {
+            return self.format.planes_bytes(width, height);
+        }
         let channels = crate::pixel::channel_count(self.color_type).unwrap_or(0);
         width
             .saturating_mul(height)
@@ -70,12 +83,37 @@ pub struct DecodeTimings {
     pub read: Duration,
 }
 
+/// Pixels of one decoded image, in whichever layout its format decodes to.
+#[derive(Debug, Eq, PartialEq)]
+pub enum Pixels {
+    /// One buffer holding every channel of `color_type`, interleaved.
+    Interleaved {
+        color_type: ColorType,
+        buffer: Vec<u8>,
+    },
+    /// One tightly packed buffer per plane of the frame format.
+    Planar(Vec<Vec<u8>>),
+}
+
+impl Pixels {
+    /// Bytes every buffer of this decode holds.
+    #[must_use]
+    pub fn bytes(&self) -> usize {
+        match self {
+            Self::Interleaved { buffer, .. } => buffer.len(),
+            Self::Planar(planes) => planes.iter().map(Vec::len).sum(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct DecodedImage {
     pub width: u32,
     pub height: u32,
-    pub color_type: ColorType,
-    pub pixels: Vec<u8>,
+    /// The format the probe recorded for this image, which is the format of the
+    /// frame it is written into.
+    pub format: PixelFormat,
+    pub pixels: Pixels,
     pub timings: DecodeTimings,
 }
 
@@ -111,12 +149,14 @@ pub fn probe(path: &Path) -> Result<ImageInfo> {
     let orientation = decoder
         .orientation()
         .map_err(|error| image_error("read orientation from", path, error))?;
-    let format = PixelFormat::from_color_type(color_type).ok_or_else(|| {
-        ImgSeqError::new(format!(
-            "unsupported color type {color_type:?} in image '{}'",
-            path.display()
-        ))
-    })?;
+    let format = format_override(path, color_type)
+        .or_else(|| PixelFormat::from_color_type(color_type))
+        .ok_or_else(|| {
+            ImgSeqError::new(format!(
+                "unsupported color type {color_type:?} in image '{}'",
+                path.display()
+            ))
+        })?;
 
     Ok(ImageInfo {
         path: path.to_path_buf(),
@@ -174,8 +214,11 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     Ok(DecodedImage {
         width,
         height,
-        color_type,
-        pixels,
+        format: info.format,
+        pixels: Pixels::Interleaved {
+            color_type,
+            buffer: pixels,
+        },
         timings: DecodeTimings {
             open,
             metadata,

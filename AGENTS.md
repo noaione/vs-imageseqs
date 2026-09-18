@@ -120,9 +120,10 @@ included.
 
 ## native licenses
 
-the current native set is dav1d, libheif, and libde265. dav1d uses the
-bsd-2-clause license. libheif and libde265 are lgplv3 and are statically
-linked. keep the exact upstream texts in `LICENSES/`.
+the current native set is dav1d, libheif, libde265, and libwebp. dav1d uses
+the bsd-2-clause license and libwebp uses bsd-3-clause. libheif and libde265
+are lgplv3 and are statically linked. keep the exact upstream texts in
+`LICENSES/`.
 
 if x265 or another codec is enabled, inspect the actual linker output and add
 its license text and distribution obligations before shipping a wheel. for

@@ -407,7 +407,7 @@ fn store(state: &mut State, index: i32, result: std::result::Result<Arc<DecodedI
         return;
     }
     if let Ok(image) = &result {
-        state.ready_bytes = state.ready_bytes.saturating_add(image.pixels.len());
+        state.ready_bytes = state.ready_bytes.saturating_add(image.pixels.bytes());
     }
     state.ready.insert(index, result);
     evict(state);
@@ -416,7 +416,7 @@ fn store(state: &mut State, index: i32, result: std::result::Result<Arc<DecodedI
 /// Releases one cached frame, keeping the byte accounting in sync.
 fn release(state: &mut State, index: i32) {
     if let Some(Ok(image)) = state.ready.remove(&index) {
-        state.ready_bytes = state.ready_bytes.saturating_sub(image.pixels.len());
+        state.ready_bytes = state.ready_bytes.saturating_sub(image.pixels.bytes());
     }
 }
 
@@ -482,7 +482,7 @@ mod tests {
         DEFAULT_BYTE_BUDGET, Prefetcher, READY_ENTRY_MARGIN, State, automatic_budget,
         committed_bytes, plan_window,
     };
-    use crate::decoder::{self, DecodeTimings, DecodedImage, ImageInfo};
+    use crate::decoder::{self, DecodeTimings, DecodedImage, ImageInfo, Pixels};
     use crate::pixel::PixelFormat;
 
     fn fixture(name: &str) -> PathBuf {
@@ -534,8 +534,11 @@ mod tests {
         DecodedImage {
             width: 1,
             height: 1,
-            color_type: ColorType::L8,
-            pixels: vec![0; bytes],
+            format: PixelFormat::Gray8,
+            pixels: Pixels::Interleaved {
+                color_type: ColorType::L8,
+                buffer: vec![0; bytes],
+            },
             timings: DecodeTimings {
                 open: Duration::ZERO,
                 metadata: Duration::ZERO,
@@ -562,7 +565,7 @@ mod tests {
         let prefetcher = Prefetcher::new(images(&["gray.pgm", "rgb.ppm"]), 0, None);
         let gray = prefetcher.fetch(0).expect("the first fixture decodes");
         let rgb = prefetcher.fetch(1).expect("the second fixture decodes");
-        assert_ne!(gray.color_type, rgb.color_type);
+        assert_ne!(gray.format, rgb.format);
         assert_eq!(prefetcher.fetch(0).expect("cached").pixels, gray.pixels);
     }
 

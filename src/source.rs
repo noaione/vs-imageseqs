@@ -18,9 +18,9 @@ use vapoursynth4_rs::{
 
 use crate::{
     color::set_frame_properties,
-    decoder::{self, ImageInfo},
+    decoder::{self, ImageInfo, Pixels},
     error::{ImgSeqError, Result},
-    pixel::{PixelFormat, write_alpha, write_planar},
+    pixel::{PixelFormat, write_alpha, write_decoded_planes, write_opaque_alpha, write_planar},
     prefetch::{self, Prefetcher},
 };
 
@@ -356,20 +356,32 @@ fn clip_frame(
     );
     let allocation = allocation_started.elapsed();
 
-    let write_timings = match clip {
-        Clip::Color => write_planar(
+    let write_timings = match (clip, &decoded.pixels) {
+        (Clip::Color, Pixels::Planar(planes)) => write_decoded_planes(
             &mut frame,
-            decoded.color_type,
+            decoded.format,
             decoded.width,
             decoded.height,
-            &decoded.pixels,
+            planes,
         )?,
-        Clip::Alpha => write_alpha(
+        (Clip::Color, Pixels::Interleaved { color_type, buffer }) => write_planar(
             &mut frame,
-            decoded.color_type,
+            *color_type,
             decoded.width,
             decoded.height,
-            &decoded.pixels,
+            buffer,
+        )?,
+        // Planar decodes have no alpha channel to read: the format that decodes
+        // to planes only takes files without one.
+        (Clip::Alpha, Pixels::Planar(_)) => {
+            write_opaque_alpha(&mut frame, format, decoded.width, decoded.height)?
+        }
+        (Clip::Alpha, Pixels::Interleaved { color_type, buffer }) => write_alpha(
+            &mut frame,
+            *color_type,
+            decoded.width,
+            decoded.height,
+            buffer,
         )?,
     };
     let properties_started = Instant::now();
@@ -558,12 +570,13 @@ fn has_format_mismatch(images: &[ImageInfo]) -> bool {
 }
 
 fn query_format(core: &CoreRef, format: PixelFormat) -> vapoursynth4_rs::frame::VideoFormat {
+    let (sub_sampling_w, sub_sampling_h) = format.sub_sampling();
     core.query_video_format(
         format.color_family(),
         format.sample_type(),
         format.bits_per_sample(),
-        0,
-        0,
+        sub_sampling_w,
+        sub_sampling_h,
     )
 }
 

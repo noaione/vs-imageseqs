@@ -13,6 +13,8 @@ These files are copied verbatim from the repository's `vcpkg_installed`
   and the upstream bundled GPL/MIT license text sections.
 - `libde265-COPYING.txt` — libde265 1.1.1, including its LGPLv3 library text
   and the upstream bundled GPL/MIT license text sections.
+- `libwebp-COPYING.txt` — libwebp 1.6.0, BSD 3-Clause, including its
+  additional IP rights grant for patents.
 
 The current manifest disables libheif default features, so x265 is not part
 of the refreshed install or current native dependency set. If HEVC encoding

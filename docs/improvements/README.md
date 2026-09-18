@@ -4,8 +4,9 @@ one file per change, each with the evidence, the intended edit, and how to
 check the result. the measurements come from [benchmarks](../BENCH.md) and from
 the probes described there.
 
-05 is implemented in `src/formats/heif.rs`, and 01 in `src/prefetch.rs` plus
-`src/source.rs`. every other entry is a proposal to review.
+05 is implemented in `src/formats/heif.rs`, 01 in `src/prefetch.rs` plus
+`src/source.rs`, and 04 + 03 in `src/formats/webp.rs` with the planar `Pixels`
+type in `src/decoder.rs`. every other entry is a proposal to review.
 
 ## evidence in short
 
@@ -14,10 +15,15 @@ per frame with `prefetch=0` and `debug=True` (see the per stage table in
 
 | set | decode | copy into the frame | serial floor |
 | --- | --- | --- | --- |
-| webp 2903x4128 | 265 ms | 48 ms | ~53 ms |
+| webp 2903x4128 | 111 ms | 5 ms | ~6 ms |
 | jxl 1500x2500 | 85 ms | 13 ms | ~18 ms |
 | jpeg 1404x2000 | 18 ms | 12 ms | ~17 ms |
 | png 1404x2000 | 9 ms | 3 ms | ~8 ms |
+
+the webp row is what [03](03-webp-yuv-output.md) and
+[04](04-webp-decoder.md) left behind, and it is not the row this table had
+before: 265 ms of decode and 48 ms of write with `image-webp` and a then-36 MB
+rgb frame. the other rows are unchanged by either plan.
 
 the *serial floor* is what the requesting thread must do for every frame no
 matter how many decoders run behind it: the copy into the frame plus the frame
@@ -32,14 +38,17 @@ properties. two conclusions follow.
    `prefetch=16` spent 2.6x one decode of cpu per delivered frame while the
    default at 4 spent 1.16x. the window is now capped by the budget and the
    budget follows the window, which turns that 2.6x into 1.43x.
-2. **parallelism cannot beat the floor.** the webp set sits at 88.8 ms/frame
-   with four workers, and about 53 ms of that is unavoidable while the copy
-   stays on the requesting thread.
+2. **parallelism cannot beat the floor.** the webp set sat at 88.8 ms/frame
+   with four workers, and about 53 ms of that was unavoidable while the copy
+   stayed on the requesting thread. [03](03-webp-yuv-output.md) cut the frame
+   to 1.5 bytes per pixel, which took the floor to about 6 ms of the 91 ms that
+   `prefetch=4` now delivers.
 
 a third one, from reading `image-webp` rather than from a measurement: a webp
-frame is currently copied twice and allocated three times per frame (the
-decoder's own canvas, our zeroed `pixels` buffer, then the frame), which is the
-part plan 04 can remove rather than shorten.
+frame used to be copied twice and allocated three times per frame (the decoder's
+own canvas, our zeroed `pixels` buffer, then the frame).
+[04](04-webp-decoder.md) removed the canvas and the zero fill, and
+[03](03-webp-yuv-output.md) removed the conversion that was left.
 
 ## plans
 
@@ -47,8 +56,8 @@ part plan 04 can remove rather than shorten.
 | --- | --- | --- | --- | --- |
 | [01 lookahead scheduling](01-lookahead-scheduling.md) | `src/prefetch.rs`, `src/source.rs` | webp 88.8 → ~70 ms at `prefetch=4`, and `prefetch` above 4 stops being a pessimisation | low, internal only | implemented |
 | [02 frame write path](02-frame-write-path.md) | `src/decoder.rs`, `src/source.rs`, `src/pixel.rs` | a few ms per frame from the buffer, and up to 1.6x on webp if the copy leaves the requesting thread | medium, frame lifetime | proposed |
-| [03 yuv output for lossy webp](03-webp-yuv-output.md) | decoder path, `src/pixel.rs`, `src/source.rs`, `src/color.rs` | webp ~25-30 ms/frame, half the bytes per frame | medium, changes the output | proposed, needs 04 |
-| [04 webp decoder](04-webp-decoder.md) | `Cargo.toml`, `vcpkg.json`, notices, `LICENSES/`, `src/decoder.rs` | decode 265 → ~150 ms per frame, and it enables 02 and 03 | medium, native dependency | proposed |
+| [03 yuv output for lossy webp](03-webp-yuv-output.md) | `src/formats/webp.rs`, `src/decoder.rs`, `src/pixel.rs`, `src/source.rs`, `src/color.rs` | webp 4.24 → 3.39 s, half the bytes per frame | medium, changes the output | implemented, with 04 |
+| [04 webp decoder](04-webp-decoder.md) | `Cargo.toml`, `build.rs`, `vcpkg.json`, notices, `LICENSES/`, `src/formats/webp.rs`, `src/decoder.rs` | decode 265 → 111 ms per frame, and it enables 02 and 03 | medium, native dependency | implemented, with 03 |
 | [05 monochrome heif](05-monochrome-heif.md) | `src/formats/heif.rs` | the 31 monochrome heic files in `sandbox/heic` decode as `Gray8` instead of failing | low, used to repair an always-failing path | implemented |
 
 01 and 02 are independent of each other. 03 needs 04. 05 is independent of all

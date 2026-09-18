@@ -56,25 +56,40 @@ pub fn set_frame_properties(
         )
         .map_err(ImgSeqError::from_display)?;
     properties
-        .set(
-            key!(c"_Range"),
-            Value::Int(i64::from(ffi::VSRange::VSC_RANGE_FULL as i32)),
-            AppendMode::Replace,
-        )
-        .map_err(ImgSeqError::from_display)?;
-    properties
         .set(key!(c"_FieldBased"), Value::Int(0), AppendMode::Replace)
         .map_err(ImgSeqError::from_display)?;
 
-    if matches!(format.color_family(), ColorFamily::RGB) {
+    // Rgb frames are what an image file means, and libwebp converts yuv to rgb
+    // with the bt.601 matrix the vp8 specification defines for the limited
+    // range, which is also what ffmpeg assumes for the same bitstreams. So the
+    // planes this plugin hands out for a lossy webp are the ones that matrix
+    // and range describe, whichever of the two paths produced the frame.
+    let (matrix, range) = match format.color_family() {
+        ColorFamily::YUV => (
+            ffi::VSMatrixCoefficients::VSC_MATRIX_BT470_BG,
+            ffi::VSRange::VSC_RANGE_LIMITED,
+        ),
+        _ => (
+            ffi::VSMatrixCoefficients::VSC_MATRIX_RGB,
+            ffi::VSRange::VSC_RANGE_FULL,
+        ),
+    };
+    if matches!(format.color_family(), ColorFamily::RGB | ColorFamily::YUV) {
         properties
             .set(
                 key!(c"_Matrix"),
-                Value::Int(i64::from(ffi::VSMatrixCoefficients::VSC_MATRIX_RGB as i32)),
+                Value::Int(i64::from(matrix as i32)),
                 AppendMode::Replace,
             )
             .map_err(ImgSeqError::from_display)?;
     }
+    properties
+        .set(
+            key!(c"_Range"),
+            Value::Int(i64::from(range as i32)),
+            AppendMode::Replace,
+        )
+        .map_err(ImgSeqError::from_display)?;
 
     if let Some(alpha) = alpha_marker {
         properties

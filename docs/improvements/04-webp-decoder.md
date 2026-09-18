@@ -1,86 +1,129 @@
 # 04 — webp decoder
 
-- status: proposed
-- touches: `Cargo.toml`, `vcpkg.json`, `THIRD_PARTY_NOTICES`, `LICENSES/`,
-  `src/decoder.rs`, `docs/IMPLEMENTATION.md`
-- expected: decode 265 → ~150 ms per frame on the 12 Mpx set, plus the memory
-  path improvements that only a decoder with a destination buffer can give
-- risk: medium, it adds a native dependency and a licence obligation
+- status: implemented, landed with [03](03-webp-yuv-output.md)
+- touches: `Cargo.toml`, `build.rs`, `vcpkg.json`, `THIRD_PARTY_NOTICES`,
+  `LICENSES/`, `src/formats/webp.rs`, `src/decoder.rs`, `docs/IMPLEMENTATION.md`
+- result: the webp set reads in 4.24 s instead of 5.66 s at the default
+  `prefetch` and 15.60 s instead of 19.97 s with `prefetch=0`; the yuv output
+  of 03 on top of it takes those to 3.39 s and 11.94 s
+- risk taken: one more native dependency, with a linker and a licence
+  obligation behind it
 
 ## problem
 
 `image`'s `webp` feature is `image-webp` 0.2.4: pure rust, single threaded (no
 rayon or thread use anywhere in the crate), and it decodes into an internal
 canvas that it then copies into the caller's buffer. one 2903x4128 lossy frame
-costs 265 ms of cpu in `read`, and there is no way to point it at a buffer we
-own, which is why [02](02-frame-write-path.md) cannot remove the extra copy
-today.
+cost 265 ms of cpu in `read`, and there was no way to point it at a buffer we
+own, which is why [02](02-frame-write-path.md) could not remove the extra copy.
 
-bestsource uses ffmpeg, which slice-threads a single vp8 frame: 177 ms/frame
-with `threads=1` and 15 ms/frame with the default threads on the same files.
-per-thread ffmpeg is not dramatically faster than `image-webp`, the difference
-is that it can put all twelve cores on one frame, and libwebp cannot do that
-either (it is single threaded per image, just with simd and a lower constant).
+bestsource uses ffmpeg, which slice-threads a single vp8 frame: 24 ms/frame
+with the default threads on this set against 351 ms with one. per-thread ffmpeg
+is not dramatically faster than `image-webp`, the difference is that it can put
+all twelve cores on one frame, and libwebp cannot do that either (it is single
+threaded per image, just with simd and a lower constant).
 
-## options
+## what was chosen
 
-| option | decode | integration | licensing |
+**libwebp** through `build.rs`, not a `*-sys` crate and not bindgen:
+
+- `vcpkg.json` gains `{ "name": "libwebp", "default-features": false,
+  "features": ["simd"] }`. the manifest already builds dav1d, libheif and
+  libde265, and the check that x265 stays disabled is unchanged.
+- `build.rs` finds it: `vcpkg::find_package("libwebp")` on windows through the
+  same local adapter the other native dependencies use, and
+  `pkg_config::Config::new().atleast_version("1.2.0").probe("libwebp")`
+  elsewhere. `vcpkg` and `pkg-config` are build dependencies of their platform
+  only, under `[target.'cfg(windows)'.build-dependencies]` and its
+  `not(windows)` twin.
+- the four entry points used are declared by hand in `src/formats/webp.rs`:
+  `WebPGetInfo`, `WebPDecodeRGBInto`, `WebPDecodeRGBAInto` and
+  `WebPDecodeYUVInto`. they have kept their signatures since libwebp 0.4, so a
+  binding generator would add a build dependency and a header search path for
+  nothing.
+- licences: `LICENSES/libwebp-COPYING.txt` (copied from the vcpkg install) and
+  a `THIRD_PARTY_NOTICES` entry. bsd-3-clause asks for the notice and the
+  licence text, not the lgpl corresponding-source treatment that libheif and
+  libde265 need. `AGENTS.md` lists libwebp in the native set.
+- the wheel expectation is unchanged: plugin only, `py3-none-win_amd64`,
+  `hatch_build.py` untouched.
+
+`image-webp` is still compiled in: `image`'s `webp` feature is what lets the
+crate *probe* a webp file at all (`output_format` reads the container first,
+and `probe` asks `image` for the colour type, the icc profile and the exif
+orientation). only the pixel decode moved.
+
+### lossless webp (the open question, answered)
+
+one path, libwebp, for lossy and lossless alike. measured on the three uniform
+lossless files of `target/bench/lossless` (3672x5274) against the same files
+under a `.png` name, which routes them through `image-webp`, `prefetch=0`, six
+passes each:
+
+| decoder | best pass | range over six passes |
+| --- | --- | --- |
+| libwebp | 156.8 ms/frame | 157-209 ms |
+| `image-webp` | 175.4 ms/frame | 172-210 ms |
+
+the ranges overlap, so on three files that is not evidence to decide on, only
+to stay with one decode path, one error type and one place where the bitstream
+is read. libwebp is not behind on lossless and it is far ahead on lossy, so
+routing both through it costs nothing measurable.
+
+## what changed in the code
+
+- `src/formats/webp.rs` is a new module: `handles`, `output_format` (the
+  container walk behind [03](03-webp-yuv-output.md)), `decode`, the two decode
+  paths and the extern declarations. `src/formats/` already held one module per
+  container the `image` crate cannot express.
+- `src/decoder.rs` keeps the same `ImageInfo`/`DecodedImage` shape, so
+  `source.rs` and `pixel.rs` do not care which decoder ran. `DecodedImage`
+  carries `Pixels`, either `Interleaved { color_type, buffer }` or
+  `Planar(Vec<Vec<u8>>)`.
+- the probe still comes from `image`, and the size `WebPGetInfo` reads from the
+  bitstream is checked against it, the way the `image` path checks its own
+  decoder. a mismatch is an error rather than a resize.
+- `docs/IMPLEMENTATION.md` records the split. `tests/fixtures/lossy.webp` (a
+  70 byte ffmpeg-encoded 16x16 frame) is what the module tests decode.
+
+## results
+
+sandbox webp set, 35 files, best pass of three:
+
+| build | frames | `prefetch=0` | `prefetch=16` |
 | --- | --- | --- | --- |
-| `libwebp` through a `*-sys` crate or bindgen | ~1.5-2x faster than pure rust, single threaded per image | small: one branch in `open_decoder`, plus yuv and destination-buffer entry points | bsd-3-clause, notice only |
-| ffmpeg | matches bestsource (slice threading) | large: build weight, format registration, yuv plumbing | lgpl-2.1+ with the same static-linking obligations already documented for libheif |
-| stay pure rust, add threading | not available | would need decode support upstream in `image-webp` | none |
+| `image-webp` | 5.66 s | 19.97 s | 4.12 s |
+| libwebp | 4.24 s | 15.60 s | 2.62 zszzzzss |
+| libwebp + yuv ([03](03-webp-yuv-output.md)) | 3.39 s | 11.94 s | 1.87 s |
 
-recommended first step: **libwebp**, because it is permissively licensed, small
-to integrate, and it is the only one of the three that also unlocks
-[03](03-webp-yuv-output.md) and the decode-into-frame path in
-[02](02-frame-write-path.md).
+the decoder alone (first to second row) is worth 1.33x on frames and 1.28x on
+the serial row. it does not close the gap to bestsource on its own: libwebp
+decodes a webp in one thread, and it still produced rgb until
+[03](03-webp-yuv-output.md) landed.
 
-## what libwebp changes beyond speed
+per stage cost on the first four sandbox files with `debug=True` and
+`prefetch=0`:
 
-`WebPDecodeRGBInto`, `WebPDecodeRGBAInto` and `WebPDecodeYUVInto` take a
-destination pointer, a destination size *and a destination stride*. a
-VapourSynth plane is a contiguous buffer with a padded stride, so:
+| stage | `image-webp` | libwebp | libwebp + yuv |
+| --- | --- | --- | --- |
+| decode | 520 ms | 265 ms | 185 ms |
+| into the frame | 86 ms | 38 ms | 8 ms |
+| total | 607 ms | 303 ms | 193 ms |
 
-- decode directly into the frame plane, dropping both intermediate copies, when
-  the frame already exists (`prefetch=0`, or once the pool can hold frames),
-- otherwise decode into a per-worker buffer with a tight stride, dropping the
-  canvas copy and the zero fill,
-- and with `WebPDecodeYUVInto`, write yuv planes with correct strides for plan
-  03.
+decode is 1.96x faster, which is the high end of the "~1.5-2x than pure rust"
+in the options table this plan started from. the middle column also shows the
+frame write dropping with it, because the decode no longer ends in a canvas
+copy; the last column is [03](03-webp-yuv-output.md) taking the same path down
+to 1.5 bytes per pixel and a plain row copy.
 
-none of that is possible with `image-webp`, so this plan is a prerequisite for
-the best version of 02 and all of 03.
+## acceptance (met)
 
-## work
-
-- `vcpkg.json`: add libwebp. the manifest already builds dav1d, libheif and
-  libde265, so this is another entry, with the existing check that x265 stays
-  disabled.
-- `src/decoder.rs`: route webp inputs through libwebp behind the existing
-  `ImageInfo`/`DecodedImage` shape so `source.rs` and `pixel.rs` do not have to
-  care which decoder ran. keep the `image` path for every other format.
-- licences: `LICENSES/libwebp-COPYING.txt` and a `THIRD_PARTY_NOTICES` entry,
-  as AGENTS.md requires when linkage changes. bsd-3-clause needs the notice and
-  the licence text, not the lgpl corresponding-source treatment.
-- `docs/IMPLEMENTATION.md`: record the second decoder, why the format is split
-  between two libraries, and which entry points are used.
-- wheel: unchanged expectation, plugin only, `py3-none-win_amd64`. verify the
-  DLL still contains nothing extra and that `hatch_build.py` needs no change.
-
-## open question — lossless webp
-
-lossy and lossless webp share one path today. libwebp handles both, but
-`image-webp` may still be competitive (or better) on lossless files, which are
-often small. measure both decoders on a lossless set before deciding whether to
-route one mode, both, or to pick per file.
-
-## acceptance
-
-- stage split on the webp set with `prefetch=0`: `read` 265 ms → ~150 ms per
-  frame, and the total with it. this measurement needs no other plan to land.
-- the decoded pixels must be identical to the current path for the same file
-  (compare plane bytes in a test or a throwaway script; this catches a wrong
-  colour profile or alpha handling in the new path).
-- `cargo test --locked`, `tests/readalpha.vpy` and the png/jpeg/jxl bench sets
-  unchanged.
+- stage split on the webp set with `prefetch=0`: decode 520 → 265 ms per frame,
+  and the total with it.
+- the decoded pixels are identical to the `image` path for the same file. the
+  module tests compare libwebp's own rgb output against the planes, and
+  `target/bench/webp-yuv-check.py` compares the yuv planes against
+  bestsource/ffmpeg (max delta 0).
+- `cargo test --locked` (45 tests, six of them new for this module),
+  `tests/readalpha.vpy`, and the png, jpeg, jxl, avif and heic sets: unchanged.
 - licence files present in both the repository and the built wheel.
