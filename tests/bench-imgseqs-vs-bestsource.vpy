@@ -24,6 +24,10 @@ images means reading every file, so its ``open`` cost is not free.
 bestsource can only be pointed at a printf pattern, so reading a part of a
 long sequence stages hardlinks of the selected files in ``target/bench/`` and
 hands those same files to imgseqs.
+
+a configuration that cannot read the format at all, for example bestsource on
+jxl, is reported and left out of the tables instead of aborting the run. the
+measured results live in ``docs/BENCH.md``.
 """
 
 from __future__ import annotations
@@ -51,6 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--dir", type=Path, help="directory holding the images")
     parser.add_argument("--pattern", default=DEFAULT_PATTERN, help="printf pattern bestsource opens")
+    parser.add_argument("--select", help="glob used to pick the files, defaults to the glob of --pattern")
     parser.add_argument("--plugin", type=Path, default=DEFAULT_PLUGIN, help="imgseqs library to load")
     parser.add_argument("--frames", type=int, default=0, help="images to read, 0 reads the whole sequence")
     parser.add_argument("--reps", type=int, default=2, help="timed passes per configuration")
@@ -59,21 +64,30 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def matching_files(directory: Path, pattern: str) -> list[Path]:
-    """The sequence files, ordered the way the printf pattern numbers them."""
-    glob = re.sub(r"%0?\d*d", "*", pattern)
+def glob_for(pattern: str) -> str:
+    """The glob that matches the files a printf pattern numbers."""
+    return re.sub(r"%0?\d*d", "*", pattern)
+
+
+def matching_files(directory: Path, glob: str) -> list[Path]:
+    """The sequence files, ordered the way the numbers in their names go."""
     images = natsorted(directory.glob(glob), key=lambda path: path.stem)
     if not images:
         raise SystemExit(f"no files match {glob!r} in {directory}")
     return images
 
 
-def first_number(files: list[Path], pattern: str) -> int:
-    """The number of the first file, which the printf pattern has to agree with."""
+def first_number(files: list[Path], pattern: str) -> Optional[int]:
+    """The number of the first file, or None when the pattern cannot say it.
+
+    A selection that mixes extensions, for example jpeg and png in one folder,
+    cannot be described by a single pattern, so bestsource has to sit that run
+    out.
+    """
     for candidate in range(10):
         if pattern % candidate == files[0].name:
             return candidate
-    raise SystemExit(f"{files[0].name} does not match the pattern {pattern!r}")
+    return None
 
 
 def staged_files(files: list[Path], pattern: str, staging: Path) -> list[Path]:
@@ -129,6 +143,7 @@ class Config:
         self.widths: list[int] = []
         self.frames = 0
         self.info = ""
+        self.failure: Optional[str] = None
 
     @property
     def best_run(self) -> list[float]:
@@ -180,7 +195,8 @@ def main() -> None:
     args = parse_args()
     core.std.LoadPlugin(str(args.plugin.resolve()))
 
-    images = matching_files(args.dir, args.pattern)
+    selection = args.select or glob_for(args.pattern)
+    images = matching_files(args.dir, selection)
     files = images if args.frames <= 0 else images[: args.frames]
     if len(files) != len(images):
         staging = ROOT / "target" / "bench" / "bs-seq"
@@ -189,19 +205,22 @@ def main() -> None:
     first = first_number(files, args.pattern)
     directory = files[0].parent
 
-    configs = [
-        Config("imgseqs", lambda: open_imgseqs(files, None)),
-        Config("bestsource", lambda: open_bestsource(directory, args.pattern, first, None)),
-    ]
+    configs = [Config("imgseqs", lambda: open_imgseqs(files, None))]
+    if first is None:
+        print(f"{args.pattern!r} does not describe {files[0].name}, so bestsource is left out")
+    else:
+        configs.append(Config("bestsource", lambda: open_bestsource(directory, args.pattern, first, None)))
     if args.extra:
         configs.append(Config("imgseqs p=0", lambda: open_imgseqs(files, 0)))
-        configs.append(Config("bestsource t=1", lambda: open_bestsource(directory, args.pattern, first, 1)))
+        if first is not None:
+            configs.append(Config("bestsource t=1", lambda: open_bestsource(directory, args.pattern, first, 1)))
     if args.prefetch is not None:
         workers = args.prefetch
         configs.append(Config(f"imgseqs p={workers}", lambda: open_imgseqs(files, workers)))
 
     bestsource = core.bs.VideoSource.plugin
-    print(f"sequence: {directory / args.pattern} ({len(files)} files, first number {first})")
+    start = "" if first is None else f", first number {first}"
+    print(f"sequence: {directory / selection} ({len(files)} files{start})")
     print(f"imgseqs: {args.plugin.resolve()}")
     print(f"bestsource: {bestsource.identifier} {bestsource.name} r{bestsource.version.major}")
     print()
@@ -209,27 +228,41 @@ def main() -> None:
     for repetition in range(args.reps):
         order = configs if repetition % 2 == 0 else list(reversed(configs))
         for config in order:
-            config.measure()
+            if config.failure:
+                continue
+            try:
+                config.measure()
+            except vs.Error as error:
+                # A plugin that cannot read the format at all, for example
+                # bestsource on jxl, should not hide the other numbers.
+                config.failure = str(error)
+                print(f"  {config.label} cannot read this sequence: {error}")
+                continue
             print(f"  rep {repetition + 1} {config.label}: {sum(config.runs[-1]) / 1000.0:.3f} s")
     print()
 
-    for config in configs:
+    usable = [config for config in configs if not config.failure]
+    if not usable:
+        raise SystemExit("no configuration could read this sequence")
+    if len(usable) < len(configs):
+        print("only " + ", ".join(config.label for config in usable) + " read this sequence")
+    for config in usable:
         print(f"{config.label:<16} {config.info} | open {min(config.open_times):.1f} ms")
     print()
-    check_alignment(configs)
+    check_alignment(usable)
 
-    count = min(config.frames for config in configs)
-    width = max(len("frame"), *(len(config.label) for config in configs))
+    count = min(config.frames for config in usable)
+    width = max(len("frame"), *(len(config.label) for config in usable))
     print()
     print(f"per frame timings in ms ({count} frames)")
-    print(f"{'frame':>{width}}" + "".join(f"{config.label:>{width + 2}}" for config in configs))
+    print(f"{'frame':>{width}}" + "".join(f"{config.label:>{width + 2}}" for config in usable))
     for index in range(count):
         row = f"{index:>{width}}"
-        row += "".join(f"{config.best_run[index]:>{width + 2}.2f}" for config in configs)
+        row += "".join(f"{config.best_run[index]:>{width + 2}.2f}" for config in usable)
         print(row)
 
     print()
-    best = {config.label: config.best_run[:count] for config in configs}
+    best = {config.label: config.best_run[:count] for config in usable}
     summary = [
         ("total s", lambda config: f"{sum(best[config.label]) / 1000.0:.3f}"),
         ("open s", lambda config: f"{min(config.open_times) / 1000.0:.3f}"),
@@ -239,14 +272,17 @@ def main() -> None:
         ("max ms", lambda config: f"{max(best[config.label]):.2f}"),
     ]
     for name, value in summary:
-        print(f"{name:>{width}}" + "".join(f"{value(config):>{width + 2}}" for config in configs))
+        print(f"{name:>{width}}" + "".join(f"{value(config):>{width + 2}}" for config in usable))
 
     print()
-    for config in configs:
+    for config in usable:
         print(f"{config.label:<{width}} reps: " + " ".join(f"{sum(run[:count]) / 1000.0:.3f}" for run in config.runs))
 
-    reference = configs[1]
-    faster = configs[0]
+    if len(usable) < 2:
+        return
+
+    reference = usable[1]
+    faster = usable[0]
     print()
     for name, seconds in (
         ("frames", lambda config: sum(best[config.label]) / 1000.0),
