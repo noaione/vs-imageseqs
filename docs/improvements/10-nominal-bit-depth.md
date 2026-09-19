@@ -2,7 +2,8 @@
 
 - status: proposed
 - touches: `src/pixel.rs`, `src/decoder.rs` (the probe), `src/formats/heif.rs`,
-  `src/clip.rs`, `src/source.rs`, fixtures, `tests/readalpha.vpy`, `README.md`
+  `src/formats/jxl.rs`, `src/clip.rs`, `src/source.rs`, fixtures,
+  `tests/readalpha.vpy`, `README.md`
 - expected: a 10-bit avif is handed out as `Gray10`/`RGB30` instead of
   `Gray16`/`RGB48`, with its samples in the words a 10-bit frame holds, and a
   12-bit file as `Gray12`/`RGB36`
@@ -59,7 +60,11 @@ without 08.
   its samples left aligned in 16-bit words, so `pixel::write_planar` and the
   planar path of [03](03-webp-yuv-output.md) shift right by `16 - bits` before
   storing. The shift belongs to the pair (source depth, target depth), so one
-  function beside the writer answers it rather than a branch per format.
+  function beside the writer answers it rather than a branch per format. jxl is
+  the exception and needs no shift: `JxlDataFormat::U16 { bit_depth }` asks that
+  decoder for the depth the frame holds and it scales its f32 pipeline to
+  `(1 << bit_depth) - 1`, so a ten bit jxl arrives already right aligned at
+  `0..1023` and is copied.
 - `_Range` and `_Matrix` say nothing new: a 10-bit frame is full range in the
   same sense an 8-bit one is, and the yuv the plugin hands out stays 8-bit.
 - what does not move: `expected_bytes` (two bytes per sample either way), the
@@ -72,8 +77,17 @@ without 08.
   source sample four times over, and right aligned in ten bits that is what a
   `Gray10` frame holds. Its row in the monochrome table changes those two
   numbers, and nothing else in `tests/readalpha.vpy` is allowed to move.
-- **a 12-bit fixture**, from `avifenc -d 12` or a jxl encode, so the shift is
-  proven to be `16 - bits` and not a hard-coded 6.
+- **a 10-bit jxl fixture**, so the shift is proven to be `16 - bits` and not a
+  hard-coded 6, and so the jxl row of this plan has a file that states its own
+  depth. It does not need `cjxl --override_bitdepth`, which also exists and also
+  works: a `P5` `PGM` whose header says `MAXVAL 1023` is read as a native ten bit
+  image, so a 4x3 grid of `1..12` written by hand (or by
+  `target/bench/make-10bit-pgm.py`) is 25 bytes of jxl under `cjxl -d 0`, and
+  `jxlinfo` prints `10-bit Grayscale` for it. `djxl` round-trips it at `maxval`
+  1023 with the same twelve values, and the plugin today hands that file out as
+  `Gray16` holding `[64, 128, 192, 256, 320, 384, 448, 512, 577, 641, 705,
+  769]` — the ten bit range stretched onto sixteen, which is the bug in one line.
+  A 12-bit counterpart is the same pgm with `MAXVAL 4095`.
 - **a 16-bit png and the 16-bit alpha fixtures stay `RGB48`/`Gray16`**, and so do
   jpeg, webp and dds. That is the check that the fallback did not swallow a
   depth it cannot read, and that a 16-bit sample is still full scale.

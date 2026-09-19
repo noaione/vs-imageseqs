@@ -74,8 +74,8 @@ Rust
 ├── libheif-rs
 │     └── HEIF / HEIC pages, and a monochrome AVIF
 │
-└── jxl-rs
-      └── JPEG XL
+└── jxl
+      └── JPEG XL, decoded by `src/formats/jxl.rs`
 ```
 
 Use:
@@ -278,7 +278,8 @@ image-rs
 └── HDR
 
 JPEG XL
-└── jxl-rs / image-rs integration
+└── jxl
+    └── decoded by `src/formats/jxl.rs`
 
 HEIF / HEIC
 └── libheif-rs
@@ -349,7 +350,7 @@ The resulting decoder-specific output should be normalized into the plugin's int
 
 Format routing itself is `image`'s: `ImageReader::with_guessed_format` sniffs the
 signatures and `into_decoder` routes to the codec that registered for them, the
-`image` hook of `libheif-rs` and `jxl-image-rs-integration` included. The modules
+`image` hook of `libheif-rs` included. The modules
 in `src/formats/` are picked by extension instead, because what they answer is
 about the container and not about the samples: a monochrome avif is a file
 `image` reads, but one whose format only its `av1C` box states. A module asked
@@ -358,9 +359,20 @@ about a file that is not its own answers `None`, and `decoder::probe` and
 
 ### JPEG XL
 
-Use `jxl-rs`, preferably through its `image-rs` integration where practical.
+JPEG XL goes through the `jxl` crate directly, in `src/formats/jxl.rs`, and not
+through an `image` integration: `image` has no jpeg xl format of its own, and the
+information a frame needs is the codestream's. The probe is a header read that
+stops in the decoder's `WithImageInfo` state and records the size, the nominal bit
+depth, the orientation and whether an icc profile is attached; the decode asks
+for the sample layout the frame wants and draws one frame into the buffer it is
+handed.
 
-JPEG XL should therefore reuse the normal image decoding pipeline instead of implementing a completely separate VapourSynth path.
+The orientation is the one field the decoder does not leave to the plugin: it
+renders the picture the file's code describes, and there is no option in the
+crate that turns that off. So `ImgSeqOrientation` reports the code the file
+states, `apply_rotation=True` writes the rendered raster unchanged, and
+`apply_rotation=False` writes it through the code *inverted*, which is the stored
+picture. See [11](improvements/11-jxl-direct.md).
 
 ### HEIF / HEIC
 
@@ -502,7 +514,7 @@ struct DecodedImage {
 }
 ```
 
-The rest of the plugin should not care whether a frame originated from `image-rs`, `jxl-rs`, `libheif`, or OpenJPEG.
+The rest of the plugin should not care whether a frame originated from `image-rs`, `jxl`, `libheif`, or OpenJPEG.
 
 ```text
 file
@@ -1314,7 +1326,7 @@ prefetch.rs
     worker threads
 
 decoder.rs
-    image-rs decoder creation and the hooks of libheif-rs and jxl-rs
+    image-rs decoder creation and the hooks of libheif-rs
     metadata-only probing
     image decoding
 
@@ -1345,7 +1357,7 @@ Implement:
 
 1. `files:data[]`.
 2. PNG/JPEG/TIFF/etc. through `image-rs`, and WebP's pixels through libwebp.
-3. JPEG XL through the Rust JXL integration.
+3. JPEG XL through the `jxl` crate.
 4. GRAY8/GRAY16.
 5. RGB8/RGB16/RGB32F.
 6. Lazy per-frame decoding.
@@ -1417,12 +1429,12 @@ Sequence (shared by every clip of one call)
          ├── image-rs           PNG, JPEG, TIFF, GIF, BMP, EXR, PNM, QOI,
          │   │                  TGA, ICO, HDR, and avif, whose samples it
          │   │                  decodes as rgb whatever the file holds
-         │   ├── jxl-rs         JPEG XL, through its image hook
          │   └── libheif-rs     colour heif/heic, through its image hook
          │
          └── src/formats/       the files those paths describe wrongly
              ├── heif.rs        monochrome heif/heic and monochrome avif, and
              │                  the avif probe that answers before a decode
+             ├── jxl.rs         every jpeg xl, which `image` has no format for
              └── webp.rs        every webp's pixels, planar yuv for a lossy one
          │
          ▼

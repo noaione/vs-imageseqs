@@ -80,12 +80,14 @@ by default, every image must have the same size and pixel format. with
 `mismatch=True`, the clip uses variable format information and each frame
 keeps its own size and format.
 
-an exif orientation is applied by default: a page whose exif says 6 comes out
-rotated 90 degrees clockwise, and orientations 5 to 8 swap the frame's width and
-height. `ImgSeqOrientation` still reports the code the file carries, so a code
-other than 1 on a frame that is not the file's stored size means the picture was
-transformed. `apply_rotation=False` hands out the stored picture at the size the
-file stores; a folder that mixes a rotated page with upright ones then fails at
+an orientation is applied by default: a page whose exif says 6 comes out rotated
+90 degrees clockwise, and orientations 5 to 8 swap the frame's width and height.
+the code is read from the file's exif, or from the codestream header for a jpeg
+xl, which states it there instead. `ImgSeqOrientation` still reports the code the
+file carries, so a code other than 1 on a frame that is not the file's stored
+size means the picture was transformed. `apply_rotation=False` hands out the
+stored picture at the size the file stores; a folder that mixes a rotated page
+with upright ones then fails at
 creation unless `mismatch=True`, exactly as a folder of different sizes does.
 This is one more thing to switch off when comparing against a plugin that does
 not rotate.
@@ -109,7 +111,7 @@ and `YUV420P8` for a lossy webp file. `Read` ignores alpha channels; use
 - `webp` - via libwebp, lossy files without alpha as `YUV420P8`, see below
 - `avif` - via dav1d, monochrome pages as `Gray8`/`Gray16`
 - `heif`/`heic` - via libheif/libde265, monochrome pages as `Gray8`/`Gray16`
-- `jxl (jpeg xl)` - via jxl-rs
+- `jxl (jpeg xl)` - via jxl
 - `exr`
 - `hdr`
 - `pnm`

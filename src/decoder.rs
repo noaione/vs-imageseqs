@@ -17,7 +17,6 @@ static DECODER_HOOKS: Once = Once::new();
 
 fn register_decoder_hooks() {
     DECODER_HOOKS.call_once(|| {
-        jxl_image_rs_integration::register_image_decoding_hook();
         libheif_rs::integration::image::register_heif_decoding_hook();
         libheif_rs::integration::image::register_heic_decoding_hook();
     });
@@ -31,6 +30,9 @@ fn format_decoder(info: &ImageInfo) -> Option<Result<DecodedImage>> {
     }
     if formats::webp::handles(info) {
         return Some(formats::webp::decode(info));
+    }
+    if formats::jxl::handles(info) {
+        return Some(formats::jxl::decode(info));
     }
     None
 }
@@ -161,6 +163,12 @@ pub fn probe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
     // [`crate::formats::heif::image_info`].
     if let Some(info) = formats::heif::image_info(path) {
         return Ok(info);
+    }
+    // A jpeg xl is read here whether or not the `image` crate could reach a
+    // decoder for one, which it cannot: it has no jpeg xl format of its own, and
+    // the hook that taught it one is gone. See [`crate::formats::jxl`].
+    if formats::jxl::owns(path) {
+        return formats::jxl::image_info(path, apply_rotation);
     }
 
     let mut decoder = open_decoder(path)?;

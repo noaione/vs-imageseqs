@@ -273,6 +273,23 @@ impl Transform {
     }
 }
 
+/// Code that undoes `orientation`, for a decoder that has already handed the
+/// picture out the way the file describes it.
+///
+/// The eight codes are the symmetry group of the square, in which the two
+/// quarter turns are each other's inverse and every other code is its own. A
+/// stored picture is the displayed one with the inverse applied; see
+/// [`crate::formats::jxl`], which is the one decoder here that applies the code
+/// itself.
+#[must_use]
+pub const fn inverse_orientation(orientation: Orientation) -> Orientation {
+    match orientation {
+        Orientation::Rotate90 => Orientation::Rotate270,
+        Orientation::Rotate270 => Orientation::Rotate90,
+        other => other,
+    }
+}
+
 /// Interleaved channel that carries alpha when the color type has one.
 pub const fn alpha_channel(color_type: ColorType) -> Option<usize> {
     match color_type {
@@ -1028,7 +1045,7 @@ fn fill_alpha_plane<T: Sample>(
 mod tests {
     use super::{
         PixelFormat, TRANSFORM_BLOCK, Transform, alpha_channel, extract_channel, for_each_block,
-        image_layout, planes_to_write, reverse_samples,
+        image_layout, inverse_orientation, planes_to_write, reverse_samples,
     };
     use image::{ColorType, metadata::Orientation};
     use vapoursynth4_rs::{ColorFamily, SampleType};
@@ -1147,6 +1164,41 @@ mod tests {
             let orientation = Orientation::from_exif(code).expect("a known exif code");
             assert_eq!(orientation.to_exif(), code);
         }
+    }
+
+    #[test]
+    fn undoing_an_orientation_hands_the_stored_picture_back() {
+        // The jxl decoder applies the file's own code, so the stored picture is
+        // the one its inverse produces; the two composed have to be the
+        // identity for every code, not only for the quarter turns.
+        for code in 1..=8u8 {
+            let orientation = Orientation::from_exif(code).expect("a known exif code");
+            let shown = rearrange(orientation, &source_grid());
+            let restored = rearrange(inverse_orientation(orientation), &shown);
+            assert_eq!(restored, source_grid(), "exif {code}");
+        }
+    }
+
+    /// `SOURCE` as the rows a transform rearranges.
+    fn source_grid() -> Vec<Vec<u8>> {
+        SOURCE.iter().map(|row| row.to_vec()).collect()
+    }
+
+    /// Applies an orientation to a grid the way the writer applies it to a
+    /// decoder buffer, which is sample by sample from `source_of`.
+    fn rearrange(orientation: Orientation, grid: &[Vec<u8>]) -> Vec<Vec<u8>> {
+        let transform = Transform::from_orientation(orientation);
+        let (width, height) = transform.output_size(grid[0].len(), grid.len());
+        (0..height)
+            .map(|row| {
+                (0..width)
+                    .map(|column| {
+                        let (x, y) = transform.source_of(column, row, width, height);
+                        grid[y][x]
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     #[test]

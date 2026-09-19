@@ -1,6 +1,6 @@
 # 11 — jxl without the image integration
 
-- status: proposed
+- status: implemented
 - touches: `Cargo.toml`, `src/formats/mod.rs`, `src/formats/jxl.rs` (new),
   `src/decoder.rs`, `src/pixel.rs` (one function), `docs/IMPLEMENTATION.md`,
   fixtures, `tests/readalpha.vpy`
@@ -85,53 +85,73 @@ both false for this format: `ImgSeqOrientation` says 1 rather than 6, and
 `apply_rotation=False` still hands out the rotated picture instead of the stored
 one. Every other format obeys the contract; jxl cannot, through this adapter.
 
-## change, as planned
+## change, as built
 
 `src/formats/jxl.rs`, a module in the shape of `webp.rs` and `heif.rs`: a
-container probe, a decode, and a pair of `handles`/`output_format` answers. Two
-details of the wiring are already right for it — `probe` consults
+container probe, a decode, and a pair of `owns`/`handles` answers. Two
+details of the wiring were already right for it — `probe` consults
 `formats::heif::image_info(path)` before it opens an `image` decoder, and
-`decode` consults `format_decoder` first — so the module hangs off both hooks
-with a `handles` test on the extension and the 12-byte codestream and container
-signatures. That test is what the adapter used to register with `image`
-(`register_decoding_hook("jxl", ..)` plus two `register_format_detection_hook`
-signatures), because `image` 0.25.10 has no jxl `ImageFormat` of its own.
+`format_decoder` is consulted before `image` is asked — so the module hangs off
+both hooks. Both hooks answer by extension alone, because the adapter used to
+register the same extension with `image` (`register_decoding_hook("jxl", ..)`
+plus two `register_format_detection_hook` signatures), and `image` 0.25.10 has no
+jxl `ImageFormat` of its own. The signatures are not lost to that: the module
+peeks at the first bytes of the file it is about to hand to the decoder and
+refuses a file that starts with neither a codestream nor a container.
 
 **the probe** parses the file header and stops:
 `JxlDecoder::<states::Initialized>::new(JxlDecoderOptions::default())`,
-`process` into `WithImageInfo`, then `basic_info()` for the display size, the
-orientation and the depth, and `embedded_color_profile()` for the colour.
-`ImageInfo` is filled the way the other formats fill it: `width`/`height` are the
-size the decoder holds, `orientation` is the code, and `transform` is
+`process` into `WithImageInfo`, then `basic_info()` for the size, the
+orientation, the depth and the extra channels, and `embedded_color_profile()` for
+the colour. `ImageInfo` is filled the way the other formats fill it:
+`width`/`height` are the size the decoder holds, `orientation` is the code, and
+`transform` is
 
 ```text
 apply_rotation = true   identity, because the decoder already handed out the display picture
 apply_rotation = false  the file's code inverted, so the writer undoes it
 ```
 
-The inverse is `Rotate90 ↔ Rotate270` and every other code itself — a
-`const fn inverse(Orientation) -> Orientation` beside
-`Transform::from_orientation` in `src/pixel.rs`, with a unit test over the eight
-codes asserting `inverse(inverse(code)) == code` and the one pair that is not its
-own inverse. The displayed picture is then the decoder's own size with the
+The inverse is `Rotate90 ↔ Rotate270` and every other code itself —
+`pixel::inverse_orientation`, beside `Transform::from_orientation`, with a unit
+test that runs the eight codes over a grid and asserts the inverted one puts the
+grid back. The displayed picture is then the decoder's own size with the
 identity transform, the stored picture is the transposed size with the inverted
 transform, and nothing in the write path changes: `write_decoded_planes` already
 takes a transform and a source raster bigger than one of them.
 
-**the decode** is the state machine the adapter's `decode_into` runs: `process`
-to `WithFrameInfo` (looping on `NeedsMoreInput` with the next slice of the file),
-one `JxlOutputBuffer::new_from_ptr` over an interleaved scratch buffer sized from
-the display size and the pixel format, then `flush_pixels` until it returns false.
+One detail of the probe is a coupling that has to be stated: the crate reports
+the size with the width and height **already swapped** for the four transposing
+codes, whether or not a code was applied to the raster, and it renders every
+code unconditionally — `JxlDecoderOptions::adjust_orientation` exists but is read
+nowhere in 0.7.4. So "the size from `basic_info()` is the display size" and "the
+raster is the display raster" are two assumptions that happen to agree today.
+The `apply_rotation=False` path is the one that would break if a future crate
+honoured the option: it would apply the inverse code to a raster that is already
+stored. `test_orientation_jxl` in `tests/readalpha.vpy` is the guard, because it
+asserts the stored picture and the stored size together.
+
+**the decode** is the state machine the adapter's `decode_into` ran: `process`
+to `WithFrameInfo` (looping on `NeedsMoreInput` with the next slice of the
+file), one `JxlOutputBuffer::new_from_ptr` over an interleaved buffer sized from
+the size and the pixel format, then `flush_pixels` until it returns false.
 `set_pixel_format` asks for `U8 { bit_depth: 8 }`, `U16 { endianness: native,
-bit_depth: 16 }` or `F32` from the depth, and for the alpha extra channel when the
-file has one and the clip is `ReadAlpha` — `extra_channels` names the type, so a
-depth or spot channel is not mistaken for alpha the way a count is.
+bit_depth: 16 }` or `F32` from the depth, and for the alpha extra channel as the
+one `JxlExtraChannel` whose `ec_type` is `Alpha` — the extra channels are named
+rather than counted, so a depth or spot channel is not mistaken for alpha.
 `DecodedImage` gets `Pixels::Interleaved { color_type, buffer }` and the
 `PixelFormat` the probe recorded, which is the same shape the `image` path hands
-over today.
+over.
 
-**what this unblocks**, and why it is proposed before 08 and 10 rather than
-beside them:
+The buffer is allocated 8-byte aligned so the `u16` case can be drawn straight
+into it, and the rare `Vec<u8>` that the allocator does not align is filled
+through a small `Aligned` window instead of a second full copy. That is where the
+adapter's extra copy of every 16-bit jxl goes away: it allocated a `Vec<u16>`
+whenever the buffer it was given was not aligned and copied the whole image into
+it.
+
+**what this unblocks**, and why it was done before 08 and 10 rather than beside
+them:
 
 - 09's jxl row: the code is a property again, and `apply_rotation=False` is the
   stored picture.
@@ -142,35 +162,46 @@ beside them:
 - 10's jxl row: `bit_depth.bits_per_sample()` is the nominal depth, and
   `JxlDataFormat::U16 { bit_depth }` is how a frame that holds 10 bits asks for
   them.
-- one copy per 16-bit jxl is saved: the adapter cannot write into an unaligned
-  buffer, so it allocates a `Vec<u16>` and copies the whole image into it, where
-  the write path already moves samples one at a time.
 
 ## validation
 
-- **the fixture that fails today**: `orientation-6.jxl`, `cjxl -q 90` from
+- **the fixture that failed before**: `orientation-6.jxl`, `cjxl -d 0` from
   `tests/fixtures/orientation-6.png`, added to `tests/fixtures` beside the png
-  and webp families that `make-orientation-fixtures.py` documents. The validator
-  asserts the display size 3x4, `ImgSeqOrientation == 6`, the display sample
-  order, and — with `apply_rotation=False` — the stored 4x3 and the stored order.
-  That test cannot pass before this plan and must pass after it, which is the
-  whole point of the plan.
+  and webp families that `make-orientation-fixtures.py` documents, with
+  `alpha-rgba8.jxl` (`cjxl -d 0` from the existing alpha fixture) beside it. The
+  validator asserts the display size 3x4, `ImgSeqOrientation == 6`, the display
+  sample order, and — with `apply_rotation=False` — the stored 4x3 and the stored
+  order; it also checks that the same page read as a png and as a jxl is the same
+  frame, that the two mix into one sequence, and that the jxl alpha page matches
+  its png channel for channel.
 - **frame parity on everything else**: no sandbox set carries an orientation or a
-  10-bit file, so every jxl page must come out bit-identical to the current
-  build. That is the control, and it is a strong one: the decode loop is new
-  code, and the only parameter it changes is the format it asks for.
-- **the alpha path**: `ReadAlpha` over an `alpha-rgba8.jxl` (`cjxl -q 95` from
-  the existing fixture) gives the color clip and `[9, 8, 7, 6, 5, 4]` on the alpha
-  plane, which is what the adapter already produces today; the equality of the
-  two clips' alpha is the check that the extra channel handling did not regress.
-- **the probe stays a header read**: the jxl page set's clip creation time must
-  stay where the debug log puts it today, because the module stops in the same
-  state the adapter stopped in. A probe that decoded would show up as a
-  many-second regression across 35 pages.
-- `cargo test --locked`, `cargo fmt`, `cargo clippy --workspace --all-targets
-  --locked -- -D warnings`, one `Read` over each sandbox set with
-  `target/bench/stage-split.py`, and `target/bench/frame-parity.py` against the
-  current dump.
+  10-bit file, so every one of the 35 jxl pages had to come out bit-identical.
+  `frame-parity.py` over the jxl set before and after differs by six *names* in
+  the sorted listing (the new `alpha-rgba8.jxl` fixture sorts among the
+  `alpha-*.png`/`.heic` entries) and by no hash at all: every plane of every frame
+  is unchanged.
+- **the alpha path**: `ReadAlpha` over `alpha-rgba8.jxl` gives the same two clips
+  as `alpha-rgba8.png`, which is what the adapter produced before this plan.
+- **the probe stayed a header read**: 35 pages, `mismatch=True`, clip creation
+  measured three times per row — before, 2.3 ms per clip (0.066 ms per file);
+  after, 2.3 ms per clip (0.064 ms per file). A probe that decoded would have
+  been seconds across 35 pages. The `apply_rotation=False` row read 4.6 ms in
+  that batch, but a second batch of the same build put the whole set at 2.9 ms
+  and 3.4 ms, so the second header parse that path costs is worth fractions of a
+  millisecond per file rather than the doubling the first pair suggested — and it
+  is what makes `ImgSeqOrientation` non-empty for a jxl at all.
+- **no regression in the pipeline**: a same-batch interleaved A/B against a
+  baseline DLL built from the pre-plan tree, twelve pages, `prefetch=0`,
+  `apply_rotation=True`, minimum of three: decode 443.35 ms and 457.94 ms total
+  before, 442.19 ms and 457.22 ms after. The png control A/B in the same session
+  was equal too (36.16/50.56 against 35.55/49.62), which is what says the machine
+  was not drifting between the two rows. Single batches of this set have read as
+  443 ms and as 564 ms for the same build.
+- `cargo test --locked` 75 passed, `cargo fmt`, `cargo clippy --workspace
+  --all-targets --locked -- -D warnings` clean, `tests/readalpha.vpy` all checks
+  passed with 14 of them under `test_orientation_jxl`, and `cargo build --release
+  --locked` produced a DLL 20,992 bytes smaller than the one it replaces
+  (8,397,312 to 8,376,320), because the adapter and its `image` traits are gone.
 - **no licence work**: `THIRD_PARTY_NOTICES` states that Rust crate licences are
   out of scope, and `jxl` is BSD-3-Clause pure Rust, so dropping one crate and
   adding the one under it changes nothing native. If the notices' rule ever
@@ -178,21 +209,34 @@ beside them:
 
 ## left over
 
+- **the probe reads the header twice when the rotation is off**: the code has to
+  be reported and the size the decoder hands out is the one it applied the code
+  to, so the stored size and the code can only be had from a second header parse.
+  It costs 0.065 ms per file and only when `apply_rotation=False`, and it is what
+  makes `ImgSeqOrientation` non-empty for a jxl at all.
+- **`adjust_orientation` is a trap for a future upgrade**: the option exists in
+  0.7.4, is read nowhere, and the render applies the codestream's code whatever it
+  says. If a later version honours it, the option must be left `true` — the
+  `src/formats/jxl.rs` module doc and the size coupling above record the
+  reasoning.
 - **decoding straight into the frame's planes**: `JxlOutputBuffer::new_from_ptr`
   takes a byte stride, so the planes of the frame could be handed over the way
-  `formats::webp` hands its planes to the writer, skipping the interleaved
-  scratch buffer. It waits for a reason to do it: the scratch buffer is the same
-  one the `image` path allocates today, so this plan is not slower than what it
-  replaces either way.
+  `formats::webp` hands its planes to the writer, skipping the interleaved buffer.
+  It waits for a reason to do it: the interleaved buffer is the same one the
+  `image` path allocates, so this plan is not slower than what it replaced.
 - **the parallel runner**: `flush_pixels` takes
-  `Option<&mut dyn JxlParallelRunner>` and the adapter passes none, so one frame
+  `Option<&mut dyn JxlParallelRunner>` and the module passes none, so one frame
   decodes on one thread inside the plugin's own lookahead pool, which is the
   design [01](01-lookahead-scheduling.md) chose. Passing a runner would nest two
   pools and is not proposed.
 - **animation, previews and tone mapping** are in `basic_info()` and stay
   unread, exactly as they do for every other format here: one frame per file is
   the plugin's whole contract.
-- **a 10-bit jxl fixture** is not reachable with `cjxl`, which keeps the input's
-  depth (a 16-bit png gives a 16-bit jxl). A `PAM` with `MAXVAL 1023` is the
-  likely route if 10 needs a jxl row in its own table; `avifenc -d 12` already
-  covers the plan's own fixture.
+- **a 10-bit jxl fixture is a hand-written pgm and one `cjxl` call**, not a
+  missing ingredient: the first draft of this plan said `cjxl` could not produce
+  one, and that was wrong twice over. `cjxl -d 0` reads a `PGM` whose `MAXVAL`
+  is 1023 as a native ten-bit image with no flag at all, and
+  `--override_bitdepth=N` states the depth for any input. A 4x3 grid of `1..12`
+  is 25 bytes, `jxlinfo` prints `10-bit Grayscale` for it, and the ten-bit values
+  survive a round trip exactly, which is what [10](10-nominal-bit-depth.md) wants
+  for its jxl row.

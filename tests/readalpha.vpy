@@ -242,7 +242,10 @@ MONO_WIDTH = 7
 MONO_HEIGHT = 5
 
 # The orientation fixtures are four wide and three tall, so a transposing exif
-# code changes the clip's size as well as the order of its samples.
+# code changes the clip's size as well as the order of its samples. The two jxl
+# ones are the same pictures as "orientation-6.png" and "alpha-rgba8.png"
+# encoded losslessly with cjxl, which keeps every sample and states the code in
+# the codestream; see "make-orientation-fixtures.py".
 ORIENTATION_WIDTH = 4
 ORIENTATION_HEIGHT = 3
 
@@ -530,6 +533,90 @@ def test_orientation_yuv() -> None:
         )
 
 
+def test_orientation_jxl() -> None:
+    """A jpeg xl states its code in the codestream, and it is undone on request.
+
+    The decoder applies the code itself, so the plugin is what has to report it
+    and what has to undo it: ``Read`` hands out the display picture beside the
+    code, and ``apply_rotation=False`` the stored one, which is the pair of
+    promises every other format keeps. The fixture is the same picture as
+    ``orientation-6.png`` encoded losslessly, so the two frames have to agree
+    sample for sample rather than merely in their order, and the alpha fixture is
+    ``alpha-rgba8.png`` encoded the same way.
+    """
+    stored = [
+        [row * ORIENTATION_WIDTH + column + 1 for column in range(ORIENTATION_WIDTH)]
+        for row in range(ORIENTATION_HEIGHT)
+    ]
+    picture = shown(stored, 6)
+    display_flat = [sample for row in picture for sample in row]
+
+    clip, alpha = read_alpha(files=[fixture("orientation-6.jxl")])
+    check(
+        (clip.width, clip.height) == (ORIENTATION_HEIGHT, ORIENTATION_WIDTH),
+        f"jxl: the clip is the display size (got {clip.width}x{clip.height})",
+    )
+    frame = clip.get_frame(0)
+    check(
+        frame.format.name == "Gray8",
+        f"jxl: a grayscale file stays gray (got {frame.format.name})",
+    )
+    check(samples(frame) == display_flat, "jxl: the picture the file states")
+    check(
+        frame.props["ImgSeqOrientation"] == 6,
+        f"jxl: ImgSeqOrientation is the code the file states "
+        f"(got {frame.props.get('ImgSeqOrientation')})",
+    )
+    check(
+        samples(alpha.get_frame(0)) == [255] * len(display_flat),
+        "jxl: a file with no alpha channel gets the opaque one",
+    )
+
+    # The same picture out of the png beside it, which is what says the two
+    # formats agree on what the code means rather than each being self
+    # consistent, and one clip holding both says they agree on size and format.
+    reference, _ = read_alpha(files=[fixture("orientation-6.png")])
+    check(
+        samples(reference.get_frame(0)) == samples(frame),
+        "jxl: the same picture as the png of the same code",
+    )
+    together = core.imgseqs.Read(
+        files=[fixture("orientation-6.png"), fixture("orientation-6.jxl")]
+    )
+    check(len(together) == 2, "jxl: the png and the jxl are one sequence")
+
+    # The stored picture, which is the code undone rather than applied.
+    stored_flat = [sample for row in stored for sample in row]
+    plain = core.imgseqs.Read(files=[fixture("orientation-6.jxl")], apply_rotation=False)
+    check(
+        (plain.width, plain.height) == (ORIENTATION_WIDTH, ORIENTATION_HEIGHT),
+        f"jxl: apply_rotation=False hands out the stored size (got {plain.width}x{plain.height})",
+    )
+    plain_frame = plain.get_frame(0)
+    check(
+        samples(plain_frame) == stored_flat,
+        "jxl: apply_rotation=False hands out the stored picture",
+    )
+    check(
+        plain_frame.props["ImgSeqOrientation"] == 6,
+        "jxl: apply_rotation=False still reports the code",
+    )
+
+    # A lossless jxl of the rgba fixture keeps its color and its alpha samples.
+    color, alpha = read_alpha(files=[fixture("alpha-rgba8.jxl")])
+    reference_color, reference_alpha = read_alpha(files=[fixture("alpha-rgba8.png")])
+    check(color.format.name == "RGB24", f"jxl: rgba is RGB24 (got {color.format.name})")
+    check(alpha.format.name == "Gray8", f"jxl: the alpha clip is Gray8 (got {alpha.format.name})")
+    check(
+        samples(color.get_frame(0)) == samples(reference_color.get_frame(0)),
+        "jxl: the color of the rgba fixture, channel for channel",
+    )
+    check(
+        samples(alpha.get_frame(0)) == samples(reference_alpha.get_frame(0)),
+        "jxl: the alpha of the rgba fixture",
+    )
+
+
 def main() -> None:
     for test in (
         test_rgba8,
@@ -545,6 +632,7 @@ def main() -> None:
         test_color_containers,
         test_orientation,
         test_orientation_yuv,
+        test_orientation_jxl,
         test_prefetch_variants,
         test_interleaved_consumers,
         test_errors,

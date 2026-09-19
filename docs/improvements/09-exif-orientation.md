@@ -63,10 +63,11 @@ already happened.
   [03](03-webp-yuv-output.md) stands: only the frame's own rows and columns are
   written, whatever the decoder's canvas is.
 - avif and heif report no orientation, because the `image` hooks do not read
-  their containers' exif, and jxl reports none because the adapter it is read
-  through does not implement `orientation()`, while the decoder under that
-  adapter applies the code anyway. Both are unchanged here and are the first two
-  left overs below.
+  their containers' exif, and jxl reported none when this plan was written
+  because the adapter it was read through did not implement `orientation()`,
+  while the decoder under that adapter applied the code anyway. avif and heif are
+  unchanged here and are the first left over below; jxl was closed by
+  [11](11-jxl-direct.md), which dropped the adapter for the crate under it.
 
 ## the write path
 
@@ -167,15 +168,18 @@ there, and it is not done.
   the `Exif` item in the avif box walk is the same walk
   [08](08-color-metadata.md) extends for `nclx`, and the two should be done
   together if either is.
-- **jxl is worse than unread and is not fixed here.** The file states its
-  orientation in the codestream, the `jxl` crate the plugin reaches jxl through
-  applies it to the pixels itself (`JxlDecoderOptions::adjust_orientation`
-  defaults to true and is read nowhere in 0.7.4) and reports the display size,
-  so a jxl that states 6 is handed out 6's way while `ImgSeqOrientation` says 1
-  and `apply_rotation=False` does not undo it. The `image` adapter in between
-  does not implement `orientation()`, which is what keeps this silent.
-  [11](11-jxl-direct.md) drops the adapter for the crate under it, where the code
-  is `basic_info().orientation`, and is the plan that closes this row.
+- **jxl was worse than unread and is now fixed** by
+  [11](11-jxl-direct.md). The file states its
+  orientation in the codestream, the `jxl` crate the plugin reached jxl through
+  applied it to the pixels itself (`JxlDecoderOptions::adjust_orientation`
+  defaults to true and is read nowhere in 0.7.4) and reported the display size,
+  so a jxl that stated 6 was handed out 6's way while `ImgSeqOrientation` said 1
+  and `apply_rotation=False` did not undo it. The `image` adapter in between
+  did not implement `orientation()`, which is what kept this silent.
+  `src/formats/jxl.rs` reads the code from `basic_info()` and inverts it for the
+  stored picture, and `test_orientation_jxl` in `tests/readalpha.vpy` is what
+  holds it: a jxl whose codestream states 6 now reports 6, hands out the display
+  picture, and hands out the stored 4x3 one under `apply_rotation=False`.
 - **a transposed plane is written one sample at a time**, which scalar code
   cannot do faster than about 0.6 ns per memory operation. A blocked SIMD
   transpose is the next step if the write path ever matters more than it does:

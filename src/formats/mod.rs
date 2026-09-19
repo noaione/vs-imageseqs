@@ -14,4 +14,5 @@
 //!   `image` path
 
 pub mod heif;
+pub mod jxl;
 pub mod webp;

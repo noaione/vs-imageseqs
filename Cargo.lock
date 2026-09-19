@@ -654,17 +654,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "jxl-image-rs-integration"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "836d5867260372d3a322362038548bbed764824f3ca83c92e7847b50815a4d1e"
-dependencies = [
- "bytemuck",
- "image",
- "jxl",
-]
-
-[[package]]
 name = "jxl_macros"
 version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1453,7 +1442,7 @@ name = "vs-imageseqs"
 version = "0.1.0"
 dependencies = [
  "image",
- "jxl-image-rs-integration",
+ "jxl",
  "libheif-rs",
  "pkg-config",
  "vapoursynth4-rs",

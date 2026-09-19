@@ -52,8 +52,9 @@ because `prefetch=0` is how lookahead is disabled.
   reports wrongly, one module per container and picked by extension (`heif.rs`
   for monochrome heif/heic, for the monochrome avif format and for the avif
   probe, which answers `decoder::probe` from the container boxes so that probing
-  an avif does not decode it, `webp.rs` for the libwebp decode and the lossy yuv
-  format).
+  an avif does not decode it, `jxl.rs` for every jpeg xl, which the `jxl` crate
+  decodes directly because `image` has no jxl format of its own, and `webp.rs`
+  for the libwebp decode and the lossy yuv format).
 - `src/pixel.rs`: supported pixel formats and planar frame writes.
 - `src/color.rs`: frame properties and color metadata.
 - `src/error.rs`: errors returned through the VapourSynth boundary.
@@ -62,10 +63,11 @@ because `prefetch=0` is how lookahead is disabled.
 - `tests/readalpha.vpy`: the VapourSynth validator, against the fixtures written
   by `tests/make-alpha-fixtures.py`; the heif and avif fixtures are encoded from
   that script's `mono-alpha.png` and `alpha-rgba8.png` with `heif-enc` and
-  `avifenc` (`mono-alpha-10.avif` is the 10 bit one), so a changed source needs
-  them re-encoded by hand. its orientation section reads the
-  `tests/fixtures/orientation-*.png` files written by
-  `tests/make-orientation-fixtures.py`, and its yuv orientation section reads the
+  `avifenc` (`mono-alpha-10.avif` is the 10 bit one), and `alpha-rgba8.jxl` from
+  the last with `cjxl`, so a changed source needs them re-encoded by hand. its
+  orientation section reads the `tests/fixtures/orientation-*.png` files written by
+  `tests/make-orientation-fixtures.py`, plus `orientation-6.jxl`, which that
+  script documents and `cjxl` makes, and its yuv orientation section reads the
   `orientation-{2,6,8}.webp` files that script cuts out of
   `orientation-split.webp`, whose bitstream is likewise made once by hand
   (`magick … -quality 90 -define webp:method=4`).

@@ -8,7 +8,8 @@ all five are implemented: 05 in `src/formats/heif.rs` (with one writer change in
 `src/pixel.rs` and the avif probe in `src/decoder.rs`), 01 in `src/prefetch.rs`
 plus `src/source.rs`, 02 in `src/clip.rs` with the generic pool in
 `src/prefetch.rs`, and 04 + 03 in `src/formats/webp.rs` with the planar `Pixels`
-type in `src/decoder.rs`.
+type in `src/decoder.rs`. [09](09-exif-orientation.md) is implemented too, in
+`src/pixel.rs` and `src/clip.rs` behind `apply_rotation`.
 
 [06](06-jpeg-2000-backend.md) to [10](10-nominal-bit-depth.md) are open. they
 are the parts of [IMPLEMENTATION.md](../IMPLEMENTATION.md) that the build does
@@ -27,8 +28,9 @@ applies the file's orientation itself, so the format reports 1 and hands out the
 rotated picture whatever `apply_rotation` says. dropping the `image` adapter for
 the `jxl` crate underneath it fixes that, and it is what lets
 [08](08-color-metadata.md) and [10](10-nominal-bit-depth.md) read a jxl's colour
-encoding and its bit depth, so it is proposed before them rather than beside
-them.
+encoding and its bit depth. it is implemented in `src/formats/jxl.rs`, with no
+change to what a jxl decodes to: 35 pages, frame for frame identical. 06, 07, 08
+and 10 are the open ones.
 
 ## evidence in short
 
@@ -99,8 +101,8 @@ open plus frames to 4.99 s.
 | [07 dds and farbfeld](07-dds-and-farbfeld.md) | `Cargo.toml`, `README.md`, fixtures, `tests/readalpha.vpy` | `.dds` and `.ff` files stop failing the probe, for two feature flags and no native code | low | proposed |
 | [08 color metadata](08-color-metadata.md) | `src/decoder.rs`, `src/formats/heif.rs`, `src/formats/png.rs` (new), `src/color.rs` | `_Primaries`/`_Transfer` from the container's `nclx`/`cICP`, and `_Matrix`/`_Range` from the file for a yuv frame, while an icc-only file changes nothing | low to medium, a wrong claim is worse than none | proposed |
 | [09 exif orientation](09-exif-orientation.md) | `src/decoder.rs`, `src/source.rs`, `src/clip.rs`, `src/pixel.rs`, fixtures, `tests/readalpha.vpy` | a file whose exif says 6 comes out the way its thumbnail looks, behind an `apply_rotation` argument that defaults on, and `ImgSeqOrientation` keeps saying what the file said | medium, it swaps width and height | implemented |
-| [10 nominal bit depth](10-nominal-bit-depth.md) | `src/pixel.rs`, `src/decoder.rs`, `src/formats/heif.rs`, `src/clip.rs`, `src/source.rs` | a 10-bit avif is `Gray10`/`RGB30` instead of `Gray16`/`RGB48`, with the samples shifted into the words a 10-bit frame holds, and the 16-bit files stay 16-bit | medium, every 9-to-15-bit file changes format | proposed |
-| [11 jxl without the image integration](11-jxl-direct.md) | `Cargo.toml`, `src/formats/jxl.rs` (new), `src/formats/mod.rs`, `src/decoder.rs`, `src/pixel.rs`, fixtures, `tests/readalpha.vpy` | a jxl that states an orientation reports it and `apply_rotation=False` gives the stored picture back, and the codestream's colour encoding and bit depth reach the probe | medium, the decode loop becomes ours | proposed |
+| [10 nominal bit depth](10-nominal-bit-depth.md) | `src/pixel.rs`, `src/decoder.rs`, `src/formats/heif.rs`, `src/formats/jxl.rs`, `src/clip.rs`, `src/source.rs` | a 10-bit avif is `Gray10`/`RGB30` instead of `Gray16`/`RGB48`, with the samples shifted into the words a 10-bit frame holds, and the 16-bit files stay 16-bit | medium, every 9-to-15-bit file changes format | proposed |
+| [11 jxl without the image integration](11-jxl-direct.md) | `Cargo.toml`, `src/formats/jxl.rs` (new), `src/formats/mod.rs`, `src/decoder.rs`, `src/pixel.rs`, fixtures, `tests/readalpha.vpy` | a jxl that states an orientation reports it and `apply_rotation=False` gives the stored picture back, and the codestream's colour encoding and bit depth reach the probe | medium, the decode loop becomes ours | implemented |
 
 the dependencies were thin: 01 and 02 were independent of each other, 03 needed
 04, and 05 was independent of all of them and is the only one that fixes
@@ -113,10 +115,10 @@ adds a native dependency, 07 is two feature flags, 08 changes what a frame says
 about itself, 09 changed where its samples are, and 10 changes the format and the
 samples together — so 10 is the last of them to do, and 08 is the one with a rule
 ("the file states it or the property is unset") instead of a measurement. 11 adds
-no dependency, only a layer: the same `jxl` crate the adapter already wraps, with
-the adapter's own 367 lines replaced by the module that reads the header. it
-moves first because 08's jxl row and 10's jxl row have no other source, and
-because it is the one item on this list that is a live defect rather than a
+no dependency, only a layer: the same `jxl` crate the adapter already wrapped,
+with the adapter's own 367 lines replaced by the module that reads the header. it
+went first because 08's jxl row and 10's jxl row have no other source, and
+because it was the one item on this list that is a live defect rather than a
 missing feature.
 
 order of value, as it turned out: 04 + 03 were the only route past bestsource on

@@ -44,7 +44,9 @@ libheif-rs = { version = "3.0.0", default-features = false, features = [
     "v1_23", # target libheif v1.23.x
     "embedded-libheif" # build on linux (v1.23.0)
 ] }
-jxl-image-rs-integration = "0.7.4"
+jxl = { version = "0.7.4", default-features = false, features = [
+    "all-simd" # the same vector paths the image integration enabled
+] }
 
 # native stuff: find libwebp, see build.rs
 [target.'cfg(windows)'.build-dependencies]
