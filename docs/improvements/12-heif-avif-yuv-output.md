@@ -274,11 +274,17 @@ section and the opaque alpha fill of a ten bit page.
 - **a monochrome avif still decodes through `image`.** its probe answers `Gray8`
   or `Gray16`, which `formats::avif::handles` reads as "not yuv" and declines, so
   [05](05-monochrome-heif.md)'s correction stays for that path and
-  [10](10-nominal-bit-depth.md) keeps the nominal-depth question there. a
-  monochrome item is one plane and dav1d hands it over directly, so this is the
-  obvious next step for 10 rather than a gap here.
+  [10](10-nominal-bit-depth.md) keeps the nominal-depth question there — which it
+  settled by narrowing the format `av1C` states in its own `output_format`, with
+  the `image` decode and the writer's shift behind it; the item is still one
+  plane dav1d hands over directly, so this is
+  the obvious next step for a decode of that path rather than a gap here.
 
 ## what this unblocks
+
+(it did, in this shape: see [10](10-nominal-bit-depth.md)'s measured section,
+where the avif and heic rows took no work and the shift stayed in the rgb and
+gray paths.)
 
 - [10](10-nominal-bit-depth.md)'s `YUV420P10` row stops being "a format no
   source produces", and its avif and heic rows shrink: on this path the depth is

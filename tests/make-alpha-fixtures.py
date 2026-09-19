@@ -22,6 +22,9 @@ commands from the repository root whenever a source png changes, with
     heif-enc -q 100 -p x265:lossless=1 -o tests/fixtures/alpha-rgba8.heic tests/fixtures/alpha-rgba8.png
     avifenc --lossless --qalpha 100 -o tests/fixtures/alpha-rgba8.avif tests/fixtures/alpha-rgba8.png
     cjxl -d 0 tests/fixtures/alpha-rgba8.png tests/fixtures/alpha-rgba8.jxl
+    cjxl -d 0 tests/fixtures/jxl-gray10.pgm tests/fixtures/jxl-gray10.jxl
+    cjxl -d 0 tests/fixtures/jxl-gray12.pgm tests/fixtures/jxl-gray12.jxl
+    cjxl -d 0 tests/fixtures/jxl-rgba10.pam tests/fixtures/jxl-rgba10.jxl
 
 The yuv avif fixtures are the same kind of hand-made container: every one of
 them states a matrix the frame properties can name, which is what moves a file
@@ -51,11 +54,23 @@ bitstream for a gray png and a 4:2:0 one for an rgb png, which is what makes
 ``mono-alpha.heic`` a monochrome-with-alpha fixture, and ``avifenc`` writes a
 monochrome bitstream for the gray source, which is what makes
 ``mono-alpha.avif`` one. ``-d 10`` stores that one at ten bits per sample, which
-is the only fixture that exercises a 16 bit avif: its planes come back as the
-same numbers times 256, within the rounding of the ten bit encode, not exactly.
+is the ten bit avif: the encoder scales the eight bit source onto the ten bit
+range, and the plugin hands the file out as ``Gray10`` holding exactly those
+numbers, so the validator can state them instead of comparing against a
+sixteen bit word the samples used to be left aligned in.
+
 ``alpha-rgba8.jxl`` is the jpeg xl copy of the same source, and it is the
 fixture for the plugin's own jxl decode path, which is the only one that reads a
-codestream's extra channels directly.
+codestream's extra channels directly. ``jxl-gray10.jxl`` and ``jxl-gray12.jxl``
+are the fixtures of a depth the ``image`` crate cannot name: both hold the
+numbers one to twelve in a four by three picture and differ only in the depth
+their ``MAXVAL`` states, one at ten bits per sample and one at twelve, which is
+what tells a reader that moves the samples down out of the sixteen bit word by
+the depth the file states rather than by a depth it was built with.
+``jxl-rgba10.jxl`` is the same kind of source at ten bits with an alpha channel,
+which is how the alpha plane of a deeper file gets a fixture of its own: it is
+four interleaved planes of distinct numbers, so a plane that was shifted by the
+wrong amount or filled with the wrong value shows up in the validator.
 """
 
 from __future__ import annotations
@@ -79,6 +94,12 @@ MONO_HEIGHT = 5
 # the height and the width.
 YUV_WIDTH = 4
 YUV_HEIGHT = 4
+
+# Size of the pgm sources of the two jpeg xl fixtures that state a depth between
+# the eight bits and the sixteen a png can: four numbers wide and three tall, so
+# the twelve samples one to twelve can be stated by position.
+JXL_WIDTH = 4
+JXL_HEIGHT = 3
 
 # PNG color types.
 GRAY = 0
@@ -115,6 +136,31 @@ def png(
     )
     with open(path, "wb") as handle:
         handle.write(document)
+
+
+def netpbm(path: str, maximum: int, rows: list[list[int]], depth: int = 1) -> None:
+    """Writes a binary grayscale PGM, or a four channel PAM when `depth` is four.
+
+    A png can only state eight bits or sixteen, so a fixture whose nominal depth
+    is between the two is a netpbm file: ``cjxl`` reads the ``MAXVAL`` of one as
+    the depth of the codestream it writes, which is the only way to make a jpeg
+    xl file that states ten or twelve bits per sample. The pgm form holds one
+    channel and the pam form the four an alpha channel needs, both with the
+    samples of a row interleaved and every sample as wide as the maximum needs.
+    """
+    if depth == 1:
+        header = f"P5\n{len(rows[0])} {len(rows)}\n{maximum}\n"
+    else:
+        header = (
+            f"P7\nWIDTH {len(rows[0]) // depth}\nHEIGHT {len(rows)}\n"
+            f"DEPTH {depth}\nMAXVAL {maximum}\nTUPLTYPE RGB_ALPHA\nENDHDR\n"
+        )
+    if maximum < 256:
+        payload = bytes(sample for row in rows for sample in row)
+    else:
+        payload = b"".join(struct.pack(">H", sample) for row in rows for sample in row)
+    with open(path, "wb") as handle:
+        handle.write(header.encode("ascii") + payload)
 
 
 def tiff_rgba32f(path: str, pixels: list[list[float]]) -> None:
@@ -267,6 +313,36 @@ def main() -> None:
             [10.0, 11.0, 12.0, 0.5],
             [13.0, 14.0, 15.0, 0.125],
         ],
+    )
+    # The sources of the jpeg xl fixtures that state a depth between the eight
+    # bits and the sixteen a png can. The two grayscale ones hold the numbers one
+    # to twelve and differ only in the depth their header states, so a reader
+    # that moved the samples down out of the sixteen bit word by a depth of its
+    # own gives a different plane for one of them; the four channel one holds
+    # four planes of distinct numbers at the same depth, so the alpha plane of a
+    # deeper file is checked apart from the colour planes that share its word.
+    samples = [
+        [1 + x + JXL_WIDTH * y for x in range(JXL_WIDTH)] for y in range(JXL_HEIGHT)
+    ]
+    netpbm(write("jxl-gray10.pgm"), 1023, samples)
+    netpbm(write("jxl-gray12.pgm"), 4095, samples)
+    netpbm(
+        write("jxl-rgba10.pam"),
+        1023,
+        [
+            [
+                sample
+                for x in range(JXL_WIDTH)
+                for sample in (
+                    1 + x + JXL_WIDTH * y,
+                    13 + x + JXL_WIDTH * y,
+                    25 + x + JXL_WIDTH * y,
+                    100 + x + JXL_WIDTH * y,
+                )
+            ]
+            for y in range(JXL_HEIGHT)
+        ],
+        depth=4,
     )
     print(f"wrote the alpha fixtures to {FIXTURES}")
 

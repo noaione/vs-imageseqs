@@ -7,7 +7,7 @@
 - expected: a jxl that states an orientation reports it and is handed out the way
   the file describes, `apply_rotation=False` gives the stored picture back, and
   the codestream's colour encoding and bit depth reach `ImageInfo` — which is
-  what [08](08-color-metadata.md) and [10](10-nominal-bit-depth.md) are waiting
+  what [08](08-color-metadata.md) and [10](10-nominal-bit-depth.md) were waiting
   for, and what [09](09-exif-orientation.md) left open for jxl
 - risk: medium — the decode loop becomes ours, and jxl is one of the two formats
   whose decode a mistake changes pixels rather than properties

@@ -107,11 +107,10 @@ are untouched.
 
 ## left over
 
-- **a 10-bit or 12-bit jp2** is handed out as `Gray16`/`RGB48` until
-  [10](10-nominal-bit-depth.md) lands, because the plugin has no nominal
-  10/12-bit representation today. The `SIZ` walk this module needs anyway is
-  where `prec` comes from, so 10 would read it from here rather than from the
-  crate's decode.
+- **a 10-bit or 12-bit jp2** will be handed out as `Gray16`/`RGB48` until this
+  module reads `prec`: [10](10-nominal-bit-depth.md) is implemented and gives the
+  depth a format in `src/pixel.rs` and a shift in the writer, so the `SIZ` walk
+  this module needs anyway is where its `prec` should come from.
 - **`sYCC` is not automatically `YUV420P8`.** The webp path can assume 4:2:0
   because vp8 is defined that way; `colr = 18` only says the samples are yuv,
   and `dx`/`dy` in `SIZ` say how they are sampled. A 4:4:4 or 4:2:2 file handed

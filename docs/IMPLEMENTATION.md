@@ -2,13 +2,14 @@
 
 This is the design document. It was written before the plugin existed and is kept
 in the order it was written: what the build does is described in these words
-where it agrees, and annotated where it does not. The work the doc asks for and
-the code does not have is one plan per change in
-[docs/improvements/](improvements/README.md) — 06 for a jpeg 2000 backend, 07 for
-the two `image` features this doc's own configuration block names, 08 for the
-colour properties, 09 for the exif orientation and 10 for the nominal 10/12-bit
-depths — and each of those carries its status, so that index is the answer to
-"what is left".
+where it agrees, and annotated where it does not. Each change the doc asks for
+is one plan in [docs/improvements/](improvements/README.md) — 06 for a jpeg 2000
+backend, 07 for the two `image` features this doc's own configuration block
+names, 08 for the colour properties, 09 for the exif orientation, 10 for the
+nominal 10/12-bit depths and 12 for a heif's or an avif's own yuv planes — and
+each of those carries its status, so that index is the answer to "what is left":
+its `plans` table for what is still a plan, and its `deferred` section for what
+the landed ones left over.
 
 ## Goal
 
@@ -460,10 +461,12 @@ The module is in the shape of `formats/heif.rs` and `formats/jxl.rs`:
 - **a monochrome item is still `image`'s.** `avif::handles` takes a file whose
   probe answered a yuv format and whose extension is `avif`, so a monochrome
   avif keeps [05](improvements/05-monochrome-heif.md)'s corrected
-  `Gray8`/`Gray16` and the `image` decode behind it, and
-  [10](improvements/10-nominal-bit-depth.md) owns the nominal depth question
-  there. A monochrome item is a single plane dav1d hands over directly, which is
-  the obvious next step for that plan rather than a gap here.
+  `Gray8`/`Gray16` and the `image` decode behind it, with the format narrowed to
+  the depth `av1C` states by [10](improvements/10-nominal-bit-depth.md): the
+  samples arrive left aligned in a sixteen bit word and the writer shifts them
+  down, which is the sample the file holds. A monochrome item is a single plane
+  dav1d hands over directly, which is the obvious next step for that plan rather
+  than a gap here.
 - **the alpha item** is decoded only when the colour type says the file has one,
   into the gray format of the same depth (`YUV420P10` gives a `Gray10` alpha),
   and its own bit depth is checked against that format before it is copied.
@@ -844,9 +847,12 @@ is implemented, and `apply_rotation=0` is what asks for the stored picture — a
 the colour information comes from the container, which is
 [08](improvements/08-color-metadata.md): an `nclx` box, a `cICP` chunk or a jxl
 codestream header, read once per file and kept in `ImageInfo` as the h.273 code
-points the file states. The one field this section leaves out is the nominal bit
-depth: a 10-bit file is probed as `Gray16`/`RGB48` today, and
-[10](improvements/10-nominal-bit-depth.md) is what would stop that.
+points the file states. The last field is the nominal bit depth: the probe keeps
+what the container states — `av1C`, libheif's handle or the jxl codestream
+header — and the format is the one that names that depth rather than the word
+the decoder reports, which is
+[10](improvements/10-nominal-bit-depth.md). A container that states none, and
+the `image` decode behind it, leaves the word alone.
 
 Conceptually:
 
@@ -879,7 +885,8 @@ to `format_override`, which is where a container can correct the format the
 decoder reports. `src/formats/webp.rs` uses it to hand back a lossy webp
 without alpha as `YUV420P8` when the decoder reports rgb, and
 `src/formats/avif.rs` uses it for a monochrome avif, which `image-rs` reports as
-`Rgba8` and whose `av1C` says is `Gray8`/`Gray16`. Both read only the leading
+`Rgba8` and whose `av1C` says is a `Gray8` to `Gray16` format at the depth the
+box names. Both read only the leading
 boxes of the file, and both answer `None` for a file they do not need to
 correct. A colour avif or heic never reaches that step: `formats::avif::handles`
 and the heif module answer the probe themselves, yuv and all, so there is nothing
@@ -917,7 +924,9 @@ GRAY10            10-bit gray, for the alpha of a 10-bit yuv page
 GRAY12            12-bit gray, for the alpha of a 12-bit yuv page
 ```
 
-For the initial implementation, use:
+A colour type is a word rather than a depth. `L8`/`RGB8` are the eight bit
+formats and `L16`/`RGB16` the sixteen bit ones, so the decoder's answer alone
+gives
 
 ```text
 u8  -> 8-bit VS format
@@ -925,14 +934,29 @@ u16 -> 16-bit VS format
 f32 -> 32-bit float VS format
 ```
 
-That leaves one hole. A file whose nominal depth is 9 to 15 and which *is* rgb
-is handed out as the 16-bit format, so a 10-bit tiff comes back as `RGB48` with
-its samples left aligned in the word rather than as a `RGB30`-shaped format —
-0.4% short of the scale the format claims, and with the wrong answer for a graph
-that wanted a 10-bit clip. Nothing infers a nominal depth from a `u16` today:
-[10](improvements/10-nominal-bit-depth.md) is the plan that would, and it is the
-one with the widest blast radius here, because a frame's format is what a graph
-branches on.
+and a file whose nominal depth is 9 to 15 arrives in the 16-bit word with its
+samples scaled onto the whole of it: a ten bit avif came back as `RGB48` with
+`max=65472`, 0.4% short of the scale the format claimed, and with the wrong
+answer for a graph that wanted `RGB30`. What closes that is the container's own
+depth, which each probe reads while it is already walking the boxes or the
+codestream header (`av1C` and the av1 sequence header for avif, libheif's
+`luma_bits_per_pixel` for heif, the jxl image header): `PixelFormat::at_depth`
+narrows the word to the format that names that depth, and the writer moves every
+sample down by the difference, which recovers it exactly. VapourSynth names
+every depth from eight to sixteen in both families, so the mapping is
+
+```text
+depth 9..=16, gray   GRAY9 .. GRAY16, the depth the file states
+depth 9..=16, rgb    RGB27 .. RGB48,  three samples to the pixel
+every other format   unchanged: a yuv format is named after the depth it holds,
+                     and a depth outside 8..=16 leaves the word alone
+```
+
+[10](improvements/10-nominal-bit-depth.md) is the plan that landed this, and the
+depths it does not have a fixture for are recorded there. What the plugin asks
+no depth of — png, jpeg, tiff, webp, dds, and the r,g,b hand-outs of a heif page
+— keeps the word it arrives in, which is what the sandbox's 16-bit png and tiff,
+both full scale, already mean.
 
 The yuv formats are the exception, and they are why
 [12](improvements/12-heif-avif-yuv-output.md) needed plan
@@ -945,7 +969,9 @@ for lossy webp by [03](improvements/03-webp-yuv-output.md), and
 depths and the chroma the two new readers can produce, together with the gray
 depths an alpha plane of those pages needs. A file that states no usable matrix
 — avif's code 2, or nothing at all — keeps the rgb hand-out it had, which is the
-rule that keeps `sandbox/hitokage-sample` unchanged.
+rule that keeps `sandbox/hitokage-sample` on its rgb path; the samples of such a
+file are still narrowed to the depth its `av1C` states, which is what moved its
+ten and twelve bit pages to `RGB30` and `RGB36`.
 
 ---
 
@@ -1297,10 +1323,17 @@ RGBA16     RGB48        GRAY16
 RGBA32F    RGBS         GRAYS
 ```
 
+The rows are the color type a decoder reports, and a source whose container
+states a depth above eight and below sixteen is one of the sixteen bit rows in
+name only: [10](improvements/10-nominal-bit-depth.md) hands it out as the format
+naming that depth — a ten bit page is `RGB30` with a `GRAY10` alpha, not `RGB48`
+with a `GRAY16` one — and its samples are right aligned at that depth.
+
 Alpha keeps the sample depth of the source and is taken from the second
 channel of `LA` input and the fourth channel of `RGBA` input. Sources without
-an alpha channel produce an opaque plane (`255`, `65535`, or `1.0`), so every
-frame of an alpha clip carries a meaningful value.
+an alpha channel produce an opaque plane (`255`, `65535`, or `1.0` — or, on a
+frame narrowed to its own depth, that depth's maximum, `1023` for a ten bit
+one), so every frame of an alpha clip carries a meaningful value.
 
 Both clips share frame count, dimensions, frame rate, and frame indexes, and
 both are built from one `Sequence`. The prefetch pool caches the finished frames
@@ -1329,14 +1362,16 @@ vendored.
 
 ## Validation
 
-`cargo test` covers the pixel plumbing, the prefetch pool (one decode shared by
-two consumers, failed decodes retried, frames of a variable sequence kept
-apart), the clip format mapping, and the container readers a file is described
-from: the avif walk (its size, bit depth, alpha item, ICC box, file type, the
-properties an `ipma` table associates from one, the boxes that move the picture,
-the header limit, the AV1 sequence header with and without a colour description,
-and seven real fixtures probed or decoded from their own containers), the heif
-handle and its own colour read, the png chunk walk and the jxl header.
+`cargo test` covers the pixel plumbing — including the format each nominal
+depth maps to and the shift that recovers the sample from a wider word — the
+prefetch pool (one decode shared by two consumers, failed decodes retried,
+frames of a variable sequence kept apart), the clip format mapping, and the
+container readers a file is described from: the avif walk (its size, bit depth,
+alpha item, ICC box, file type, the properties an `ipma` table associates from
+one, the boxes that move the picture, the header limit, the AV1 sequence header
+with and without a colour description, and seven real fixtures probed or decoded
+from their own containers), the heif handle and its own colour read, the png
+chunk walk and the jxl header.
 
 `tests/readalpha.vpy` covers the plugin itself against the fixtures written by
 `tests/make-alpha-fixtures.py`: LA/RGBA 8/16-bit and float, opaque fills, mixed
@@ -1356,6 +1391,15 @@ position; the 4x4 `alpha-yuv420p.avif` is checked plane by plane against the
 `yuv-rgba8.png` it is encoded from, alpha included; the opaque fill is checked to
 be the depth's own maximum (255 on the 8-bit page, 1023 on the ten bit one); and
 a yuv page beside an rgb one is rejected without `mismatch`.
+
+[10](improvements/10-nominal-bit-depth.md) added the depth section: the three
+hand-made jxl fixtures — `jxl-gray10.jxl` and `jxl-gray12.jxl`, four by three
+grayscale holding `1..12`, and `jxl-rgba10.jxl`, the same numbers in three planes
+with `100..111` in its alpha — are read as `Gray10`, `Gray12` and `RGB30` with a
+`Gray10` alpha plane, and the ten bit rows of the monochrome and yuv tables state
+the depth's own samples, `round(value * 1023 / 255)`, which is what `avifenc`
+stored, rather than the same numbers left aligned in the sixteen bit word those
+rows used to be checked in.
 
 ---
 
@@ -1493,17 +1537,19 @@ The list has moved three times since it was written:
   [03](improvements/03-webp-yuv-output.md) measured. A colour heif, heic or avif
   page followed in [12](improvements/12-heif-avif-yuv-output.md), where the
   container's own planes and its own matrix decide the format.
-- **`special 10/12-bit preservation` is no longer deferred but planned**: it is
-  [10](improvements/10-nominal-bit-depth.md), which is work rather than a
-  decision to leave alone. [12](improvements/12-heif-avif-yuv-output.md) took the
-  half of it that a yuv page needs, because those planes carry their depth in the
-  format; what is left is rgb and jxl, where a nominal depth has to be chosen for
-  a 16 bit buffer.
+- **`special 10/12-bit preservation` is done**: [10](improvements/10-nominal-bit-depth.md)
+  reads the depth the container states and hands the file out as the format that
+  names it, right aligned in that format's word, so a ten bit avif page is a
+  `RGB30` frame instead of a `RGB48` one whose samples stop 0.4% short.
+  [12](improvements/12-heif-avif-yuv-output.md) had taken the half of it a yuv
+  page needs, because those planes already carry their depth in the format. What
+  is left of the depth question is a decoder that does not fill the range of a
+  sixteen bit file, and a fixture for the depths nobody has a file at.
 
 The rest is policy and stays where it is: icc conversion, gpu output (waiting on
 `vapoursynth4-rs`), SIMD, custom Rayon, and the two python-side helpers.
 `docs/improvements/README.md`'s `not planned` section has the reason for each,
-and the plans this doc still asks for are 06, 07 and 10 in that same folder.
+and the plans this doc still asks for are 06 and 07 in that same folder.
 
 ---
 

@@ -34,6 +34,15 @@ whenever the container states a matrix VapourSynth names. a container that state
 code 2 or nothing keeps the rgb the plugin builds, and a monochrome page of any
 family is gray at its own depth.
 
+a frame's depth is the one its container states, not the word the decoder hands
+over: a file that states nine to fifteen bits is handed out as the format that
+names that depth (`RGB30` for ten bit rgb, `Gray12`, and so on) and the writer
+moves every sample down by `word_bits - frame_bits`, which recovers it exactly.
+eight and sixteen bit files, float files, and a container that states no depth
+(`png`, `jpeg`, `tiff`, `webp`, and a heif page on the rgb path) keep the word
+they had. jxl asks for sixteen bit words like every other reader and takes the
+same shift; `formats/jxl.rs` says why.
+
 frames are tagged with the colour their container states: `_Primaries` and
 `_Transfer` for every family, `_Matrix` and `_Range` for a yuv frame, from an
 `nclx` box, a `cICP` chunk, a jxl codestream header or an av1 sequence header
@@ -73,7 +82,8 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   for the `cICP` chunk, which `image` has no accessor for, and `webp.rs` for the
   libwebp decode and the lossy yuv format). a monochrome avif still goes through
   `image` and is corrected to `Gray8` here.
-- `src/pixel.rs`: supported pixel formats and planar frame writes.
+- `src/pixel.rs`: supported pixel formats, the format a nominal depth names, and
+  planar frame writes, which move a wider word down to the frame's own depth.
 - `src/color.rs`: frame properties, and the container's color metadata mapped
   onto them as `_Primaries`, `_Transfer`, `_Matrix` and `_Range`.
 - `src/error.rs`: errors returned through the VapourSynth boundary.
@@ -84,7 +94,10 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   that script's `mono-alpha.png` and `alpha-rgba8.png` with `heif-enc` and
   `avifenc` (`mono-alpha-10.avif` is the 10 bit one), and `alpha-rgba8.jxl` from
   the last with `cjxl`, so a changed source needs them re-encoded by hand. its
-  yuv avif section reads the three crops `avif-yuv420p.avif`, `avif-yuv422p.avif`
+  depth section reads `jxl-gray10.jxl`, `jxl-gray12.jxl` and `jxl-rgba10.jxl`,
+  encoded with `cjxl -d 0` from the `P5` pgm and the `P7` pam the same script
+  writes (`MAXVAL` 1023, 4095 and 1023 with four channels), so those are
+  re-encoded by hand the same way. its yuv avif section reads the three crops `avif-yuv420p.avif`, `avif-yuv422p.avif`
   and `avif-yuv444p10.avif` cut out of the `sandbox/hitokage-sample` yuv avifs,
   plus `alpha-yuv420p.avif`, and those four are likewise described by hand in
   that script's header. its orientation section reads the `tests/fixtures/orientation-*.png` files written by

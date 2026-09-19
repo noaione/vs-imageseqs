@@ -453,6 +453,78 @@ generated fixture pages come back exactly (`max 0` on every plane). the residual
 is chroma upsampling phase, not a wrong plane: the frames of a graph that does not
 resize are the file's own samples, which is what the format change means.
 
+## nominal depth
+
+[10](improvements/10-nominal-bit-depth.md) hands a file whose container states a
+depth between eight and sixteen out as the format that names it, with its samples
+right aligned at that depth. the format and the position of every sample inside a
+two byte word both move, so this is a change nothing should pay for: the same
+bytes are allocated, the same bytes are written, and `expected_bytes`, the
+lookahead budget and the number of frames that budget holds are all unchanged.
+the only files it can touch are jxl and the paths that go through `image` — a
+monochrome avif, and the r,g,b hand-outs of a page whose matrix the properties
+cannot name — and the corpus for it is `sandbox/hitokage-sample`, which is the
+one set with a ten and a twelve bit page in it. `format-summary.py --frame`, before and
+after (`target/bench/base10/hitokage-*.txt`):
+
+| file | before | after | frame bytes |
+| --- | --- | --- | --- |
+| `avif-yuv444p10le.avif` | `RGB48` max=65472 | `RGB30` max=1023 | 144,384,000 |
+| `avif-yuv444p12le.avif` | `RGB48` max=65520 | `RGB36` max=4095 | 144,384,000 |
+| `jxl-rgb48le.jxl` | `RGB48` max=65535 | `RGB48` max=65535 | 144,384,000 |
+| `png-rgb48be.png` | `RGB48` max=65535 | `RGB48` max=65535 | 144,384,000 |
+| `tiff-rgb48le.tiff` | `RGB48` max=65535 | `RGB48` max=65535 | 144,384,000 |
+| `tiff-rgb24.tiff` | `RGB24` max=255 | `RGB24` max=255 | 72,192,000 |
+| `exr-gbrpf32le.exr` | `RGBS` max=255 | `RGBS` max=255 | 288,000,000 |
+
+the other three avifs of that set are `avif-yuv420p.avif`, `avif-yuv422p.avif`
+and `avif-yuv444p.avif`, all 8 bit, and all three stay `RGB24` max=255 at
+72,192,000 bytes. the two deep files are the ones the sixteen bit word was too
+wide for — 0.4% of the scale at ten bits, 0.02% at twelve — and their first
+samples moved from 18304, 18688, 19072, 19008, 18560, 18880 to 286, 292, 298,
+297, 290, 295 (`>> 6`) and from 18320, 18720, 19248, 19120, 18576, 18688 to 1145,
+1170, 1203, 1195, 1161, 1168 (`>> 4`), which is the old value shifted by exactly
+the difference between the two depths. a ten bit frame is two bytes per sample
+like the word it replaces, so `frame bytes` is the same number on both sides of
+every row, and 144,384,000 is what the lookahead budget was already counting for
+those pages.
+
+pixels: the parity sets are the six sandbox sets, a fixed png subset and the
+alpha fixtures, and none of them holds a file whose depth changed, so the check
+here is that nothing else moved: 105 of the 106 lines of `frame-parity.py` are
+byte identical to the pre-change build's, the odd line out being the plugin name
+it prints (`base10/parity-*.txt`), and the deep pages of `hitokage-sample` sit
+outside those sets and are checked by the table above. same-batch interleaved A/B
+against `vs_imageseqs-before-10.dll`, best of five rounds:
+
+| set | probe before → after | decode before → after |
+| --- | --- | --- |
+| avif 35 | 2.0 → 1.8 ms | 3149.2 → 3097.3 ms (0.984) |
+| heic 35 | 6.2 → 6.8 ms | 7346.6 → 7258.9 ms (0.988) |
+| hitokage 5 | 0.6 → 0.6 ms | 1294.7 → 1345.4 ms (1.039) |
+| mixed 35 | 23.3 → 27.7 ms | 4077.0 → 4077.3 ms (1.000) |
+| png 35 | 4.9 → 4.8 ms | 581.0 → 590.7 ms (1.017) |
+| fixtures 99 | 1.8 → 1.6 ms | 5.3 → 6.0 ms |
+
+a second run of the same rows moved them by up to 4% in both directions, and the
+`mixed` probe, which is the widest of the differences, was re-measured over six
+paired rounds as 19.9/29.5/24.6/24.1/23.3/24.0 before against
+20.7/24.0/24.1/24.3/25.0/23.6 after: the whole table is drift around a change
+that does no work. the convert stage on its own, paired and interleaved over four
+rounds of eight frames of one 6000x4000 file (`target/bench/ab-convert.py`,
+`base10/ab-convert.txt`):
+
+| file | convert before → after |
+| --- | --- |
+| 10-bit avif (the shifted path) | 112.0 → 112.1 ms |
+| 12-bit avif (the shifted path) | 105.0 → 104.1 ms |
+| 16-bit jxl (control) | 85.8 → 85.7 ms |
+| 16-bit png (control) | 87.7 → 88.5 ms |
+
+one move per sample more per sample moved, and no measurable difference: the load
+and the store were already there, and a shift of a value the load brought into a
+register is what the loop around it does anyway.
+
 ## per stage cost
 
 `debug=True` with `prefetch=0`, averaged over the first four files of each
@@ -570,3 +642,10 @@ what it was worth — 9.25 s to 4.74 s at the default, and `prefetch=16` from
 separately from the speed work, the sandbox found one format that used not to
 work at all: the 31 monochrome heic files failed to decode, and they now read as
 `Gray8` through [05 monochrome heif](improvements/05-monochrome-heif.md).
+
+one more finding is not headroom but a wrong answer, and it came out of the same
+corpus: the two deep pages of `sandbox/hitokage-sample` state ten and twelve bits
+and used to be handed out as sixteen bit `RGB48` frames whose samples stopped
+0.4% and 0.02% short of the scale the format claimed, which is the section on
+nominal depth above. [10](improvements/10-nominal-bit-depth.md) fixed it, and it
+cost nothing to fix.

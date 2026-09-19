@@ -102,6 +102,15 @@ and the yuv families a file's own planes need (`YUV420P8`, `YUV420P10`,
 and `Gray12` for the alpha clip of a ten or twelve bit yuv page. `Read` ignores
 alpha channels; use `ReadAlpha` to read them.
 
+a file whose container states a depth between eight and sixteen is handed out as
+the format that names that depth, with its samples right aligned in the words
+such a frame holds: a ten bit avif page is `RGB30` holding `0..1023` rather than
+`RGB48` holding the same picture scaled onto a sixteen bit word, and a twelve bit
+one is `RGB36`. that covers gray and rgb alike — `Gray10`, `Gray12`, `RGB30`,
+`RGB36`, and every depth up to sixteen — and the alpha plane of a deeper file is
+narrowed with it. an eight bit file, a sixteen bit file, a float file and a file
+whose container states no depth are unchanged.
+
 ### common inputs
 
 - `png`
@@ -111,10 +120,10 @@ alpha channels; use `ReadAlpha` to read them.
 - `ico`
 - `tiff`
 - `webp` - via libwebp, lossy files without alpha as `YUV420P8`, see below
-- `avif` - via dav1d, monochrome pages as `Gray8`/`Gray16`, colour pages as
-their own yuv planes, see below
-- `heif`/`heic` - via libheif/libde265, monochrome pages as `Gray8`/`Gray16`,
-colour pages as their own yuv planes, see below
+- `avif` - via dav1d, monochrome pages as `Gray8`/`Gray10`/`Gray12`, colour
+pages as their own yuv planes, see below
+- `heif`/`heic` - via libheif/libde265, monochrome pages as
+`Gray8`/`Gray10`/`Gray12`, colour pages as their own yuv planes, see below
 - `jxl (jpeg xl)` - via jxl
 - `exr`
 - `hdr`
@@ -132,10 +141,11 @@ same way — the item's own planes, `YUV420P8` for the common 4:2:0 case and
 `nclx` colour box, or from the AV1 sequence header when an avif has no `colr` box
 at all. a page whose container states code 2 (`unspecified`) or nothing keeps the
 `RGB24`/`RGB48` the plugin builds, which is why `sandbox/hitokage-sample`'s
-colour avifs are still rgb; lossless webp, a webp with an alpha channel, and
-every other format keep the `RGB24`/`Gray8` output they always had. `ReadAlpha`
-over a ten bit yuv page gives a `Gray10` alpha clip, and one over an 8 bit page a
-`Gray8` one.
+colour avifs are still rgb — at the depth their own `av1C` states, so its ten
+and twelve bit pages are `RGB30` and `RGB36` — and lossless webp, a webp with an
+alpha channel, and every other format keep the `RGB24`/`Gray8` output they always
+had. `ReadAlpha` over a ten bit yuv page gives a `Gray10` alpha clip, and one
+over an 8 bit page a `Gray8` one.
 
 a graph that needs rgb converts back once. `zimg` takes the matrix and the range
 from the frame's own properties when the arguments are left out, so one line
@@ -242,8 +252,11 @@ a plugin function with several outputs returns a dictionary in python, keyed
 by the names of its return type (`clip` and `alpha`).
 
 alpha keeps the sample depth of the source: 8-bit input becomes `GRAY8`,
-16-bit input becomes `GRAY16`, and float input becomes `GRAYS`. the alpha of
-`LA` input is its second channel and the alpha of `RGBA` input is its fourth.
+16-bit input becomes `GRAY16`, and float input becomes `GRAYS`. a source whose
+container states a depth above eight and below sixteen gives that depth's gray
+format, `GRAY10` for a ten bit page, because a frame narrowed to its own depth
+does not widen again for its alpha. the alpha of `LA` input is its second channel
+and the alpha of `RGBA` input is its fourth.
 files without an alpha channel produce an opaque plane, filled with the largest
 sample the alpha format holds: `255` for `Gray8`, `1023` for `Gray10`, `4095` for
 `Gray12`, `65535` for `Gray16`, and `1.0` for `Gray32F`. the alpha clip of a yuv

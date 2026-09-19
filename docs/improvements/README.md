@@ -2,7 +2,9 @@
 
 one file per change, each with the evidence, the intended edit, and how to
 check the result. the measurements come from [benchmarks](../BENCH.md) and from
-the probes described there.
+the probes described there. `plans` below is the list itself, `deferred` is
+everything the landed ones left over — work that is not a plan because nothing
+has measured it as worth doing — and `not planned` is the decisions.
 
 all five are implemented: 05 in `src/formats/heif.rs` (with one writer change in
 `src/pixel.rs` and the avif probe in `src/decoder.rs`), 01 in `src/prefetch.rs`
@@ -11,23 +13,23 @@ plus `src/source.rs`, 02 in `src/clip.rs` with the generic pool in
 type in `src/decoder.rs`. [09](09-exif-orientation.md) is implemented too, in
 `src/pixel.rs` and `src/clip.rs` behind `apply_rotation`.
 
-[06](06-jpeg-2000-backend.md) to [10](10-nominal-bit-depth.md) are the rest of
-the list. they
-are the parts of [IMPLEMENTATION.md](../IMPLEMENTATION.md) that the build does
-not have: a jpeg 2000 backend the plan names and nothing compiles, the two
-`image` features the doc's own configuration block lists (`dds` and `ff`), the
-colour properties its `# Color Metadata` section asks for, the exif orientation
-it probes and never applies, and the nominal 10/12-bit depths its scope list
-defers. only the first four of those were open when the list was written.
-[08](08-color-metadata.md) is implemented in `src/color.rs` with a container
-read in `src/formats/heif.rs`, `src/formats/jxl.rs` and the new
-`src/formats/png.rs`, and it keeps its measurement because it is the one of the
-five whose probe cost can move: 0.15 ms per heic file and 0.04 ms per png file,
-measured against the sets it describes.
+[06](06-jpeg-2000-backend.md) and [07](07-dds-and-farbfeld.md) are the rest of
+the list. they are the parts of [IMPLEMENTATION.md](../IMPLEMENTATION.md) that
+the build does not have: a jpeg 2000 backend the plan names and nothing
+compiles, and the two `image` features the doc's own configuration block lists
+(`dds` and `ff`). the three other rows the list was written from all landed —
+the colour properties its `# Color Metadata` section asks for, in `src/color.rs`
+with a container read in `src/formats/heif.rs`, `src/formats/jxl.rs` and the new
+`src/formats/png.rs` ([08](08-color-metadata.md)), the exif orientation it
+probes and never applies ([09](09-exif-orientation.md)), and the nominal
+10/12-bit depths its scope list defers ([10](10-nominal-bit-depth.md)) — and the
+two of them whose cost could move keep their measurements: 0.15 ms per heic file
+and 0.04 ms per png file for 08's container reads, measured against the sets it
+describes, and 112.0 → 112.1 ms per frame for the convert stage of a ten bit
+avif under 10's shift.
 
-nothing left in the list is a speed plan: two are formats no sandbox set covers,
-[10](10-nominal-bit-depth.md) changes what a frame holds, and 09 was a transform
-the file asked for and did not get.
+nothing left in the list is a speed plan: 06 and 07 are two formats no sandbox
+set covers, and 09 was a transform the file asked for and did not get.
 
 [11](11-jxl-direct.md) is the odd one out and came out of the last row of that
 list: reading the orientation for a jxl showed that the decoder the plugin wraps
@@ -36,8 +38,8 @@ rotated picture whatever `apply_rotation` says. dropping the `image` adapter for
 the `jxl` crate underneath it fixes that, and it is what lets
 [08](08-color-metadata.md) and [10](10-nominal-bit-depth.md) read a jxl's colour
 encoding and its bit depth. it is implemented in `src/formats/jxl.rs`, with no
-change to what a jxl decodes to: 35 pages, frame for frame identical. 06, 07 and
-10 are the open ones.
+change to what a jxl decodes to: 35 pages, frame for frame identical. 06 and 07
+are the open ones.
 
 [12](12-heif-avif-yuv-output.md) came out of the samples in
 `sandbox/hitokage-sample` and is the first plan here that is about what a frame
@@ -56,6 +58,25 @@ decode pass is 35% faster. the 31 monochrome heic pages, the unspecified-matrix
 `hitokage-sample` avifs and every other container are unchanged, and the four
 promises it does not keep — a heic's orientation code, the alpha item on `Read`,
 `iinf`/`pixi`, and the monochrome avif decode — are listed in the plan.
+
+[10](10-nominal-bit-depth.md) is the last of these three to land, and the
+smallest of them, exactly because [12](12-heif-avif-yuv-output.md) took most of
+it: a yuv frame's depth is its format, so the avif and heic pages needed nothing
+here. what was left is the depth a colour type cannot state — a jxl codestream
+header, `av1C` on the rgb path, and libheif's handle — so the probe of each
+reader keeps one more number and `PixelFormat::at_depth` names the format for
+it, while the writer moves every sample down by `word_bits - frame_bits`. that
+shift is exact rather than approximate (scaling a sample of `bits` bits onto a
+word of `word` bits multiplies it by less than `2^(word - bits) + 1`, so the
+largest scaled sample stays below the smallest one of the value above it), which
+is why jxl keeps asking for sixteen bit words and takes the same shift as every
+other reader instead of being the exception the plan describes. it is implemented
+in `src/pixel.rs` and the three container modules, against three hand-made jxl
+fixtures: the two deep pages of `sandbox/hitokage-sample` are `RGB30` and `RGB36`
+now, `jxl-gray10`/`jxl-gray12`/`jxl-rgba10` are `Gray10`/`Gray12`/`RGB30`, 105 of
+the 106 parity lines are byte identical to the build before it, and the paired
+convert stage moved 112.0 → 112.1 ms on the ten bit avif, which is to say the
+shift cost nothing.
 
 ## evidence in short
 
@@ -126,7 +147,7 @@ open plus frames to 4.99 s.
 | [07 dds and farbfeld](07-dds-and-farbfeld.md) | `Cargo.toml`, `README.md`, fixtures, `tests/readalpha.vpy` | `.dds` and `.ff` files stop failing the probe, for two feature flags and no native code | low | proposed |
 | [08 color metadata](08-color-metadata.md) | `src/decoder.rs`, `src/formats/heif.rs`, `src/formats/jxl.rs`, `src/formats/png.rs` (new), `src/color.rs` | `_Primaries`/`_Transfer` from the container's `nclx`, `cICP` or jxl codestream header, and `_Matrix`/`_Range` from the file for a yuv frame, while an icc-only file changes nothing | low to medium, a wrong claim is worse than none | implemented |
 | [09 exif orientation](09-exif-orientation.md) | `src/decoder.rs`, `src/source.rs`, `src/clip.rs`, `src/pixel.rs`, fixtures, `tests/readalpha.vpy` | a file whose exif says 6 comes out the way its thumbnail looks, behind an `apply_rotation` argument that defaults on, and `ImgSeqOrientation` keeps saying what the file said | medium, it swaps width and height | implemented |
-| [10 nominal bit depth](10-nominal-bit-depth.md) | `src/pixel.rs`, `src/decoder.rs`, `src/formats/heif.rs`, `src/formats/jxl.rs`, `src/clip.rs`, `src/source.rs` | a 10-bit avif is `Gray10`/`RGB30` instead of `Gray16`/`RGB48`, with the samples shifted into the words a 10-bit frame holds, and the 16-bit files stay 16-bit | medium, every 9-to-15-bit file changes format | proposed |
+| [10 nominal bit depth](10-nominal-bit-depth.md) | `src/pixel.rs`, `src/formats/avif.rs`, `src/formats/heif.rs`, `src/formats/jxl.rs`, fixtures, `tests/readalpha.vpy` | a 10-bit avif is `Gray10`/`RGB30` instead of `Gray16`/`RGB48`, with the samples shifted into the words a 10-bit frame holds, and the 16-bit files stay 16-bit: 112.0 → 112.1 ms per frame on the convert stage, so the shift is free | medium, every 9-to-15-bit file changes format | implemented |
 | [11 jxl without the image integration](11-jxl-direct.md) | `Cargo.toml`, `src/formats/jxl.rs` (new), `src/formats/mod.rs`, `src/decoder.rs`, `src/pixel.rs`, fixtures, `tests/readalpha.vpy` | a jxl that states an orientation reports it and `apply_rotation=False` gives the stored picture back, and the codestream's colour encoding and bit depth reach the probe | medium, the decode loop becomes ours | implemented |
 | [12 heif and avif planes](12-heif-avif-yuv-output.md) | `Cargo.toml`, `src/pixel.rs`, `src/decoder.rs`, `src/formats/heif.rs`, `src/formats/avif.rs` (new), `src/color.rs`, `src/clip.rs`, `src/source.rs`, fixtures, `tests/readalpha.vpy` | a colour heic or avif page is `YUV420P8`/`YUV444P10` instead of `RGB24`/`RGB48`, at half the bytes and with no conversion in the plugin: 55.40 → 27.70 MiB a frame, the avif decode pass 35% faster | high, it changes the format of every colour heic and avif frame | implemented |
 
@@ -156,8 +177,11 @@ make, and 10 keeps the jxl rows, the rgb files that state 9 to 15 bits, and the
 monochrome ones. that makes the order 08, 12, 10 the cheapest one — but 12 is
 also the widest change on the list, so doing the small metadata win and the
 smaller depth work first is a defensible alternative, it just means writing the
-avif depth shift for the rgb path that 12 would then retire. 08 and 12 both
-landed, so 10 is next and only its jxl, rgb and monochrome rows are left.
+avif depth shift for the rgb path that 12 would then retire. 08, 12 and 10 all
+landed in that order, so the queue is down to 06 and 07, the two formats. the
+rest of what is outstanding after all twelve — the leftovers each plan records
+and the two `defer:` entries in `IMPLEMENTATION.md` that are neither done nor
+refused — is the `deferred` section below.
 
 order of value, as it turned out: 04 + 03 were the only route past bestsource on
 webp, 02 was worth 5% to 35% on the frames it was written for and took the manga
@@ -170,7 +194,117 @@ page carries a parity measurement beside its speed one. 09 also cost the most of
 write reads across the decoder buffer instead of along it, which was 9x the
 identity write before the walk was blocked, and 1.7x on an interleaved page and
 2.9x on a planar one once the mirrors went back to whole rows, the channels of a
-frame shared one walk, and a sample move stopped being a runtime-sized copy.
+frame shared one walk, and a sample move stopped being a runtime-sized copy. 10
+is the cheapest of the lot: it moved the format and the position of every sample
+of the files that state a depth, and the paired convert-stage measurement says it
+cost nothing, because the load and the store were already there.
+
+## deferred
+
+what the landed plans recorded under "left over", and what `IMPLEMENTATION.md`
+defers without refusing. none of it is a plan: a plan here needs a corpus and a
+measurement that says the work is worth doing, and these are the notes that
+have neither yet. each bullet names the page that keeps the full argument. the
+rest of that `defer:` list — gpu output, manual simd, filesystem globbing and
+format-based clip grouping — is in `not planned` below, with its reasons.
+
+**the decoder could write the frame itself**
+
+- **decode straight into the frame's planes.** `JxlOutputBuffer::new_from_ptr`
+  takes a byte stride, `dav1d::Decoder` is generic over a `PictureAllocator`, and
+  libwebp's planar entry point writes into a buffer and a stride the caller owns,
+  so jxl, avif and webp could each skip the copy the plugin does today
+  ([11](11-jxl-direct.md), [12](12-heif-avif-yuv-output.md),
+  [04](04-webp-decoder.md)). it waits for the copy to matter, and no measurement
+  here shows it does: it is one pass over bytes the decoder just wrote, and the
+  rgb paths would still have an interleave to do.
+- **a blocked SIMD transpose** for `apply_rotation=False`, where the write is
+  scalar and cannot beat ~0.6 ns per memory operation
+  ([09](09-exif-orientation.md)): a rotated lossless page is 158 ms of frame
+  time against 110 ms identity.
+- **the jxl parallel runner and libwebp's intra-frame threading.** both nest
+  another pool inside the lookahead pool the plugin runs, which is why neither
+  is proposed ([11](11-jxl-direct.md), and `not planned` for webp). the same
+  reason is behind the `custom Rayon inside get_frame()` entry in
+  `IMPLEMENTATION.md`'s `defer:` list: the lookahead pool is the parallelism
+  ([01](01-lookahead-scheduling.md)), and a second one inside a frame request
+  would nest it.
+
+**depth**
+
+- **the depths that have a format and no file.** nine, eleven, thirteen,
+  fourteen and fifteen bits are mapped and unit tested and no file here states
+  one; a `P5` `PGM` or a `P7` `PAM` with another `MAXVAL` and one line in
+  `tests/make-alpha-fixtures.py` makes one ([10](10-nominal-bit-depth.md)).
+- **a sixteen bit file whose decoder does not fill the range**, which the format
+  claims anyway, as every other reader here does
+  ([10](10-nominal-bit-depth.md)).
+- **`YUV420P14` and its siblings.** libheif can report fourteen bits for a page
+  whose samples it decodes itself and `yuv_format` has no arm for it, so such a
+  page falls back to rgb ([10](10-nominal-bit-depth.md),
+  [12](12-heif-avif-yuv-output.md)).
+- **`prec` in the jp2 `SIZ` walk**, so a deep jp2 is handed out at its own depth:
+  one field in a walk [06](06-jpeg-2000-backend.md) needs anyway, and
+  [10](10-nominal-bit-depth.md) has built the rest of the path.
+- **twelve bit heic, tiled (grid) avif, gain maps, ten bit PQ/HDR avif**: read
+  nowhere and absent from the sandbox ([12](12-heif-avif-yuv-output.md)).
+- **a ten bit monochrome heic has no fixture.** the heif row of
+  [10](10-nominal-bit-depth.md) is implemented and unverified: the fixture needs
+  `heif-enc`, which is not installed on the machine the plan was built on, and a
+  `heif-enc` pass over `tests/make-alpha-fixtures.py`'s ten bit gray source is
+  what would close it.
+
+**what a file states and the plugin does not read**
+
+- **the avif and heif `Exif` item**, so a rotated avif reports a code at all and
+  a rotated heic stops reporting 1 — libheif applies `irot`/`imir` itself, and
+  the code can only be had by reading those boxes
+  ([09](09-exif-orientation.md)).
+- **`_ChromaLocation` from av1's `chroma_sample_position`**: two bits inside the
+  sequence header, and `unknown` in every file of the corpus
+  ([08](08-color-metadata.md)).
+- **png's `cHRM`, `gAMA` and `sRGB` chunks**, which state the same thing as the
+  `cICP` chunk less directly ([08](08-color-metadata.md)).
+- **the icc bytes**, read and dropped: nothing in this workspace reads a raw
+  profile, and turning one into primaries is the guess rule 3 forbids
+  ([08](08-color-metadata.md)). `full ICC color management` is the `defer:` entry
+  in `IMPLEMENTATION.md` that this sits on.
+- **animation, previews and tone mapping** in a jxl and their equivalents
+  elsewhere: one frame per file is the whole contract
+  ([11](11-jxl-direct.md)).
+- **`pclr`, `cdef`, `res`/`resc` and the `uuid` boxes of a jp2**
+  ([06](06-jpeg-2000-backend.md)).
+- **a heic that stores av1**: the `ispe`/`av1C` read would apply to it and
+  nothing in the corpus is one ([05](05-monochrome-heif.md)).
+
+**formats with no corpus**
+
+- **a real dds or farbfeld file.** `sandbox/` has a folder per container it
+  claims and neither of these has one, so two hand-written files prove the
+  routing and the format mapping and not the codecs
+  ([07](07-dds-and-farbfeld.md)); dds is also a container for mipmaps, cubemaps
+  and volume textures, of which the top mip of the first face is all a
+  one-frame-per-file reader can use.
+- **camera RAW**, which is a decoder and a demosaic rather than a format
+  correction ([12](12-heif-avif-yuv-output.md)).
+
+**costs left standing, all small**
+
+- the lookahead overhead at `prefetch=16` on webp, 1.43x of one decode per
+  delivered frame, and the `--prefetch 4` row of the manga webp set that was
+  never re-measured ([01](01-lookahead-scheduling.md)).
+- the heif and heic hook probe's 5 ms for all 35 pages, and libheif parsing a
+  monochrome page a second time when it decodes it
+  ([05](05-monochrome-heif.md)).
+- the jxl probe parsing the header twice when `apply_rotation=False`, 0.065 ms
+  per file, which is what makes `ImgSeqOrientation` non-empty for a jxl at all
+  ([11](11-jxl-direct.md)).
+- `mismatch=True` beside rotation, two ways to get a heterogeneous clip with
+  only one of them a property a graph can read
+  ([09](09-exif-orientation.md)).
+- **`adjust_orientation` is a trap for a future jxl upgrade**: the option exists
+  in 0.7.4 and is read nowhere, and if a later version honours it, it must stay
+  `true` ([11](11-jxl-direct.md)).
 
 ## validating a change
 
@@ -224,4 +358,5 @@ C:/vcpkg/vcpkg.exe install --triplet x64-windows-static-md --x-manifest-root="$P
   [BENCH.md](../BENCH.md) has never shown the copy as the bottleneck the way
   [02](02-frame-write-path.md) showed the floor, so there is nothing to measure
   it against yet. (the nominal 10/12-bit representation the same entry in
-  `IMPLEMENTATION.md` defers is [10](10-nominal-bit-depth.md) now.)
+  `IMPLEMENTATION.md` defers is [10](10-nominal-bit-depth.md) now, and it landed
+  without needing any of this.)

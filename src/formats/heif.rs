@@ -198,14 +198,18 @@ impl HeifHeader {
 
     /// Format the file is handed out as.
     ///
-    /// A monochrome image is the gray format its color type maps to, and a
-    /// 4:2:0 one is handed out as the yuv planes it holds. Anything else keeps
-    /// the `image` decoder: r,g,b samples have no yuv format to be handed out
-    /// as, and a file whose matrix the frame properties cannot name would have
-    /// to be labelled with a guess.
+    /// A monochrome image is the gray format its color type maps to, at the
+    /// depth libheif reports for it - which is the depth of the planes it hands
+    /// over, so a ten bit page is a `Gray10` frame holding the samples as they
+    /// are - and a 4:2:0 one is handed out as the yuv planes it holds. Anything
+    /// else keeps the `image` decoder: r,g,b samples have no yuv format to be
+    /// handed out as, and a file whose matrix the frame properties cannot name
+    /// would have to be labelled with a guess.
     fn format(&self) -> Option<PixelFormat> {
         match self.color_space {
-            ColorSpace::Monochrome => PixelFormat::from_color_type(self.color_type),
+            ColorSpace::Monochrome => {
+                Some(PixelFormat::from_color_type(self.color_type)?.at_depth(self.depth.into()))
+            }
             ColorSpace::YCbCr(chroma) => {
                 self.cicp.filter(|cicp| usable_matrix(cicp.matrix))?;
                 yuv_format(chroma, self.depth)
@@ -242,9 +246,15 @@ const fn usable_matrix(matrix: u8) -> bool {
 /// The colours libheif is asked for, so that it hands the planes over unconverted.
 fn color_space_of(format: PixelFormat) -> Option<ColorSpace> {
     match format {
-        PixelFormat::Gray8 | PixelFormat::Gray10 | PixelFormat::Gray12 | PixelFormat::Gray16 => {
-            Some(ColorSpace::Monochrome)
-        }
+        PixelFormat::Gray8
+        | PixelFormat::Gray9
+        | PixelFormat::Gray10
+        | PixelFormat::Gray11
+        | PixelFormat::Gray12
+        | PixelFormat::Gray13
+        | PixelFormat::Gray14
+        | PixelFormat::Gray15
+        | PixelFormat::Gray16 => Some(ColorSpace::Monochrome),
         PixelFormat::Yuv420P8 | PixelFormat::Yuv420P10 => Some(ColorSpace::YCbCr(Chroma::C420)),
         PixelFormat::Yuv422P8 | PixelFormat::Yuv422P10 => Some(ColorSpace::YCbCr(Chroma::C422)),
         PixelFormat::Yuv444P8 | PixelFormat::Yuv444P10 | PixelFormat::Yuv444P12 => {

@@ -99,8 +99,8 @@ pub fn image_info(path: &Path) -> Option<ImageInfo> {
     if header.monochrome {
         // A monochrome item holds one plane, and the `image` decoder converts it
         // into the four channels it reports. The probe records the gray format
-        // the samples map to and leaves the decode to `image`, which is where
-        // that path has always been; see
+        // the samples map to, at the depth the `av1C` box states, and leaves the
+        // decode to `image`, which is where that path has always been; see
         // `docs/improvements/05-monochrome-heif.md`.
         return Some(ImageInfo {
             path: path.to_path_buf(),
@@ -114,7 +114,8 @@ pub fn image_info(path: &Path) -> Option<ImageInfo> {
             chroma_location: None,
             orientation: Orientation::NoTransforms,
             transform: Transform::IDENTITY,
-            format: PixelFormat::from_color_type(header.file_color_type(has_alpha))?,
+            format: PixelFormat::from_color_type(header.file_color_type(has_alpha))?
+                .at_depth(header.depth.into()),
         });
     }
 
@@ -130,9 +131,11 @@ pub fn image_info(path: &Path) -> Option<ImageInfo> {
     let (format, color_type) = match yuv {
         Some(format) => (format, header.colour_color_type(has_alpha)),
         // The color type the `image` decoder reports, which is what the frame
-        // request of such a file is checked against.
+        // request of such a file is checked against, and the depth the `av1C`
+        // box states, which is what its samples are handed out at.
         None => (
-            PixelFormat::from_color_type(header.decoded_color_type())?,
+            PixelFormat::from_color_type(header.decoded_color_type())?
+                .at_depth(header.depth.into()),
             header.decoded_color_type(),
         ),
     };
@@ -177,6 +180,7 @@ pub fn output_format(path: &Path, color_type: ColorType) -> Option<PixelFormat> 
         .monochrome
         .then(|| PixelFormat::from_color_type(header.file_color_type(meta.has_alpha())))
         .flatten()
+        .map(|format| format.at_depth(header.depth.into()))
 }
 
 /// Decodes one avif item into the planes of the format its probe recorded.

@@ -25,11 +25,28 @@ pub enum PixelFormat {
     Yuv444P8,
     Yuv444P10,
     Yuv444P12,
+    /// Gray or r,g,b at the depth a container states, for the four depths
+    /// between the eight bits and the sixteen bits a decoder's colour type
+    /// knows: `Gray11` and `Rgb13` are the `Gray11` and `RGB39` a file that
+    /// states them is handed out as, rather than the sixteen bit word the
+    /// decoder handed over. See [`PixelFormat::at_depth`].
+    Gray9,
     Gray10,
+    Gray11,
     Gray12,
+    Gray13,
+    Gray14,
+    Gray15,
     Gray16,
     Gray32F,
     Rgb8,
+    Rgb9,
+    Rgb10,
+    Rgb11,
+    Rgb12,
+    Rgb13,
+    Rgb14,
+    Rgb15,
     Rgb16,
     Rgb32F,
 }
@@ -46,14 +63,57 @@ impl PixelFormat {
         }
     }
 
+    /// Format a decoder's color type is handed out as when a container states
+    /// `bits` per sample.
+    ///
+    /// The colour type knows eight bits, sixteen bits and float and nothing in
+    /// between, so the format built from it is the word the samples are stored
+    /// in rather than the depth the file states, and a ten bit file arrives
+    /// left aligned in `Gray16` or `Rgb16`. A container that states a depth
+    /// narrows that word here, and the writer moves the samples down into the
+    /// depth the narrower format names.
+    ///
+    /// VapourSynth names every depth from eight to sixteen in both families, so
+    /// a file that states one is always handed out as the format that says so. A
+    /// depth outside that range leaves the word alone rather than rounding the
+    /// samples into a format that would misstate them, and so does every other
+    /// format: an eight bit word is the whole depth of the two eight bit
+    /// formats, and a planar or float one is already the depth it holds, or one
+    /// a container's depth says nothing about.
+    #[must_use]
+    pub const fn at_depth(self, bits: u32) -> Self {
+        match self {
+            Self::Gray16 => match gray_format(bits) {
+                Some(format) => format,
+                None => self,
+            },
+            Self::Rgb16 => match rgb_format(bits) {
+                Some(format) => format,
+                None => self,
+            },
+            other => other,
+        }
+    }
+
     /// Gray format that carries the alpha channel of this format.
+    ///
+    /// The alpha clip of a source is the same depth as its colour, so a ten bit
+    /// file's alpha plane is a ten bit frame and is opaque at 1023 rather than
+    /// at 65535.
     pub const fn alpha_format(self) -> Self {
         match self {
             Self::Gray8 | Self::Rgb8 | Self::Yuv420P8 | Self::Yuv422P8 | Self::Yuv444P8 => {
                 Self::Gray8
             }
-            Self::Gray10 | Self::Yuv420P10 | Self::Yuv422P10 | Self::Yuv444P10 => Self::Gray10,
-            Self::Gray12 | Self::Yuv444P12 => Self::Gray12,
+            Self::Gray9 | Self::Rgb9 => Self::Gray9,
+            Self::Gray10 | Self::Rgb10 | Self::Yuv420P10 | Self::Yuv422P10 | Self::Yuv444P10 => {
+                Self::Gray10
+            }
+            Self::Gray11 | Self::Rgb11 => Self::Gray11,
+            Self::Gray12 | Self::Rgb12 | Self::Yuv444P12 => Self::Gray12,
+            Self::Gray13 | Self::Rgb13 => Self::Gray13,
+            Self::Gray14 | Self::Rgb14 => Self::Gray14,
+            Self::Gray15 | Self::Rgb15 => Self::Gray15,
             Self::Gray16 | Self::Rgb16 => Self::Gray16,
             Self::Gray32F | Self::Rgb32F => Self::Gray32F,
         }
@@ -61,10 +121,26 @@ impl PixelFormat {
 
     pub const fn color_family(self) -> ColorFamily {
         match self {
-            Self::Gray8 | Self::Gray10 | Self::Gray12 | Self::Gray16 | Self::Gray32F => {
-                ColorFamily::Gray
-            }
-            Self::Rgb8 | Self::Rgb16 | Self::Rgb32F => ColorFamily::RGB,
+            Self::Gray8
+            | Self::Gray9
+            | Self::Gray10
+            | Self::Gray11
+            | Self::Gray12
+            | Self::Gray13
+            | Self::Gray14
+            | Self::Gray15
+            | Self::Gray16
+            | Self::Gray32F => ColorFamily::Gray,
+            Self::Rgb8
+            | Self::Rgb9
+            | Self::Rgb10
+            | Self::Rgb11
+            | Self::Rgb12
+            | Self::Rgb13
+            | Self::Rgb14
+            | Self::Rgb15
+            | Self::Rgb16
+            | Self::Rgb32F => ColorFamily::RGB,
             Self::Yuv420P8
             | Self::Yuv420P10
             | Self::Yuv422P8
@@ -85,8 +161,13 @@ impl PixelFormat {
     pub const fn bits_per_sample(self) -> i32 {
         match self {
             Self::Gray8 | Self::Rgb8 | Self::Yuv420P8 | Self::Yuv422P8 | Self::Yuv444P8 => 8,
-            Self::Gray10 | Self::Yuv420P10 | Self::Yuv422P10 | Self::Yuv444P10 => 10,
-            Self::Gray12 | Self::Yuv444P12 => 12,
+            Self::Gray9 | Self::Rgb9 => 9,
+            Self::Gray10 | Self::Rgb10 | Self::Yuv420P10 | Self::Yuv422P10 | Self::Yuv444P10 => 10,
+            Self::Gray11 | Self::Rgb11 => 11,
+            Self::Gray12 | Self::Rgb12 | Self::Yuv444P12 => 12,
+            Self::Gray13 | Self::Rgb13 => 13,
+            Self::Gray14 | Self::Rgb14 => 14,
+            Self::Gray15 | Self::Rgb15 => 15,
             Self::Gray16 | Self::Rgb16 => 16,
             Self::Gray32F | Self::Rgb32F => 32,
         }
@@ -95,9 +176,9 @@ impl PixelFormat {
     pub const fn bytes_per_sample(self) -> usize {
         match self {
             Self::Gray8 | Self::Rgb8 | Self::Yuv420P8 | Self::Yuv422P8 | Self::Yuv444P8 => 1,
-            Self::Gray16 | Self::Rgb16 => 2,
             Self::Gray32F | Self::Rgb32F => 4,
-            // Every depth a planar yuv format names is stored in a 16 bit word.
+            // Every depth from nine to sixteen bits, and every depth a planar
+            // yuv format names, is stored in a 16 bit word.
             _ => 2,
         }
     }
@@ -119,7 +200,16 @@ impl PixelFormat {
 
     pub const fn plane_count(self) -> usize {
         match self {
-            Self::Gray8 | Self::Gray10 | Self::Gray12 | Self::Gray16 | Self::Gray32F => 1,
+            Self::Gray8
+            | Self::Gray9
+            | Self::Gray10
+            | Self::Gray11
+            | Self::Gray12
+            | Self::Gray13
+            | Self::Gray14
+            | Self::Gray15
+            | Self::Gray16
+            | Self::Gray32F => 1,
             _ => 3,
         }
     }
@@ -188,11 +278,23 @@ impl PixelFormat {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Gray8 => "Gray8",
+            Self::Gray9 => "Gray9",
             Self::Gray10 => "Gray10",
+            Self::Gray11 => "Gray11",
             Self::Gray12 => "Gray12",
+            Self::Gray13 => "Gray13",
+            Self::Gray14 => "Gray14",
+            Self::Gray15 => "Gray15",
             Self::Gray16 => "Gray16",
             Self::Gray32F => "GrayS",
             Self::Rgb8 => "RGB24",
+            Self::Rgb9 => "RGB27",
+            Self::Rgb10 => "RGB30",
+            Self::Rgb11 => "RGB33",
+            Self::Rgb12 => "RGB36",
+            Self::Rgb13 => "RGB39",
+            Self::Rgb14 => "RGB42",
+            Self::Rgb15 => "RGB45",
             Self::Rgb16 => "RGB48",
             Self::Rgb32F => "RGBS",
             Self::Yuv420P8 => "YUV420P8",
@@ -203,6 +305,44 @@ impl PixelFormat {
             Self::Yuv444P10 => "YUV444P10",
             Self::Yuv444P12 => "YUV444P12",
         }
+    }
+}
+
+/// The gray format that names `bits` per sample, which VapourSynth has for every
+/// depth from eight to sixteen.
+///
+/// A depth outside that range answers `None`, which leaves a caller the format
+/// it started from: there is no gray format a file of such a depth is handed out
+/// as, and the word it is stored in is what is left.
+const fn gray_format(bits: u32) -> Option<PixelFormat> {
+    match bits {
+        8 => Some(PixelFormat::Gray8),
+        9 => Some(PixelFormat::Gray9),
+        10 => Some(PixelFormat::Gray10),
+        11 => Some(PixelFormat::Gray11),
+        12 => Some(PixelFormat::Gray12),
+        13 => Some(PixelFormat::Gray13),
+        14 => Some(PixelFormat::Gray14),
+        15 => Some(PixelFormat::Gray15),
+        16 => Some(PixelFormat::Gray16),
+        _ => None,
+    }
+}
+
+/// The r,g,b format that names `bits` per sample, which VapourSynth has for
+/// every depth from eight to sixteen; see [`gray_format`].
+const fn rgb_format(bits: u32) -> Option<PixelFormat> {
+    match bits {
+        8 => Some(PixelFormat::Rgb8),
+        9 => Some(PixelFormat::Rgb9),
+        10 => Some(PixelFormat::Rgb10),
+        11 => Some(PixelFormat::Rgb11),
+        12 => Some(PixelFormat::Rgb12),
+        13 => Some(PixelFormat::Rgb13),
+        14 => Some(PixelFormat::Rgb14),
+        15 => Some(PixelFormat::Rgb15),
+        16 => Some(PixelFormat::Rgb16),
+        _ => None,
     }
 }
 
@@ -365,6 +505,10 @@ trait Sample: Copy {
 
     fn load(source: &[u8]) -> Self;
     fn store(self, destination: &mut [u8]);
+    /// This sample moved down out of the word it was scaled into, which is how
+    /// a frame that names a depth below its word holds it. A float sample is
+    /// never scaled into anything and is returned unchanged.
+    fn shifted(self, bits: u32) -> Self;
 }
 
 impl Sample for u8 {
@@ -378,6 +522,14 @@ impl Sample for u8 {
     #[inline(always)]
     fn store(self, destination: &mut [u8]) {
         destination[0] = self;
+    }
+
+    #[inline(always)]
+    fn shifted(self, bits: u32) -> Self {
+        // The one byte formats are the eight bit ones, whose word is the whole
+        // depth they name, so nothing is ever scaled into them.
+        debug_assert_eq!(bits, 0);
+        self
     }
 }
 
@@ -398,12 +550,98 @@ macro_rules! native_sample {
             fn store(self, destination: &mut [u8]) {
                 destination[..$size].copy_from_slice(&self.to_ne_bytes());
             }
+
+            #[inline(always)]
+            fn shifted(self, bits: u32) -> Self {
+                self >> bits
+            }
         }
     };
 }
 
 native_sample!(u16, 2);
-native_sample!(f32, 4);
+
+impl Sample for f32 {
+    const SIZE: usize = 4;
+
+    #[inline(always)]
+    fn load(source: &[u8]) -> Self {
+        let bytes: [u8; 4] = source[..4].try_into().expect("the sample size is fixed");
+        Self::from_ne_bytes(bytes)
+    }
+
+    #[inline(always)]
+    fn store(self, destination: &mut [u8]) {
+        destination[..4].copy_from_slice(&self.to_ne_bytes());
+    }
+
+    #[inline(always)]
+    fn shifted(self, bits: u32) -> Self {
+        // A float frame's depth is the width of its own word, so only an integer
+        // format ever names a depth below the samples it holds.
+        debug_assert_eq!(bits, 0);
+        self
+    }
+}
+
+/// What a frame declares about the depth of the samples written into it.
+struct FrameDepth {
+    /// How far right one decoded sample moves to fit the frame's depth.
+    shift: u32,
+    /// Largest sample the frame holds, which is what an opaque alpha plane is
+    /// filled with: a ten bit alpha frame is opaque at 1023, not at 65535.
+    maximum: u16,
+}
+
+/// Reads the depth a frame declares and checks it against the samples the
+/// decoder returned.
+///
+/// Every interleaved source hands its samples scaled to the whole word they are
+/// stored in: `image` decodes a ten bit file into two byte samples holding the
+/// ten bit value shifted up by the six bits the range it reports is wider, and
+/// jpeg xl's decoder scales its own pipeline onto the whole range of the word it
+/// was asked for. A frame whose format names a depth holds the sample itself,
+/// right aligned at that depth, so the two are the same number exactly when the
+/// frame declares the whole word - which is what an eight or a sixteen bit file,
+/// and every file whose container states no depth, gets.
+///
+/// The shift recovers the sample exactly rather than approximately, whatever the
+/// two depths are: scaling a sample of `bits` bits onto a word of `word` bits
+/// multiplies it by less than `2^(word - bits) + 1`, and the largest scaled
+/// sample stays below the smallest one of the value after it, so dividing the
+/// scaled sample back down by that power of two returns the sample it started
+/// as.
+///
+/// The two word sizes are checked to agree first, because every write moves
+/// whole samples of the decoder's width into the frame's.
+fn frame_depth(frame: &VideoFrame, source: PixelFormat) -> Result<FrameDepth> {
+    let word_bytes = source.bytes_per_sample();
+    let format = frame.get_video_format();
+    let frame_bytes = usize::try_from(format.bytes_per_sample)
+        .map_err(|_| ImgSeqError::new("VapourSynth returned a negative sample size"))?;
+    if frame_bytes != word_bytes {
+        return Err(ImgSeqError::new(format!(
+            "the frame holds {frame_bytes} byte samples, but the decoder returned {word_bytes} byte samples"
+        )));
+    }
+    let word_bits = u32::try_from(word_bytes * 8).expect("a sample is at most four bytes");
+    let frame_bits = u32::try_from(format.bits_per_sample)
+        .map_err(|_| ImgSeqError::new("VapourSynth returned a negative sample depth"))?;
+    if frame_bits > word_bits {
+        return Err(ImgSeqError::new(format!(
+            "the frame declares {frame_bits} bit samples, but the decoder returned {word_bits} bit samples"
+        )));
+    }
+
+    Ok(FrameDepth {
+        shift: word_bits - frame_bits,
+        maximum: if frame_bits >= 16 {
+            u16::MAX
+        } else {
+            ((1u32 << frame_bits) - 1) as u16
+        },
+    })
+}
 
 pub(crate) fn channel_count(color_type: ColorType) -> Result<usize> {
     match color_type {
@@ -463,24 +701,50 @@ fn image_layout(
     })
 }
 
+/// Copy a packed row into a frame row of the same width, moving every sample
+/// down by `shift`.
+///
+/// A frame that declares the whole word of its samples takes the row as it
+/// stands, which one copy moves; a narrower one holds the sample itself rather
+/// than the word it was scaled into, which is one move per sample.
+fn copy_samples<T: Sample>(source: &[u8], destination: &mut [u8], shift: u32) {
+    if shift == 0 {
+        destination.copy_from_slice(source);
+        return;
+    }
+    // Both rows are whole samples wide, because they were built from a width, so
+    // no partial sample is ever moved.
+    for (group, sample) in source.chunks(T::SIZE).zip(destination.chunks_mut(T::SIZE)) {
+        T::store(T::load(group).shifted(shift), sample);
+    }
+}
+
 /// Extract one interleaved channel of a single row into a packed row.
 #[inline(always)]
 fn extract_channel<T: Sample, const CHANNELS: usize, const CHANNEL: usize>(
     source: &[u8],
     destination: &mut [u8],
+    shift: u32,
 ) {
     let source_stride = CHANNELS * T::SIZE;
     let sample_start = CHANNEL * T::SIZE;
     // The destination row holds exactly one sample per source group, so
     // `chunks_mut` never yields a partial sample.
-    for (group, sample) in source
-        .chunks_exact(source_stride)
-        .zip(destination.chunks_mut(T::SIZE))
-    {
-        T::store(
-            T::load(&group[sample_start..sample_start + T::SIZE]),
-            sample,
-        );
+    let groups = source.chunks_exact(source_stride);
+    let samples = destination.chunks_mut(T::SIZE);
+    // A frame that declares the whole word takes the sample as it stands, and
+    // the two cases are told apart here so that the loop below is one move per
+    // sample either way.
+    if shift == 0 {
+        for (group, sample) in groups.zip(samples) {
+            let group = &group[sample_start..sample_start + T::SIZE];
+            T::store(T::load(group), sample);
+        }
+        return;
+    }
+    for (group, sample) in groups.zip(samples) {
+        let group = &group[sample_start..sample_start + T::SIZE];
+        T::store(T::load(group).shifted(shift), sample);
     }
 }
 
@@ -606,11 +870,15 @@ fn reverse_samples(row: &mut [u8], sample_bytes: usize) {
 
 /// Write one interleaved channel of every row directly into a VapourSynth
 /// plane, leaving the row padding untouched.
+///
+/// `shift` is how far the samples move down out of the word the decoder scaled
+/// them into, which is zero for every frame that declares that whole word.
 fn write_channel<T: Sample, const CHANNELS: usize, const CHANNEL: usize>(
     target: PlaneTarget,
     pixels: &[u8],
     layout: &ImageLayout,
     transform: Transform,
+    shift: u32,
 ) {
     // A row of the frame holds whole samples, so this is the width the
     // transform is defined against.
@@ -633,9 +901,9 @@ fn write_channel<T: Sample, const CHANNELS: usize, const CHANNEL: usize>(
             let destination =
                 unsafe { slice::from_raw_parts_mut(target.row_start(row), target.row_bytes) };
             if CHANNELS == 1 {
-                destination.copy_from_slice(source);
+                copy_samples::<T>(source, destination, shift);
             } else {
-                extract_channel::<T, CHANNELS, CHANNEL>(source, destination);
+                extract_channel::<T, CHANNELS, CHANNEL>(source, destination, shift);
             }
             if transform.flip_x {
                 reverse_samples(destination, T::SIZE);
@@ -666,7 +934,16 @@ fn write_channel<T: Sample, const CHANNELS: usize, const CHANNEL: usize>(
             // sample of a row that was checked to hold them all, so both
             // offsets are inside their buffers and the buffers are distinct.
             unsafe {
-                copy_nonoverlapping(source.add(from), destination.add(to), sample_bytes);
+                let source = source.add(from);
+                let destination = destination.add(to);
+                if shift == 0 {
+                    copy_nonoverlapping(source, destination, sample_bytes);
+                } else {
+                    T::store(
+                        T::load(slice::from_raw_parts(source, sample_bytes)).shifted(shift),
+                        slice::from_raw_parts_mut(destination, sample_bytes),
+                    );
+                }
             }
         }
     });
@@ -685,6 +962,7 @@ fn write_transposed_planes<T: Sample, const CHANNELS: usize>(
     plane_row_bytes: usize,
     pixels: &[u8],
     transform: Transform,
+    shift: u32,
 ) -> Result<()> {
     let output_width = plane_row_bytes / T::SIZE;
     let (_, output_height) = transform.output_size(layout.width, layout.height);
@@ -708,11 +986,16 @@ fn write_transposed_planes<T: Sample, const CHANNELS: usize>(
                 let to = column * sample_bytes;
                 for (plane, target) in targets.iter().enumerate().take(planes) {
                     let target = target.expect("every plane was checked");
-                    copy_nonoverlapping(
-                        group.add(plane * sample_bytes),
-                        target.row_start(row).add(to),
-                        sample_bytes,
-                    );
+                    let from = group.add(plane * sample_bytes);
+                    let destination = target.row_start(row).add(to);
+                    if shift == 0 {
+                        copy_nonoverlapping(from, destination, sample_bytes);
+                    } else {
+                        T::store(
+                            T::load(slice::from_raw_parts(from, sample_bytes)).shifted(shift),
+                            slice::from_raw_parts_mut(destination, sample_bytes),
+                        );
+                    }
                 }
             }
         }
@@ -727,6 +1010,7 @@ fn write_planes<T: Sample, const CHANNELS: usize>(
     planes: usize,
     pixels: &[u8],
     transform: Transform,
+    shift: u32,
 ) -> Result<()> {
     let (output_width, output_height) = transform.output_size(layout.width, layout.height);
     let plane_row_bytes = output_width
@@ -743,14 +1027,15 @@ fn write_planes<T: Sample, const CHANNELS: usize>(
             plane_row_bytes,
             pixels,
             transform,
+            shift,
         );
     }
     for plane in 0..planes {
         let target = plane_target(frame, plane, plane_row_bytes, output_height)?;
         match plane {
-            0 => write_channel::<T, CHANNELS, 0>(target, pixels, layout, transform),
-            1 => write_channel::<T, CHANNELS, 1>(target, pixels, layout, transform),
-            _ => write_channel::<T, CHANNELS, 2>(target, pixels, layout, transform),
+            0 => write_channel::<T, CHANNELS, 0>(target, pixels, layout, transform, shift),
+            1 => write_channel::<T, CHANNELS, 1>(target, pixels, layout, transform, shift),
+            _ => write_channel::<T, CHANNELS, 2>(target, pixels, layout, transform, shift),
         }
     }
 
@@ -779,6 +1064,9 @@ fn planes_to_write(frame_planes: i32, channels: usize) -> Result<usize> {
 ///
 /// The frame holds what `transform` produces, so an orientation that transposes
 /// the picture is written into a frame that is as tall as the image is wide.
+/// The frame's own depth decides whether the samples are written as they were
+/// decoded or moved down out of the word they were scaled into; see
+/// [`frame_depth`].
 pub fn write_planar(
     frame: &mut VideoFrame,
     color_type: ColorType,
@@ -789,18 +1077,19 @@ pub fn write_planar(
 ) -> Result<WriteTimings> {
     let layout = image_layout(color_type, width, height, pixels)?;
     let planes = planes_to_write(frame.get_video_format().num_planes, layout.channels)?;
+    let shift = frame_depth(frame, layout.format)?.shift;
     let started = Instant::now();
     match (layout.format.bytes_per_sample(), layout.channels) {
-        (1, 1) => write_planes::<u8, 1>(frame, &layout, planes, pixels, transform)?,
-        (1, 2) => write_planes::<u8, 2>(frame, &layout, planes, pixels, transform)?,
-        (1, 3) => write_planes::<u8, 3>(frame, &layout, planes, pixels, transform)?,
-        (1, 4) => write_planes::<u8, 4>(frame, &layout, planes, pixels, transform)?,
-        (2, 1) => write_planes::<u16, 1>(frame, &layout, planes, pixels, transform)?,
-        (2, 2) => write_planes::<u16, 2>(frame, &layout, planes, pixels, transform)?,
-        (2, 3) => write_planes::<u16, 3>(frame, &layout, planes, pixels, transform)?,
-        (2, 4) => write_planes::<u16, 4>(frame, &layout, planes, pixels, transform)?,
-        (4, 3) => write_planes::<f32, 3>(frame, &layout, planes, pixels, transform)?,
-        (4, 4) => write_planes::<f32, 4>(frame, &layout, planes, pixels, transform)?,
+        (1, 1) => write_planes::<u8, 1>(frame, &layout, planes, pixels, transform, shift)?,
+        (1, 2) => write_planes::<u8, 2>(frame, &layout, planes, pixels, transform, shift)?,
+        (1, 3) => write_planes::<u8, 3>(frame, &layout, planes, pixels, transform, shift)?,
+        (1, 4) => write_planes::<u8, 4>(frame, &layout, planes, pixels, transform, shift)?,
+        (2, 1) => write_planes::<u16, 1>(frame, &layout, planes, pixels, transform, shift)?,
+        (2, 2) => write_planes::<u16, 2>(frame, &layout, planes, pixels, transform, shift)?,
+        (2, 3) => write_planes::<u16, 3>(frame, &layout, planes, pixels, transform, shift)?,
+        (2, 4) => write_planes::<u16, 4>(frame, &layout, planes, pixels, transform, shift)?,
+        (4, 3) => write_planes::<f32, 3>(frame, &layout, planes, pixels, transform, shift)?,
+        (4, 4) => write_planes::<f32, 4>(frame, &layout, planes, pixels, transform, shift)?,
         (bytes_per_sample, channels) => {
             return Err(ImgSeqError::new(format!(
                 "unsupported sample size {bytes_per_sample} with {channels} channels"
@@ -1024,7 +1313,9 @@ pub fn write_opaque_alpha(
 ///
 /// Sources without an alpha channel produce an opaque plane, so an alpha clip
 /// always has a meaningful value for every frame. The plane is transformed the
-/// same way the colour plane is, which is what keeps the two aligned.
+/// same way the colour plane is, which is what keeps the two aligned, and it is
+/// written at the frame's own depth: a ten bit alpha clip holds the sample
+/// itself, and its opaque fill is 1023.
 pub fn write_alpha(
     frame: &mut VideoFrame,
     color_type: ColorType,
@@ -1034,15 +1325,26 @@ pub fn write_alpha(
     transform: Transform,
 ) -> Result<WriteTimings> {
     let layout = image_layout(color_type, width, height, pixels)?;
+    let depth = frame_depth(frame, layout.format)?;
     let started = Instant::now();
     match (layout.format.bytes_per_sample(), alpha_channel(color_type)) {
-        (1, Some(1)) => write_alpha_plane::<u8, 2, 1>(frame, &layout, pixels, transform)?,
-        (2, Some(1)) => write_alpha_plane::<u16, 2, 1>(frame, &layout, pixels, transform)?,
-        (1, Some(3)) => write_alpha_plane::<u8, 4, 3>(frame, &layout, pixels, transform)?,
-        (2, Some(3)) => write_alpha_plane::<u16, 4, 3>(frame, &layout, pixels, transform)?,
-        (4, Some(3)) => write_alpha_plane::<f32, 4, 3>(frame, &layout, pixels, transform)?,
+        (1, Some(1)) => {
+            write_alpha_plane::<u8, 2, 1>(frame, &layout, pixels, transform, depth.shift)?;
+        }
+        (2, Some(1)) => {
+            write_alpha_plane::<u16, 2, 1>(frame, &layout, pixels, transform, depth.shift)?;
+        }
+        (1, Some(3)) => {
+            write_alpha_plane::<u8, 4, 3>(frame, &layout, pixels, transform, depth.shift)?;
+        }
+        (2, Some(3)) => {
+            write_alpha_plane::<u16, 4, 3>(frame, &layout, pixels, transform, depth.shift)?;
+        }
+        (4, Some(3)) => {
+            write_alpha_plane::<f32, 4, 3>(frame, &layout, pixels, transform, depth.shift)?;
+        }
         (1, None) => fill_alpha_plane::<u8>(frame, &layout, transform, u8::MAX)?,
-        (2, None) => fill_alpha_plane::<u16>(frame, &layout, transform, u16::MAX)?,
+        (2, None) => fill_alpha_plane::<u16>(frame, &layout, transform, depth.maximum)?,
         (4, None) => fill_alpha_plane::<f32>(frame, &layout, transform, 1.0)?,
         (bytes_per_sample, channel) => {
             return Err(ImgSeqError::new(format!(
@@ -1070,11 +1372,12 @@ fn write_alpha_plane<T: Sample, const CHANNELS: usize, const CHANNEL: usize>(
     layout: &ImageLayout,
     pixels: &[u8],
     transform: Transform,
+    shift: u32,
 ) -> Result<()> {
     let (_, output_height) = transform.output_size(layout.width, layout.height);
     let row_bytes = alpha_plane_row_bytes::<T>(layout, transform)?;
     let target = plane_target(frame, 0, row_bytes, output_height)?;
-    write_channel::<T, CHANNELS, CHANNEL>(target, pixels, layout, transform);
+    write_channel::<T, CHANNELS, CHANNEL>(target, pixels, layout, transform, shift);
     Ok(())
 }
 
@@ -1289,9 +1592,9 @@ mod tests {
         let mut red = [0; 2];
         let mut green = [0; 2];
         let mut blue = [0; 2];
-        extract_channel::<u8, 4, 0>(&pixels, &mut red);
-        extract_channel::<u8, 4, 1>(&pixels, &mut green);
-        extract_channel::<u8, 4, 2>(&pixels, &mut blue);
+        extract_channel::<u8, 4, 0>(&pixels, &mut red, 0);
+        extract_channel::<u8, 4, 1>(&pixels, &mut green, 0);
+        extract_channel::<u8, 4, 2>(&pixels, &mut blue, 0);
         assert_eq!((red, green, blue), ([1, 4], [2, 5], [3, 6]));
     }
 
@@ -1299,8 +1602,131 @@ mod tests {
     fn extracts_gray16() {
         let pixels = [1, 2, 3, 4];
         let mut plane = [0; 4];
-        extract_channel::<u16, 1, 0>(&pixels, &mut plane);
+        extract_channel::<u16, 1, 0>(&pixels, &mut plane, 0);
         assert_eq!(plane, pixels);
+    }
+
+    #[test]
+    fn extracts_a_channel_at_a_narrower_depth() {
+        // Three ten bit samples, each left aligned in the sixteen bit word
+        // `image` hands a deeper file over in, extracted into the ten bit plane
+        // that holds the sample itself.
+        let values: [u16; 3] = [1, 2, 1023];
+        let mut pixels = Vec::new();
+        for value in values {
+            pixels.extend_from_slice(&(value << 6).to_ne_bytes());
+        }
+        let mut expected = Vec::new();
+        for value in values {
+            expected.extend_from_slice(&value.to_ne_bytes());
+        }
+
+        let mut plane = vec![0; expected.len()];
+        extract_channel::<u16, 1, 0>(&pixels, &mut plane, 6);
+        assert_eq!(plane, expected);
+    }
+
+    #[test]
+    fn a_scaled_sample_moves_back_down_to_the_one_it_started_as() {
+        // A decoder hands a deeper sample over scaled onto the whole word it is
+        // stored in, either by shifting it up or by scaling it onto the word's
+        // range with a round, and the writer moves it back down by the
+        // difference between the two depths. That has to return the sample it
+        // started as, whatever the two depths are.
+        for bits in 1..=16u32 {
+            let word = if bits <= 8 { 8 } else { 16 };
+            let shift = word - bits;
+            let maximum = (1u32 << bits) - 1;
+            for value in 0..=maximum {
+                assert_eq!(
+                    (value << shift) >> shift,
+                    value,
+                    "{bits} bit {value} shifted"
+                );
+                let scaled = (value * ((1u32 << word) - 1) + maximum / 2) / maximum;
+                assert_eq!(
+                    scaled >> shift,
+                    value,
+                    "{bits} bit {value} scaled onto {word} bits"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn narrows_a_word_to_the_depth_a_container_states() {
+        for (bits, gray, rgb) in [
+            (9, PixelFormat::Gray9, PixelFormat::Rgb9),
+            (10, PixelFormat::Gray10, PixelFormat::Rgb10),
+            (11, PixelFormat::Gray11, PixelFormat::Rgb11),
+            (12, PixelFormat::Gray12, PixelFormat::Rgb12),
+            (13, PixelFormat::Gray13, PixelFormat::Rgb13),
+            (14, PixelFormat::Gray14, PixelFormat::Rgb14),
+            (15, PixelFormat::Gray15, PixelFormat::Rgb15),
+            (16, PixelFormat::Gray16, PixelFormat::Rgb16),
+        ] {
+            assert_eq!(PixelFormat::Gray16.at_depth(bits), gray);
+            assert_eq!(PixelFormat::Rgb16.at_depth(bits), rgb);
+        }
+
+        // A depth no format names leaves the word alone rather than rounding the
+        // samples into one that would misstate them, and a decimal depth that is
+        // not a depth at all is the same case.
+        for bits in [0, 1, 7, 17, 32] {
+            assert_eq!(PixelFormat::Gray16.at_depth(bits), PixelFormat::Gray16);
+            assert_eq!(PixelFormat::Rgb16.at_depth(bits), PixelFormat::Rgb16);
+        }
+
+        // An eight bit word is the whole depth of the formats it names, so a
+        // container that states another depth does not widen it, and a float or
+        // planar format is already the depth it holds.
+        assert_eq!(PixelFormat::Gray8.at_depth(9), PixelFormat::Gray8);
+        assert_eq!(PixelFormat::Rgb8.at_depth(12), PixelFormat::Rgb8);
+        assert_eq!(PixelFormat::Rgb32F.at_depth(10), PixelFormat::Rgb32F);
+        assert_eq!(PixelFormat::Yuv420P10.at_depth(10), PixelFormat::Yuv420P10);
+        assert_eq!(PixelFormat::Yuv444P12.at_depth(10), PixelFormat::Yuv444P12);
+    }
+
+    #[test]
+    fn names_every_depth_a_container_can_state() {
+        // The name is what a graph reads and what the validator checks: a gray
+        // format is named after the depth of its one sample, an r,g,b one after
+        // the bits of its three, and the depth every container states from eight
+        // to sixteen is one of them.
+        for bits in 8..=16i32 {
+            let depth = u32::try_from(bits).unwrap();
+            let gray = PixelFormat::Gray16.at_depth(depth);
+            let rgb = PixelFormat::Rgb16.at_depth(depth);
+            assert_eq!(gray.name(), format!("Gray{bits}"));
+            assert_eq!(rgb.name(), format!("RGB{}", bits * 3));
+            assert_eq!(gray.bits_per_sample(), bits);
+            assert_eq!(rgb.bits_per_sample(), bits);
+            assert_eq!(gray.color_family(), ColorFamily::Gray);
+            assert_eq!(rgb.color_family(), ColorFamily::RGB);
+            assert_eq!(gray.sample_type(), SampleType::Integer);
+            let bytes = if bits <= 8 { 1 } else { 2 };
+            assert_eq!(gray.bytes_per_sample(), bytes);
+            assert_eq!(rgb.bytes_per_sample(), bytes);
+            assert_eq!(
+                gray.integer_max(),
+                if bits >= 16 {
+                    u16::MAX
+                } else {
+                    ((1u32 << bits) - 1) as u16
+                }
+            );
+            assert_eq!(gray.plane_count(), 1);
+            assert_eq!(rgb.plane_count(), 3);
+            assert_eq!(rgb.sub_sampling(), (0, 0));
+            // The alpha clip of a source is the same depth as its colour, so an
+            // opaque plane is filled with the same maximum.
+            assert_eq!(gray.alpha_format().bits_per_sample(), bits);
+            assert_eq!(rgb.alpha_format().bits_per_sample(), bits);
+            assert_eq!(rgb.alpha_format().name(), format!("Gray{bits}"));
+            assert_eq!(gray.alpha_format().integer_max(), gray.integer_max());
+            assert_eq!(rgb.alpha_format().integer_max(), rgb.integer_max());
+            assert_eq!(gray.alpha_format().plane_count(), 1);
+        }
     }
 
     #[test]
@@ -1357,11 +1783,11 @@ mod tests {
     fn extracts_alpha_channels() {
         let gray_alpha = [10, 99, 20, 98];
         let mut alpha = [0; 2];
-        extract_channel::<u8, 2, 1>(&gray_alpha, &mut alpha);
+        extract_channel::<u8, 2, 1>(&gray_alpha, &mut alpha, 0);
         assert_eq!(alpha, [99, 98]);
 
         let rgba = [1, 2, 3, 4, 5, 6, 7, 8];
-        extract_channel::<u8, 4, 3>(&rgba, &mut alpha);
+        extract_channel::<u8, 4, 3>(&rgba, &mut alpha, 0);
         assert_eq!(alpha, [4, 8]);
 
         let rgba16 = [
@@ -1369,7 +1795,7 @@ mod tests {
             0, 5, 0, 6, 0, 7, 0, 8,
         ];
         let mut alpha = [0; 4];
-        extract_channel::<u16, 4, 3>(&rgba16, &mut alpha);
+        extract_channel::<u16, 4, 3>(&rgba16, &mut alpha, 0);
         assert_eq!(alpha, [0, 4, 0, 8]);
 
         let mut rgba32f = Vec::new();
@@ -1377,7 +1803,7 @@ mod tests {
             rgba32f.extend_from_slice(&value.to_ne_bytes());
         }
         let mut alpha = [0; 8];
-        extract_channel::<f32, 4, 3>(&rgba32f, &mut alpha);
+        extract_channel::<f32, 4, 3>(&rgba32f, &mut alpha, 0);
         assert_eq!(
             f32::from_ne_bytes(alpha[0..4].try_into().unwrap()),
             0.25_f32

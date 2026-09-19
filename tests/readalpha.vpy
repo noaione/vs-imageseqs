@@ -250,6 +250,13 @@ MONO_HEIGHT = 5
 ORIENTATION_WIDTH = 4
 ORIENTATION_HEIGHT = 3
 
+# The jpeg xl fixtures that state their own depth are four wide and three tall:
+# the two grayscale ones hold the numbers one to twelve and the four channel one
+# holds four planes of distinct numbers, so the alpha plane of a deeper file is
+# checked apart from the colour planes that share its word.
+DEPTH_WIDTH = 4
+DEPTH_HEIGHT = 3
+
 # The yuv orientation fixtures are four quadrants of four grey levels rather
 # than the twelve different samples of the png ones, because a lossy encode
 # cannot keep those: the four levels survive it and their order is enough to say
@@ -302,32 +309,44 @@ def shown(stored: list[list[int]], orientation: int) -> list[list[int]]:
             raise AssertionError(f"unknown orientation {orientation}")
 
 
+def ten_bit(value: int) -> int:
+    """The ten bit sample an eight bit one is stored as.
+
+    ``avifenc`` scales the eight bit source onto the ten bit range when it codes
+    a deeper copy of it, and the lossless encode keeps exactly that number, so
+    this is what the ten bit fixture holds rather than four times a sample.
+    """
+    return round(value * 1023 / 255)
+
+
 def test_monochrome_containers() -> None:
     """A monochrome heif and avif hand out one plane per sample.
 
     ``mono-alpha.png`` holds ``8 + 11x + 23y`` grey and ``240 - 9x - 13y`` alpha.
     The eight bit containers bring those numbers back unchanged in a ``Gray8``
-    colour clip and a ``Gray8`` alpha clip. The ten bit avif stores each sample
-    four times over, and dav1d hands the ten bit samples back left aligned in
-    sixteen bits, so its planes are the same numbers times 256 within the
-    rounding of that encode. Both avifs report three channels through the
-    ``image`` decoder and are described from their container instead, so this
-    covers that probe, the format it corrects and the writer that fills a grey
-    plane from the wider buffer the decoder returns.
+    colour clip and a ``Gray8`` alpha clip. The ten bit avif is handed out as
+    ``Gray10`` holding the ten bit number the encode stored, which is the eight
+    bit one scaled onto the ten bit range: the format names the depth the file
+    states and the samples are the ones that depth holds, rather than the same
+    numbers left aligned in the sixteen bit word it used to be described as.
+    Both avifs report three channels through the ``image`` decoder and are
+    described from their container instead, so this covers that probe, the format
+    it corrects, the writer that fills a grey plane from the wider buffer the
+    decoder returns and the alpha plane of the same depth.
     """
     grey = [8 + 11 * x + 23 * y for y in range(MONO_HEIGHT) for x in range(MONO_WIDTH)]
     alpha_plane = [
         240 - 9 * x - 13 * y for y in range(MONO_HEIGHT) for x in range(MONO_WIDTH)
     ]
     cases = [
-        ("mono-alpha.heic", "heic", "Gray8", 1, 0),
-        ("mono-alpha.avif", "avif", "Gray8", 1, 0),
-        ("mono-alpha-10.avif", "avif 10 bit", "Gray16", 256, 256),
+        ("mono-alpha.heic", "heic", "Gray8", lambda value: value),
+        ("mono-alpha.avif", "avif", "Gray8", lambda value: value),
+        ("mono-alpha-10.avif", "avif 10 bit", "Gray10", ten_bit),
     ]
     files = [fixture(name) for name, *_ in cases]
     clip, alpha = read_alpha(files=files, mismatch=True)
     check(len(clip) == len(files), "mono: every file becomes one frame")
-    for index, (_, label, format_name, scale, tolerance) in enumerate(cases):
+    for index, (_, label, format_name, stored) in enumerate(cases):
         color = clip.get_frame(index)
         frame = alpha.get_frame(index)
         check(
@@ -339,11 +358,11 @@ def test_monochrome_containers() -> None:
             f"mono {label}: the alpha clip is {format_name} (got {frame.format.name})",
         )
         check(
-            almost(samples(color), [value * scale for value in grey], tolerance),
+            almost(samples(color), [stored(value) for value in grey]),
             f"mono {label}: the gray plane",
         )
         check(
-            almost(samples(frame), [value * scale for value in alpha_plane], tolerance),
+            almost(samples(frame), [stored(value) for value in alpha_plane]),
             f"mono {label}: the alpha plane",
         )
         check(frame.props["ImgSeqAlpha"] == 1, f"mono {label}: alpha frames carry ImgSeqAlpha")
@@ -352,6 +371,68 @@ def test_monochrome_containers() -> None:
     plain_clip, plain_alpha = read_alpha(files=[fixture("mono-alpha.png")])
     check(samples(plain_clip.get_frame(0)) == grey, "mono: the source png keeps the same gray plane")
     check(samples(plain_alpha.get_frame(0)) == alpha_plane, "mono: the source png keeps the same alpha")
+
+
+def test_jxl_depths() -> None:
+    """A jpeg xl that states its own depth is handed out at that depth.
+
+    The three fixtures hold the same twelve positions and differ only in the
+    depth their codestream states, which ``cjxl`` reads from the ``MAXVAL`` of
+    the pgm or pam they were encoded from; see "make-alpha-fixtures.py". A file
+    that states ten bits is a ``Gray10`` or ``RGB30`` frame holding the sample
+    itself, and the twelve bit one is a ``Gray12`` frame, so all of them hand out
+    the numbers below: moving the samples down out of the sixteen bit word the
+    decoder returns by a depth of the reader's own, rather than by the one the
+    file states, gives a different plane for at least one of them.
+
+    ``jxl-rgba10.jxl`` holds an alpha channel at the same depth, which is where a
+    deeper alpha plane of its own is checked: it is a ``Gray10`` plane of its own
+    numbers, moved down the same way the colour planes are. The two gray
+    fixtures hold no alpha channel, so their alpha clip is an opaque plane of
+    their format instead: 1023 for the ten bit one and 4095 for the twelve bit
+    one, rather than the 65535 the sixteen bit word would hold.
+    """
+    positions = [(x, y) for y in range(DEPTH_HEIGHT) for x in range(DEPTH_WIDTH)]
+
+    def numbered(first: int) -> list[int]:
+        """`first` upward along every row, which is how the fixtures are built."""
+        return [first + x + DEPTH_WIDTH * y for x, y in positions]
+
+    for name, format_name, opaque in (
+        ("jxl-gray10.jxl", "Gray10", 1023),
+        ("jxl-gray12.jxl", "Gray12", 4095),
+    ):
+        clip, alpha = read_alpha(files=[fixture(name)])
+        color = clip.get_frame(0)
+        frame = alpha.get_frame(0)
+        check(
+            color.format.name == format_name,
+            f"{name}: the color clip is {format_name} (got {color.format.name})",
+        )
+        check(
+            frame.format.name == format_name,
+            f"{name}: the alpha clip is {format_name} (got {frame.format.name})",
+        )
+        check(samples(color) == numbered(1), f"{name}: the gray plane")
+        check(
+            samples(frame) == [opaque] * len(positions),
+            f"{name}: the opaque alpha plane",
+        )
+
+    clip, alpha = read_alpha(files=[fixture("jxl-rgba10.jxl")])
+    color = clip.get_frame(0)
+    frame = alpha.get_frame(0)
+    check(
+        color.format.name == "RGB30",
+        f"jxl-rgba10.jxl: the color clip is RGB30 (got {color.format.name})",
+    )
+    check(
+        frame.format.name == "Gray10",
+        f"jxl-rgba10.jxl: the alpha clip is Gray10 (got {frame.format.name})",
+    )
+    for plane, first in ((0, 1), (1, 13), (2, 25)):
+        check(samples(color, plane) == numbered(first), f"jxl-rgba10.jxl: plane {plane}")
+    check(samples(frame) == numbered(100), "jxl-rgba10.jxl: the alpha plane")
 
 
 def test_color_containers() -> None:
@@ -869,6 +950,7 @@ def main() -> None:
         test_variable_depth,
         test_read_is_unchanged,
         test_monochrome_containers,
+        test_jxl_depths,
         test_color_containers,
         test_yuv_containers,
         test_color_metadata,

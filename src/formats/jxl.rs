@@ -100,6 +100,11 @@ struct Header {
     jxl_color_type: JxlColorType,
     /// Sample format the decoder is asked for.
     data_format: JxlDataFormat,
+    /// Bits per sample the codestream states, which is the depth the frame is
+    /// built at: a ten bit file is handed out as `Gray10` or `Rgb10` holding the
+    /// sample itself rather than as the word it arrives in. A float file states
+    /// none and is as wide as its own sample, which narrows nothing.
+    depth: u32,
     /// Extra channels the requested layout has to account for, alpha included.
     extra_channels: usize,
     /// Whether the file's embedded color profile is an icc profile rather than a
@@ -132,6 +137,10 @@ impl Header {
         let grayscale = decoder.current_pixel_format().color_type.is_grayscale();
         let (color_type, jxl_color_type, data_format) =
             output_format(&info.bit_depth, grayscale, has_alpha);
+        let depth = match &info.bit_depth {
+            JxlBitDepth::Int { bits_per_sample } => *bits_per_sample,
+            JxlBitDepth::Float { .. } => 32,
+        };
         let profile = decoder.embedded_color_profile();
         Ok(Self {
             width,
@@ -140,10 +149,21 @@ impl Header {
             color_type,
             jxl_color_type,
             data_format,
+            depth,
             extra_channels,
             has_icc_profile: matches!(profile, JxlColorProfile::Icc(_)),
             cicp: cicp_of(profile),
         })
+    }
+
+    /// Pixel format the frame holds.
+    ///
+    /// The color type is the word the samples are stored in, which knows eight
+    /// bits, sixteen bits and float; the codestream's own depth is what the
+    /// frame is built at, so a ten bit file is a ten bit frame whose samples the
+    /// writer moves down out of the word. See [`PixelFormat::at_depth`].
+    fn format(&self) -> Option<PixelFormat> {
+        Some(PixelFormat::from_color_type(self.color_type)?.at_depth(self.depth))
     }
 
     /// Pixel format to ask the decoder for.
@@ -199,10 +219,14 @@ fn output_format(
             jxl_color_type(grayscale, has_alpha),
             JxlDataFormat::U8 { bit_depth: 8 },
         ),
-        // 9 to 16 bits are handed out in 16 bit words. Where the samples sit in
-        // those words, and whether the frame should hold a nominal 10 or 12 bit
-        // format instead, is what `docs/improvements/10-nominal-bit-depth.md`
-        // takes on.
+        // 9 to 16 bits are asked for in 16 bit words, scaled onto the whole
+        // range of the word. The frame is then built at the depth the codestream
+        // states - see [`Header::format`], which narrows the color type with
+        // [`PixelFormat::at_depth`] - and the writer moves each sample down out
+        // of the word by the difference, which recovers it exactly however deep
+        // the file is. Asking for `bit_depth: *bits_per_sample` instead would
+        // hand the samples over already right aligned, at the price of a
+        // narrower word that the writer would have to be told about.
         JxlBitDepth::Int { .. } => (
             match (grayscale, has_alpha) {
                 (true, false) => ColorType::L16,
@@ -354,7 +378,8 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
         } else {
             Transform::from_orientation(inverse_orientation(header.orientation))
         },
-        format: PixelFormat::from_color_type(header.color_type)
+        format: header
+            .format()
             .ok_or_else(|| unsupported(header.color_type, path))?,
     })
 }
@@ -363,18 +388,27 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
 pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     let mut opened = open_header(&info.path)?;
     let header = Header::read(&opened.decoder, &info.path)?;
+    // The format is part of what the frame holds, so a file that changed its
+    // depth - which a color type of the same width does not show - is caught
+    // here as well.
+    let format = header
+        .format()
+        .ok_or_else(|| unsupported(header.color_type, &info.path))?;
     if (header.width, header.height, header.color_type)
         != (info.width, info.height, info.color_type)
+        || format != info.format
     {
         return Err(ImgSeqError::new(format!(
-            "image '{}' changed after probing (was {was_width}x{was_height} {was:?}, now {now_width}x{now_height} {now:?})",
+            "image '{}' changed after probing (was {was_width}x{was_height} {was:?} {was_format}, now {now_width}x{now_height} {now:?} {now_format})",
             info.path.display(),
             was_width = info.width,
             was_height = info.height,
             was = info.color_type,
+            was_format = info.format.name(),
             now_width = header.width,
             now_height = header.height,
             now = header.color_type,
+            now_format = format.name(),
         )));
     }
 
