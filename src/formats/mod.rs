@@ -25,6 +25,7 @@
 
 pub mod avif;
 pub mod heif;
+pub mod jp2;
 pub mod jxl;
 pub mod png;
 pub mod webp;

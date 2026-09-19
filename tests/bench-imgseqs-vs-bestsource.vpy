@@ -53,14 +53,16 @@ core = vs.core
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description="Compares imgseqs with bestsource reading the same image sequence.")
     parser.add_argument("--dir", type=Path, help="directory holding the images")
     parser.add_argument("--pattern", default=DEFAULT_PATTERN, help="printf pattern bestsource opens")
     parser.add_argument("--select", help="glob used to pick the files, defaults to the glob of --pattern")
     parser.add_argument("--plugin", type=Path, default=DEFAULT_PLUGIN, help="imgseqs library to load")
     parser.add_argument("--frames", type=int, default=0, help="images to read, 0 reads the whole sequence")
     parser.add_argument("--reps", type=int, default=2, help="timed passes per configuration")
-    parser.add_argument("--extra", action="store_true", help="also run imgseqs without lookahead and bestsource with one thread")
+    parser.add_argument(
+        "--extra", action="store_true", help="also run imgseqs without lookahead and bestsource with one thread"
+    )
     parser.add_argument("--prefetch", type=int, default=None, help="also run imgseqs with this many lookahead workers")
     return parser.parse_args()
 
@@ -179,7 +181,10 @@ def check_alignment(configs: list[Config]) -> None:
     reference = configs[0]
     for config in configs[1:]:
         if config.frames != reference.frames:
-            print(f"warning: {config.label} returned {config.frames} frames, {reference.label} returned {reference.frames}")
+            print(
+                f"warning: {config.label} returned {config.frames} frames, "
+                f"{reference.label} returned {reference.frames}"
+            )
             continue
         differing = [
             index
@@ -290,7 +295,11 @@ def main() -> None:
         ("with open", lambda config: (sum(best[config.label]) + min(config.open_times)) / 1000.0),
     ):
         mine, theirs = seconds(faster), seconds(reference)
-        winner, loser, ratio = (faster, reference, theirs / mine) if mine <= theirs else (reference, faster, mine / theirs)
+        winner, loser, ratio = (
+            (faster, reference, theirs / mine)
+            if mine <= theirs else
+            (reference, faster, mine / theirs)
+        )
         print(f"{winner.label} is {ratio:.2f}x faster than {loser.label} ({name})")
 
 

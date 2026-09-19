@@ -12,6 +12,7 @@ vcpkg installation used to build the Windows wheel:
   * libde265 1.1.1
   * dav1d 1.5.3
   * libwebp 1.6.0
+  * OpenJPEG (vendored by openjpeg-sys 1.0.12)
 
 The native dependency versions and license expressions used by this build
 are recorded below. Rust crate licenses are intentionally out of scope for
@@ -50,6 +51,12 @@ libwebp 1.6.0
   Linkage: statically linked, used by the plugin's own webp decode path
   Notice and license text: LICENSES/libwebp-COPYING.txt
   Upstream: https://github.com/webmproject/libwebp
+
+openjpeg (vendored by openjpeg-sys 1.0.12)
+  License: BSD 2-Clause License
+  Linkage: statically compiled into the plugin by the jpeg2k dependency
+  Notice: LICENSES/openjpeg-COPYING.txt
+  Upstream: https://github.com/uclouvain/openjpeg
 
 The current vcpkg manifest disables libheif default features, so x265 is not
 selected. The refreshed install contains no x265 library. Older generated
@@ -90,3 +97,4 @@ dependency installation used for this build.
   * libheif: https://github.com/strukturag/libheif/blob/master/COPYING
   * libde265: https://github.com/strukturag/libde265/blob/master/COPYING
   * libwebp: https://github.com/webmproject/libwebp/blob/main/COPYING
+  * OpenJPEG: https://github.com/uclouvain/openjpeg/blob/master/LICENSE

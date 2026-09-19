@@ -1,15 +1,13 @@
 # 06 — jpeg 2000 backend
 
-- status: proposed
-- touches: `Cargo.toml`, `vcpkg.json`, `build.rs`, `README.md`,
-  `.github/workflows/`, `THIRD_PARTY_NOTICES`, `LICENSES/`,
-  `src/formats/jp2.rs` (new), `src/formats/mod.rs`, `src/decoder.rs`,
-  `src/pixel.rs` (only if a format is added), fixtures, `tests/readalpha.vpy`
-- expected: a `.jp2`/`.j2k` file reads as `Gray8`/`RGB24`/`Gray16`/`RGB48`
-  instead of failing the probe, and the probe costs a header walk rather than a
-  decode
-- risk: medium — a fourth native dependency and a decoder path with no sandbox
-  set behind it
+- status: implemented
+- touches: `Cargo.toml`, `README.md`, `THIRD_PARTY_NOTICES`, `LICENSES/`,
+  `src/formats/jp2.rs` (new), `src/formats/mod.rs`, `src/decoder.rs`, fixtures,
+  `tests/make-alpha-fixtures.py`, `tests/readalpha.vpy`
+- expected: a `.jp2`/`.j2k` file reads as gray or RGB at its stated depth instead
+  of failing the probe, and the probe costs a header walk rather than a decode
+- risk: medium — a vendored native decoder and a format path with no sandbox set
+  behind it
 
 ## problem
 
@@ -36,27 +34,19 @@ the change is the one number this plan cannot quote before it is written.
 
 ## change, as planned
 
-**the dependency.** `jpeg2k` 0.10.1 (published 2025-07-29, MIT/Apache-2.0 for
-the wrapper) sits on `openjpeg-sys`, which links OpenJPEG. Settle first how the
-sys crate gets it: through pkg-config on unix and vcpkg on windows like libwebp,
-or by building the copy it ships. That answer decides three files:
-
-- `vcpkg.json` gains `openjpeg` (its `x64-windows-static-md` build is static,
-  like the rest of the tree);
-- `README.md`'s build section gains the unix package names beside the `libwebp`
-  ones that are there now;
-- `THIRD_PARTY_NOTICES` and `LICENSES/` gain OpenJPEG's text, and
-  `.github/workflows/` gains its name in the `otool -L`/`readelf -d` assertion
-  if the build ends up importing `libopenjp2` rather than linking the archive.
-  Copy the upstream licence text into `LICENSES/` rather than summarising it,
-  the way the four native entries there do now.
+**the dependency.** `jpeg2k` 0.10.1 (MIT/Apache-2.0 for the wrapper) uses
+`openjpeg-sys` 1.0.12, which compiles the OpenJPEG sources it vendors. No
+vcpkg or pkg-config entry is needed; the plugin contains that static decoder.
+`THIRD_PARTY_NOTICES` and `LICENSES/` carry the vendored OpenJPEG BSD-2-Clause
+text.
 
 **the module.** `src/formats/jp2.rs`, picked by extension (`jp2`, `j2k`, `jpf`,
 `jpx`, `j2c`) and by the signature the file starts with: a `jP  ` box for a
 container, `FF 4F FF 51` for a bare codestream. It exposes the same two entry
 points as `heif.rs` and `webp.rs`:
 
-- `handles(info)` — the extension and the magic agree.
+- `handles(info)` — the extension selects the module, and the probe validates
+  the JP2 or codestream magic before accepting the file.
 - `image_info(path)` — the probe, from the header. A container states the size
   and the component types in `ihdr` (height, width, component count, bit depth)
   and the colour space in `colr` (16 `sRGB`, 17 `greyscale`, 18 `sYCC`); a bare
@@ -70,8 +60,9 @@ points as `heif.rs` and `webp.rs`:
   `colr` box calls rgb or grey, and into the planar `Pixels` of
   [03](03-webp-yuv-output.md) only for a file the header proves is 4:2:0.
 
-**the formats.** `prec <= 8` is `Gray8`/`RGB24`, above that `Gray16`/`RGB48`,
-the same rule the heif module uses. Jpeg 2000 has no alpha channel, so
+**the formats.** `prec <= 8` is `Gray8`/`RGB24`; deeper components use the
+nominal `Gray9`–`Gray16` or `RGB27`–`RGB48` format, with the decoder's wider
+word shifted down by the existing pixel writer. Jpeg 2000 has no alpha channel, so
 `ReadAlpha` answers the opaque gray plane it answers for every other source
 without one, and a component count above three (cmyk, or an alpha-less
 `colr`-less codestream with four components) fails loudly rather than being
@@ -85,13 +76,8 @@ are untouched.
 
 - fixtures, encoded once by hand and committed, the way the avif and heic ones
   are: 8-bit grey, 8-bit rgb, 16-bit rgb (reversible 5/3), one lossy 9/7, and
-  one bare `.j2k` codestream. `opj_compress` writes all five (`-i` takes a png,
-  `-o` names the output, `-O` writes the bare codestream; an OpenJPEG release or
-  the tools the vcpkg port installs under `openjpeg/tools` both provide it).
-  Keep the sources small so the
-  fixtures stay a few hundred bytes each, and record which command wrote which
-  file in the fixture script, as `tests/make-alpha-fixtures.py` does for the
-  heif and avif ones.
+  one bare `.j2k` codestream. `opj_compress` writes all five; the commands are
+  recorded in `tests/make-alpha-fixtures.py`.
 - `tests/readalpha.vpy` gains a table row per fixture: the four container files
   in one `mismatch=True` clip with the format each of them must land on, and the
   bare codestream beside them. That is the same shape the monochrome container
@@ -107,16 +93,9 @@ are untouched.
 
 ## left over
 
-- **a 10-bit or 12-bit jp2** will be handed out as `Gray16`/`RGB48` until this
-  module reads `prec`: [10](10-nominal-bit-depth.md) is implemented and gives the
-  depth a format in `src/pixel.rs` and a shift in the writer, so the `SIZ` walk
-  this module needs anyway is where its `prec` should come from.
-- **`sYCC` is not automatically `YUV420P8`.** The webp path can assume 4:2:0
-  because vp8 is defined that way; `colr = 18` only says the samples are yuv,
-  and `dx`/`dy` in `SIZ` say how they are sampled. A 4:4:4 or 4:2:2 file handed
-  out as `YUV420P8` would describe itself wrongly to every graph downstream, so
-  the yuv path is taken only for `dx = dy = 2` and the rest stays rgb, with the
-  decision written down in the module beside the format it returns.
+- **`sYCC` is not automatically `YUV420P8`.** The yuv path is taken only for
+  8/10-bit `dx = dy = 2`; other sYCC sampling is converted to RGB, with the
+  decision kept beside the format it returns.
 - **`jpx`/`jp2` metadata that is not read**: `pclr` palettes, `cdef` channel
   definitions, `res`/`resc` resolutions and the `uuid` boxes. A file that needs
   one of them to be interpreted correctly is out of scope; the colour space in

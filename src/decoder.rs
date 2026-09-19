@@ -39,6 +39,9 @@ fn format_decoder(info: &ImageInfo) -> Option<Result<DecodedImage>> {
     if formats::jxl::handles(info) {
         return Some(formats::jxl::decode(info));
     }
+    if formats::jp2::handles(info) {
+        return Some(formats::jp2::decode(info));
+    }
     None
 }
 
@@ -193,6 +196,9 @@ pub fn probe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
     // the hook that taught it one is gone. See [`crate::formats::jxl`].
     if formats::jxl::owns(path) {
         return formats::jxl::image_info(path, apply_rotation);
+    }
+    if formats::jp2::owns(path) {
+        return formats::jp2::image_info(path, apply_rotation);
     }
 
     let mut decoder = open_decoder(path)?;

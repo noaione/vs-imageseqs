@@ -147,6 +147,38 @@ def test_dds_and_farbfeld() -> None:
     check(samples(frame) == [100, 200, 300, 400], "farbfeld: alpha plane")
 
 
+def test_jpeg2000() -> None:
+    """JP2 and bare J2K files use the OpenJPEG path and keep their depth."""
+    cases = [
+        ("alpha-jp2-gray8.jp2", "Gray8", [7, 8, 9, 10, 11, 12], None),
+        ("alpha-jp2-rgb8.jp2", "RGB24", None, [1, 4, 7, 10, 13, 16]),
+        ("alpha-j2k-rgb8.j2k", "RGB24", None, [1, 4, 7, 10, 13, 16]),
+        ("alpha-jp2-lossy.jp2", "RGB24", None, None),
+        ("alpha-jp2-rgb16.jp2", "RGB48", None, [1000, 4000, 7000, 10000, 13000, 16000]),
+    ]
+    files = [fixture(name) for name, *_ in cases]
+    clip, alpha = read_alpha(files=files, mismatch=True)
+    for index, (name, format_name, gray, red) in enumerate(cases):
+        color = clip.get_frame(index)
+        opaque = alpha.get_frame(index)
+        check(
+            color.format.name == format_name,
+            f"{name}: color clip is {format_name} (got {color.format.name})",
+        )
+        check(
+            opaque.format.name == ("Gray16" if format_name == "RGB48" else "Gray8"),
+            f"{name}: opaque alpha keeps the source depth",
+        )
+        if gray is not None:
+            check(samples(color) == gray, f"{name}: gray plane")
+        if red is not None:
+            check(samples(color, 0) == red, f"{name}: red plane")
+        check(
+            samples(opaque) == ([65535] * 6 if format_name == "RGB48" else [255] * 6),
+            f"{name}: opaque alpha plane",
+        )
+
+
 def test_opaque_fill() -> None:
     _, alpha = read_alpha(files=[fixture("alpha-rgb8.png")])
     check(alpha.format.name == "Gray8", "rgb8: an alpha clip is still produced")
@@ -974,6 +1006,7 @@ def main() -> None:
         test_la16,
         test_rgba16,
         test_dds_and_farbfeld,
+        test_jpeg2000,
         test_float,
         test_opaque_fill,
         test_alpha_presence_mixed,

@@ -91,6 +91,7 @@ and total frame time to the vapoursynth log.
 | avif | dav1d; monochrome uses `Gray8`/`Gray10`/`Gray12`, color may use its YUV planes |
 | heif, heic | libheif/libde265; monochrome uses `Gray8`/`Gray10`/`Gray12`, color may use its YUV planes |
 | jxl | jpeg xl decoder |
+| jp2, j2k, jpf, jpx, j2c | JPEG 2000 through OpenJPEG; gray and RGB at 8–16 bits |
 | exr, hdr, pnm, qoi, tga | standard image decoder |
 
 supported output includes gray and rgb at 8–16 bits, rgb 32-bit float, and the
@@ -236,8 +237,8 @@ brew install cmake ninja pkg-config dav1d libde265 webp
 ```
 
 libwebp is linked from its static archive when available, so it is not needed
-at runtime. dav1d and libde265 remain shared on unix; windows uses the static
-vcpkg triplet.
+at runtime. JPEG 2000 uses the OpenJPEG sources bundled by `openjpeg-sys`.
+dav1d and libde265 remain shared on unix; windows uses the static vcpkg triplet.
 
 see [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) and [LICENSES](LICENSES) for
 native dependency obligations. the project itself is licensed under the

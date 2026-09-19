@@ -58,6 +58,7 @@ pages are one channel. what imgseqs makes of them depends on the container:
 | webp | 35 `YUV420P8` frames | 964 MiB, one 22.3 MiB frame and 34 of 27.7 MiB |
 | avif | 34 `YUV420P8` frames and one `Gray8` | 965 MiB: one 22.3 MiB frame, 33 of 27.7 MiB and one of 18.5 MiB |
 | heic | 31 `Gray8` frames of 18.5 MiB and 4 `YUV420P8` | 685 MiB, one 22.3 MiB frame and three of 27.7 MiB |
+| jp2 | 32 `Gray8` frames of 18.5 MiB and 3 `RGB24` | 748 MiB: one 44.7 MiB frame, two of 55.4 MiB and 32 of 18.5 MiB |
 | jpeg, png, jxl | 31 `Gray8` frames of 18.5 MiB and 4 `RGB24` | 784 MiB |
 
 every set needs `mismatch=True` for this. the avif and heic rows are
@@ -244,6 +245,25 @@ creates the clip, 7.18 s against imgseqs's 0.20 s, and gains nothing from its
 threads here (7.49 s against 7.44 s with one), so the win is imgseqs's
 lookahead, 4.6x over its own serial row. at `prefetch=16` the gap against
 bestsource widens to 3.7x on frames, and a frame costs 11.8 ms.
+
+## jpeg 2000
+
+35 files, 263 MB: 32 monochrome pages of 18.5 MiB (`Gray8`) and three colour
+ones (`RGB24`, one of 44.7 MiB and two of 55.4 MiB). the rows below are one
+pass because jpeg 2000 decoding is expensive.
+
+| reading the set | frames | median frame | open | total |
+| --- | --- | --- | --- | --- |
+| imgseqs `Read` | 13.637 s | 350.07 ms | 0.162 s | 13.799 s |
+| imgseqs `Read`, `prefetch=0` | 46.267 s | 1309.57 ms | 0.151 s | 46.418 s |
+| imgseqs `Read`, `prefetch=4` | 14.683 s | 339.37 ms | 0.147 s | 14.830 s |
+| bestsource `VideoSource` | 14.635 s | 24.22 ms | 16.389 s | 31.023 s |
+| bestsource `VideoSource`, `threads=1` | 87.336 s | 2475.90 ms | 85.440 s | 172.776 s |
+
+imgseqs is 1.07x faster than bestsource on frames and 2.25x faster including
+the open. lookahead is 3.4x faster than the serial row, while `prefetch=4` is
+effectively tied with the default. bestsource's single-threaded row is much
+slower at 87.336 s.
 
 ## png
 

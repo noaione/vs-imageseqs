@@ -53,6 +53,9 @@ jxl = { version = "0.7.4", default-features = false, features = [
 # planes the bitstream holds are handed out instead of r,g,b; see
 # `docs/improvements/12-heif-avif-yuv-output.md`
 dav1d = { version = "0.11.1", default-features = false }
+jpeg2k = { version = "0.10.1", default-features = false, features = [
+    "openjpeg-sys"
+] }
 
 # native stuff: find libwebp, see build.rs
 [target.'cfg(windows)'.build-dependencies]

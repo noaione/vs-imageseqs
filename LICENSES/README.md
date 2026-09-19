@@ -5,8 +5,7 @@ statically linked native components used by the plugin.
 
 ## Native components
 
-These files are copied verbatim from the repository's `vcpkg_installed`
-`x64-windows-static-md` package installation:
+These files are copied verbatim from the dependency sources used by the build:
 
 - `dav1d-COPYING.txt` — dav1d 1.5.3, BSD 2-Clause.
 - `libheif-COPYING.txt` — libheif 1.23.1, including its LGPLv3 library text
@@ -15,6 +14,8 @@ These files are copied verbatim from the repository's `vcpkg_installed`
   and the upstream bundled GPL/MIT license text sections.
 - `libwebp-COPYING.txt` — libwebp 1.6.0, BSD 3-Clause, including its
   additional IP rights grant for patents.
+- `openjpeg-COPYING.txt` — the OpenJPEG sources vendored by `openjpeg-sys`
+  1.0.12, BSD 2-Clause.
 
 The current manifest disables libheif default features, so x265 is not part
 of the refreshed install or current native dependency set. If HEVC encoding

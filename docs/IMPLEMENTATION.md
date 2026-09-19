@@ -302,12 +302,11 @@ JPEG 2000
     └── OpenJPEG
 ```
 
-Everything above except JPEG 2000 is in the build. JPEG 2000 is a plan rather
-than a backend: [06](improvements/06-jpeg-2000-backend.md) is where its
-dependency, its module and its fixtures are written down. The `image` feature
-list below is the other half of this picture, and it is the one place where the
-doc and the manifest disagreed: `dds` and `ff` are named there and not enabled,
-which is [07](improvements/07-dds-and-farbfeld.md).
+Everything above is in the build. JPEG 2000 is implemented in
+`src/formats/jp2.rs` through `jpeg2k` and its vendored OpenJPEG sources; the
+probe walks the JP2/SIZ headers before decode. The `image` feature list below is
+the other half of this picture, and `dds` and `ff` are enabled as described by
+[07](improvements/07-dds-and-farbfeld.md).
 
 ### image-rs Configuration
 

@@ -25,6 +25,12 @@ commands from the repository root whenever a source png changes, with
     cjxl -d 0 tests/fixtures/jxl-gray10.pgm tests/fixtures/jxl-gray10.jxl
     cjxl -d 0 tests/fixtures/jxl-gray12.pgm tests/fixtures/jxl-gray12.jxl
     cjxl -d 0 tests/fixtures/jxl-rgba10.pam tests/fixtures/jxl-rgba10.jxl
+    opj_compress -i tests/fixtures/alpha-l8.png -n 1 -o tests/fixtures/alpha-jp2-gray8.jp2
+    opj_compress -i tests/fixtures/alpha-rgb8.png -mct 0 -n 1 -o tests/fixtures/alpha-jp2-rgb8.jp2
+    opj_compress -i tests/fixtures/alpha-rgb8.png -mct 0 -n 1 -o tests/fixtures/alpha-j2k-rgb8.j2k
+    opj_compress -i tests/fixtures/alpha-rgb8.png -mct 0 -I -q 35 -n 1 -o tests/fixtures/alpha-jp2-lossy.jp2
+    magick tests/fixtures/alpha-rgba16.png -alpha off PNG48:target/j2k-rgb16.png
+    opj_compress -i target/j2k-rgb16.png -mct 0 -n 1 -o tests/fixtures/alpha-jp2-rgb16.jp2
 
 The yuv avif fixtures are the same kind of hand-made container: every one of
 them states a matrix the frame properties can name, which is what moves a file

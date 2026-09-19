@@ -78,10 +78,11 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   for every colour avif, which `dav1d` decodes and which also answers
   `decoder::probe` from the container boxes and the av1 sequence header so that
   probing an avif does not decode it, `jxl.rs` for every jpeg xl, which the `jxl`
-  crate decodes directly because `image` has no jxl format of its own, `png.rs`
-  for the `cICP` chunk, which `image` has no accessor for, and `webp.rs` for the
-  libwebp decode and the lossy yuv format). a monochrome avif still goes through
-  `image` and is corrected to `Gray8` here.
+  crate decodes directly because `image` has no jxl format of its own, `jp2.rs`
+  for JPEG 2000 header probing and OpenJPEG decoding, `png.rs` for the `cICP`
+  chunk, which `image` has no accessor for, and `webp.rs` for the libwebp decode
+  and the lossy yuv format). a monochrome avif still goes through `image` and is
+  corrected to `Gray8` here.
 - `src/pixel.rs`: supported pixel formats, the format a nominal depth names, and
   planar frame writes, which move a wider word down to the frame's own depth.
 - `src/color.rs`: frame properties, and the container's color metadata mapped
@@ -186,13 +187,14 @@ included.
 
 ## native licenses
 
-the current native set is dav1d, libheif, libde265, and libwebp. dav1d uses
-the bsd-2-clause license and libwebp uses bsd-3-clause. libheif and libde265
-are lgplv3 and are statically linked. keep the exact upstream texts in
-`LICENSES/`.
+the current native set is dav1d, libheif, libde265, libwebp, and the OpenJPEG
+sources vendored by `openjpeg-sys`. dav1d and OpenJPEG use the bsd-2-clause
+license and libwebp uses bsd-3-clause. libheif and libde265 are lgplv3 and are
+statically linked. keep the exact upstream texts in `LICENSES/`.
 
-on windows the vcpkg `x64-windows-static-md` triplet makes every native
-library static. on unix `build.rs` links libwebp from its archive when the
+on windows the vcpkg `x64-windows-static-md` triplet makes every vcpkg native
+library static. `jpeg2k` compiles its vendored OpenJPEG sources on every
+platform. on unix `build.rs` links libwebp from its archive when the
 development package installs one (`libwebp-dev` and homebrew's `webp` both
 do); on apple the archive is named instead of requested, because `ld` ignores
 the `static=` hint and prefers `libwebp.dylib` in the directory homebrew puts

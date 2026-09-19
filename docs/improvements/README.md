@@ -15,8 +15,8 @@ plus `src/source.rs`, 02 in `src/clip.rs` with the generic pool in
 type in `src/decoder.rs`. [09](09-exif-orientation.md) is implemented too, in
 `src/pixel.rs` and `src/clip.rs` behind `apply_rotation`.
 
-[06](06-jpeg-2000-backend.md) is the remaining open item. [07](07-dds-and-farbfeld.md)
-landed through the two `image` features the doc's own configuration block lists
+06 and 07 are implemented. 06 uses the `jpeg2k` wrapper with its vendored
+OpenJPEG backend; 07 landed through the two `image` features the doc's own configuration block lists
 (`dds` and `ff`), with hand-written DXT5 and farbfeld alpha fixtures. the three
 other rows the list was written from all landed —
 the colour properties its `# Color Metadata` section asks for, in `src/color.rs`
@@ -39,8 +39,8 @@ rotated picture whatever `apply_rotation` says. dropping the `image` adapter for
 the `jxl` crate underneath it fixes that, and it is what lets
 [08](08-color-metadata.md) and [10](10-nominal-bit-depth.md) read a jxl's colour
 encoding and its bit depth. it is implemented in `src/formats/jxl.rs`, with no
-change to what a jxl decodes to: 35 pages, frame for frame identical. 06 and 07
-are the open ones.
+change to what a jxl decodes to: 35 pages, frame for frame identical. the two
+format rows are covered by committed fixtures and the VapourSynth validator.
 
 [12](12-heif-avif-yuv-output.md) came out of the samples in
 `sandbox/hitokage-sample` and is the first plan here that is about what a frame
@@ -144,8 +144,8 @@ open plus frames to 4.99 s.
 | [03 yuv output for lossy webp](03-webp-yuv-output.md) | `src/formats/webp.rs`, `src/decoder.rs`, `src/pixel.rs`, `src/source.rs`, `src/color.rs` | webp 4.24 → 3.39 s, half the bytes per frame | medium, changes the output | implemented, with 04 |
 | [04 webp decoder](04-webp-decoder.md) | `Cargo.toml`, `build.rs`, `vcpkg.json`, notices, `LICENSES/`, `src/formats/webp.rs`, `src/decoder.rs` | decode 265 → 111 ms per frame, and it enables 02 and 03 | medium, native dependency | implemented, with 03 |
 | [05 monochrome heif](05-monochrome-heif.md) | `src/formats/heif.rs`, `src/pixel.rs` | the 31 monochrome heic files in `sandbox/heic` decode as `Gray8` instead of failing, and a monochrome avif is handed out as `Gray8` instead of `RGB24` | low, used to repair an always-failing path | implemented |
-| [06 jpeg 2000 backend](06-jpeg-2000-backend.md) | `Cargo.toml`, `vcpkg.json`, `build.rs`, README, notices, `LICENSES/`, `src/formats/jp2.rs` (new), `src/decoder.rs` | a `.jp2`/`.j2k` file reads as `Gray8`/`RGB24`/`Gray16`/`RGB48` instead of failing the probe, and the probe stays a header walk | medium, a fourth native dependency | proposed |
-| [07 dds and farbfeld](07-dds-and-farbfeld.md) | `Cargo.toml`, `README.md`, fixtures, `tests/readalpha.vpy` | `.dds` and `.ff` files stop failing the probe, for two feature flags and no native code | low | proposed |
+| [06 jpeg 2000 backend](06-jpeg-2000-backend.md) | `Cargo.toml`, README, notices, `LICENSES/`, `src/formats/jp2.rs`, `src/decoder.rs`, fixtures, `tests/readalpha.vpy` | a `.jp2`/`.j2k` file reads through a header-only probe as gray/RGB at its nominal depth, with planar sYCC 4:2:0 where supported | medium, vendored native decoder | implemented |
+| [07 dds and farbfeld](07-dds-and-farbfeld.md) | `Cargo.toml`, `README.md`, fixtures, `tests/readalpha.vpy` | `.dds` and `.ff` files stop failing the probe, for two feature flags and no native code | low | implemented |
 | [08 color metadata](08-color-metadata.md) | `src/decoder.rs`, `src/formats/heif.rs`, `src/formats/jxl.rs`, `src/formats/png.rs` (new), `src/color.rs` | `_Primaries`/`_Transfer` from the container's `nclx`, `cICP` or jxl codestream header, and `_Matrix`/`_Range` from the file for a yuv frame, while an icc-only file changes nothing | low to medium, a wrong claim is worse than none | implemented |
 | [09 exif orientation](09-exif-orientation.md) | `src/decoder.rs`, `src/source.rs`, `src/clip.rs`, `src/pixel.rs`, fixtures, `tests/readalpha.vpy` | a file whose exif says 6 comes out the way its thumbnail looks, behind an `apply_rotation` argument that defaults on, and `ImgSeqOrientation` keeps saying what the file said | medium, it swaps width and height | implemented |
 | [10 nominal bit depth](10-nominal-bit-depth.md) | `src/pixel.rs`, `src/formats/avif.rs`, `src/formats/heif.rs`, `src/formats/jxl.rs`, fixtures, `tests/readalpha.vpy` | a 10-bit avif is `Gray10`/`RGB30` instead of `Gray16`/`RGB48`, with the samples shifted into the words a 10-bit frame holds, and the 16-bit files stay 16-bit: 112.0 → 112.1 ms per frame on the convert stage, so the shift is free | medium, every 9-to-15-bit file changes format | implemented |
@@ -244,9 +244,6 @@ format-based clip grouping — is in `not planned` below, with its reasons.
   whose samples it decodes itself and `yuv_format` has no arm for it, so such a
   page falls back to rgb ([10](10-nominal-bit-depth.md),
   [12](12-heif-avif-yuv-output.md)).
-- **`prec` in the jp2 `SIZ` walk**, so a deep jp2 is handed out at its own depth:
-  one field in a walk [06](06-jpeg-2000-backend.md) needs anyway, and
-  [10](10-nominal-bit-depth.md) has built the rest of the path.
 - **twelve bit heic, tiled (grid) avif, gain maps, ten bit PQ/HDR avif**: read
   nowhere and absent from the sandbox ([12](12-heif-avif-yuv-output.md)).
 - **a ten bit monochrome heic has no fixture.** the heif row of
