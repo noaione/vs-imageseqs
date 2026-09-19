@@ -1,5 +1,15 @@
 # Rust VapourSynth Image Sequence Reader
 
+This is the design document. It was written before the plugin existed and is kept
+in the order it was written: what the build does is described in these words
+where it agrees, and annotated where it does not. The work the doc asks for and
+the code does not have is one plan per change in
+[docs/improvements/](improvements/README.md) — 06 for a jpeg 2000 backend, 07 for
+the two `image` features this doc's own configuration block names, 08 for the
+colour properties, 09 for the exif orientation and 10 for the nominal 10/12-bit
+depths — and each of those carries its status, so that index is the answer to
+"what is left".
+
 ## Goal
 
 Implement a native VapourSynth image-sequence source plugin in Rust.
@@ -53,11 +63,16 @@ Rust
 ├── image-rs
 │     ├── PNG
 │     ├── JPEG
-│     ├── WebP
 │     ├── TIFF
 │     ├── AVIF
 │     ├── EXR
 │     └── other supported formats
+│
+├── libwebp
+│     └── WebP, lossy files as planar yuv
+│
+├── libheif-rs
+│     └── HEIF / HEIC pages, and a monochrome AVIF
 │
 └── jxl-rs
       └── JPEG XL
@@ -249,7 +264,6 @@ Use `image-rs` as the primary decoder abstraction, with dedicated backends for f
 image-rs
 ├── PNG
 ├── JPEG
-├── WebP
 ├── TIFF
 ├── GIF
 ├── BMP
@@ -271,10 +285,20 @@ HEIF / HEIC
     └── libheif
         └── libde265 for HEVC/HEIC decoding
 
+WebP
+└── libwebp
+
 JPEG 2000
 └── jpeg2k
     └── OpenJPEG
 ```
+
+Everything above except JPEG 2000 is in the build. JPEG 2000 is a plan rather
+than a backend: [06](improvements/06-jpeg-2000-backend.md) is where its
+dependency, its module and its fixtures are written down. The `image` feature
+list below is the other half of this picture, and it is the one place where the
+doc and the manifest disagreed: `dds` and `ff` are named there and not enabled,
+which is [07](improvements/07-dds-and-farbfeld.md).
 
 ### image-rs Configuration
 
@@ -300,6 +324,12 @@ image = { version = "0.25.10", default-features = false, features = [
     "rayon",
 ] }
 ```
+
+`webp` stays in that list because `image` is still what identifies and probes a
+webp file: the format is recognised from the file's magic and the size, the
+colour type, the exif orientation and the icc profile all come from its decoder.
+Only the pixels are decoded elsewhere, by `src/formats/webp.rs`, which
+[04](improvements/04-webp-decoder.md) explains.
 
 ### Format Routing
 
@@ -390,6 +420,38 @@ apply, on two sizes or two coded records that disagree, and on a file whose bran
 is not `avif`/`avis`, so a file it describes is one whose decode matches what it
 promised. `decoder::decode` compares width, height and color type against the
 probe all the same and fails the frame if they disagree.
+
+### WebP
+
+`image`'s `webp` feature is `image-webp`: pure rust, single threaded, and it
+decodes into a canvas of its own which it then copies into the caller's buffer.
+libwebp is the format's reference decoder, it is vectorised, and its entry
+points write into a buffer and a stride the caller picks, so the canvas and that
+copy both go. `src/formats/webp.rs` takes every webp file that way, picked by
+extension and by the chunk headers a file starts with, and only the pixel decode
+moved — see above for what `image` still answers. The size libwebp reads from the
+bitstream is checked against the probe the way the `image` path checks its own
+decoder.
+
+Lossy webp stores yuv 4:2:0, and libwebp decodes it either way. A lossy file
+without an alpha channel is decoded into its own planes and handed out as
+`YUV420P8`: half the bytes per image, no yuv to rgb conversion that a graph
+would only undo, and twice as many frames in the lookahead budget.
+`formats::webp::output_format` is what tells the probe, and it is one of the two
+format corrections `# Probing` describes. Everything else keeps the interleaved
+layout the `image` path produced, because lossless webp is rgb by definition and
+a file with an alpha channel needs the buffer its alpha plane is read from.
+
+A yuv frame is tagged `_Matrix = 5` (`bt470bg`) and `_Range = 0` (limited): vp8
+defines the bt.601 coefficients for the limited range, libwebp's own yuv to rgb
+conversion uses that pair, and ffmpeg's webp decoder reports the same two values
+for the same bitstreams. `src/color.rs` applies that pair to the yuv family and
+leaves rgb and gray on `_Matrix = RGB` / `_Range = full`.
+
+[BENCH.md](BENCH.md)'s per stage table has what both changes left behind: the
+webp copy is the 5 ms of a frame whose planes arrive in the layout the frame
+already wants, which is why [02](improvements/02-frame-write-path.md) could move
+the rest of the write into the pool without the copy being the floor any more.
 
 ### Native Library Linkage
 
@@ -510,16 +572,25 @@ This allows extremely large image sequences without loading all image data into 
 messages through the VapourSynth log. The messages are opt-in because they
 add one log entry per requested frame.
 
-At creation time, report:
+At creation time, one line reports what the call cost and what it decided:
 
 ```text
-image probing
-format validation
-video-format selection
-total setup time
+create: frames= clips= probe= validate= prefetch= prefetch_memory= total=
 ```
 
-For each frame, report:
+`probe` is every file's size, format and metadata, `validate` is the mismatch
+check over them, `prefetch` and `prefetch_memory` are the pool the arguments
+resolved to — the byte budget follows the window, see below — and `total` is the
+whole call. There is no separate measurement for selecting the video format:
+sizing a clip is a field assignment, not a pass over the files.
+
+For each frame, one line names the frame and reports the fields the request was
+made of:
+
+```text
+frame 342 ('…p342.png') (RGB24): fetch= decode= (open= metadata= buffer= read=)
+                                  format= allocate= convert= properties= total=
+```
 
 ```text
 fetch                     waiting for a lookahead worker, zero when the frame
@@ -712,6 +783,14 @@ orientation
 CICP/color information where available
 ```
 
+Of that list, the size, both colour types, the presence of an icc profile and
+the orientation are read today. CICP is not, which is
+[08](improvements/08-color-metadata.md), and the orientation is reported and
+never applied to the picture, which is [09](improvements/09-exif-orientation.md).
+The other field this section leaves out is the nominal bit depth: a 10-bit file
+is probed as `Gray16`/`RGB48` today, and [10](improvements/10-nominal-bit-depth.md)
+is what would stop that.
+
 Conceptually:
 
 ```rust
@@ -769,6 +848,8 @@ LA16              GRAY16 + alpha
 RGBA8             RGB24 + alpha
 RGBA16            RGB48 + alpha
 RGBA32F           RGBS + alpha
+
+planar yuv 4:2:0   YUV420P8
 ```
 
 For the initial implementation, use:
@@ -779,9 +860,16 @@ u16 -> 16-bit VS format
 f32 -> 32-bit float VS format
 ```
 
-Do not initially attempt to infer or preserve unusual nominal 10/12-bit representations stored inside `u16`.
-
-That can be added later if a real decoder/use case requires it.
+That leaves one hole. A file whose nominal depth is 9 to 15 is handed out as the
+16-bit format, so a 10-bit avif comes back as `Gray16` with its samples left
+aligned in the word rather than as the `Gray10` it is — 0.4% short of the scale
+the format claims, and with the wrong answer for a graph that wanted a 10-bit
+clip. Nothing infers a nominal depth from a `u16` today:
+[10](improvements/10-nominal-bit-depth.md) is the plan that would, and it is the
+one with the widest blast radius here, because a frame's format is what a graph
+branches on. `YUV420P8` is the exception in the other direction: it is the only
+format this plugin hands out that `image` has no equivalent for, and it exists
+because lossy webp is yuv in the file.
 
 ---
 
@@ -826,6 +914,11 @@ This is an extra memory pass, but it is simple and highly SIMD-friendly.
 Do not add custom Rayon parallelization for this initially.
 
 Benchmark first.
+
+A yuv frame skips all of it: `src/formats/webp.rs` hands out planes that are
+already planar and `pixel::write_decoded_planes` copies them plane by plane,
+which is why the webp row is the cheapest copy in [BENCH.md](BENCH.md)'s per
+stage table.
 
 ---
 
@@ -953,30 +1046,50 @@ _ChromaLocation
 _FieldBased
 ```
 
-For normalized RGB output:
+What is written today is three of those six. Every frame gets `_FieldBased=0`
+and `_Range`; `_Matrix` is written for the RGB and YUV families only, because a
+gray frame has no matrix to name:
 
 ```text
-_Matrix = RGB / identity
-_Range  = full
+RGB / GRAY   _Matrix = RGB (identity)   _Range = full
+yuv          _Matrix = bt470bg           _Range = limited
 ```
 
-Set primaries and transfer characteristics when reliable metadata is available.
+The rgb and gray pair is the meaning of the formats themselves, and the yuv pair
+is what [03](improvements/03-webp-yuv-output.md) established for the one yuv
+format the plugin hands out: vp8 defines those coefficients and ffmpeg reports
+the same two values for the same bitstreams.
 
-Do not invent sRGB/BT.709 metadata when the file only supplies an ICC profile that has not been interpreted.
+`_Primaries`, `_Transfer` and `_ChromaLocation` are not written, because nothing
+reads a source for them yet. The containers that state them (an `nclx` colour box
+in avif and heif, a `cICP` chunk in png, the codestream header in jxl), the
+mapping onto VapourSynth's enums, and the rule that a value is written only when
+the file states it, are [08](improvements/08-color-metadata.md). The rule this
+doc already had stands and is already implemented: a file that supplies only an
+icc profile is never turned into sRGB or BT.709 metadata, and the profile's bytes
+are read and dropped — `ImgSeqHasICC` says it is there, and full icc conversion
+stays in the defer list below.
 
-ICC handling can initially be limited to preserving/detecting the profile rather than performing complete color management.
-
-Full ICC conversion can be added later.
+An exif orientation is metadata of the same kind and is treated the same way: the
+code reaches every frame as `ImgSeqOrientation`, and no pixel is moved because of
+it. [09](improvements/09-exif-orientation.md) is the plan that would apply it,
+behind an argument, because orientations 5 to 8 swap the dimensions a clip is
+built from.
 
 ---
 
 # Image-Specific Frame Properties
 
-Useful custom properties:
+Useful custom properties — all six are written, and the last one only on an alpha
+clip:
 
 ```text
-ImgSeqPath
-ImgSeqIndex
+ImgSeqPath               the file this frame was read from
+ImgSeqIndex              its position in the list
+ImgSeqOriginalColorType  the decoder's own colour type, before any correction
+ImgSeqHasICC             whether the file carries an icc profile
+ImgSeqOrientation        the exif orientation code, as the file stores it
+ImgSeqAlpha              present on an alpha clip only, always 1
 ```
 
 For example:
@@ -1093,36 +1206,30 @@ colour containers (`alpha-rgba8.heic`, `alpha-rgba8.avif`) that must keep
 
 # Error Handling
 
-Use normal Rust errors internally.
-
-Example:
+Use normal Rust errors internally, and convert them into a VapourSynth filter
+error at the plugin boundary. Every message crosses one boundary and nothing
+inside the plugin matches on a variant, so the error is a message and not an enum:
 
 ```rust
-#[derive(thiserror::Error, Debug)]
-enum ImgSeqError {
-    #[error("failed to open image {path}: {source}")]
-    Open {
-        path: PathBuf,
-        source: image::ImageError,
-    },
-
-    #[error(
-        "format mismatch at frame {frame}: expected {expected}, got {actual}"
-    )]
-    FormatMismatch {
-        frame: usize,
-        expected: String,
-        actual: String,
-    },
-
-    #[error("unsupported image format: {0}")]
-    UnsupportedFormat(String),
+/// Error type passed back to VapourSynth.
+pub struct ImgSeqError {
+    message: CString,
 }
 ```
 
-Convert errors into VapourSynth filter errors at the plugin boundary.
+`ImgSeqError::from_display` wraps anything that implements `Display`, which is
+how a decoder's own error is carried through unchanged. Messages include the
+frame index and the source path whenever the failure is about one file; the
+mismatch error names the index, both paths, both sizes and both formats:
 
-Errors should include the frame index and source path whenever possible.
+```text
+frame 12 ('images/p012.png') has 1404x2000 RGB24, expected frame 0 ('images/p000.png') to be 1404x1998 RGB24
+```
+
+It does not tell the caller to pass `mismatch=True`, which is the argument that
+would allow it. That hint is the one thing this section asks for that the code
+does not do; the alternative is to leave the message as it is and let the
+argument list be the documentation.
 
 ---
 
@@ -1165,21 +1272,22 @@ prefetch.rs
     worker threads
 
 decoder.rs
-    image-rs decoder creation
-    JPEG XL registration
+    image-rs decoder creation and the hooks of libheif-rs and jxl-rs
     metadata-only probing
     image decoding
 
 formats/
     containers image-rs cannot express, one module each
     and the format corrections for the ones it can
+    plus the probes that answer before a decoder is built
 
 pixel.rs
     image-rs -> VapourSynth mapping
     interleaved -> planar conversion
 
 color.rs
-    ICC/CICP/frame properties
+    ICC detection and the frame properties
+    the matrix/range tags of the yuv and rgb families
 
 error.rs
     plugin errors
@@ -1194,7 +1302,7 @@ The first version should remain deliberately small.
 Implement:
 
 1. `files:data[]`.
-2. PNG/JPEG/WebP/TIFF/etc. through `image-rs`.
+2. PNG/JPEG/TIFF/etc. through `image-rs`, and WebP's pixels through libwebp.
 3. JPEG XL through the Rust JXL integration.
 4. GRAY8/GRAY16.
 5. RGB8/RGB16/RGB32F.
@@ -1202,7 +1310,7 @@ Implement:
 7. Constant-format clips.
 8. Optional variable format/resolution via `mismatch=True`.
 9. Basic color metadata.
-10. `ImgSeqPath` and `ImgSeqIndex`.
+10. The `ImgSeq*` frame properties (six of them; see the section above).
 11. VapourSynth-managed frame-level concurrency.
 12. Keep the `image-rs` Rayon feature enabled initially.
 13. `ReadAlpha` for a separate alpha clip.
@@ -1214,11 +1322,27 @@ full ICC color management
 GPU/Vulkan output
 manual SIMD
 custom Rayon inside get_frame()
-native YUV preservation
 filesystem globbing inside the native plugin
 format-based clip grouping
 special 10/12-bit preservation
 ```
+
+The list has moved twice since it was written:
+
+- **`native YUV preservation` is done**, for the one format that stores yuv and
+  can be handed out that way: a lossy webp without alpha is a `YUV420P8` clip.
+  Decoding it to rgb first cost a conversion nothing asked for and half the
+  lookahead budget — the sandbox webp set reads in 3.39 s instead of 5.66 s at
+  the default `prefetch` and 11.94 s instead of 19.97 s at `prefetch=0`, which
+  [03](improvements/03-webp-yuv-output.md) measured.
+- **`special 10/12-bit preservation` is no longer deferred but planned**: it is
+  [10](improvements/10-nominal-bit-depth.md), which is work rather than a
+  decision to leave alone.
+
+The rest is policy and stays where it is: icc conversion, gpu output (waiting on
+`vapoursynth4-rs`), SIMD, custom Rayon, and the two python-side helpers.
+`docs/improvements/README.md`'s `not planned` section has the reason for each,
+and the other plans this doc asks for are 06 to 10 in that same folder.
 
 ---
 
@@ -1246,30 +1370,38 @@ Sequence (shared by every clip of one call)
       files[N]
          │
          ▼
-     image-rs                    or a module of src/formats/
-       │   │
-       │   └── jxl-rs for JPEG XL
-       │
-       ▼
+   decoder::probe / decoder::decode
+         │
+         ├── image-rs           PNG, JPEG, TIFF, GIF, BMP, EXR, PNM, QOI,
+         │   │                  TGA, ICO, HDR, and avif, whose samples it
+         │   │                  decodes as rgb whatever the file holds
+         │   ├── jxl-rs         JPEG XL, through its image hook
+         │   └── libheif-rs     colour heif/heic, through its image hook
+         │
+         └── src/formats/       the files those paths describe wrongly
+             ├── heif.rs        monochrome heif/heic and monochrome avif, and
+             │                  the avif probe that answers before a decode
+             └── webp.rs        every webp's pixels, planar yuv for a lossy one
+         │
+         ▼
    normalized image
-   RGB / Gray
+   RGB / Gray / YUV
        │
        ▼
-interleaved -> planar
+interleaved or planar -> planar
        │
        ▼
 VapourSynth VideoFrame  <- built by the worker that decoded, not by the request
        │
        ├── pixel data
        ├── color properties
-       ├── ImgSeqPath
-       └── ImgSeqIndex
+       └── the ImgSeq* keys
 ```
 
 The central design principle is:
 
-> Let VapourSynth schedule frames, let image-rs decode individual images,
-> keep each frame completely independent, and only overlap decoding when a
-> client walks the clip sequentially.
+> Let VapourSynth schedule frames, let the registered decoders read individual
+> images, keep each frame completely independent, and only overlap decoding when
+> a client walks the clip sequentially.
 
 This gives the plugin simple random access, good multicore scaling, minimal shared state, and a mostly safe Rust implementation.

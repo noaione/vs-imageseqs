@@ -10,6 +10,17 @@ plus `src/source.rs`, 02 in `src/clip.rs` with the generic pool in
 `src/prefetch.rs`, and 04 + 03 in `src/formats/webp.rs` with the planar `Pixels`
 type in `src/decoder.rs`.
 
+[06](06-jpeg-2000-backend.md) to [10](10-nominal-bit-depth.md) are open. they
+are the parts of [IMPLEMENTATION.md](../IMPLEMENTATION.md) that the build does
+not have: a jpeg 2000 backend the plan names and nothing compiles, the two
+`image` features the doc's own configuration block lists (`dds` and `ff`), the
+colour properties its `# Color Metadata` section asks for with no source to read
+them from, the exif orientation it probes and never applies, and the nominal
+10/12-bit depths its scope list defers. none of the five is a speed plan, so none
+of them carries a measurement: two are formats no sandbox set covers, two change
+what a frame holds or claims about itself, and one is a transform the file asks
+for and does not get.
+
 ## evidence in short
 
 per frame with `prefetch=0` and `debug=True` (see the per stage table in
@@ -75,12 +86,23 @@ open plus frames to 4.99 s.
 | [03 yuv output for lossy webp](03-webp-yuv-output.md) | `src/formats/webp.rs`, `src/decoder.rs`, `src/pixel.rs`, `src/source.rs`, `src/color.rs` | webp 4.24 → 3.39 s, half the bytes per frame | medium, changes the output | implemented, with 04 |
 | [04 webp decoder](04-webp-decoder.md) | `Cargo.toml`, `build.rs`, `vcpkg.json`, notices, `LICENSES/`, `src/formats/webp.rs`, `src/decoder.rs` | decode 265 → 111 ms per frame, and it enables 02 and 03 | medium, native dependency | implemented, with 03 |
 | [05 monochrome heif](05-monochrome-heif.md) | `src/formats/heif.rs`, `src/pixel.rs` | the 31 monochrome heic files in `sandbox/heic` decode as `Gray8` instead of failing, and a monochrome avif is handed out as `Gray8` instead of `RGB24` | low, used to repair an always-failing path | implemented |
+| [06 jpeg 2000 backend](06-jpeg-2000-backend.md) | `Cargo.toml`, `vcpkg.json`, `build.rs`, README, notices, `LICENSES/`, `src/formats/jp2.rs` (new), `src/decoder.rs` | a `.jp2`/`.j2k` file reads as `Gray8`/`RGB24`/`Gray16`/`RGB48` instead of failing the probe, and the probe stays a header walk | medium, a fourth native dependency | proposed |
+| [07 dds and farbfeld](07-dds-and-farbfeld.md) | `Cargo.toml`, `README.md`, fixtures, `tests/readalpha.vpy` | `.dds` and `.ff` files stop failing the probe, for two feature flags and no native code | low | proposed |
+| [08 color metadata](08-color-metadata.md) | `src/decoder.rs`, `src/formats/heif.rs`, `src/formats/png.rs` (new), `src/color.rs` | `_Primaries`/`_Transfer` from the container's `nclx`/`cICP`, and `_Matrix`/`_Range` from the file for a yuv frame, while an icc-only file changes nothing | low to medium, a wrong claim is worse than none | proposed |
+| [09 exif orientation](09-exif-orientation.md) | `src/decoder.rs`, `src/source.rs`, `src/clip.rs`, `src/pixel.rs`, fixtures, `tests/readalpha.vpy` | a file whose exif says 6 comes out the way its thumbnail looks, behind a `rotation` argument, and `ImgSeqOrientation` keeps saying what the file said | medium, it swaps width and height | proposed |
+| [10 nominal bit depth](10-nominal-bit-depth.md) | `src/pixel.rs`, `src/decoder.rs`, `src/formats/heif.rs`, `src/clip.rs`, `src/source.rs` | a 10-bit avif is `Gray10`/`RGB30` instead of `Gray16`/`RGB48`, with the samples shifted into the words a 10-bit frame holds, and the 16-bit files stay 16-bit | medium, every 9-to-15-bit file changes format | proposed |
 
 the dependencies were thin: 01 and 02 were independent of each other, 03 needed
 04, and 05 was independent of all of them and is the only one that fixes
 correctness rather than speed, so it did not have to wait for a decision on the
 others. 01 was the only purely internal change, which made it the right first one
 to try.
+
+06 to 10 are independent of each other and of all five. 06 is the only one that
+adds a native dependency, 07 is two feature flags, 08 changes what a frame says
+about itself, 09 changes where its samples are, and 10 changes the format and the
+samples together — so 10 is the last of them to do, and 08 is the one with a rule
+("the file states it or the property is unset") instead of a measurement.
 
 order of value, as it turned out: 04 + 03 were the only route past bestsource on
 webp, 02 was worth 5% to 35% on the frames it was written for and took the manga
@@ -127,3 +149,16 @@ C:/vcpkg/vcpkg.exe install --triplet x64-windows-static-md --x-manifest-root="$P
   ([01](01-lookahead-scheduling.md)), but the measured answer is still no: the
   cheap sets gain nothing from depth and the deepest rows only add cpu, so the
   default stays small and a caller who wants more asks for it.
+- **the python `imgseqs.from_folder(...)` helper, a format-based clip grouping
+  utility, and in-plugin globbing.** all three are in `IMPLEMENTATION.md` as
+  things that "can later" be provided, and all three are policy rather than
+  work: the caller passes the ordered list, and a graph that needs a folder
+  walked, or clips split by format, does it in python where the list comes from.
+  `AGENTS.md` keeps the wheel plugin-only for the same reason.
+- **gpu/vulkan output.** `IMPLEMENTATION.md` defers it until `vapoursynth4-rs`
+  exposes a frame allocator, and it still does not.
+- **manual simd for the rgb deinterleave.** the per stage table in
+  [BENCH.md](../BENCH.md) has never shown the copy as the bottleneck the way
+  [02](02-frame-write-path.md) showed the floor, so there is nothing to measure
+  it against yet. (the nominal 10/12-bit representation the same entry in
+  `IMPLEMENTATION.md` defers is [10](10-nominal-bit-depth.md) now.)
