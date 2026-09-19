@@ -772,7 +772,6 @@ mod tests {
             "v {}",
             mean(&planes[2])
         );
-        assert_eq!(decoded.pixels.bytes(), 16 * 16 + 2 * 8 * 8);
     }
     #[test]
     fn the_planes_rebuild_the_rgb_libwebp_decodes() {

@@ -45,40 +45,77 @@ pub fn automatic_workers() -> usize {
 
 /// Byte budget used when the `prefetch_memory` argument is omitted.
 ///
-/// A pool cannot be faster than the frames it can hold: the fixed 192 MiB fit
+/// A pool cannot be faster than the payloads it can hold: the fixed 192 MiB fit
 /// three of the 55 MiB sandbox webp frames, so a window of 16 queued frames it
 /// had to evict again and decoded them a second time instead of reading ahead.
 /// The budget therefore follows the requested window, and the floor keeps
 /// small frames at the previous value.
 #[must_use]
-pub fn automatic_budget(images: &[ImageInfo], window: usize) -> usize {
-    let largest = images.iter().map(ImageInfo::frame_bytes).max().unwrap_or(0);
+pub fn automatic_budget(sizes: &[usize], window: usize) -> usize {
+    let largest = sizes.iter().copied().max().unwrap_or(0);
     window.saturating_mul(largest).max(DEFAULT_BYTE_BUDGET)
 }
 
-struct Shared {
-    state: Mutex<State>,
-    signal: Condvar,
-    stop: AtomicBool,
+/// What one finished decode hands to the clips that ask for an index.
+///
+/// The pool never looks inside a payload: it counts [`Payload::bytes`] against
+/// the lookahead budget, and hands out a clone instead of decoding again.
+///
+/// A payload is handed to one thread at a time, so it does not have to be
+/// `Sync`; a VapourSynth frame is `Send` but not `Sync`.
+pub trait Payload: Clone + Send + 'static {
+    /// Memory one payload holds, in bytes.
+    fn bytes(&self) -> usize;
 }
 
-struct State {
+/// Turns one decoded image into the payload the clips of a call ask for.
+///
+/// Decoding and payload building both happen on the worker that read the file,
+/// so the thread that answers a request only hands out what is already
+/// finished.
+pub trait Prepare: Send + Sync + 'static {
+    /// What a request for one index hands out.
+    type Payload: Payload;
+
+    /// Payload bytes one image is expected to hold.
+    ///
+    /// This is what the lookahead budget is sized from, before anything is
+    /// decoded; [`Payload::bytes`] reports what a payload really holds.
+    fn estimate(&self, image: &ImageInfo) -> usize;
+
+    /// Builds the payload of one decoded image.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ImgSeqError`] when the image cannot be turned into a payload.
+    fn build(&self, image: &ImageInfo, index: i32, decoded: DecodedImage) -> Result<Self::Payload>;
+}
+
+struct Shared<P: Prepare> {
+    state: Mutex<State<P>>,
+    signal: Condvar,
+    stop: AtomicBool,
+    /// Turns a decoded image into what the clips of a call are handed.
+    prepare: P,
+}
+
+struct State<P: Prepare> {
     /// Pending prefetch requests, oldest first, with the generation they
     /// belong to.
     queue: VecDeque<(u64, i32)>,
     /// Frames currently being decoded by a worker or by a consumer.
     in_flight: HashSet<i32>,
-    /// Decoded frames waiting for a `fetch` call.
-    ready: BTreeMap<i32, std::result::Result<Arc<DecodedImage>, String>>,
+    /// Finished payloads waiting for a `fetch` call.
+    ready: BTreeMap<i32, std::result::Result<P::Payload, String>>,
     ready_bytes: usize,
     /// Bumped whenever requests stop being sequential so that results from
     /// the previous access pattern can be discarded.
     generation: u64,
     last_index: Option<i32>,
     window: usize,
-    /// Number of frames the pool keeps cached, independent of their size.
+    /// Number of payloads the pool keeps cached, independent of their size.
     entry_cap: usize,
-    /// Decoded data the pool may hold or have in flight.
+    /// Payload data the pool may hold or have in flight.
     budget: usize,
 }
 
@@ -87,29 +124,36 @@ struct State {
 ///
 /// The pool is deliberately conservative: it only looks ahead after
 /// sequential requests, limits the lookahead window, caps the amount of
-/// decoded data held in memory, and never blocks progress on the worker
+/// payload data held in memory, and never blocks progress on the worker
 /// threads (a consumer decodes its own frame when nothing else has claimed
 /// it).
 ///
-/// Successful decodes stay cached until they are evicted, so a filter that
-/// returns several clips can share one decode per frame.
-pub struct Prefetcher {
+/// Everything a request needs is finished before it is cached, so the thread
+/// that answers a frame request never decodes or writes pixels. Successful
+/// decodes stay cached until they are evicted, so a filter that returns several
+/// clips shares one decode per frame.
+pub struct Prefetcher<P: Prepare> {
     images: Arc<[ImageInfo]>,
-    /// Decoded size of every frame, in the same order as `images`.
+    /// Payload bytes of every image, in the same order as `images`.
     sizes: Arc<[usize]>,
-    shared: Arc<Shared>,
+    shared: Arc<Shared<P>>,
     workers: Vec<JoinHandle<()>>,
 }
 
-impl Prefetcher {
+impl<P: Prepare> Prefetcher<P> {
     /// Creates a pool with `workers` background decoders.
     ///
     /// A worker count of zero disables lookahead decoding and makes
-    /// [`Prefetcher::fetch`] decode on the calling thread. `budget` is the
-    /// amount of decoded frame data the pool may hold or have in flight;
-    /// `None` derives it from the window and the largest frame of the sequence,
-    /// see [`automatic_budget`].
-    pub fn new(images: Arc<[ImageInfo]>, workers: usize, budget: Option<usize>) -> Self {
+    /// [`Prefetcher::fetch`] decode and build on the calling thread. `budget`
+    /// is the amount of payload data the pool may hold or have in flight;
+    /// `None` derives it from the window and the largest payload of the
+    /// sequence, see [`automatic_budget`].
+    pub fn new(
+        images: Arc<[ImageInfo]>,
+        prepare: P,
+        workers: usize,
+        budget: Option<usize>,
+    ) -> Self {
         let workers = workers.min(MAX_WORKERS);
         let window = if workers == 0 {
             0
@@ -118,10 +162,10 @@ impl Prefetcher {
         };
         let sizes: Arc<[usize]> = images
             .iter()
-            .map(ImageInfo::frame_bytes)
+            .map(|image| prepare.estimate(image))
             .collect::<Vec<_>>()
             .into();
-        let budget = budget.unwrap_or_else(|| automatic_budget(&images, window));
+        let budget = budget.unwrap_or_else(|| automatic_budget(&sizes, window));
 
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
@@ -137,6 +181,7 @@ impl Prefetcher {
             }),
             signal: Condvar::new(),
             stop: AtomicBool::new(false),
+            prepare,
         });
 
         let workers = (0..workers)
@@ -158,18 +203,23 @@ impl Prefetcher {
         }
     }
 
-    /// Bytes of decoded frame data this pool may hold.
+    /// Bytes of payload data this pool may hold.
     #[must_use]
     pub fn byte_budget(&self) -> usize {
         self.lock().budget
     }
 
-    /// Returns the decoded frame `index`, using a prefetched result when one
-    /// is ready and decoding it on the calling thread otherwise.
+    /// Returns the payload of `index`, using a prefetched result when one is
+    /// ready and building it on the calling thread otherwise.
     ///
-    /// Several consumers may share one pool: a frame that has already been
-    /// decoded is handed out again instead of being decoded twice.
-    pub fn fetch(&self, index: i32) -> Result<Arc<DecodedImage>> {
+    /// Several consumers may share one pool: a payload that has already been
+    /// built is handed out again instead of being decoded twice.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ImgSeqError`] when the index is out of range or its image
+    /// cannot be decoded.
+    pub fn fetch(&self, index: i32) -> Result<P::Payload> {
         self.plan(index);
 
         loop {
@@ -182,19 +232,18 @@ impl Prefetcher {
                         return Err(ImgSeqError::new(message));
                     }
                 }
-                if let Some(Ok(image)) = state.ready.get(&index) {
-                    return Ok(Arc::clone(image));
+                if let Some(Ok(payload)) = state.ready.get(&index) {
+                    return Ok(payload.clone());
                 }
                 if claim(&mut state, index) {
                     drop(state);
-                    let decoded = decoder::decode(&self.images[index as usize]);
+                    let built = self.build(index);
                     let mut state = self.lock();
                     state.in_flight.remove(&index);
-                    let result = match decoded {
-                        Ok(image) => {
-                            let image = Arc::new(image);
-                            store(&mut state, index, Ok(Arc::clone(&image)));
-                            Ok(image)
+                    let result = match built {
+                        Ok(payload) => {
+                            store(&mut state, index, Ok(payload.clone()));
+                            Ok(payload)
                         }
                         Err(error) => {
                             store(&mut state, index, Err(error.to_string()));
@@ -224,6 +273,21 @@ impl Prefetcher {
         }
     }
 
+    /// Decodes one image and builds its payload, on the calling thread.
+    fn build(&self, index: i32) -> Result<P::Payload> {
+        let image = self.image(index)?;
+        let decoded = decoder::decode(image)?;
+        self.shared.prepare.build(image, index, decoded)
+    }
+
+    /// Image of one frame index.
+    fn image(&self, index: i32) -> Result<&ImageInfo> {
+        usize::try_from(index)
+            .ok()
+            .and_then(|index| self.images.get(index))
+            .ok_or_else(|| out_of_range(index, self.images.len()))
+    }
+
     /// Records the request and queues the following frames when the access
     /// pattern is sequential.
     fn plan(&self, index: i32) {
@@ -244,7 +308,7 @@ impl Prefetcher {
         self.shared.signal.notify_all();
     }
 
-    fn lock(&self) -> MutexGuard<'_, State> {
+    fn lock(&self) -> MutexGuard<'_, State<P>> {
         self.shared
             .state
             .lock()
@@ -254,13 +318,13 @@ impl Prefetcher {
 
 /// Scheduler state, for tests that need to look at the queue itself.
 #[cfg(test)]
-impl Prefetcher {
+impl<P: Prepare> Prefetcher<P> {
     fn queued(&self) -> usize {
         self.lock().queue.len()
     }
 }
 
-impl Drop for Prefetcher {
+impl<P: Prepare> Drop for Prefetcher<P> {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
         self.shared.signal.notify_all();
@@ -273,8 +337,8 @@ impl Drop for Prefetcher {
 // All shared mutation happens behind a mutex and lock poisoning is handled by
 // continuing with the inner state, so the prefetcher cannot observe a broken
 // invariant after a panic.
-impl std::panic::RefUnwindSafe for Prefetcher {}
-impl std::panic::UnwindSafe for Prefetcher {}
+impl<P: Prepare + std::panic::RefUnwindSafe> std::panic::RefUnwindSafe for Prefetcher<P> {}
+impl<P: Prepare + std::panic::RefUnwindSafe> std::panic::UnwindSafe for Prefetcher<P> {}
 
 /// Queues the frames of the lookahead window that fit the byte budget.
 ///
@@ -283,13 +347,13 @@ impl std::panic::UnwindSafe for Prefetcher {}
 /// evicted before it is asked for, which is what made a deep `prefetch`
 /// re-decode frames rather than read ahead.
 ///
-/// Cached frames the consumer has already been handed are dropped to make room
+/// Cached payloads the consumer has already been handed are dropped to make room
 /// first: they are only kept so that a second clip can share the decode, and
-/// holding them would otherwise stall the lookahead on a full cache. Frames
+/// holding them would otherwise stall the lookahead on a full cache. Payloads
 /// ahead of the request are never dropped here, they are what the consumer asks
 /// for next. Skipping rather than stopping at a frame that does not fit keeps
 /// the window useful on sequences that mix small and large frames.
-fn plan_window(state: &mut State, sizes: &[usize], index: i32) {
+fn plan_window<P: Prepare>(state: &mut State<P>, sizes: &[usize], index: i32) {
     if state.window == 0 {
         return;
     }
@@ -327,7 +391,7 @@ fn plan_window(state: &mut State, sizes: &[usize], index: i32) {
 /// request, so it can be decoded again if a later graph asks for it a third
 /// time. The oldest ones go first because they are the least likely to be
 /// asked for again.
-fn make_room(state: &mut State, sizes: &[usize], index: i32, wanted: usize) {
+fn make_room<P: Prepare>(state: &mut State<P>, sizes: &[usize], index: i32, wanted: usize) {
     let mut freed = 0;
     while freed < wanted {
         let Some(victim) = state.ready.keys().find(|&&key| key < index).copied() else {
@@ -348,7 +412,7 @@ fn frame_size(sizes: &[usize], index: i32) -> usize {
 }
 
 /// Marks `index` as being decoded by the caller unless a worker owns it.
-fn claim(state: &mut State, index: i32) -> bool {
+fn claim<P: Prepare>(state: &mut State<P>, index: i32) -> bool {
     state.queue.retain(|&(_, queued)| queued != index);
     if state.in_flight.contains(&index) {
         return false;
@@ -357,7 +421,14 @@ fn claim(state: &mut State, index: i32) -> bool {
     true
 }
 
-fn worker(shared: &Shared, images: &[ImageInfo]) {
+/// Error for a frame index the sequence does not have.
+fn out_of_range(index: i32, frames: usize) -> ImgSeqError {
+    ImgSeqError::new(format!(
+        "requested frame {index}, but the clip has {frames} frames"
+    ))
+}
+
+fn worker<P: Prepare>(shared: &Shared<P>, images: &[ImageInfo]) {
     loop {
         let (generation, index) = {
             let mut state = shared
@@ -383,9 +454,18 @@ fn worker(shared: &Shared, images: &[ImageInfo]) {
             (generation, index)
         };
 
-        let result = decoder::decode(&images[index as usize])
-            .map(Arc::new)
-            .map_err(|error| error.to_string());
+        // The queue only ever holds indices of this sequence, so an image that
+        // is missing here is a bug rather than a failed decode.
+        let result = match images.get(usize::try_from(index).unwrap_or(usize::MAX)) {
+            Some(image) => match decoder::decode(image) {
+                Ok(decoded) => shared
+                    .prepare
+                    .build(image, index, decoded)
+                    .map_err(|error| error.to_string()),
+                Err(error) => Err(error.to_string()),
+            },
+            None => Err(out_of_range(index, images.len()).to_string()),
+        };
 
         let mut state = shared
             .state
@@ -401,31 +481,35 @@ fn worker(shared: &Shared, images: &[ImageInfo]) {
     }
 }
 
-/// Caches a decoded frame (or its error) and trims the cache.
-fn store(state: &mut State, index: i32, result: std::result::Result<Arc<DecodedImage>, String>) {
+/// Caches a finished payload (or its error) and trims the cache.
+fn store<P: Prepare>(
+    state: &mut State<P>,
+    index: i32,
+    result: std::result::Result<P::Payload, String>,
+) {
     if state.ready.contains_key(&index) {
         return;
     }
-    if let Ok(image) = &result {
-        state.ready_bytes = state.ready_bytes.saturating_add(image.pixels.bytes());
+    if let Ok(payload) = &result {
+        state.ready_bytes = state.ready_bytes.saturating_add(payload.bytes());
     }
     state.ready.insert(index, result);
     evict(state);
 }
 
-/// Releases one cached frame, keeping the byte accounting in sync.
-fn release(state: &mut State, index: i32) {
-    if let Some(Ok(image)) = state.ready.remove(&index) {
-        state.ready_bytes = state.ready_bytes.saturating_sub(image.pixels.bytes());
+/// Releases one cached payload, keeping the byte accounting in sync.
+fn release<P: Prepare>(state: &mut State<P>, index: i32) {
+    if let Some(Ok(payload)) = state.ready.remove(&index) {
+        state.ready_bytes = state.ready_bytes.saturating_sub(payload.bytes());
     }
 }
 
-/// Everything the pool holds or has committed to produce: the frames cached for
-/// a consumer, the frames a worker is decoding, and the frames still queued.
+/// Everything the pool holds or has committed to produce: the payloads cached
+/// for a consumer, the payloads a worker is building, and the ones still queued.
 ///
 /// Derived from the maps rather than kept as a counter, so it cannot drift when
 /// a decode fails, is claimed by a consumer, or is dropped with a generation.
-fn committed_bytes(state: &State, sizes: &[usize]) -> usize {
+fn committed_bytes<P: Prepare>(state: &State<P>, sizes: &[usize]) -> usize {
     let size = |index: i32| {
         usize::try_from(index)
             .ok()
@@ -446,12 +530,12 @@ fn committed_bytes(state: &State, sizes: &[usize]) -> usize {
             .sum::<usize>()
 }
 
-/// Drops cached frames until the cache fits the entry and byte budgets.
+/// Drops cached payloads until the cache fits the entry and byte budgets.
 ///
-/// Frames behind the newest request are released first because consumers only
-/// move forward. When every cached frame is still ahead of the request, the
+/// Payloads behind the newest request are released first because consumers only
+/// move forward. When every cached payload is still ahead of the request, the
 /// furthest one is dropped because it is the cheapest to decode again later.
-fn evict(state: &mut State) {
+fn evict<P: Prepare>(state: &mut State<P>) {
     while state.ready.len() > state.entry_cap || state.ready_bytes > state.budget {
         if state.ready.len() <= 1 {
             break;
@@ -479,10 +563,11 @@ mod tests {
     use image::{ColorType, ExtendedColorType, metadata::Orientation};
 
     use super::{
-        DEFAULT_BYTE_BUDGET, Prefetcher, READY_ENTRY_MARGIN, State, automatic_budget,
-        committed_bytes, plan_window,
+        DEFAULT_BYTE_BUDGET, Payload, Prefetcher, Prepare, READY_ENTRY_MARGIN, State,
+        automatic_budget, committed_bytes, plan_window,
     };
     use crate::decoder::{self, DecodeTimings, DecodedImage, ImageInfo, Pixels};
+    use crate::error::Result;
     use crate::pixel::PixelFormat;
 
     fn fixture(name: &str) -> PathBuf {
@@ -515,7 +600,7 @@ mod tests {
     }
 
     /// A scheduler state with an empty cache.
-    fn state_with(window: usize, budget: usize) -> State {
+    fn state_with(window: usize, budget: usize) -> State<Decode> {
         State {
             queue: VecDeque::new(),
             in_flight: HashSet::new(),
@@ -526,6 +611,45 @@ mod tests {
             window,
             entry_cap: window + READY_ENTRY_MARGIN,
             budget,
+        }
+    }
+
+    /// Hands the decode straight to the consumer.
+    ///
+    /// The scheduler only cares about how many bytes a payload holds and when
+    /// it is ready, so the real payload, which builds VapourSynth frames, is
+    /// only exercised from a graph.
+    struct Decode;
+
+    impl Payload for Arc<DecodedImage> {
+        fn bytes(&self) -> usize {
+            match &self.pixels {
+                Pixels::Interleaved { buffer, .. } => buffer.len(),
+                Pixels::Planar(planes) => planes.iter().map(Vec::len).sum(),
+            }
+        }
+    }
+
+    /// Payload bytes the pool sizes its budget from for one synthetic image,
+    /// which is what the production estimate reports too.
+    fn bytes(image: &ImageInfo) -> usize {
+        crate::clip::expected_bytes(crate::clip::READ_CLIPS, image)
+    }
+
+    impl Prepare for Decode {
+        type Payload = Arc<DecodedImage>;
+
+        fn estimate(&self, image: &ImageInfo) -> usize {
+            bytes(image)
+        }
+
+        fn build(
+            &self,
+            _image: &ImageInfo,
+            _index: i32,
+            decoded: DecodedImage,
+        ) -> Result<Arc<DecodedImage>> {
+            Ok(Arc::new(decoded))
         }
     }
 
@@ -551,7 +675,7 @@ mod tests {
     #[test]
     fn shares_one_decode_between_consumers() {
         for workers in [0, 2] {
-            let prefetcher = Prefetcher::new(images(&["gray.pgm"]), workers, None);
+            let prefetcher = Prefetcher::new(images(&["gray.pgm"]), Decode, workers, None);
             let first = prefetcher.fetch(0).expect("the fixture decodes");
             // Another clip asking for the same frame must reuse the decode
             // instead of reading the file a second time.
@@ -562,7 +686,7 @@ mod tests {
 
     #[test]
     fn keeps_frames_of_a_variable_sequence_apart() {
-        let prefetcher = Prefetcher::new(images(&["gray.pgm", "rgb.ppm"]), 0, None);
+        let prefetcher = Prefetcher::new(images(&["gray.pgm", "rgb.ppm"]), Decode, 0, None);
         let gray = prefetcher.fetch(0).expect("the first fixture decodes");
         let rgb = prefetcher.fetch(1).expect("the second fixture decodes");
         assert_ne!(gray.format, rgb.format);
@@ -577,7 +701,7 @@ mod tests {
         let mut info = decoder::probe(&source).expect("the fixture probes");
         info.path = temp.clone();
 
-        let prefetcher = Prefetcher::new(vec![info].into(), 0, None);
+        let prefetcher = Prefetcher::new(vec![info].into(), Decode, 0, None);
         assert!(
             prefetcher.fetch(0).is_err(),
             "a missing file reports an error"
@@ -598,21 +722,21 @@ mod tests {
     fn automatic_budget_keeps_the_floor_and_follows_the_window() {
         let small = synthetic(1404, 2000, ColorType::Rgb8);
         assert_eq!(
-            automatic_budget(&[small], 6),
+            automatic_budget(&[bytes(&small)], 6),
             DEFAULT_BYTE_BUDGET,
-            "frames that fit the floor do not move it"
+            "payloads that fit the floor do not move it"
         );
 
         let large = synthetic(3672, 5274, ColorType::Rgb8);
-        assert_eq!(large.frame_bytes(), 3672 * 5274 * 3);
-        let images = [large.clone()];
+        assert_eq!(bytes(&large), 3672 * 5274 * 3);
+        let sizes = [bytes(&large)];
         assert_eq!(
-            automatic_budget(&images, 6),
-            large.frame_bytes() * 6,
-            "a deep window on large frames raises the budget"
+            automatic_budget(&sizes, 6),
+            bytes(&large) * 6,
+            "a deep window on large payloads raises the budget"
         );
         assert_eq!(
-            automatic_budget(&images, 0),
+            automatic_budget(&sizes, 0),
             DEFAULT_BYTE_BUDGET,
             "without lookahead only the floor is needed"
         );
@@ -620,7 +744,7 @@ mod tests {
 
     #[test]
     fn a_budget_too_small_for_one_frame_still_delivers() {
-        let prefetcher = Prefetcher::new(images(&["gray.pgm", "rgb.ppm"]), 2, Some(1));
+        let prefetcher = Prefetcher::new(images(&["gray.pgm", "rgb.ppm"]), Decode, 2, Some(1));
         for index in 0..2 {
             assert!(
                 prefetcher.fetch(index).is_ok(),
@@ -697,7 +821,7 @@ mod tests {
     #[test]
     fn committed_bytes_counts_ready_decoding_and_queued() {
         let sizes = [10, 20, 30, 40];
-        let mut state = State {
+        let mut state = State::<Decode> {
             queue: VecDeque::from([(0, 1)]),
             in_flight: HashSet::from([2]),
             ready: BTreeMap::new(),

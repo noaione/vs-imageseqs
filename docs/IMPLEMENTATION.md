@@ -416,14 +416,16 @@ get_frame(342)
 files[342]
       │
       ▼
-decode image
+lookahead worker: decode image -> create VSFrame(s) -> cache payload
       │
       ▼
-create VSFrame
-      │
-      ▼
-return
+return the finished frame
 ```
+
+The frame is allocated and filled where the decode happens, not on the thread
+that asked for it: a request only hands over a finished frame. `src/clip.rs`
+owns that hand off, and [02](improvements/02-frame-write-path.md) has the
+measurements.
 
 This allows extremely large image sequences without loading all image data into memory.
 
@@ -447,22 +449,24 @@ total setup time
 For each frame, report:
 
 ```text
-decoder open
-decoder metadata
-decoded-buffer allocation
-image read
-frame-format lookup
-frame allocation
-planar conversion (directly into the VapourSynth planes)
-frame-property writes
-total frame time
+fetch                     waiting for a lookahead worker, zero when the frame
+                          was already finished
+decode                    decoder open, metadata, buffer allocation, image read
+frame format              the name of the format the frame was built in
+allocate                  creating the frame in the core
+convert                   writing the decoded pixels into the frame planes
+properties                the frame property writes
+total                     the whole request, on the requesting thread
 ```
 
 These are wall-clock timings intended for diagnosing a script or decoder.
 They are not a replacement for a controlled benchmark because VapourSynth's
-cache and scheduler affect the result. The per-frame `decode` value includes
-waiting for the lookahead pool, so a near-zero value means the frame was
-already decoded in the background.
+cache and scheduler affect the result. Everything between `decode` and
+`properties` is measured in the worker that read the file, so those fields
+describe one frame's cost rather than the requesting thread's; on a busy pool
+they add up to more than `total`. The `fetch` field is the part the requesting
+thread waits for: a near-zero value means the frame was ready before it was
+asked for.
 
 ---
 
@@ -504,8 +508,9 @@ worker 3 -> frame 13 -> AVIF decoder
 ```
 
 The persistent `Sequence` state should therefore be immutable apart from the
-prefetch pool described below. Decoded frames are cached as shared immutable
-buffers, so the clips of one call never decode a file twice.
+prefetch pool described below. Finished frames are cached as shared immutable
+buffers, so the clips of one call never decode a file twice and a request never
+writes pixels.
 
 ## Lookahead prefetching
 
@@ -520,12 +525,20 @@ filter:
 ```text
 fetch(n)
    │
-   ├─ ready frame from the pool -> return immediately
+   ├─ finished frame from the pool -> return immediately
    │
-   ├─ otherwise decode n on the calling thread
+   ├─ otherwise decode n, build its frames and return on the calling thread
    │
    └─ queue n+1 .. n+window for the worker threads
 ```
+
+The pool caches finished frames rather than decoded images: the worker that
+reads a file also creates the frame of every clip of the call, writes the pixels
+into it and attaches the source properties. A request therefore never touches
+pixels, and its cost is the `fetch` field of the debug log, see
+[02](improvements/02-frame-write-path.md). The pool is generic over what it
+caches (`Payload` and `Prepare` in `src/prefetch.rs`), so `src/clip.rs` owns the
+frame layout and the budget accounting stays in the pool.
 
 The pool is intentionally conservative:
 
@@ -943,8 +956,8 @@ an alpha channel produce an opaque plane (`255`, `65535`, or `1.0`), so every
 frame of an alpha clip carries a meaningful value.
 
 Both clips share frame count, dimensions, frame rate, and frame indexes, and
-both are built from one `Sequence`. The prefetch pool caches decoded frames as
-shared immutable buffers, so a file is decoded once even when both clips ask
+both are built from one `Sequence`. The prefetch pool caches the finished frames
+of both clips, so a file is decoded once even when both clips ask
 for the same frame. With `mismatch=True`, both clips use variable format
 information and a frame whose file has no alpha still yields an opaque plane.
 
@@ -1021,8 +1034,10 @@ vs-imgseqs/
 └─ src/
    ├─ lib.rs
    ├─ source.rs
+   ├─ clip.rs
+   ├─ prefetch.rs
    ├─ decoder.rs
-   ├─ probe.rs
+   ├─ formats/
    ├─ pixel.rs
    ├─ color.rs
    └─ error.rs
@@ -1041,13 +1056,22 @@ source.rs
     Filter implementations
     VSVideoInfo handling
 
+clip.rs
+    the clips a sequence hands out
+    building and caching their frames (the pool's Prepare and Payload)
+
+prefetch.rs
+    lookahead pool, window and byte budget
+    worker threads
+
 decoder.rs
     image-rs decoder creation
     JPEG XL registration
+    metadata-only probing
     image decoding
 
-probe.rs
-    metadata-only probing
+formats/
+    containers image-rs cannot express, one module each
 
 pixel.rs
     image-rs -> VapourSynth mapping
@@ -1112,7 +1136,7 @@ Sequence (shared by every clip of one call)
   ├── immutable ImageInfo[]
   │
   ├── bounded lookahead prefetch pool
-  │       └── cached decoded frames (shared between clips)
+  │       └── cached finished frames, one per clip of the call
   │
   └── VSVideoInfo per clip
          │
@@ -1121,7 +1145,7 @@ Sequence (shared by every clip of one call)
       files[N]
          │
          ▼
-     image-rs
+     image-rs                    or a module of src/formats/
        │   │
        │   └── jxl-rs for JPEG XL
        │
@@ -1133,7 +1157,7 @@ Sequence (shared by every clip of one call)
 interleaved -> planar
        │
        ▼
-VapourSynth VideoFrame
+VapourSynth VideoFrame  <- built by the worker that decoded, not by the request
        │
        ├── pixel data
        ├── color properties

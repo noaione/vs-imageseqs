@@ -53,29 +53,7 @@ pub struct ImageInfo {
     pub format: PixelFormat,
 }
 
-impl ImageInfo {
-    /// Size of the buffer this image decodes into.
-    ///
-    /// A planar decode hands back one buffer per plane, everything else hands
-    /// back one interleaved buffer that holds every channel of the color type,
-    /// so the lookahead pool can size its budget from the probe alone, without
-    /// decoding anything.
-    #[must_use]
-    pub fn frame_bytes(&self) -> usize {
-        let width = usize::try_from(self.width).unwrap_or(usize::MAX);
-        let height = usize::try_from(self.height).unwrap_or(usize::MAX);
-        if self.format.decodes_to_planes() {
-            return self.format.planes_bytes(width, height);
-        }
-        let channels = crate::pixel::channel_count(self.color_type).unwrap_or(0);
-        width
-            .saturating_mul(height)
-            .saturating_mul(channels)
-            .saturating_mul(self.format.bytes_per_sample())
-    }
-}
-
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DecodeTimings {
     pub open: Duration,
     pub metadata: Duration,
@@ -93,17 +71,6 @@ pub enum Pixels {
     },
     /// One tightly packed buffer per plane of the frame format.
     Planar(Vec<Vec<u8>>),
-}
-
-impl Pixels {
-    /// Bytes every buffer of this decode holds.
-    #[must_use]
-    pub fn bytes(&self) -> usize {
-        match self {
-            Self::Interleaved { buffer, .. } => buffer.len(),
-            Self::Planar(planes) => planes.iter().map(Vec::len).sum(),
-        }
-    }
 }
 
 #[derive(Debug)]

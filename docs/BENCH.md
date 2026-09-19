@@ -335,7 +335,11 @@ where the set has any:
 the decode figure includes the first-touch page faults of the decode buffer,
 27.7 MiB for a colour webp frame, 55.4 MiB for an rgb one and 18.5 MiB for a
 monochrome one, which is why allocating that buffer measures as ~0 ms on its
-own. the webp row is what [03](improvements/03-webp-yuv-output.md) and
+own. with `prefetch=0` every column is the requesting thread's own work, and the
+`fetch` field the log also prints is the sum of them. with workers the decode and
+the write are measured in the worker that did them, and `fetch` is only the wait,
+which is what [02](improvements/02-frame-write-path.md) changed. the webp row is
+what [03](improvements/03-webp-yuv-output.md) and
 [04](improvements/04-webp-decoder.md) left behind: it read 520 ms of decode and
 86 ms of write with `image-webp` and an rgb frame, and its planes are now copied
 into the frame row by row instead of converted from an interleaved buffer, which
@@ -344,14 +348,68 @@ second cost: 150 ms of its 263 ms is parsing the container, before any av1
 decoding happens. jxl is the slowest of the five, and it is the format whose
 frames the lookahead helps most.
 
+## frame write path
+
+[02](improvements/02-frame-write-path.md) moved the frame build out of the
+requesting thread and into the lookahead worker that decoded the file. the copy
+is memory bound, so this only pays where the pool was already faster than the
+thread asking for frames: the corpus below is that case, the small jpeg set is
+the counter example.
+
+132 manga pages of 1404x2000 (`I:/Manga/Yuri Love Story/source/v02`), wall clock
+for the whole set, `--reps 1`, two rounds, bestsource measured in the same four
+passes:
+
+| round | default before | default after | `prefetch=16` before | after | bestsource |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 1.177 s | 1.172 s | 1.030 s | 0.870 s | 1.938 s, 2.104 s |
+| 2 | 1.234 s | 1.016 s | 1.522 s | 0.757 s | 2.070 s, 1.967 s |
+
+32 sandbox png pages of 3672x5274 (`Gray8`, 18.5 MiB each), two rounds, `total`
+in ms/frame from `target/bench/stage-split.py`, which takes a prefetch argument:
+
+| prefetch | before | after |
+| --- | --- | --- |
+| 4 | 21.32, 19.76 | 18.09, 18.80 |
+| 16 | 16.97, 16.12 | 12.43, 16.15 |
+
+and the case where it is worth nothing, 8 of the same jpeg pages at
+`prefetch=4`:
+
+| stage | before | after |
+| --- | --- | --- |
+| wait for the pool (`decode`, then `fetch`) | 1.93 ms | 8.87 ms |
+| copy on the requesting thread (`convert`) | 6.94 ms | gone |
+| total | 8.96 ms | 8.89 ms |
+
+the worker side of that last row moved the other way: `read` 15.13 → 18.11 ms and
+`convert` 6.94 → 15.59 ms per frame, because four workers writing planes at once
+compete for the memory bandwidth the decoder wants. the write does not scale with
+the worker count, so moving it into the pool moves the floor instead of removing
+it. that is why the same change is worth 5% to 35% on a pool that had room and
+nothing on a pool that did not, and why `prefetch=0` is unchanged: it is the same
+work on the same thread.
+
+the parity check for it is `target/bench/frame-parity.py`, which hashes every
+plane of every frame of seven sets (six from `sandbox/` plus `tests/fixtures`),
+for `Read` and for both clips of `ReadAlpha`. the 75 line dump is identical
+before and after except for the header that names the plugin.
+
 ## known headroom
 
-the numbers point at two things: a decoder that cannot use more than one core,
-and the copy into the frame running on the requesting thread. libwebp is
-single threaded per image — ffmpeg is ahead on webp only because it
+the numbers point at one thing: a decoder that cannot use more than one core.
+libwebp is single threaded per image — ffmpeg is ahead on webp only because it
 slice-threads one vp8 frame, 353 ms to 20 ms per frame from one thread to
-sixteen — and `image-webp` is behind it per thread as well
+sixteen — and `image-webp` was behind it per thread as well
 ([04](improvements/04-webp-decoder.md)).
+
+the copy into the frame used to be the second one. it now runs on the lookahead
+worker instead of on the requesting thread
+([02](improvements/02-frame-write-path.md)), which moves where it is paid rather
+than removing it: the write is memory bound and does not scale with workers, so
+the next step for a format that is expensive to write is a decoder that writes
+the planes itself rather than one more worker (libwebp already can, which is what
+[04](improvements/04-webp-decoder.md) used).
 
 a second one used to be here: the lookahead pool decoded frames it could not
 keep, which cost both cpu and wall time on the largest sets. that is fixed in

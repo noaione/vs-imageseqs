@@ -1,3 +1,4 @@
+mod clip;
 mod color;
 mod decoder;
 mod error;

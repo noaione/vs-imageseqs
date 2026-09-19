@@ -33,12 +33,6 @@ impl PixelFormat {
         }
     }
 
-    /// Whether one decoded frame of this format is laid out as one buffer per
-    /// plane instead of one interleaved buffer.
-    pub const fn decodes_to_planes(self) -> bool {
-        matches!(self, Self::Yuv420P8)
-    }
-
     /// Gray format that carries the alpha channel of this format.
     pub const fn alpha_format(self) -> Self {
         match self {
@@ -166,7 +160,7 @@ pub const fn alpha_channel(color_type: ColorType) -> Option<usize> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct WriteTimings {
     /// Time spent converting the interleaved decoder buffer into the
     /// VapourSynth planes.

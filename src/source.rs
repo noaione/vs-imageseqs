@@ -17,50 +17,15 @@ use vapoursynth4_rs::{
 };
 
 use crate::{
-    color::set_frame_properties,
-    decoder::{self, ImageInfo, Pixels},
+    clip::{Clip, FrameBuilder, READ_ALPHA_CLIPS, READ_CLIPS, query_format},
+    decoder::{self, ImageInfo},
     error::{ImgSeqError, Result},
-    pixel::{PixelFormat, write_alpha, write_decoded_planes, write_opaque_alpha, write_planar},
+    pixel::PixelFormat,
     prefetch::{self, Prefetcher},
 };
 
 /// Arguments accepted by `Read` and `ReadAlpha`.
 const SEQUENCE_ARGS: &CStr = c"files:data[];fpsnum:int:opt;fpsden:int:opt;mismatch:int:opt;debug:int:opt;prefetch:int:opt;prefetch_memory:int:opt;";
-
-/// One of the clips an image sequence hands out.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Clip {
-    /// Color planes of every frame.
-    Color,
-    /// Alpha plane of every frame, filled with the opaque value when the file
-    /// has no alpha channel.
-    Alpha,
-}
-
-impl Clip {
-    /// Pixel format this clip uses for an image decoded as `format`.
-    const fn pixel_format(self, format: PixelFormat) -> PixelFormat {
-        match self {
-            Self::Color => format,
-            Self::Alpha => format.alpha_format(),
-        }
-    }
-
-    /// `ImgSeqAlpha` property of this clip's frames; color clips have none.
-    const fn alpha_marker(self) -> Option<bool> {
-        match self {
-            Self::Color => None,
-            Self::Alpha => Some(true),
-        }
-    }
-
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Color => "color",
-            Self::Alpha => "alpha",
-        }
-    }
-}
 
 /// `Read` filter instance: the color clip of one image sequence.
 pub struct Read {
@@ -78,7 +43,8 @@ pub struct ReadAlpha {
 /// State shared by every clip of one `Read` or `ReadAlpha` call.
 struct Sequence {
     images: Arc<[ImageInfo]>,
-    prefetcher: Arc<Prefetcher>,
+    /// Holds finished frames, so a request never decodes or writes pixels.
+    prefetcher: Arc<Prefetcher<FrameBuilder>>,
     debug: bool,
 }
 
@@ -92,7 +58,7 @@ struct SetupTimings {
 /// Validated arguments of one `Read` or `ReadAlpha` call.
 struct SequenceArgs {
     images: Arc<[ImageInfo]>,
-    prefetcher: Arc<Prefetcher>,
+    prefetcher: Arc<Prefetcher<FrameBuilder>>,
     format: PixelFormat,
     width: i32,
     height: i32,
@@ -108,7 +74,10 @@ struct SequenceArgs {
 
 impl SequenceArgs {
     /// Reads, probes, and validates the arguments of one call.
-    fn read(input: &MapRef) -> Result<Self> {
+    ///
+    /// `clips` are the clips the call hands out, which are also the frames its
+    /// lookahead workers build.
+    fn read(input: &MapRef, clips: &[Clip], core: CoreRef) -> Result<Self> {
         let setup_started = Instant::now();
         let files = read_files(input)?;
         let fps_num = read_optional_int(input, key!(c"fpsnum"), "fpsnum")?.unwrap_or(24);
@@ -152,6 +121,7 @@ impl SequenceArgs {
             format: images[0].format,
             prefetcher: Arc::new(Prefetcher::new(
                 Arc::clone(&images),
+                FrameBuilder::new(core, clips),
                 prefetch_workers,
                 prefetch_memory,
             )),
@@ -219,8 +189,8 @@ impl Filter for Read {
         _data: Option<Box<Self::FilterData>>,
         mut core: CoreRef,
     ) -> Result<()> {
-        let args = SequenceArgs::read(&input)?;
-        log_create(&mut core, &args, &[Clip::Color]);
+        let args = SequenceArgs::read(&input, READ_CLIPS, core)?;
+        log_create(&mut core, &args, READ_CLIPS);
         let info = args.video_info(&core, Clip::Color);
         add_filter(
             &mut core,
@@ -261,8 +231,8 @@ impl Filter for ReadAlpha {
         _data: Option<Box<Self::FilterData>>,
         mut core: CoreRef,
     ) -> Result<()> {
-        let args = SequenceArgs::read(&input)?;
-        log_create(&mut core, &args, &[Clip::Color, Clip::Alpha]);
+        let args = SequenceArgs::read(&input, READ_ALPHA_CLIPS, core)?;
+        log_create(&mut core, &args, READ_ALPHA_CLIPS);
         let color_info = args.video_info(&core, Clip::Color);
         let alpha_info = args.video_info(&core, Clip::Alpha);
         let sequence = args.into_sequence();
@@ -320,7 +290,10 @@ fn add_filter<F: Filter>(
     core.create_video_filter(output, name, info, Box::new(filter), dependencies);
 }
 
-/// Writes one frame of `clip` from the state the clips of a call share.
+/// Returns one frame of `clip` from the state the clips of a call share.
+///
+/// The pool only hands out frames a worker has already decoded and written, so
+/// this adds nothing but the timings it reports under `debug`.
 fn clip_frame(
     sequence: &Sequence,
     clip: Clip,
@@ -340,71 +313,31 @@ fn clip_frame(
             sequence.images.len()
         ))
     })?;
-    let decode_started = Instant::now();
-    let decoded = sequence.prefetcher.fetch(n)?;
-    let decode = decode_started.elapsed();
-
-    let format = clip.pixel_format(image.format);
-    let allocation_started = Instant::now();
-    let mut frame = core.new_video_frame(
-        &query_format(&core, format),
-        i32::try_from(decoded.width)
-            .map_err(|_| ImgSeqError::new("image width does not fit VapourSynth"))?,
-        i32::try_from(decoded.height)
-            .map_err(|_| ImgSeqError::new("image height does not fit VapourSynth"))?,
-        None,
-    );
-    let allocation = allocation_started.elapsed();
-
-    let write_timings = match (clip, &decoded.pixels) {
-        (Clip::Color, Pixels::Planar(planes)) => write_decoded_planes(
-            &mut frame,
-            decoded.format,
-            decoded.width,
-            decoded.height,
-            planes,
-        )?,
-        (Clip::Color, Pixels::Interleaved { color_type, buffer }) => write_planar(
-            &mut frame,
-            *color_type,
-            decoded.width,
-            decoded.height,
-            buffer,
-        )?,
-        // Planar decodes have no alpha channel to read: the format that decodes
-        // to planes only takes files without one.
-        (Clip::Alpha, Pixels::Planar(_)) => {
-            write_opaque_alpha(&mut frame, format, decoded.width, decoded.height)?
-        }
-        (Clip::Alpha, Pixels::Interleaved { color_type, buffer }) => write_alpha(
-            &mut frame,
-            *color_type,
-            decoded.width,
-            decoded.height,
-            buffer,
-        )?,
-    };
-    let properties_started = Instant::now();
-    set_frame_properties(&mut frame, image, index, format, clip.alpha_marker())?;
-    let properties = properties_started.elapsed();
+    let fetch_started = Instant::now();
+    let frames = sequence.prefetcher.fetch(n)?;
+    let fetch = fetch_started.elapsed();
+    let frame = frames.frame(clip)?;
 
     if sequence.debug {
+        let decode = frames.decode_timings();
+        let work = frames.frame_timings(clip);
         log_debug(
             &mut core,
             format_args!(
-                "frame {} '{}' ({}): decode={} (open={} metadata={} buffer={} read={}) format={} allocate={} convert={} properties={} total={}",
+                "frame {} '{}' ({}): fetch={} decode={} (open={} metadata={} buffer={} read={}) format={} allocate={} convert={} properties={} total={}",
                 n,
                 image.path.display(),
                 clip.name(),
-                format_duration(decode),
-                format_duration(decoded.timings.open),
-                format_duration(decoded.timings.metadata),
-                format_duration(decoded.timings.buffer),
-                format_duration(decoded.timings.read),
-                format.name(),
-                format_duration(allocation),
-                format_duration(write_timings.deinterleave),
-                format_duration(properties),
+                format_duration(fetch),
+                format_duration(decode.open + decode.metadata + decode.buffer + decode.read),
+                format_duration(decode.open),
+                format_duration(decode.metadata),
+                format_duration(decode.buffer),
+                format_duration(decode.read),
+                clip.pixel_format(image.format).name(),
+                format_duration(work.map_or(Duration::ZERO, |work| work.allocate)),
+                format_duration(work.map_or(Duration::ZERO, |work| work.write.deinterleave)),
+                format_duration(work.map_or(Duration::ZERO, |work| work.properties)),
                 format_duration(frame_started.elapsed()),
             ),
         );
@@ -569,17 +502,6 @@ fn has_format_mismatch(images: &[ImageInfo]) -> bool {
     })
 }
 
-fn query_format(core: &CoreRef, format: PixelFormat) -> vapoursynth4_rs::frame::VideoFormat {
-    let (sub_sampling_w, sub_sampling_h) = format.sub_sampling();
-    core.query_video_format(
-        format.color_family(),
-        format.sample_type(),
-        format.bits_per_sample(),
-        sub_sampling_w,
-        sub_sampling_h,
-    )
-}
-
 fn undefined_video_format() -> vapoursynth4_rs::frame::VideoFormat {
     vapoursynth4_rs::frame::VideoFormat {
         color_family: ColorFamily::Undefined,
@@ -594,8 +516,8 @@ fn undefined_video_format() -> vapoursynth4_rs::frame::VideoFormat {
 
 #[cfg(test)]
 mod tests {
-    use super::{Clip, gcd, reduce_fps, resolve_prefetch_memory, resolve_prefetch_workers};
-    use crate::{pixel::PixelFormat, prefetch};
+    use super::{gcd, reduce_fps, resolve_prefetch_memory, resolve_prefetch_workers};
+    use crate::{clip::Clip, pixel::PixelFormat, prefetch};
 
     #[test]
     fn maps_clip_formats() {

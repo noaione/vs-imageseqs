@@ -4,9 +4,10 @@ one file per change, each with the evidence, the intended edit, and how to
 check the result. the measurements come from [benchmarks](../BENCH.md) and from
 the probes described there.
 
-05 is implemented in `src/formats/heif.rs`, 01 in `src/prefetch.rs` plus
-`src/source.rs`, and 04 + 03 in `src/formats/webp.rs` with the planar `Pixels`
-type in `src/decoder.rs`. every other entry is a proposal to review.
+all five are implemented: 05 in `src/formats/heif.rs`, 01 in `src/prefetch.rs`
+plus `src/source.rs`, 02 in `src/clip.rs` with the generic pool in
+`src/prefetch.rs`, and 04 + 03 in `src/formats/webp.rs` with the planar `Pixels`
+type in `src/decoder.rs`.
 
 ## evidence in short
 
@@ -26,8 +27,10 @@ before: 265 ms of decode and 48 ms of write with `image-webp` and a then-36 MB
 rgb frame. the other rows are unchanged by either plan.
 
 the *serial floor* is what the requesting thread must do for every frame no
-matter how many decoders run behind it: the copy into the frame plus the frame
-properties. two conclusions follow.
+matter how many decoders run behind it: for a long time that was the copy into
+the frame plus the frame properties, and after
+[02](02-frame-write-path.md) it is only the wait for a finished frame, because
+the worker that decoded the file builds the frame too. three conclusions follow.
 
 1. **the lookahead used to decode some frames twice** (fixed by
    [01](01-lookahead-scheduling.md)). cpu per delivered frame on the webp set:
@@ -38,11 +41,15 @@ properties. two conclusions follow.
    `prefetch=16` spent 2.6x one decode of cpu per delivered frame while the
    default at 4 spent 1.16x. the window is now capped by the budget and the
    budget follows the window, which turns that 2.6x into 1.43x.
-2. **parallelism cannot beat the floor.** the webp set sat at 88.8 ms/frame
-   with four workers, and about 53 ms of that was unavoidable while the copy
-   stayed on the requesting thread. [03](03-webp-yuv-output.md) cut the frame
-   to 1.5 bytes per pixel, which took the floor to about 6 ms of the 91 ms that
-   `prefetch=4` now delivers.
+2. **parallelism could not beat the floor until [02](02-frame-write-path.md)
+   moved it.** the webp set sat at 88.8 ms/frame with four workers, and about
+   53 ms of that was unavoidable while the copy stayed on the requesting thread.
+   [03](03-webp-yuv-output.md) cut the frame to 1.5 bytes per pixel, which took
+   the floor to about 6 ms of the 91 ms that `prefetch=4` delivered, and 02 then
+   moved the write itself into the pool, so the requesting thread only hands over
+   a frame a worker finished. the win is proportional to how much the write *was*
+   the floor: 5% to 35% on a pool with room, nothing on a pool that was already
+   slower than the thread asking.
 
 a third one, from reading `image-webp` rather than from a measurement: a webp
 frame used to be copied twice and allocated three times per frame (the decoder's
@@ -55,19 +62,21 @@ own canvas, our zeroed `pixels` buffer, then the frame).
 | plan | touches | expected | risk | status |
 | --- | --- | --- | --- | --- |
 | [01 lookahead scheduling](01-lookahead-scheduling.md) | `src/prefetch.rs`, `src/source.rs` | webp 88.8 → ~70 ms at `prefetch=4`, and `prefetch` above 4 stops being a pessimisation | low, internal only | implemented |
-| [02 frame write path](02-frame-write-path.md) | `src/decoder.rs`, `src/source.rs`, `src/pixel.rs` | a few ms per frame from the buffer, and up to 1.6x on webp if the copy leaves the requesting thread | medium, frame lifetime | proposed |
+| [02 frame write path](02-frame-write-path.md) | `src/clip.rs` (new), `src/prefetch.rs`, `src/source.rs`, `src/decoder.rs`, `src/pixel.rs` | a few ms per frame from the buffer, and up to 1.6x on webp if the copy leaves the requesting thread | medium, frame lifetime | implemented, 2b only |
 | [03 yuv output for lossy webp](03-webp-yuv-output.md) | `src/formats/webp.rs`, `src/decoder.rs`, `src/pixel.rs`, `src/source.rs`, `src/color.rs` | webp 4.24 → 3.39 s, half the bytes per frame | medium, changes the output | implemented, with 04 |
 | [04 webp decoder](04-webp-decoder.md) | `Cargo.toml`, `build.rs`, `vcpkg.json`, notices, `LICENSES/`, `src/formats/webp.rs`, `src/decoder.rs` | decode 265 → 111 ms per frame, and it enables 02 and 03 | medium, native dependency | implemented, with 03 |
 | [05 monochrome heif](05-monochrome-heif.md) | `src/formats/heif.rs` | the 31 monochrome heic files in `sandbox/heic` decode as `Gray8` instead of failing | low, used to repair an always-failing path | implemented |
 
-01 and 02 are independent of each other. 03 needs 04. 05 is independent of all
-of them and is the only one that fixes correctness rather than speed, so it did
-not have to wait for a decision on the others. 01 was the only purely internal
-change, which made it the right first one to try; it is now in.
+the dependencies were thin: 01 and 02 were independent of each other, 03 needed
+04, and 05 was independent of all of them and is the only one that fixes
+correctness rather than speed, so it did not have to wait for a decision on the
+others. 01 was the only purely internal change, which made it the right first one
+to try.
 
-expected order of value: 04 + 03 (the only route past bestsource on webp), then
-02 (which mostly matters for the same large frames), then the remaining
-containers. 01 and 05 are done.
+order of value, as it turned out: 04 + 03 were the only route past bestsource on
+webp, 02 was worth 5% to 35% on the frames it was written for and took the manga
+jpeg corpus from 1.6x to 2.5x of bestsource, and 05 repaired a format that never
+worked at all.
 
 ## validating a change
 
@@ -76,8 +85,14 @@ its frames are small, nothing is evicted today, so it must not regress.
 
 ```console
 .venv/Scripts/python.exe tests/bench-imgseqs-vs-bestsource.vpy --reps 3 --extra --prefetch 16 --dir "I:/Manga/KamiKatsu/source/v06"
-.venv/Scripts/python.exe tests/bench-imgseqs-vs-bestsource.vpy --reps 3 --extra --dir "I:/Manga/Yuri Love Story/v02" --pattern "Yuri Love Story - v02 - p%03d.png"
+.venv/Scripts/python.exe tests/bench-imgseqs-vs-bestsource.vpy --reps 3 --extra --prefetch 16 --dir "I:/Manga/Yuri Love Story/source/v02" --pattern "Yuri Love Story - v02 - p%03d.jpg"
 ```
+
+for a change that is meant to be pixel neutral, run `target/bench/frame-parity.py`
+against the old and the new build and compare the two dumps: it hashes every
+plane of every frame of seven sandbox sets and of both `ReadAlpha` clips.
+`target/bench/stage-split.py` prints the per stage means of the debug log and
+takes a prefetch argument.
 
 the bench prints wall time per frame; the plans that talk about wasted work
 also need process CPU per frame, which the local probe beside it measures.
