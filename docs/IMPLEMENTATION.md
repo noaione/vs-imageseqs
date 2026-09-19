@@ -346,6 +346,34 @@ Colour HEIF/HEIC is read through the `image-rs` decoding hook that `libheif-rs` 
 
 Monochrome HEIF/HEIC is therefore decoded directly through `libheif-rs` in `src/formats/heif.rs`, which asks for `ColorSpace::Monochrome` and packs the planes into the same interleaved layout the frame writer accepts. `src/formats/` holds one module per container that the `image` crate cannot express; `decoder::decode` asks each module whether it handles the image before falling back to `image-rs`.
 
+### Native Library Linkage
+
+libwebp is the only native library this crate links on its own; dav1d, libde265,
+libheif and everything below them arrive through `libheif-sys`. `build.rs` links
+libwebp from its archive wherever one exists, so a plugin built on unix does not
+need the platform's `libwebp` at run time:
+
+| build | what `build.rs` emits | what the linker is given |
+| --- | --- | --- |
+| windows | `vcpkg::find_package("libwebp")` | the archive from the `x64-windows-static-md` tree |
+| gnu link editors | `rustc-link-lib=static=webp` | `-Bstatic -lwebp`, which selects the archive |
+| apple | `rustc-link-lib=static:+whole-archive=webp` | `-force_load <path to libwebp.a>` |
+
+the apple row is not a preference. `static=` is a hint, apple's `ld` reads no
+`-Bstatic` equivalent, and it searches each directory of the search path for
+`libwebp.dylib` before `libwebp.a`: homebrew installs both into one directory, so
+the hint was silently ignored and a macos build came out needing
+`/opt/homebrew/opt/webp/lib/libwebp.7.dylib` and `libsharpyuv.0.dylib`, the
+latter being libwebp's own private requirement, which `pkg-config --static`
+reports as one more library to link. `+whole-archive` is the form rustc resolves
+to a path there, and it is emitted in the local native library position, ahead of
+the libraries other crates name, so the archives supply their symbols first.
+`-Wl,-dead_strip_dylibs` then drops a dylib that a link interface named but no
+symbol came from, which is the shape libheif's generated `libheif.pc` has: its
+`Requires.private` names libsharpyuv, and those flags belong to `libheif-sys`.
+`.github/workflows/build.yml` asserts the result by reading `otool -L` on macos
+and `readelf -d` on linux and rejecting either name.
+
 ### Decoder Abstraction
 
 Keep all decoder-specific code behind a common internal interface:

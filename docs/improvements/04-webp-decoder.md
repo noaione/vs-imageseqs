@@ -39,7 +39,14 @@ threaded per image, just with simd and a lower constant).
   which is where `libwebp-dev` installs `libwebp.a` (measured: the flags come
   out as `-lwebp` and the plugin ends up with `NEEDED libwebp.so.7`). A build
   that only finds the shared library still links, with a cargo warning.
-  `vcpkg` and `pkg-config` are build dependencies of their platform only, under
+  On apple the archive has to be named rather than asked for: `ld` reads no
+  `-Bstatic` hint and looks for `libwebp.dylib` before `libwebp.a` in the one
+  directory homebrew installs both into, so `+whole-archive` is used there,
+  which rustc resolves to a path and passes on as `-force_load <path>`, plus
+  `-Wl,-dead_strip_dylibs` so a dylib that a dependency's own link flags name
+  (libheif's generated `libheif.pc` names libsharpyuv) does not stay a run time
+  dependency after the archives have supplied its symbols. `build.rs` has the
+  detail.  `vcpkg` and `pkg-config` are build dependencies of their platform only, under
   `[target.'cfg(windows)'.build-dependencies]` and its `not(windows)` twin.
 - the four entry points used are declared by hand in `src/formats/webp.rs`:
   `WebPGetInfo`, `WebPDecodeRGBInto`, `WebPDecodeRGBAInto` and

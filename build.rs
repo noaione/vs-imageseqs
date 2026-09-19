@@ -12,6 +12,13 @@
 //! as `/usr/lib`: that is where distributions install `libwebp.a`. A library
 //! whose archive is missing keeps the shared form, so a machine that only has
 //! the shared library still links.
+//!
+//! Choosing the archive is not enough everywhere. `static=` is a hint, and
+//! apple's `ld` ignores it: it looks for `libfoo.dylib` before `libfoo.a` in
+//! every directory of the search path, and homebrew installs both into the same
+//! one, so the shared library wins and the plugin needs it at run time. On that
+//! platform the archive is named instead, which is not a hint but the file the
+//! link picks up.
 
 /// Oldest libwebp the entry points in `src/formats/webp.rs` are written against.
 #[cfg(not(windows))]
@@ -59,16 +66,30 @@ fn link_unix_libwebp() {
     }
 
     let mut webp_is_static = false;
+    let mut archives = 0;
     for name in library_names(&library) {
         let archive = !SYSTEM_LIBRARIES.contains(&name) && archive_exists(&library, name);
         if name == "webp" {
             webp_is_static = archive;
         }
         if archive {
-            println!("cargo:rustc-link-lib=static={name}");
+            archives += 1;
+            println!("cargo:rustc-link-lib={}", archive_directive(name));
         } else {
             println!("cargo:rustc-link-lib={name}");
         }
+    }
+
+    if archives > 0 && is_apple() {
+        // An archive linked into the plugin does not keep the shared library of
+        // the same name out of the link: the load command is written for every
+        // library the link line names, including the ones another crate's
+        // link flags bring in. libheif's own `Requires.private` names
+        // libsharpyuv, and its flags are not ours to change, so a dylib that
+        // supplied no symbol is dropped instead. Only a dylib no symbol came
+        // from is affected, and the archives above have just supplied the ones
+        // that matter.
+        println!("cargo:rustc-link-arg=-Wl,-dead_strip_dylibs");
     }
 
     if !webp_is_static {
@@ -76,6 +97,32 @@ fn link_unix_libwebp() {
             "cargo:warning=libwebp is linked from the shared library and will be needed at run time; install the development package (libwebp-dev on debian and ubuntu, webp on macos with homebrew) to link the archive instead"
         );
     }
+}
+
+/// The directive that links `name` from the archive found beside it.
+///
+/// The gnu link editors receive `static=` as `-Bstatic`, which selects the
+/// archive. Apple's `ld` gets no such flag, so the archive is named instead:
+/// `+whole-archive` is the form rustc resolves to a path there and passes on as
+/// `-force_load <path>`. Pinning the archive also pins all of its symbols,
+/// which is what keeps the shared library of the same name out of the link.
+#[cfg(not(windows))]
+fn archive_directive(name: &str) -> String {
+    if is_apple() {
+        format!("static:+whole-archive={name}")
+    } else {
+        format!("static={name}")
+    }
+}
+
+/// Whether the link editor is the one apple ships.
+///
+/// It searches each directory of the search path for `libfoo.dylib` before
+/// `libfoo.a`, so a directory holding both forms (homebrew's, for webp and
+/// sharpyuv) hides the archive from a plain `-lfoo`.
+#[cfg(not(windows))]
+fn is_apple() -> bool {
+    cfg!(target_vendor = "apple")
 }
 
 /// Names of the libraries to link, in the order `pkg-config` reported them and
