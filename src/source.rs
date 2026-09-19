@@ -25,7 +25,7 @@ use crate::{
 };
 
 /// Arguments accepted by `Read` and `ReadAlpha`.
-const SEQUENCE_ARGS: &CStr = c"files:data[];fpsnum:int:opt;fpsden:int:opt;mismatch:int:opt;debug:int:opt;prefetch:int:opt;prefetch_memory:int:opt;";
+const SEQUENCE_ARGS: &CStr = c"files:data[];fpsnum:int:opt;fpsden:int:opt;mismatch:int:opt;apply_rotation:int:opt;debug:int:opt;prefetch:int:opt;prefetch_memory:int:opt;";
 
 /// `Read` filter instance: the color clip of one image sequence.
 pub struct Read {
@@ -64,6 +64,10 @@ struct SequenceArgs {
     height: i32,
     fps_num: i64,
     fps_den: i64,
+    /// Whether the `mismatch` argument allowed a clip of varying frames.
+    mismatch: bool,
+    /// Whether the exif orientation was applied to the pixels.
+    apply_rotation: bool,
     num_frames: i32,
     /// True when the sequence is not one single size and format.
     variable: bool,
@@ -83,6 +87,12 @@ impl SequenceArgs {
         let fps_num = read_optional_int(input, key!(c"fpsnum"), "fpsnum")?.unwrap_or(24);
         let fps_den = read_optional_int(input, key!(c"fpsden"), "fpsden")?.unwrap_or(1);
         let mismatch = read_optional_int(input, key!(c"mismatch"), "mismatch")?.unwrap_or(0) != 0;
+        // Rotating is the default because that is what every other source of a
+        // single picture does with the orientation a file states, and
+        // `apply_rotation=0` is there for the callers that would rather move
+        // the samples themselves.
+        let apply_rotation =
+            read_optional_int(input, key!(c"apply_rotation"), "apply_rotation")?.unwrap_or(1) != 0;
         let debug = read_optional_int(input, key!(c"debug"), "debug")?.unwrap_or(0) != 0;
         let prefetch_workers =
             resolve_prefetch_workers(read_optional_int(input, key!(c"prefetch"), "prefetch")?)?;
@@ -96,7 +106,7 @@ impl SequenceArgs {
         let probe_started = Instant::now();
         let images = files
             .iter()
-            .map(|path| decoder::probe(path))
+            .map(|path| decoder::probe(path, apply_rotation))
             .collect::<Result<Vec<_>>>()?;
         let probe = probe_started.elapsed();
 
@@ -106,13 +116,17 @@ impl SequenceArgs {
         let num_frames = i32::try_from(images.len())
             .map_err(|_| ImgSeqError::new("the image sequence has too many frames"))?;
         let variable = mismatch && has_format_mismatch(&images);
+        // The clip is the size the frames are written as, which a transposing
+        // orientation swaps relative to the size the files hold. Deciding it
+        // here is what lets `mismatch=0` reject a folder that mixes a rotated
+        // page with upright ones before a frame is ever requested.
         let (width, height) = if variable {
             (0, 0)
         } else {
             (
-                i32::try_from(images[0].width)
+                i32::try_from(images[0].output_width())
                     .map_err(|_| ImgSeqError::new("image width does not fit VapourSynth"))?,
-                i32::try_from(images[0].height)
+                i32::try_from(images[0].output_height())
                     .map_err(|_| ImgSeqError::new("image height does not fit VapourSynth"))?,
             )
         };
@@ -130,6 +144,8 @@ impl SequenceArgs {
             height,
             fps_num,
             fps_den,
+            mismatch,
+            apply_rotation,
             num_frames,
             variable,
             debug,
@@ -358,9 +374,12 @@ fn log_create(core: &mut CoreRef<'_>, args: &SequenceArgs, clips: &[Clip]) {
     log_debug(
         core,
         format_args!(
-            "create: frames={} clips={} probe={} validate={} prefetch={} prefetch_memory={} total={}",
+            "create: frames={} clips={} mismatch={} variable={} apply_rotation={} probe={} validate={} prefetch={} prefetch_memory={} total={}",
             args.images.len(),
             clips,
+            args.mismatch,
+            args.variable,
+            args.apply_rotation,
             format_duration(args.timings.probe),
             format_duration(args.timings.validate),
             args.prefetch_workers,
@@ -474,19 +493,21 @@ fn validate_images(images: Vec<ImageInfo>, mismatch: bool) -> Result<Vec<ImageIn
         .ok_or_else(|| ImgSeqError::new("Read requires at least one file"))?;
     if !mismatch {
         for (index, image) in images.iter().enumerate().skip(1) {
-            if image.width != first.width
-                || image.height != first.height
+            // The size the frames will be is the size the image is handed out
+            // as, so that is what a folder has to agree on.
+            if image.output_width() != first.output_width()
+                || image.output_height() != first.output_height()
                 || image.format != first.format
             {
                 return Err(ImgSeqError::new(format!(
                     "frame {index} ('{}') has {}x{} {}, expected frame 0 ('{}') to be {}x{} {}",
                     image.path.display(),
-                    image.width,
-                    image.height,
+                    image.output_width(),
+                    image.output_height(),
                     image.format.name(),
                     first.path.display(),
-                    first.width,
-                    first.height,
+                    first.output_width(),
+                    first.output_height(),
                     first.format.name(),
                 )));
             }
@@ -498,7 +519,9 @@ fn validate_images(images: Vec<ImageInfo>, mismatch: bool) -> Result<Vec<ImageIn
 fn has_format_mismatch(images: &[ImageInfo]) -> bool {
     let first = &images[0];
     images.iter().skip(1).any(|image| {
-        image.width != first.width || image.height != first.height || image.format != first.format
+        image.output_width() != first.output_width()
+            || image.output_height() != first.output_height()
+            || image.format != first.format
     })
 }
 

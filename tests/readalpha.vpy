@@ -241,6 +241,62 @@ def test_interleaved_consumers() -> None:
 MONO_WIDTH = 7
 MONO_HEIGHT = 5
 
+# The orientation fixtures are four wide and three tall, so a transposing exif
+# code changes the clip's size as well as the order of its samples.
+ORIENTATION_WIDTH = 4
+ORIENTATION_HEIGHT = 3
+
+# The yuv orientation fixtures are four quadrants of four grey levels rather
+# than the twelve different samples of the png ones, because a lossy encode
+# cannot keep those: the four levels survive it and their order is enough to say
+# which way the picture was turned.
+SPLIT_WIDTH = 16
+SPLIT_HEIGHT = 12
+SPLIT_QUADRANTS = [[16, 90], [170, 235]]
+
+
+def flip_h(picture: list[list[int]]) -> list[list[int]]:
+    """Mirrors a picture horizontally."""
+    return [row[::-1] for row in picture]
+
+
+def flip_v(picture: list[list[int]]) -> list[list[int]]:
+    """Mirrors a picture vertically."""
+    return picture[::-1]
+
+
+def transpose(picture: list[list[int]]) -> list[list[int]]:
+    """Mirrors a picture across its main diagonal."""
+    return [list(column) for column in zip(*picture)]
+
+
+def shown(stored: list[list[int]], orientation: int) -> list[list[int]]:
+    """The picture a viewer shows for an exif `orientation`.
+
+    This is written the way the exif table reads, with a rotation and a mirror
+    as separate steps, rather than with the transpose and flip pair the plugin
+    writes with, so the two only agree when both are right.
+    """
+    match orientation:
+        case 1:
+            return stored
+        case 2:
+            return flip_h(stored)
+        case 3:
+            return flip_h(flip_v(stored))
+        case 4:
+            return flip_v(stored)
+        case 5:
+            return flip_h(flip_h(transpose(stored)))  # a quarter turn, mirrored
+        case 6:
+            return flip_h(transpose(stored))  # a quarter turn clockwise
+        case 7:
+            return flip_h(flip_v(transpose(stored)))  # the other turn, mirrored
+        case 8:
+            return flip_v(transpose(stored))  # a quarter turn counter-clockwise
+        case _:
+            raise AssertionError(f"unknown orientation {orientation}")
+
 
 def test_monochrome_containers() -> None:
     """A monochrome heif and avif hand out one plane per sample.
@@ -329,6 +385,151 @@ def test_errors() -> None:
             check(False, f"errors: {label} is rejected")
 
 
+def test_orientation() -> None:
+    """The exif orientation is applied, and only when it is asked for.
+
+    The fixtures hold one four by three picture of twelve different samples and
+    differ in the code their ``eXIf`` chunk states, so every code has to hand
+    out its own rearrangement of the same numbers, and the four transposing ones
+    a clip that is three wide and four tall. ``apply_rotation=False`` has to hand
+    out the stored picture of the same file, with the same ``ImgSeqOrientation``,
+    and the size the orientation produces is the size ``mismatch`` compares,
+    which is why a rotated page beside an upright one is rejected at creation
+    rather than at the first frame.
+    """
+    stored = [
+        [row * ORIENTATION_WIDTH + column + 1 for column in range(ORIENTATION_WIDTH)]
+        for row in range(ORIENTATION_HEIGHT)
+    ]
+    for orientation in range(1, 9):
+        picture = shown(stored, orientation)
+        width, height = len(picture[0]), len(picture)
+        clip, alpha = read_alpha(files=[fixture(f"orientation-{orientation}.png")])
+        check(
+            (clip.width, clip.height) == (width, height),
+            f"exif {orientation}: the clip is {width}x{height} (got {clip.width}x{clip.height})",
+        )
+        frame = clip.get_frame(0)
+        samples_flat = [sample for row in picture for sample in row]
+        check(samples(frame) == samples_flat, f"exif {orientation}: the picture the file states")
+        check(
+            frame.props["ImgSeqOrientation"] == orientation,
+            f"exif {orientation}: ImgSeqOrientation keeps the code the file states",
+        )
+        check(
+            samples(alpha.get_frame(0)) == [255] * len(samples_flat),
+            f"exif {orientation}: the opaque alpha clip matches the size",
+        )
+
+    # The stored picture, for files whose two sizes differ, which is what says
+    # the transform and not the decoder produced the sizes above.
+    files = [fixture(f"orientation-{orientation}.png") for orientation in range(1, 9)]
+    clip, _ = read_alpha(files=files, apply_rotation=False)
+    check(
+        (clip.width, clip.height) == (ORIENTATION_WIDTH, ORIENTATION_HEIGHT),
+        f"exif: apply_rotation=False keeps the stored size (got {clip.width}x{clip.height})",
+    )
+    stored_flat = [sample for row in stored for sample in row]
+    for orientation in range(1, 9):
+        frame = clip.get_frame(orientation - 1)
+        check(
+            samples(frame) == stored_flat,
+            f"exif {orientation}: apply_rotation=False hands out the stored picture",
+        )
+        check(
+            frame.props["ImgSeqOrientation"] == orientation,
+            f"exif {orientation}: apply_rotation=False still reports the code",
+        )
+
+    # A rotated page beside an upright one is one stored size and two shown
+    # ones, so the clip cannot have a constant size.
+    mixed = [fixture("orientation-6.png"), fixture("orientation-1.png")]
+    try:
+        core.imgseqs.Read(files=mixed)
+    except Exception as error:
+        check(
+            "3x4" in str(error) and "4x3" in str(error),
+            f"exif: a rotated page beside an upright one is rejected ({str(error).strip()})",
+        )
+    else:
+        check(False, "exif: a rotated page beside an upright one is rejected")
+
+    unrotated = core.imgseqs.Read(files=mixed, apply_rotation=False)
+    check(
+        (unrotated.width, unrotated.height) == (ORIENTATION_WIDTH, ORIENTATION_HEIGHT),
+        "exif: the same two files agree when rotation is off",
+    )
+    variable = core.imgseqs.Read(files=mixed, mismatch=True)
+    check(
+        (variable.width, variable.height) == (0, 0),
+        "exif: mismatch=True hands out a clip of frames of their own size",
+    )
+    frame = variable.get_frame(0)
+    check(
+        (frame.width, frame.height) == (ORIENTATION_HEIGHT, ORIENTATION_WIDTH),
+        f"exif: the rotated frame is its own size (got {frame.width}x{frame.height})",
+    )
+
+
+def quadrant_values(frame) -> list:
+    """The sample at the centre of each quadrant of the luma plane, row major."""
+    plane = samples(frame)
+    width, height = frame.width, frame.height
+    centres = [
+        (width // 4 + column * width // 2, height // 4 + row * height // 2)
+        for row in range(2)
+        for column in range(2)
+    ]
+    return [plane[y * width + x] for x, y in centres]
+
+
+def test_orientation_yuv() -> None:
+    """A rotated lossy webp is turned in its own planes, not in an rgb buffer.
+
+    The webp fixtures hold the four quadrants of the picture they were encoded
+    from and differ in the code their ``EXIF`` chunk states, so this is the
+    planar write path: the frame stays ``YUV420P8``, the chroma planes are half
+    the size of the luma one and still transformed with their own dimensions,
+    and a transposing code changes the size of all three. The levels are only
+    compared by their order because the compression is lossy, which is also why
+    the four of them are far apart.
+    """
+    cases = (
+        (2, SPLIT_WIDTH, SPLIT_HEIGHT),
+        (6, SPLIT_HEIGHT, SPLIT_WIDTH),
+        (8, SPLIT_HEIGHT, SPLIT_WIDTH),
+    )
+    for orientation, width, height in cases:
+        expected = [value for row in shown(SPLIT_QUADRANTS, orientation) for value in row]
+        clip, _ = read_alpha(files=[fixture(f"orientation-{orientation}.webp")])
+        check(
+            (clip.width, clip.height) == (width, height),
+            f"exif webp {orientation}: the clip is {width}x{height} "
+            f"(got {clip.width}x{clip.height})",
+        )
+        frame = clip.get_frame(0)
+        check(
+            frame.format.name == "YUV420P8",
+            f"exif webp {orientation}: a lossy webp stays yuv (got {frame.format.name})",
+        )
+        check(
+            len(samples(frame, 1)) == (width // 2) * (height // 2),
+            f"exif webp {orientation}: the chroma plane is its own size",
+        )
+        observed = quadrant_values(frame)
+        for first in range(4):
+            for second in range(first + 1, 4):
+                check(
+                    (observed[first] < observed[second])
+                    == (expected[first] < expected[second]),
+                    f"exif webp {orientation}: quadrant {first} against {second}",
+                )
+        check(
+            frame.props["ImgSeqOrientation"] == orientation,
+            f"exif webp {orientation}: ImgSeqOrientation keeps the code the file states",
+        )
+
+
 def main() -> None:
     for test in (
         test_rgba8,
@@ -342,6 +543,8 @@ def main() -> None:
         test_read_is_unchanged,
         test_monochrome_containers,
         test_color_containers,
+        test_orientation,
+        test_orientation_yuv,
         test_prefetch_variants,
         test_interleaved_consumers,
         test_errors,

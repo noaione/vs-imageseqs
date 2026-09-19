@@ -1,5 +1,11 @@
 {
     "[rust]": {
         "editor.formatOnSave": true
+    },
+    "chat.tools.terminal.autoApprove": {
+        ".\\.venv\\Scripts\\python.exe": true,
+        "ForEach-Object": true,
+        "Get-Command": true,
+        "gh": true
     }
 }

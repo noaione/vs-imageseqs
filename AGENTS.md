@@ -16,7 +16,11 @@ the plugin accepts an ordered `files:data[]` list and returns one frame per
 file. `Read` returns the color clip, `ReadAlpha` returns the color clip and a
 separate gray alpha clip that is opaque for files without an alpha channel.
 `fpsnum` and `fpsden` default to `24/1`. `mismatch` defaults to false;
-when true, variable dimensions and formats are allowed. `debug` defaults to
+when true, variable dimensions and formats are allowed. `apply_rotation`
+defaults to true and hands out the picture the file's exif orientation
+describes, including the width and height swap of orientations 5 to 8; when
+false the stored picture is handed out at the stored size and
+`ImgSeqOrientation` still reports the file's code. `debug` defaults to
 false and emits VapourSynth log timings when enabled. `prefetch` selects the
 number of background decode workers used for sequential reads; it defaults to
 half the logical cores (capped at four) and `0` disables lookahead decoding.
@@ -59,7 +63,12 @@ because `prefetch=0` is how lookahead is disabled.
   by `tests/make-alpha-fixtures.py`; the heif and avif fixtures are encoded from
   that script's `mono-alpha.png` and `alpha-rgba8.png` with `heif-enc` and
   `avifenc` (`mono-alpha-10.avif` is the 10 bit one), so a changed source needs
-  them re-encoded by hand.
+  them re-encoded by hand. its orientation section reads the
+  `tests/fixtures/orientation-*.png` files written by
+  `tests/make-orientation-fixtures.py`, and its yuv orientation section reads the
+  `orientation-{2,6,8}.webp` files that script cuts out of
+  `orientation-split.webp`, whose bitstream is likewise made once by hand
+  (`magick … -quality 90 -define webp:method=4`).
 - `docs/IMPLEMENTATION.md`: design notes and deferred ideas.
 
 ## local build

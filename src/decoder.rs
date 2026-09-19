@@ -10,7 +10,7 @@ use image::{ColorType, ExtendedColorType, ImageDecoder, ImageReader};
 use crate::{
     error::{ImgSeqError, Result},
     formats,
-    pixel::PixelFormat,
+    pixel::{PixelFormat, Transform},
 };
 
 static DECODER_HOOKS: Once = Once::new();
@@ -50,8 +50,28 @@ pub struct ImageInfo {
     pub color_type: ColorType,
     pub original_color_type: ExtendedColorType,
     pub has_icc_profile: bool,
+    /// The exif orientation the file states, which is reported as a property
+    /// whatever the caller asked for.
     pub orientation: Orientation,
+    /// The rearrangement the pixels are written with, which is the identity
+    /// when the file states no orientation or the caller turned rotation off.
+    pub transform: Transform,
     pub format: PixelFormat,
+}
+
+impl ImageInfo {
+    /// Width this image is handed out as, which is its height for an
+    /// orientation that transposes the picture.
+    #[must_use]
+    pub const fn output_width(&self) -> u32 {
+        orientation_size(self.transform, self.width, self.height).0
+    }
+
+    /// Height this image is handed out as.
+    #[must_use]
+    pub const fn output_height(&self) -> u32 {
+        orientation_size(self.transform, self.width, self.height).1
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -81,8 +101,38 @@ pub struct DecodedImage {
     /// The format the probe recorded for this image, which is the format of the
     /// frame it is written into.
     pub format: PixelFormat,
+    /// How the samples are rearranged as they are written, from the probe.
+    pub transform: Transform,
     pub pixels: Pixels,
     pub timings: DecodeTimings,
+}
+
+impl DecodedImage {
+    /// Width of the frame these pixels are written into, which is the stored
+    /// height for an orientation that transposes the picture.
+    #[must_use]
+    pub const fn output_width(&self) -> u32 {
+        orientation_size(self.transform, self.width, self.height).0
+    }
+
+    /// Height of the frame these pixels are written into.
+    #[must_use]
+    pub const fn output_height(&self) -> u32 {
+        orientation_size(self.transform, self.width, self.height).1
+    }
+}
+
+/// Size `width`x`height` is handed out as under `transform`.
+///
+/// The probe and the decode result answer the same question, and the frame the
+/// pixels are written into is this size rather than the size the file holds.
+#[must_use]
+pub const fn orientation_size(transform: Transform, width: u32, height: u32) -> (u32, u32) {
+    if transform.transposes() {
+        (height, width)
+    } else {
+        (width, height)
+    }
 }
 
 fn open_decoder(path: &Path) -> Result<impl ImageDecoder> {
@@ -105,7 +155,7 @@ pub(crate) fn image_error(action: &str, path: &Path, error: impl std::fmt::Displ
     ))
 }
 
-pub fn probe(path: &Path) -> Result<ImageInfo> {
+pub fn probe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
     // A file a format module can describe from its container skips the decoder,
     // which for an avif means skipping a decode of the whole picture; see
     // [`crate::formats::heif::image_info`].
@@ -141,6 +191,11 @@ pub fn probe(path: &Path) -> Result<ImageInfo> {
         original_color_type,
         has_icc_profile,
         orientation,
+        transform: if apply_rotation {
+            Transform::from_orientation(orientation)
+        } else {
+            Transform::IDENTITY
+        },
         format,
     })
 }
@@ -190,6 +245,7 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
         width,
         height,
         format: info.format,
+        transform: info.transform,
         pixels: Pixels::Interleaved {
             color_type,
             buffer: pixels,

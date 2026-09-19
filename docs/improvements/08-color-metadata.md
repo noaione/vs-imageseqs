@@ -44,7 +44,7 @@ it is the one that cannot make a frame wrong.
 | png | a `cICP` chunk: four bytes, the H.273 codes for primaries, transfer, matrix and the full range flag | a new `src/formats/png.rs` chunk walk; `image` has no accessor for the chunk |
 | jpeg | nothing — an APP14 marker and an `ICCP` chunk at most | — |
 | webp | nothing — `ICCP` only, and vp8 codes no colour description | the current bt.470bg/limited default stands |
-| jxl | the codestream's `ColourEncoding` | only if the integration exposes it; check that before promising it, and skip jxl if it does not |
+| jxl | the codestream's `ColourEncoding` | it exists: `embedded_color_profile()` answers `Simple(JxlColorEncoding { primaries, transfer_function, white_point, rendering_intent })` or `Icc(..)`, but the `image` adapter the plugin reads jxl through exposes only the *converted* output profile. jxl joins this plan after [11](11-jxl-direct.md), which drops that adapter |
 
 ## change, as planned
 

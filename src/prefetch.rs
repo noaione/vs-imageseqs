@@ -580,7 +580,9 @@ mod tests {
     fn images(names: &[&str]) -> Arc<[ImageInfo]> {
         names
             .iter()
-            .map(|name| decoder::probe(&fixture(name)).expect("the fixture is a supported image"))
+            .map(|name| {
+                decoder::probe(&fixture(name), true).expect("the fixture is a supported image")
+            })
             .collect::<Vec<_>>()
             .into()
     }
@@ -595,6 +597,7 @@ mod tests {
             original_color_type: ExtendedColorType::from(color_type),
             has_icc_profile: false,
             orientation: Orientation::NoTransforms,
+            transform: crate::pixel::Transform::IDENTITY,
             format: PixelFormat::from_color_type(color_type).expect("a supported color type"),
         }
     }
@@ -659,6 +662,7 @@ mod tests {
             width: 1,
             height: 1,
             format: PixelFormat::Gray8,
+            transform: crate::pixel::Transform::IDENTITY,
             pixels: Pixels::Interleaved {
                 color_type: ColorType::L8,
                 buffer: vec![0; bytes],
@@ -698,7 +702,7 @@ mod tests {
         let source = fixture("gray.pgm");
         let temp = std::env::temp_dir().join("imgseqs-prefetch-retry.pgm");
         let _ = std::fs::remove_file(&temp);
-        let mut info = decoder::probe(&source).expect("the fixture probes");
+        let mut info = decoder::probe(&source, true).expect("the fixture probes");
         info.path = temp.clone();
 
         let prefetcher = Prefetcher::new(vec![info].into(), Decode, 0, None);

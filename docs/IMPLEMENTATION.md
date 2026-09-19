@@ -784,9 +784,10 @@ CICP/color information where available
 ```
 
 Of that list, the size, both colour types, the presence of an icc profile and
-the orientation are read today. CICP is not, which is
-[08](improvements/08-color-metadata.md), and the orientation is reported and
-never applied to the picture, which is [09](improvements/09-exif-orientation.md).
+the orientation are read today, and the orientation is applied to the picture by
+default — [09](improvements/09-exif-orientation.md) is implemented, and
+`apply_rotation=0` is what asks for the stored picture. CICP is not read, which
+is [08](improvements/08-color-metadata.md).
 The other field this section leaves out is the nominal bit depth: a 10-bit file
 is probed as `Gray16`/`RGB48` today, and [10](improvements/10-nominal-bit-depth.md)
 is what would stop that.
@@ -919,6 +920,47 @@ A yuv frame skips all of it: `src/formats/webp.rs` hands out planes that are
 already planar and `pixel::write_decoded_planes` copies them plane by plane,
 which is why the webp row is the cheapest copy in [BENCH.md](BENCH.md)'s per
 stage table.
+
+---
+
+# Applying the exif orientation
+
+A file's exif orientation is applied by default, and `apply_rotation=0` is the
+argument that asks for the stored picture. Three facts make this more than a
+write-time detail:
+
+- orientations 5 to 8 swap width and height, so the size the clip is built from
+  is the *transformed* one. `decoder::probe` reports both sizes and
+  `ImageInfo`/`DecodedImage` hand out `output_width()`/`output_height()` beside
+  the stored pair, which is what `source.rs` sizes the clip from,
+  `clip.rs::expected_bytes` sizes the lookahead budget from, and `mismatch`
+  compares. A folder that mixes a rotated page with an upright one therefore
+  fails at creation, before a frame exists.
+- the eight codes are the identity, a mirror per axis and a transpose, composed
+  — `pixel::Transform` is those three flags and `source_of(x, y)` is the whole
+  mapping. The mirrors are applied in the frame's own coordinates first and the
+  transpose swaps what is left, which is what makes exif 5 the plain transpose
+  and exif 6 a rotation; the reverse mapping is wrong and was written first.
+- a transform that transposes reads *across* the decoder buffer while the frame
+  is written *along* it, which the identity path never does. `pixel::for_each_block`
+  walks the destination in square blocks of `TRANSFORM_BLOCK` samples so the
+  reads of one block stay inside whole cache lines and the block's other rows
+  reuse them; one destination sample per pass measured 9x the identity write on
+  12 megapixel pages before blocking. The codes that do not transpose take the
+  row-wise path instead, which is a row copy plus `reverse_samples` for a mirror,
+  and a transpose of an interleaved buffer is one walk that fills every channel
+  rather than one pass per plane. In the planar writer the sample size is a
+  constant of the dispatch (`write_sample_planes::<T>`) and not a value the walk
+  carries: a run-time sized move is a call into the copy routine per sample,
+  which measured 3.3x worse on a transposed yuv plane than a constant one.
+  [09](improvements/09-exif-orientation.md) has the numbers.
+
+On an odd sized `4:2:0` page a subsampled plane is rounded up by the decoder and
+down by the frame, so a transformed write there is approximate in the same way
+the untransformed one already was; the fit test is made against the source turned
+the way the frame was, which keeps the reads inside the decoder's buffer either
+way. [BENCH.md](BENCH.md) and [09](improvements/09-exif-orientation.md) have the
+numbers.
 
 ---
 
@@ -1070,11 +1112,11 @@ icc profile is never turned into sRGB or BT.709 metadata, and the profile's byte
 are read and dropped — `ImgSeqHasICC` says it is there, and full icc conversion
 stays in the defer list below.
 
-An exif orientation is metadata of the same kind and is treated the same way: the
-code reaches every frame as `ImgSeqOrientation`, and no pixel is moved because of
-it. [09](improvements/09-exif-orientation.md) is the plan that would apply it,
-behind an argument, because orientations 5 to 8 swap the dimensions a clip is
-built from.
+An exif orientation is metadata of the same kind, and [09](improvements/09-exif-orientation.md)
+is implemented: the code reaches every frame as `ImgSeqOrientation` either way,
+and the picture is transformed by default. `apply_rotation=0` hands out the
+stored picture, which is the one case where the property and the frame's size
+say different things about the same file.
 
 ---
 

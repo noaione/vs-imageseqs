@@ -65,6 +65,8 @@ clip = core.imgseqs.Read(
 - `files`: required, ordered image paths.
 - `fpsnum` and `fpsden`: frame rate. defaults to `24/1`.
 - `mismatch`: set to `True` to allow different sizes or pixel formats.
+- `apply_rotation`: set to `False` to hand out the picture the file stores
+  instead of the one its exif orientation describes. defaults to `True`.
 - `debug`: set to `True` to log create and per-frame timing information.
 - `prefetch`: number of background worker threads used to decode upcoming
   frames while the clip is read sequentially. `0` disables lookahead decoding.
@@ -77,6 +79,16 @@ clip = core.imgseqs.Read(
 by default, every image must have the same size and pixel format. with
 `mismatch=True`, the clip uses variable format information and each frame
 keeps its own size and format.
+
+an exif orientation is applied by default: a page whose exif says 6 comes out
+rotated 90 degrees clockwise, and orientations 5 to 8 swap the frame's width and
+height. `ImgSeqOrientation` still reports the code the file carries, so a code
+other than 1 on a frame that is not the file's stored size means the picture was
+transformed. `apply_rotation=False` hands out the stored picture at the size the
+file stores; a folder that mixes a rotated page with upright ones then fails at
+creation unless `mismatch=True`, exactly as a folder of different sizes does.
+This is one more thing to switch off when comparing against a plugin that does
+not rotate.
 
 with `debug=True`, timing messages are sent to the VapourSynth log. they
 include probing, decoding, frame allocation, planar conversion, frame
@@ -168,7 +180,8 @@ page, because a `4:2:0` plane in a VapourSynth frame is `floor(size / 2)`.
 - `ImgSeqIndex` - the frame index in the input list
 - `ImgSeqOriginalColorType` - the original image color type
 - `ImgSeqHasICC` - whether the original image had an ICC profile
-- `ImgSeqOrientation` - the original image orientation, if any
+- `ImgSeqOrientation` - the orientation the file states, if any. this is the
+  file's own answer even when `apply_rotation` changed the picture
 - `ImgSeqAlpha` - `1` on frames of a clip created by `ReadAlpha`
 
 ### alpha clips
@@ -220,9 +233,10 @@ creating a clip only reads what each container states about its file, so opening
 costs 5 ms at most. the decode happens per frame, in the background pool.
 
 when comparing with bestsource, open it with `cachemode=0` and
-`apply_rotation=False`, and do not pass `fpsnum`/`fpsden` for image sequences:
-ffmpeg reads them at 25 fps, so any other rate resamples and silently drops
-every 25th image.
+`apply_rotation=False`, and pass `apply_rotation=False` to `Read` as well: the
+two plugins rotate by default, but a fair read comparison wants neither of them
+to. do not pass `fpsnum`/`fpsden` for image sequences: ffmpeg reads them at
+25 fps, so any other rate resamples and silently drops every 25th image.
 
 ## build
 

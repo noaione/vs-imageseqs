@@ -21,6 +21,15 @@ of them carries a measurement: two are formats no sandbox set covers, two change
 what a frame holds or claims about itself, and one is a transform the file asks
 for and does not get.
 
+[11](11-jxl-direct.md) is the odd one out and came out of the last row of that
+list: reading the orientation for a jxl showed that the decoder the plugin wraps
+applies the file's orientation itself, so the format reports 1 and hands out the
+rotated picture whatever `apply_rotation` says. dropping the `image` adapter for
+the `jxl` crate underneath it fixes that, and it is what lets
+[08](08-color-metadata.md) and [10](10-nominal-bit-depth.md) read a jxl's colour
+encoding and its bit depth, so it is proposed before them rather than beside
+them.
+
 ## evidence in short
 
 per frame with `prefetch=0` and `debug=True` (see the per stage table in
@@ -89,8 +98,9 @@ open plus frames to 4.99 s.
 | [06 jpeg 2000 backend](06-jpeg-2000-backend.md) | `Cargo.toml`, `vcpkg.json`, `build.rs`, README, notices, `LICENSES/`, `src/formats/jp2.rs` (new), `src/decoder.rs` | a `.jp2`/`.j2k` file reads as `Gray8`/`RGB24`/`Gray16`/`RGB48` instead of failing the probe, and the probe stays a header walk | medium, a fourth native dependency | proposed |
 | [07 dds and farbfeld](07-dds-and-farbfeld.md) | `Cargo.toml`, `README.md`, fixtures, `tests/readalpha.vpy` | `.dds` and `.ff` files stop failing the probe, for two feature flags and no native code | low | proposed |
 | [08 color metadata](08-color-metadata.md) | `src/decoder.rs`, `src/formats/heif.rs`, `src/formats/png.rs` (new), `src/color.rs` | `_Primaries`/`_Transfer` from the container's `nclx`/`cICP`, and `_Matrix`/`_Range` from the file for a yuv frame, while an icc-only file changes nothing | low to medium, a wrong claim is worse than none | proposed |
-| [09 exif orientation](09-exif-orientation.md) | `src/decoder.rs`, `src/source.rs`, `src/clip.rs`, `src/pixel.rs`, fixtures, `tests/readalpha.vpy` | a file whose exif says 6 comes out the way its thumbnail looks, behind a `rotation` argument, and `ImgSeqOrientation` keeps saying what the file said | medium, it swaps width and height | proposed |
+| [09 exif orientation](09-exif-orientation.md) | `src/decoder.rs`, `src/source.rs`, `src/clip.rs`, `src/pixel.rs`, fixtures, `tests/readalpha.vpy` | a file whose exif says 6 comes out the way its thumbnail looks, behind an `apply_rotation` argument that defaults on, and `ImgSeqOrientation` keeps saying what the file said | medium, it swaps width and height | implemented |
 | [10 nominal bit depth](10-nominal-bit-depth.md) | `src/pixel.rs`, `src/decoder.rs`, `src/formats/heif.rs`, `src/clip.rs`, `src/source.rs` | a 10-bit avif is `Gray10`/`RGB30` instead of `Gray16`/`RGB48`, with the samples shifted into the words a 10-bit frame holds, and the 16-bit files stay 16-bit | medium, every 9-to-15-bit file changes format | proposed |
+| [11 jxl without the image integration](11-jxl-direct.md) | `Cargo.toml`, `src/formats/jxl.rs` (new), `src/formats/mod.rs`, `src/decoder.rs`, `src/pixel.rs`, fixtures, `tests/readalpha.vpy` | a jxl that states an orientation reports it and `apply_rotation=False` gives the stored picture back, and the codestream's colour encoding and bit depth reach the probe | medium, the decode loop becomes ours | proposed |
 
 the dependencies were thin: 01 and 02 were independent of each other, 03 needed
 04, and 05 was independent of all of them and is the only one that fixes
@@ -100,14 +110,24 @@ to try.
 
 06 to 10 are independent of each other and of all five. 06 is the only one that
 adds a native dependency, 07 is two feature flags, 08 changes what a frame says
-about itself, 09 changes where its samples are, and 10 changes the format and the
+about itself, 09 changed where its samples are, and 10 changes the format and the
 samples together — so 10 is the last of them to do, and 08 is the one with a rule
-("the file states it or the property is unset") instead of a measurement.
+("the file states it or the property is unset") instead of a measurement. 11 adds
+no dependency, only a layer: the same `jxl` crate the adapter already wraps, with
+the adapter's own 367 lines replaced by the module that reads the header. it
+moves first because 08's jxl row and 10's jxl row have no other source, and
+because it is the one item on this list that is a live defect rather than a
+missing feature.
 
 order of value, as it turned out: 04 + 03 were the only route past bestsource on
 webp, 02 was worth 5% to 35% on the frames it was written for and took the manga
-jpeg corpus from 1.6x to 2.5x of bestsource, and 05 repaired a format that never
-worked at all.
+jpeg corpus from 1.6x to 2.5x of bestsource, 05 repaired a format that never
+worked at all, and 09 removed the last place where the two plugins disagreed
+about what a file means. 09 also cost the most of the small ones: a transposing
+write reads across the decoder buffer instead of along it, which was 9x the
+identity write before the walk was blocked, and 1.7x on an interleaved page and
+2.9x on a planar one once the mirrors went back to whole rows, the channels of a
+frame shared one walk, and a sample move stopped being a runtime-sized copy.
 
 ## validating a change
 

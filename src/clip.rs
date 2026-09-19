@@ -87,13 +87,15 @@ pub fn query_format(core: &Core, format: PixelFormat) -> vapoursynth4_rs::frame:
 /// Frame bytes one image of `clips` is expected to need.
 ///
 /// This is the planar size of every frame the image is written into, which is
-/// what the lookahead budget is sized from before anything is decoded.
+/// what the lookahead budget is sized from before anything is decoded. The
+/// frames are sized from the same answer the probe gave, so an orientation that
+/// swaps width and height is accounted for here as well.
 /// VapourSynth pads the stride of a frame, so what the frames really hold is a
 /// little more than this.
 #[must_use]
 pub fn expected_bytes(clips: &[Clip], image: &ImageInfo) -> usize {
-    let width = usize::try_from(image.width).unwrap_or(usize::MAX);
-    let height = usize::try_from(image.height).unwrap_or(usize::MAX);
+    let width = usize::try_from(image.output_width()).unwrap_or(usize::MAX);
+    let height = usize::try_from(image.output_height()).unwrap_or(usize::MAX);
     clips
         .iter()
         .map(|&clip| clip.pixel_format(image.format).planes_bytes(width, height))
@@ -176,10 +178,13 @@ impl ClipFrames {
         let mut frames = Vec::with_capacity(clips.len());
         let mut timings = Vec::with_capacity(clips.len());
         let mut bytes: usize = 0;
+        // A rotation may have swapped the stored size, and the frames are the
+        // size the pixels are written as rather than the size the file holds.
+        let (output_width, output_height) = (decoded.output_width(), decoded.output_height());
         for &clip in clips.iter() {
             let format = clip.pixel_format(decoded.format);
             let allocate_started = Instant::now();
-            let mut frame = new_frame(core, format, decoded.width, decoded.height)?;
+            let mut frame = new_frame(core, format, output_width, output_height)?;
             let allocate = allocate_started.elapsed();
             let write = write_frame(&mut frame, clip, format, &decoded)?;
             let properties_started = Instant::now();
@@ -280,27 +285,50 @@ fn new_frame(core: &Core, format: PixelFormat, width: u32, height: u32) -> Resul
 }
 
 /// Writes the decoded pixels of one image into one clip's frame.
+///
+/// The frames are the size `decoded.transform` produces, and both clips of an
+/// image are written with the same transform, so the alpha plane lands where the
+/// colour planes do rather than the two agreeing by construction.
 fn write_frame(
     frame: &mut VideoFrame,
     clip: Clip,
     format: PixelFormat,
     decoded: &DecodedImage,
 ) -> Result<WriteTimings> {
+    let transform = decoded.transform;
     match (clip, &decoded.pixels) {
-        (Clip::Color, Pixels::Planar(planes)) => {
-            write_decoded_planes(frame, decoded.format, decoded.width, decoded.height, planes)
-        }
-        (Clip::Color, Pixels::Interleaved { color_type, buffer }) => {
-            write_planar(frame, *color_type, decoded.width, decoded.height, buffer)
-        }
+        (Clip::Color, Pixels::Planar(planes)) => write_decoded_planes(
+            frame,
+            decoded.format,
+            decoded.width,
+            decoded.height,
+            planes,
+            transform,
+        ),
+        (Clip::Color, Pixels::Interleaved { color_type, buffer }) => write_planar(
+            frame,
+            *color_type,
+            decoded.width,
+            decoded.height,
+            buffer,
+            transform,
+        ),
         // Planar decodes have no alpha channel to read: the format that decodes
         // to planes only takes files without one.
-        (Clip::Alpha, Pixels::Planar(_)) => {
-            write_opaque_alpha(frame, format, decoded.width, decoded.height)
-        }
-        (Clip::Alpha, Pixels::Interleaved { color_type, buffer }) => {
-            write_alpha(frame, *color_type, decoded.width, decoded.height, buffer)
-        }
+        (Clip::Alpha, Pixels::Planar(_)) => write_opaque_alpha(
+            frame,
+            format,
+            decoded.output_width(),
+            decoded.output_height(),
+        ),
+        (Clip::Alpha, Pixels::Interleaved { color_type, buffer }) => write_alpha(
+            frame,
+            *color_type,
+            decoded.width,
+            decoded.height,
+            buffer,
+            transform,
+        ),
     }
 }
 

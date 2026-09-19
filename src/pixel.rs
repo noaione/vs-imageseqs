@@ -1,9 +1,11 @@
 use std::{
+    ops::Range,
+    ptr::copy_nonoverlapping,
     slice,
     time::{Duration, Instant},
 };
 
-use image::ColorType;
+use image::{ColorType, metadata::Orientation};
 use vapoursynth4_rs::frame::VideoFrame;
 use vapoursynth4_rs::{ColorFamily, SampleType};
 
@@ -151,6 +153,126 @@ impl PixelFormat {
     }
 }
 
+/// How the samples of a decoded image are rearranged as they are written.
+///
+/// The eight exif orientations are the identity, a mirror in one direction or
+/// both, a transpose, and the two mirrors composed with it, so three flags hold
+/// all of them. The mirrors are in the frame's own coordinates, which is why a
+/// transpose swaps the size the frame is built with: [`Self::output_size`] is
+/// what a clip is sized from, and [`Self::source_of`] is what the writer reads
+/// for each destination sample.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Transform {
+    transpose: bool,
+    flip_x: bool,
+    flip_y: bool,
+}
+
+impl Transform {
+    /// Transform that rearranges nothing, which is what a file without an exif
+    /// orientation, and every file when the caller turns rotation off, gets.
+    pub const IDENTITY: Self = Self {
+        transpose: false,
+        flip_x: false,
+        flip_y: false,
+    };
+
+    /// Transform that hands out `orientation` the way a viewer shows it.
+    ///
+    /// [`Orientation`](image::metadata::Orientation) names the same eight
+    /// transformations the exif tag does, so this is a rename and not a
+    /// conversion, down to the order of the composed ones: `Rotate90FlipH`
+    /// rotates the stored picture 90 degrees clockwise and then mirrors it,
+    /// which comes out as the plain transpose, while `Rotate90` on its own does
+    /// not.
+    #[must_use]
+    pub const fn from_orientation(orientation: Orientation) -> Self {
+        match orientation {
+            Orientation::NoTransforms => Self::IDENTITY,
+            Orientation::FlipHorizontal => Self {
+                flip_x: true,
+                ..Self::IDENTITY
+            },
+            Orientation::Rotate180 => Self {
+                flip_x: true,
+                flip_y: true,
+                ..Self::IDENTITY
+            },
+            Orientation::FlipVertical => Self {
+                flip_y: true,
+                ..Self::IDENTITY
+            },
+            // A quarter turn clockwise reads the source column `y` for
+            // destination row `y`, and its row `output_width - 1 - x`.
+            Orientation::Rotate90 => Self {
+                transpose: true,
+                flip_x: true,
+                ..Self::IDENTITY
+            },
+            // The quarter turn followed by a horizontal mirror, which is the
+            // transpose of the stored picture and not a rotation at all.
+            Orientation::Rotate90FlipH => Self {
+                transpose: true,
+                ..Self::IDENTITY
+            },
+            // The anti-diagonal twin, which is a quarter turn the other way
+            // followed by the same mirror.
+            Orientation::Rotate270FlipH => Self {
+                transpose: true,
+                flip_x: true,
+                flip_y: true,
+            },
+            // A quarter turn counter-clockwise, which is the anti-diagonal
+            // transpose with its row mirrored.
+            Orientation::Rotate270 => Self {
+                transpose: true,
+                flip_y: true,
+                ..Self::IDENTITY
+            },
+        }
+    }
+
+    /// Whether it swaps width and height.
+    #[must_use]
+    pub const fn transposes(self) -> bool {
+        self.transpose
+    }
+
+    /// Size this transform hands an image of `width` x `height` out as.
+    #[must_use]
+    pub const fn output_size(self, width: usize, height: usize) -> (usize, usize) {
+        if self.transpose {
+            (height, width)
+        } else {
+            (width, height)
+        }
+    }
+
+    /// Source sample of the destination sample `(x, y)` of an `output_width` x
+    /// `output_height` frame.
+    ///
+    /// The mirrors are applied first, in the frame's coordinates, and the
+    /// transpose swaps what is left: a mirror and a transpose do not commute,
+    /// and this order is the one that makes exif 5 the plain transpose and exif
+    /// 7 its anti-diagonal twin.
+    #[must_use]
+    pub const fn source_of(
+        self,
+        x: usize,
+        y: usize,
+        output_width: usize,
+        output_height: usize,
+    ) -> (usize, usize) {
+        let x = if self.flip_x { output_width - 1 - x } else { x };
+        let y = if self.flip_y {
+            output_height - 1 - y
+        } else {
+            y
+        };
+        if self.transpose { (y, x) } else { (x, y) }
+    }
+}
+
 /// Interleaved channel that carries alpha when the color type has one.
 pub const fn alpha_channel(color_type: ColorType) -> Option<usize> {
     match color_type {
@@ -292,39 +414,239 @@ fn extract_channel<T: Sample, const CHANNELS: usize, const CHANNEL: usize>(
     }
 }
 
-/// Write one interleaved channel of every row directly into a VapourSynth
-/// plane, leaving the row padding untouched.
-fn write_channel<T: Sample, const CHANNELS: usize, const CHANNEL: usize>(
-    mut destination: *mut u8,
+/// One plane of a frame, with the geometry every write walks it by.
+///
+/// The row size is the frame's own, which a transform may have swapped relative
+/// to the decoder's, and `rows` is how many rows of it are written.
+#[derive(Clone, Copy)]
+struct PlaneTarget {
+    /// First byte of the plane.
+    destination: *mut u8,
+    /// Distance between the starts of two rows, which is at least `row_bytes`.
     stride: isize,
-    pixels: &[u8],
-    layout: &ImageLayout,
-    plane_row_bytes: usize,
-) -> Result<()> {
+    /// Bytes of one active row.
+    row_bytes: usize,
+    /// Active rows of the plane.
+    rows: usize,
+}
+
+impl PlaneTarget {
+    /// First byte of row `row` of this plane.
+    ///
+    /// Only the `rows` rows [`plane_target`] checked against the plane's size
+    /// are inside it, which is what every caller must stay below.
+    fn row_start(self, row: usize) -> *mut u8 {
+        debug_assert!(row < self.rows);
+        // Safety: the callers only walk rows that were checked against the
+        // plane's size, and VapourSynth pads a plane to at least
+        // `stride * height` bytes, so this offset is inside it.
+        unsafe { self.destination.offset(self.stride * row as isize) }
+    }
+}
+
+/// Plane `index` of `frame`, checked to hold `rows` rows of `row_bytes` bytes.
+///
+/// Every write path needs the same two facts checked, and the checks are the
+/// only way either can fail once the decoder buffer is known to be the right
+/// size.
+fn plane_target(
+    frame: &mut VideoFrame,
+    index: usize,
+    row_bytes: usize,
+    rows: usize,
+) -> Result<PlaneTarget> {
+    let plane = i32::try_from(index).expect("the plane count fits in i32");
+    let stride = frame.stride(plane);
+    let destination = frame.plane_mut(plane);
     if destination.is_null() {
         return Err(ImgSeqError::new(format!(
-            "VapourSynth returned a null pointer for plane {CHANNEL}"
+            "VapourSynth returned a null pointer for plane {index}"
         )));
     }
-    if stride < plane_row_bytes as isize {
+    if stride < row_bytes as isize {
         return Err(ImgSeqError::new(format!(
-            "VapourSynth plane {CHANNEL} stride {stride} is smaller than row size {plane_row_bytes}"
+            "VapourSynth plane {index} stride {stride} is smaller than row size {row_bytes}"
         )));
     }
 
-    for row in 0..layout.height {
-        let source_start = row * layout.row_bytes;
-        let source = &pixels[source_start..source_start + layout.row_bytes];
-        // Safety: `new_video_frame` returns writable planes with at least
-        // `stride * height` bytes, so every active row fits in the plane.
-        let target = unsafe { slice::from_raw_parts_mut(destination, plane_row_bytes) };
-        if CHANNELS == 1 {
-            target.copy_from_slice(source);
-        } else {
-            extract_channel::<T, CHANNELS, CHANNEL>(source, target);
+    Ok(PlaneTarget {
+        destination,
+        stride,
+        row_bytes,
+        rows,
+    })
+}
+
+/// Samples per side of the square blocks a transformed write is walked in.
+///
+/// A transform that transposes reads across the decoder buffer while the frame
+/// is written along it, so a walk that takes one destination sample at a time
+/// fetches a cache line for each of them. Walking the destination in square
+/// blocks instead keeps the reads of one block inside whole cache lines, and
+/// those lines are reused by the block's remaining rows before the walk moves
+/// on.
+///
+/// Eight samples a side is what the sweep recorded in
+/// `docs/improvements/09-exif-orientation.md` found best on 12 megapixel pages,
+/// which is about 24 bytes of a source row per block for the interleaved
+/// formats. The exact size is not delicate: every value from 8 to 64 that the
+/// sweep tried measured within 15% of the best one.
+const TRANSFORM_BLOCK: usize = 8;
+
+/// Call `visit` with each destination row of a transformed write, and the run
+/// of columns of it to write, in the order that keeps one block of the decoder
+/// buffer's reads in cache.
+///
+/// Every row is visited once with each of its runs of columns, in order, so a
+/// caller writes complete rows and never revisits a sample.
+fn for_each_block(output_width: usize, rows: usize, mut visit: impl FnMut(usize, Range<usize>)) {
+    for block_row in (0..rows).step_by(TRANSFORM_BLOCK) {
+        let block_rows = block_row..(block_row + TRANSFORM_BLOCK).min(rows);
+        for block_column in (0..output_width).step_by(TRANSFORM_BLOCK) {
+            let columns = block_column..(block_column + TRANSFORM_BLOCK).min(output_width);
+            for row in block_rows.clone() {
+                visit(row, columns.clone());
+            }
         }
-        destination = unsafe { destination.offset(stride) };
     }
+}
+
+/// Reverse the samples of a row in place, which is what a horizontal mirror does
+/// on top of the copy that put them there.
+///
+/// A mirrored row cannot be a `memcpy` on its own, but copying the row and
+/// turning it around afterwards can be: both passes are contiguous, and the pass
+/// that reads the decoder buffer still reads along it. The samples are reversed
+/// one at a time and not one byte at a time, which would swap the halves of
+/// every 16 bit or float sample.
+fn reverse_samples(row: &mut [u8], sample_bytes: usize) {
+    if sample_bytes == 1 {
+        row.reverse();
+        return;
+    }
+    let half = row.len() / sample_bytes / 2 * sample_bytes;
+    let (left, right) = row.split_at_mut(half);
+    for (first, last) in left
+        .chunks_exact_mut(sample_bytes)
+        .zip(right.rchunks_exact_mut(sample_bytes))
+    {
+        first.swap_with_slice(last);
+    }
+}
+
+/// Write one interleaved channel of every row directly into a VapourSynth
+/// plane, leaving the row padding untouched.
+fn write_channel<T: Sample, const CHANNELS: usize, const CHANNEL: usize>(
+    target: PlaneTarget,
+    pixels: &[u8],
+    layout: &ImageLayout,
+    transform: Transform,
+) {
+    // A row of the frame holds whole samples, so this is the width the
+    // transform is defined against.
+    let output_width = target.row_bytes / T::SIZE;
+
+    // Every transform that does not transpose reads the buffer along the row it
+    // is writing, so whole rows move at once: the mirrors only decide which row
+    // that is and which way round it goes.
+    if !transform.transposes() {
+        for row in 0..target.rows {
+            let source_row = if transform.flip_y {
+                target.rows - 1 - row
+            } else {
+                row
+            };
+            let source_start = source_row * layout.row_bytes;
+            let source = &pixels[source_start..source_start + layout.row_bytes];
+            // Safety: `plane_target` checked the row size against the stride of
+            // this plane, so every active row of it fits.
+            let destination =
+                unsafe { slice::from_raw_parts_mut(target.row_start(row), target.row_bytes) };
+            if CHANNELS == 1 {
+                destination.copy_from_slice(source);
+            } else {
+                extract_channel::<T, CHANNELS, CHANNEL>(source, destination);
+            }
+            if transform.flip_x {
+                reverse_samples(destination, T::SIZE);
+            }
+        }
+
+        return;
+    }
+
+    // A transposing transform reads the buffer from a different row for every
+    // sample it writes, so the destination is walked in blocks: see
+    // [`for_each_block`]. `row_bytes` is a whole number of samples because it
+    // was built from a width, so no partial sample is ever copied.
+    let sample_bytes = T::SIZE;
+    let group_bytes = CHANNELS * T::SIZE;
+    let channel_bytes = CHANNEL * T::SIZE;
+    let source = pixels.as_ptr();
+    for_each_block(output_width, target.rows, |row, columns| {
+        // The row size was checked against the stride of this plane, so every
+        // active row of it fits and `row_bytes` is a whole number of samples.
+        let destination = target.row_start(row);
+        for column in columns {
+            let (x, y) = transform.source_of(column, row, output_width, target.rows);
+            let from = y * layout.row_bytes + x * group_bytes + channel_bytes;
+            let to = column * sample_bytes;
+            // Safety: the source is in the row `y` and the column `x` of the
+            // validated decoder buffer, and the destination is the `column`th
+            // sample of a row that was checked to hold them all, so both
+            // offsets are inside their buffers and the buffers are distinct.
+            unsafe {
+                copy_nonoverlapping(source.add(from), destination.add(to), sample_bytes);
+            }
+        }
+    });
+}
+
+/// Write every channel of a transposing transform into its own plane in one walk.
+///
+/// One pass per plane reads the whole decoder buffer once per plane; when every
+/// channel has a plane of its own, one walk reads each source sample group once
+/// and writes every channel of it, which is the same destination traffic for a
+/// third of the reads and a third of the loop.
+fn write_transposed_planes<T: Sample, const CHANNELS: usize>(
+    frame: &mut VideoFrame,
+    layout: &ImageLayout,
+    planes: usize,
+    plane_row_bytes: usize,
+    pixels: &[u8],
+    transform: Transform,
+) -> Result<()> {
+    let output_width = plane_row_bytes / T::SIZE;
+    let (_, output_height) = transform.output_size(layout.width, layout.height);
+    let mut targets: [Option<PlaneTarget>; 3] = [None; 3];
+    for (plane, target) in targets.iter_mut().enumerate().take(planes) {
+        *target = Some(plane_target(frame, plane, plane_row_bytes, output_height)?);
+    }
+
+    let group_bytes = CHANNELS * T::SIZE;
+    let sample_bytes = T::SIZE;
+    let source = pixels.as_ptr();
+    for_each_block(output_width, output_height, |row, columns| {
+        for column in columns {
+            let (x, y) = transform.source_of(column, row, output_width, output_height);
+            // Safety: the source is the row `y` and the column `x` of the
+            // validated decoder buffer, and every plane was checked to hold the
+            // `column`th sample of its row, so both offsets are inside their
+            // buffers and the buffers are distinct.
+            unsafe {
+                let group = source.add(y * layout.row_bytes + x * group_bytes);
+                let to = column * sample_bytes;
+                for (plane, target) in targets.iter().enumerate().take(planes) {
+                    let target = target.expect("every plane was checked");
+                    copy_nonoverlapping(
+                        group.add(plane * sample_bytes),
+                        target.row_start(row).add(to),
+                        sample_bytes,
+                    );
+                }
+            }
+        }
+    });
 
     Ok(())
 }
@@ -334,36 +656,31 @@ fn write_planes<T: Sample, const CHANNELS: usize>(
     layout: &ImageLayout,
     planes: usize,
     pixels: &[u8],
+    transform: Transform,
 ) -> Result<()> {
-    let plane_row_bytes = layout
-        .width
+    let (output_width, output_height) = transform.output_size(layout.width, layout.height);
+    let plane_row_bytes = output_width
         .checked_mul(T::SIZE)
         .ok_or_else(|| ImgSeqError::new("image plane row is too large"))?;
+    // A transpose reads the buffer across the row it is writing, so a plane at a
+    // time reads the whole buffer once per plane. When every channel has a plane
+    // of its own, one walk fills all of them instead.
+    if transform.transposes() && planes == CHANNELS && matches!(planes, 2 | 3) {
+        return write_transposed_planes::<T, CHANNELS>(
+            frame,
+            layout,
+            planes,
+            plane_row_bytes,
+            pixels,
+            transform,
+        );
+    }
     for plane in 0..planes {
-        let stride = frame.stride(i32::try_from(plane).expect("plane count fits in i32"));
-        let destination = frame.plane_mut(i32::try_from(plane).expect("plane count fits in i32"));
+        let target = plane_target(frame, plane, plane_row_bytes, output_height)?;
         match plane {
-            0 => write_channel::<T, CHANNELS, 0>(
-                destination,
-                stride,
-                pixels,
-                layout,
-                plane_row_bytes,
-            )?,
-            1 => write_channel::<T, CHANNELS, 1>(
-                destination,
-                stride,
-                pixels,
-                layout,
-                plane_row_bytes,
-            )?,
-            _ => write_channel::<T, CHANNELS, 2>(
-                destination,
-                stride,
-                pixels,
-                layout,
-                plane_row_bytes,
-            )?,
+            0 => write_channel::<T, CHANNELS, 0>(target, pixels, layout, transform),
+            1 => write_channel::<T, CHANNELS, 1>(target, pixels, layout, transform),
+            _ => write_channel::<T, CHANNELS, 2>(target, pixels, layout, transform),
         }
     }
 
@@ -389,27 +706,31 @@ fn planes_to_write(frame_planes: i32, channels: usize) -> Result<usize> {
 }
 
 /// Convert one interleaved decoded image directly into the VapourSynth planes.
+///
+/// The frame holds what `transform` produces, so an orientation that transposes
+/// the picture is written into a frame that is as tall as the image is wide.
 pub fn write_planar(
     frame: &mut VideoFrame,
     color_type: ColorType,
     width: u32,
     height: u32,
     pixels: &[u8],
+    transform: Transform,
 ) -> Result<WriteTimings> {
     let layout = image_layout(color_type, width, height, pixels)?;
     let planes = planes_to_write(frame.get_video_format().num_planes, layout.channels)?;
     let started = Instant::now();
     match (layout.format.bytes_per_sample(), layout.channels) {
-        (1, 1) => write_planes::<u8, 1>(frame, &layout, planes, pixels)?,
-        (1, 2) => write_planes::<u8, 2>(frame, &layout, planes, pixels)?,
-        (1, 3) => write_planes::<u8, 3>(frame, &layout, planes, pixels)?,
-        (1, 4) => write_planes::<u8, 4>(frame, &layout, planes, pixels)?,
-        (2, 1) => write_planes::<u16, 1>(frame, &layout, planes, pixels)?,
-        (2, 2) => write_planes::<u16, 2>(frame, &layout, planes, pixels)?,
-        (2, 3) => write_planes::<u16, 3>(frame, &layout, planes, pixels)?,
-        (2, 4) => write_planes::<u16, 4>(frame, &layout, planes, pixels)?,
-        (4, 3) => write_planes::<f32, 3>(frame, &layout, planes, pixels)?,
-        (4, 4) => write_planes::<f32, 4>(frame, &layout, planes, pixels)?,
+        (1, 1) => write_planes::<u8, 1>(frame, &layout, planes, pixels, transform)?,
+        (1, 2) => write_planes::<u8, 2>(frame, &layout, planes, pixels, transform)?,
+        (1, 3) => write_planes::<u8, 3>(frame, &layout, planes, pixels, transform)?,
+        (1, 4) => write_planes::<u8, 4>(frame, &layout, planes, pixels, transform)?,
+        (2, 1) => write_planes::<u16, 1>(frame, &layout, planes, pixels, transform)?,
+        (2, 2) => write_planes::<u16, 2>(frame, &layout, planes, pixels, transform)?,
+        (2, 3) => write_planes::<u16, 3>(frame, &layout, planes, pixels, transform)?,
+        (2, 4) => write_planes::<u16, 4>(frame, &layout, planes, pixels, transform)?,
+        (4, 3) => write_planes::<f32, 3>(frame, &layout, planes, pixels, transform)?,
+        (4, 4) => write_planes::<f32, 4>(frame, &layout, planes, pixels, transform)?,
         (bytes_per_sample, channels) => {
             return Err(ImgSeqError::new(format!(
                 "unsupported sample size {bytes_per_sample} with {channels} channels"
@@ -425,15 +746,41 @@ pub fn write_planar(
 /// Copy one tightly packed decoder buffer per plane into the VapourSynth
 /// planes.
 ///
-/// Unlike [`write_planar`] the buffers already have the plane layout, so this
-/// only moves whole rows around the frame padding, which is what makes the
-/// planar formats cheaper to write: there is no per sample work at all.
+/// Unlike [`write_planar`] the buffers already have the plane layout, so a
+/// transform-free write only moves whole rows around the frame padding, which is
+/// what makes the planar formats cheaper to write: there is no per sample work
+/// at all. A transform writes one sample at a time instead, in blocks that keep
+/// its reads in cache, because a transposed plane is read down a column rather
+/// than along a row.
 pub fn write_decoded_planes(
     frame: &mut VideoFrame,
     format: PixelFormat,
     width: u32,
     height: u32,
     planes: &[Vec<u8>],
+    transform: Transform,
+) -> Result<WriteTimings> {
+    // The sample size is a constant of the write rather than a value it carries,
+    // so that a transformed plane moves whole samples instead of calling a copy
+    // routine once per sample for it.
+    match format.bytes_per_sample() {
+        1 => write_sample_planes::<u8>(frame, format, width, height, planes, transform),
+        2 => write_sample_planes::<u16>(frame, format, width, height, planes, transform),
+        4 => write_sample_planes::<f32>(frame, format, width, height, planes, transform),
+        bytes_per_sample => Err(ImgSeqError::new(format!(
+            "unsupported sample size {bytes_per_sample} for {}",
+            format.name()
+        ))),
+    }
+}
+
+fn write_sample_planes<T: Sample>(
+    frame: &mut VideoFrame,
+    format: PixelFormat,
+    width: u32,
+    height: u32,
+    planes: &[Vec<u8>],
+    transform: Transform,
 ) -> Result<WriteTimings> {
     if planes.len() != format.plane_count() {
         return Err(ImgSeqError::new(format!(
@@ -447,7 +794,8 @@ pub fn write_decoded_planes(
         .map_err(|_| ImgSeqError::new("image width does not fit in memory"))?;
     let height = usize::try_from(height)
         .map_err(|_| ImgSeqError::new("image height does not fit in memory"))?;
-    let sample_bytes = format.bytes_per_sample();
+    let sample_bytes = T::SIZE;
+    let (output_width, output_height) = transform.output_size(width, height);
     let started = Instant::now();
 
     for (index, buffer) in planes.iter().enumerate() {
@@ -467,41 +815,86 @@ pub fn write_decoded_planes(
 
         // The frame can be a row or a column smaller than the decoder's plane
         // on an odd size, and the extra samples have nowhere to go.
-        let (frame_width, frame_height) = format.frame_plane_dimensions(index, width, height);
+        let (frame_width, frame_height) =
+            format.frame_plane_dimensions(index, output_width, output_height);
         let row_bytes = frame_width
             .checked_mul(sample_bytes)
             .ok_or_else(|| ImgSeqError::new("image plane row is too large"))?;
-        if decoded_height < frame_height || decoded_row < row_bytes {
+        // A transform reads across the plane as well as along it, so what has to
+        // fit is the source turned the same way the frame was. On an odd size a
+        // subsampled plane is rounded up by the decoder and down by the frame,
+        // and this is what keeps the reads inside the buffer either way.
+        let (fits, mapped_width, mapped_height) = if transform.transposes() {
+            (
+                frame_width <= decoded_height && frame_height <= decoded_width,
+                decoded_height,
+                decoded_width,
+            )
+        } else {
+            (
+                decoded_height >= frame_height && decoded_row >= row_bytes,
+                decoded_width,
+                decoded_height,
+            )
+        };
+        if !fits {
             return Err(ImgSeqError::new(format!(
-                "decoder returned a {decoded_width}x{decoded_height} plane {index}, which is smaller than the {frame_width}x{frame_height} the frame holds"
+                "decoder returned a {decoded_width}x{decoded_height} plane {index}, which cannot fill the {frame_width}x{frame_height} the frame holds from a {mapped_width}x{mapped_height} source"
             )));
         }
 
-        let plane = i32::try_from(index).expect("the plane count fits in i32");
-        let stride = frame.stride(plane);
-        let destination = frame.plane_mut(plane);
-        if destination.is_null() {
-            return Err(ImgSeqError::new(format!(
-                "VapourSynth returned a null pointer for plane {index}"
-            )));
-        }
-        if stride < row_bytes as isize {
-            return Err(ImgSeqError::new(format!(
-                "VapourSynth plane {index} stride {stride} is smaller than row size {row_bytes}"
-            )));
+        let target = plane_target(frame, index, row_bytes, frame_height)?;
+
+        // Every transform that does not transpose reads the buffer along the row
+        // it is writing, so whole rows move at once: a mirror only decides which
+        // row that is and which way round it goes. `row_bytes` is a whole number
+        // of samples because it came from a width, so no partial sample is ever
+        // copied.
+        if !transform.transposes() {
+            for row in 0..frame_height {
+                let source_row = if transform.flip_y {
+                    frame_height - 1 - row
+                } else {
+                    row
+                };
+                // Every row of the decoder buffer is `decoded_row` bytes wide,
+                // and the frame keeps the first `row_bytes` of it.
+                let source =
+                    &buffer[source_row * decoded_row..source_row * decoded_row + row_bytes];
+                // Safety: `plane_target` checked the plane against these rows,
+                // so every active row fits in it.
+                let destination =
+                    unsafe { slice::from_raw_parts_mut(target.row_start(row), row_bytes) };
+                destination.copy_from_slice(source);
+                if transform.flip_x {
+                    reverse_samples(destination, sample_bytes);
+                }
+            }
+
+            continue;
         }
 
-        for row in 0..frame_height {
-            // Every row of the decoder buffer is `decoded_row` bytes wide, and
-            // the frame keeps the first `row_bytes` of it.
-            let source = &buffer[row * decoded_row..row * decoded_row + row_bytes];
-            // Safety: the plane holds at least `stride * frame_height` bytes,
-            // so every active row fits in it.
-            let target = unsafe {
-                slice::from_raw_parts_mut(destination.offset(stride * row as isize), row_bytes)
-            };
-            target.copy_from_slice(source);
-        }
+        // A transpose reads the buffer from a different row for every sample it
+        // writes, so the destination is walked in blocks: see [`for_each_block`].
+        let source = buffer.as_ptr();
+        for_each_block(frame_width, frame_height, |row, columns| {
+            // The plane was checked against these rows, so every active row of
+            // it fits and `row_bytes` is a whole number of samples.
+            let destination = target.row_start(row);
+            for column in columns {
+                let (x, y) = transform.source_of(column, row, frame_width, frame_height);
+                let from = y * decoded_row + x * sample_bytes;
+                let to = column * sample_bytes;
+                // Safety: the source is in the row `y` and the sample `x` of a
+                // decoder plane that was checked to hold those, and the
+                // destination is the `column`th sample of a row that was checked
+                // to hold them all, so both offsets are inside their buffers and
+                // the buffers are distinct.
+                unsafe {
+                    copy_nonoverlapping(source.add(from), destination.add(to), sample_bytes);
+                }
+            }
+        });
     }
 
     Ok(WriteTimings {
@@ -509,29 +902,23 @@ pub fn write_decoded_planes(
     })
 }
 
-/// Fill one gray plane of `height` rows of `row_bytes` bytes with `value`.
-fn fill_plane<T: Sample>(
-    mut destination: *mut u8,
-    stride: isize,
-    row_bytes: usize,
-    height: usize,
-    value: T,
-) {
-    for _ in 0..height {
-        // Safety: the plane holds at least `stride * height` bytes, so every
-        // active row fits in it, and `row_bytes` is a whole number of samples.
-        let target = unsafe { slice::from_raw_parts_mut(destination, row_bytes) };
-        for sample in target.chunks_mut(T::SIZE) {
+/// Fill the active rows of a plane with `value`.
+fn fill_plane<T: Sample>(target: PlaneTarget, value: T) {
+    for row in 0..target.rows {
+        // Safety: `plane_target` checked the plane against these rows, and
+        // `row_bytes` is a whole number of samples.
+        let bytes = unsafe { slice::from_raw_parts_mut(target.row_start(row), target.row_bytes) };
+        for sample in bytes.chunks_mut(T::SIZE) {
             value.store(sample);
         }
-        destination = unsafe { destination.offset(stride) };
     }
 }
 
 /// Fill the single plane of a gray frame with the opaque value.
 ///
 /// Sources that decode to planes have no alpha channel to write, so their
-/// alpha clip is opaque everywhere.
+/// alpha clip is opaque everywhere. `width` and `height` are the size of the
+/// frame, which a rotation may have swapped relative to the file.
 pub fn write_opaque_alpha(
     frame: &mut VideoFrame,
     format: PixelFormat,
@@ -545,23 +932,12 @@ pub fn write_opaque_alpha(
     let row_bytes = width
         .checked_mul(format.bytes_per_sample())
         .ok_or_else(|| ImgSeqError::new("image plane row is too large"))?;
-    let stride = frame.stride(0);
-    let destination = frame.plane_mut(0);
-    if destination.is_null() {
-        return Err(ImgSeqError::new(
-            "VapourSynth returned a null pointer for the alpha plane",
-        ));
-    }
-    if stride < row_bytes as isize {
-        return Err(ImgSeqError::new(format!(
-            "VapourSynth alpha plane stride {stride} is smaller than row size {row_bytes}"
-        )));
-    }
+    let target = plane_target(frame, 0, row_bytes, height)?;
     let started = Instant::now();
     match format.bytes_per_sample() {
-        1 => fill_plane::<u8>(destination, stride, row_bytes, height, u8::MAX),
-        2 => fill_plane::<u16>(destination, stride, row_bytes, height, u16::MAX),
-        4 => fill_plane::<f32>(destination, stride, row_bytes, height, 1.0),
+        1 => fill_plane::<u8>(target, u8::MAX),
+        2 => fill_plane::<u16>(target, u16::MAX),
+        4 => fill_plane::<f32>(target, 1.0),
         bytes => {
             return Err(ImgSeqError::new(format!(
                 "unsupported alpha sample size {bytes}"
@@ -577,25 +953,27 @@ pub fn write_opaque_alpha(
 /// Write the alpha channel of one decoded image into a gray VapourSynth frame.
 ///
 /// Sources without an alpha channel produce an opaque plane, so an alpha clip
-/// always has a meaningful value for every frame.
+/// always has a meaningful value for every frame. The plane is transformed the
+/// same way the colour plane is, which is what keeps the two aligned.
 pub fn write_alpha(
     frame: &mut VideoFrame,
     color_type: ColorType,
     width: u32,
     height: u32,
     pixels: &[u8],
+    transform: Transform,
 ) -> Result<WriteTimings> {
     let layout = image_layout(color_type, width, height, pixels)?;
     let started = Instant::now();
     match (layout.format.bytes_per_sample(), alpha_channel(color_type)) {
-        (1, Some(1)) => write_alpha_plane::<u8, 2, 1>(frame, &layout, pixels)?,
-        (2, Some(1)) => write_alpha_plane::<u16, 2, 1>(frame, &layout, pixels)?,
-        (1, Some(3)) => write_alpha_plane::<u8, 4, 3>(frame, &layout, pixels)?,
-        (2, Some(3)) => write_alpha_plane::<u16, 4, 3>(frame, &layout, pixels)?,
-        (4, Some(3)) => write_alpha_plane::<f32, 4, 3>(frame, &layout, pixels)?,
-        (1, None) => fill_alpha_plane::<u8>(frame, &layout, u8::MAX)?,
-        (2, None) => fill_alpha_plane::<u16>(frame, &layout, u16::MAX)?,
-        (4, None) => fill_alpha_plane::<f32>(frame, &layout, 1.0)?,
+        (1, Some(1)) => write_alpha_plane::<u8, 2, 1>(frame, &layout, pixels, transform)?,
+        (2, Some(1)) => write_alpha_plane::<u16, 2, 1>(frame, &layout, pixels, transform)?,
+        (1, Some(3)) => write_alpha_plane::<u8, 4, 3>(frame, &layout, pixels, transform)?,
+        (2, Some(3)) => write_alpha_plane::<u16, 4, 3>(frame, &layout, pixels, transform)?,
+        (4, Some(3)) => write_alpha_plane::<f32, 4, 3>(frame, &layout, pixels, transform)?,
+        (1, None) => fill_alpha_plane::<u8>(frame, &layout, transform, u8::MAX)?,
+        (2, None) => fill_alpha_plane::<u16>(frame, &layout, transform, u16::MAX)?,
+        (4, None) => fill_alpha_plane::<f32>(frame, &layout, transform, 1.0)?,
         (bytes_per_sample, channel) => {
             return Err(ImgSeqError::new(format!(
                 "unsupported alpha source for {bytes_per_sample}-byte samples with channel {channel:?}"
@@ -608,9 +986,10 @@ pub fn write_alpha(
     })
 }
 
-fn alpha_plane_row_bytes<T: Sample>(layout: &ImageLayout) -> Result<usize> {
-    layout
-        .width
+fn alpha_plane_row_bytes<T: Sample>(layout: &ImageLayout, transform: Transform) -> Result<usize> {
+    transform
+        .output_size(layout.width, layout.height)
+        .0
         .checked_mul(T::SIZE)
         .ok_or_else(|| ImgSeqError::new("image plane row is too large"))
 }
@@ -620,57 +999,155 @@ fn write_alpha_plane<T: Sample, const CHANNELS: usize, const CHANNEL: usize>(
     frame: &mut VideoFrame,
     layout: &ImageLayout,
     pixels: &[u8],
+    transform: Transform,
 ) -> Result<()> {
-    let plane_row_bytes = alpha_plane_row_bytes::<T>(layout)?;
-    write_channel::<T, CHANNELS, CHANNEL>(
-        frame.plane_mut(0),
-        frame.stride(0),
-        pixels,
-        layout,
-        plane_row_bytes,
-    )
+    let (_, output_height) = transform.output_size(layout.width, layout.height);
+    let row_bytes = alpha_plane_row_bytes::<T>(layout, transform)?;
+    let target = plane_target(frame, 0, row_bytes, output_height)?;
+    write_channel::<T, CHANNELS, CHANNEL>(target, pixels, layout, transform);
+    Ok(())
 }
 
 /// Fill the single plane of a gray frame with one value.
 fn fill_alpha_plane<T: Sample>(
     frame: &mut VideoFrame,
     layout: &ImageLayout,
+    transform: Transform,
     value: T,
 ) -> Result<()> {
-    let plane_row_bytes = alpha_plane_row_bytes::<T>(layout)?;
-    let stride = frame.stride(0);
-    let mut destination = frame.plane_mut(0);
-    if destination.is_null() {
-        return Err(ImgSeqError::new(
-            "VapourSynth returned a null pointer for the alpha plane",
-        ));
-    }
-    if stride < plane_row_bytes as isize {
-        return Err(ImgSeqError::new(format!(
-            "VapourSynth alpha plane stride {stride} is smaller than row size {plane_row_bytes}"
-        )));
-    }
-
-    for _ in 0..layout.height {
-        // Safety: `new_video_frame` returns writable planes with at least
-        // `stride * height` bytes, so every active row fits in the plane.
-        let target = unsafe { slice::from_raw_parts_mut(destination, plane_row_bytes) };
-        // `plane_row_bytes` is a whole number of samples, so no partial chunk
-        // is ever handed to `Sample::store`.
-        for sample in target.chunks_mut(T::SIZE) {
-            value.store(sample);
-        }
-        destination = unsafe { destination.offset(stride) };
-    }
-
+    let (_, output_height) = transform.output_size(layout.width, layout.height);
+    let row_bytes = alpha_plane_row_bytes::<T>(layout, transform)?;
+    let target = plane_target(frame, 0, row_bytes, output_height)?;
+    // A constant plane has nothing to rearrange, so the transform is only in
+    // the size it covers.
+    fill_plane::<T>(target, value);
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PixelFormat, alpha_channel, extract_channel, image_layout, planes_to_write};
-    use image::ColorType;
+    use super::{
+        PixelFormat, TRANSFORM_BLOCK, Transform, alpha_channel, extract_channel, for_each_block,
+        image_layout, planes_to_write, reverse_samples,
+    };
+    use image::{ColorType, metadata::Orientation};
     use vapoursynth4_rs::{ColorFamily, SampleType};
+
+    /// The 3x2 source every orientation test rearranges, whose values are
+    /// `row * 3 + column + 1` so a wrong sample names itself in the failure.
+    const SOURCE: [[u8; 3]; 2] = [[1, 2, 3], [4, 5, 6]];
+
+    /// Reads one sample of the source grid.
+    fn source(x: usize, y: usize) -> u8 {
+        SOURCE[y][x]
+    }
+
+    /// The frame a transform hands `SOURCE` out as, one row per entry.
+    fn transform(orientation: Orientation) -> Vec<Vec<u8>> {
+        let transform = Transform::from_orientation(orientation);
+        let (width, height) = transform.output_size(3, 2);
+        (0..height)
+            .map(|row| {
+                (0..width)
+                    .map(|column| {
+                        let (x, y) = transform.source_of(column, row, width, height);
+                        source(x, y)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn applies_every_exif_orientation() {
+        // Each expectation is the picture a viewer shows, the way `image`'s own
+        // `Orientation::apply` builds it: the rotation first and then the
+        // mirror, which is what makes exif 5 the transpose and exif 7 the other
+        // one.
+        assert_eq!(transform(Orientation::NoTransforms), [[1, 2, 3], [4, 5, 6]]);
+        assert_eq!(
+            transform(Orientation::FlipHorizontal),
+            [[3, 2, 1], [6, 5, 4]]
+        );
+        assert_eq!(transform(Orientation::Rotate180), [[6, 5, 4], [3, 2, 1]]);
+        assert_eq!(transform(Orientation::FlipVertical), [[4, 5, 6], [1, 2, 3]]);
+        assert_eq!(
+            transform(Orientation::Rotate90FlipH),
+            [[1, 4], [2, 5], [3, 6]]
+        );
+        assert_eq!(transform(Orientation::Rotate90), [[4, 1], [5, 2], [6, 3]]);
+        assert_eq!(
+            transform(Orientation::Rotate270FlipH),
+            [[6, 3], [5, 2], [4, 1]]
+        );
+        assert_eq!(transform(Orientation::Rotate270), [[3, 6], [2, 5], [1, 4]]);
+    }
+
+    #[test]
+    fn every_orientation_reads_each_sample_once() {
+        // A transform that loses or doubles a sample still has the right size,
+        // so the writes are only correct when the sources are a permutation.
+        for orientation in [
+            Orientation::NoTransforms,
+            Orientation::FlipHorizontal,
+            Orientation::Rotate180,
+            Orientation::FlipVertical,
+            Orientation::Rotate90FlipH,
+            Orientation::Rotate90,
+            Orientation::Rotate270FlipH,
+            Orientation::Rotate270,
+        ] {
+            let mut seen = transform(orientation).concat();
+            seen.sort_unstable();
+            assert_eq!(seen, [1, 2, 3, 4, 5, 6], "{orientation:?}");
+        }
+    }
+
+    #[test]
+    fn reports_the_size_and_the_transpose() {
+        assert_eq!(Transform::IDENTITY.output_size(3, 2), (3, 2));
+        assert_eq!(
+            Transform::from_orientation(Orientation::NoTransforms),
+            Transform::IDENTITY
+        );
+        assert_eq!(
+            Transform::from_orientation(Orientation::Rotate90).output_size(3, 2),
+            (2, 3)
+        );
+        assert!(Transform::from_orientation(Orientation::Rotate90).transposes());
+        assert!(!Transform::from_orientation(Orientation::FlipVertical).transposes());
+        // Only the identity leaves every sample where it was, and a transpose
+        // keeps the diagonal, so an off-diagonal sample is what tells them
+        // apart.
+        for orientation in [
+            Orientation::FlipHorizontal,
+            Orientation::Rotate180,
+            Orientation::FlipVertical,
+            Orientation::Rotate90FlipH,
+            Orientation::Rotate90,
+            Orientation::Rotate270FlipH,
+            Orientation::Rotate270,
+        ] {
+            let transform = Transform::from_orientation(orientation);
+            let (width, height) = transform.output_size(3, 2);
+            assert!(
+                transform.source_of(0, 0, width, height) != (0, 0)
+                    || transform.source_of(1, 0, width, height) != (1, 0),
+                "{orientation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_exif_code_round_trips() {
+        // `probe` reads the code and `color` writes it back, so a code that
+        // does not survive the pair would report a different orientation than
+        // the one that was applied.
+        for code in 1..=8u8 {
+            let orientation = Orientation::from_exif(code).expect("a known exif code");
+            assert_eq!(orientation.to_exif(), code);
+        }
+    }
 
     #[test]
     fn a_gray_frame_can_be_filled_from_a_wider_buffer() {
@@ -789,5 +1266,95 @@ mod tests {
             f32::from_ne_bytes(alpha[4..8].try_into().unwrap()),
             0.75_f32
         );
+    }
+
+    #[test]
+    fn reverses_rows_in_samples() {
+        let mut bytes = [1, 2, 3, 4, 5, 6];
+        reverse_samples(&mut bytes, 1);
+        assert_eq!(bytes, [6, 5, 4, 3, 2, 1]);
+
+        // A wider sample is turned around as a whole: reversing its bytes would
+        // swap the halves of every value.
+        let samples = [1u16, 2, 3, 4, 5];
+        let mut row = Vec::new();
+        for sample in samples {
+            row.extend_from_slice(&sample.to_ne_bytes());
+        }
+        reverse_samples(&mut row, 2);
+        let mut expected = Vec::new();
+        for sample in samples.iter().rev() {
+            expected.extend_from_slice(&sample.to_ne_bytes());
+        }
+        assert_eq!(row, expected);
+
+        // An odd row leaves its middle sample alone, which is the sample the
+        // empty half of the split never reaches.
+        let mut odd = [1u8, 2, 3, 4, 5, 6, 7];
+        reverse_samples(&mut odd, 1);
+        assert_eq!(odd, [7, 6, 5, 4, 3, 2, 1]);
+
+        // A row of one sample is already reversed, and a wider sample than the
+        // row is never split.
+        let mut single = [9u8, 8, 7, 6];
+        reverse_samples(&mut single, 4);
+        assert_eq!(single, [9, 8, 7, 6]);
+        reverse_samples(&mut single, 2);
+        assert_eq!(single, [7, 6, 9, 8]);
+    }
+
+    #[test]
+    fn blocked_walk_covers_every_sample_once() {
+        // The walk is the only thing a transform write shares with the write it
+        // replaced, so a block that is off by one either skips a row or writes
+        // one twice. The sizes go past a block on both sides, which is where a
+        // partial last block is walked.
+        for (width, height) in [(70, 33), (33, 70), (1, 1), (1, 70), (70, 1), (64, 64)] {
+            let mut visits = vec![0u8; width * height];
+            for_each_block(width, height, |row, columns| {
+                for column in columns {
+                    visits[row * width + column] += 1;
+                }
+            });
+            assert!(
+                visits.iter().all(|count| *count == 1),
+                "{width}x{height} visits {visits:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn blocked_walk_keeps_rows_in_order() {
+        // The reads of a block are cheap because the writes are not: each row
+        // has to be written in ascending, gapless runs of columns from a block
+        // boundary, so that the destination stays contiguous inside the block
+        // and a row is whole once the walk has seen it.
+        let mut written: Vec<Vec<usize>> = vec![Vec::new(); 33];
+        for_each_block(70, 33, |row, columns| {
+            assert!(columns.end <= 70);
+            assert_eq!(columns.start % TRANSFORM_BLOCK, 0);
+            written[row].extend(columns);
+        });
+        for (row, columns) in written.iter().enumerate() {
+            assert_eq!(*columns, (0..70).collect::<Vec<usize>>(), "row {row}");
+        }
+    }
+
+    #[test]
+    fn blocked_walk_writes_a_column_block_in_row_order() {
+        // A transposing write reads across the buffer while it writes along it,
+        // so what has to stay in cache is the rows the column block touches: the
+        // walk returns to a column block with the rows that follow the ones it
+        // left, and never goes back over one it has written.
+        let mut rows: Vec<Vec<usize>> = vec![Vec::new(); 100_usize.div_ceil(TRANSFORM_BLOCK)];
+        for_each_block(100, 70, |row, columns| {
+            rows[columns.start / TRANSFORM_BLOCK].push(row);
+        });
+        for (block, rows) in rows.iter().enumerate() {
+            let mut sorted = rows.clone();
+            sorted.sort_unstable();
+            assert_eq!(*rows, sorted, "column block {block} goes back over rows");
+            assert_eq!(rows.len(), 70, "column block {block}");
+        }
     }
 }

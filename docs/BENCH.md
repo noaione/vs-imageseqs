@@ -22,9 +22,12 @@ their own defaults unless the row says otherwise.
 ## fair comparison
 
 - bestsource is opened with `cachemode=0` (never read or write an index on
-  disk) and `apply_rotation=False` (imgseqs records the orientation but never
-  transforms the picture). its `cachesize`, `threads` and `maxdecoders` stay at
-  the defaults, and `threads=1` is the row that matches `prefetch=0`.
+  disk) and both plugins are given `apply_rotation=False`, so neither of them
+  moves a pixel and the comparison is the read path alone. Without it both
+  plugins rotate, and they agree about the file — the sandbox sets carry no exif
+  either way, so these numbers are unaffected. bestsource's `cachesize`,
+  `threads` and `maxdecoders` stay at the defaults, and `threads=1` is the row
+  that matches `prefetch=0`.
 - bestsource is never given `fpsnum`/`fpsden` for an image sequence: ffmpeg
   reads image sequences at 25 fps, so any other rate resamples and silently
   drops every 25th image.

@@ -279,6 +279,7 @@ impl Source<'_> {
             width: info.width,
             height: info.height,
             format: info.format,
+            transform: info.transform,
             pixels,
             timings: DecodeTimings {
                 open: self.open,
@@ -477,6 +478,7 @@ mod tests {
             original_color_type: ExtendedColorType::Rgb8,
             has_icc_profile: false,
             orientation: image::metadata::Orientation::NoTransforms,
+            transform: crate::pixel::Transform::IDENTITY,
             format: crate::pixel::PixelFormat::from_color_type(color_type)
                 .expect("a supported color type"),
         }
@@ -496,7 +498,7 @@ mod tests {
             .encode(pixels, width, height, color_type)
             .expect("a lossless webp stream");
         let path = write_temp(&format!("{name}.webp"), &encoded);
-        let probed = probe(&path).expect("the image to probe");
+        let probed = probe(&path, true).expect("the image to probe");
         (path, probed)
     }
 
@@ -538,7 +540,7 @@ mod tests {
             .join("tests")
             .join("fixtures")
             .join("lossy.webp");
-        let probed = probe(&path).expect("the fixture to probe");
+        let probed = probe(&path, true).expect("the fixture to probe");
         (path, probed)
     }
 

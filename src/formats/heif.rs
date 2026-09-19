@@ -43,7 +43,7 @@ use libheif_rs::{ColorSpace, HeifContext, LibHeif, Plane};
 use crate::{
     decoder::{DecodeTimings, DecodedImage, ImageInfo, Pixels, image_error},
     error::{ImgSeqError, Result},
-    pixel::PixelFormat,
+    pixel::{PixelFormat, Transform},
 };
 
 /// File extensions that hold a heif container.
@@ -120,8 +120,11 @@ pub fn image_info(path: &Path) -> Option<ImageInfo> {
         original_color_type: header.file_color_type().into(),
         has_icc_profile: header.has_icc_profile,
         // The avif decoder reports no orientation: it does not read the exif
-        // metadata the `image` trait would take one from.
+        // metadata the `image` trait would take one from. The box walk this
+        // probe is built on could read the `Exif` item the same way it reads
+        // `ispe` and `colr`, which is the left over plan 09 leaves open.
         orientation: Orientation::NoTransforms,
+        transform: Transform::IDENTITY,
         format: header.format()?,
     })
 }
@@ -496,6 +499,7 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
         width: info.width,
         height: info.height,
         format: info.format,
+        transform: info.transform,
         pixels: Pixels::Interleaved {
             color_type: info.color_type,
             buffer: pixels,
@@ -643,6 +647,7 @@ mod tests {
             original_color_type: ExtendedColorType::L8,
             has_icc_profile: false,
             orientation: Orientation::NoTransforms,
+            transform: Transform::IDENTITY,
             format: PixelFormat::from_color_type(color_type).expect("a supported color type"),
         }
     }
