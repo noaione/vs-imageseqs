@@ -25,9 +25,10 @@ writer a rotated page goes through, and it needs a fixture of its own:
 that same test on the planar path. Lossy compression cannot keep twelve
 different samples, so this picture is four quadrants of four grey levels, which
 survive an encode and still say which way the picture was turned. They are cut
-from ``orientation-split.webp``, whose bitstream has to be made once by hand:
+from ``orientation-split.webp``, whose bitstream has to be made once by hand
+from the repository root, with ``magick`` on ``PATH``:
 
-    magick orientation-split.png -quality 90 -define webp:method=4 orientation-split.webp
+    magick tests/fixtures/orientation-split.png -quality 90 -define webp:method=4 tests/fixtures/orientation-split.webp
 
 The script copies that bitstream and writes the exif chunk beside it, which is
 where a webp keeps its exif, together with the extended header that says the
@@ -37,7 +38,8 @@ file has one.
 orientation, and it is not written by this script because a jpeg xl cannot be
 assembled by hand the way the other two can: the code lives in the codestream
 header, and only an encoder will produce one. It is encoded once from the png
-above and committed, and has to be re-encoded by hand if the picture changes:
+above and committed, and has to be re-encoded by hand from the repository root,
+with ``cjxl`` on ``PATH``, if the picture changes:
 
     cjxl -d 0 tests/fixtures/orientation-6.png tests/fixtures/orientation-6.jxl
 
@@ -195,7 +197,10 @@ def main() -> None:
     base = os.path.join(FIXTURES, WEBP_SOURCE)
     if not os.path.exists(base):
         print(f"{base} is missing: encode it from orientation-split.png with")
-        print("  magick orientation-split.png -quality 90 -define webp:method=4 orientation-split.webp")
+        print(
+            "  magick tests/fixtures/orientation-split.png -quality 90"
+            " -define webp:method=4 tests/fixtures/orientation-split.webp"
+        )
         return
     with open(base, "rb") as handle:
         source = handle.read()

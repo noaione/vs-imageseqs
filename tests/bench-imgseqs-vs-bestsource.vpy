@@ -1,9 +1,10 @@
 """Compares imgseqs with bestsource reading the same image sequence.
 
-Usage from the repository root:
+Usage from the repository root, with the repository's virtual environment
+active:
 
-    .venv/Scripts/python.exe tests/bench-imgseqs-vs-bestsource.vpy
-    .venv/Scripts/python.exe tests/bench-imgseqs-vs-bestsource.vpy --frames 10 --extra
+    python tests/bench-imgseqs-vs-bestsource.vpy
+    python tests/bench-imgseqs-vs-bestsource.vpy --frames 10 --extra
 
 Every configuration reads the same ordered files once per repetition and every
 ``get_frame`` is timed on its own, so the table shows where the time goes per

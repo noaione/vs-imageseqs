@@ -12,7 +12,12 @@
 //! - `decode(info)` — decode it into the interleaved buffer the frame writer
 //!   expects, with the same timings and the same consistency checks as the
 //!   `image` path
+//!
+//! A module that only reads a container exposes neither, because the `image`
+//! path decodes those files: [`png`] answers what a png states about the colour
+//! of its samples and nothing else.
 
 pub mod heif;
 pub mod jxl;
+pub mod png;
 pub mod webp;

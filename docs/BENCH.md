@@ -369,6 +369,18 @@ half a millisecond of that — and the copy then converts the yuv it holds to th
 r,g,b the frame takes. jxl is the slowest of the five, and it is the format whose
 frames the lookahead helps most.
 
+the one cost that is not in this table is the colour read
+[08](improvements/08-color-metadata.md) added at clip creation, because it
+happens once per file rather than once per frame: 0.04 ms per png file for
+walking its chunks to the `cICP` chunk, and 0.15 ms per heic file for the second
+open the colour of its handle needs. clip creation over either 35 page set is
+1.8 ms → 3.2 ms for png and 4.7 ms → 10.1 ms for heic, which is 0.3% and 0.08% of
+the time those pages then take to decode, and it is why the heic `open` row above
+would read 0.010 s rather than 0.005 s. the per-frame stages do not move: the
+same eight page run, alternating the two builds inside one batch, measures 61.50
+against 61.88 ms/frame for png and 682.75 against 683.11 ms/frame for heic at
+each build's best, which is inside the spread of the same binary run twice.
+
 ## frame write path
 
 [02](improvements/02-frame-write-path.md) moved the frame build out of the

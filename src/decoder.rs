@@ -8,6 +8,7 @@ use image::metadata::Orientation;
 use image::{ColorType, ExtendedColorType, ImageDecoder, ImageReader};
 
 use crate::{
+    color::Cicp,
     error::{ImgSeqError, Result},
     formats,
     pixel::{PixelFormat, Transform},
@@ -52,6 +53,10 @@ pub struct ImageInfo {
     pub color_type: ColorType,
     pub original_color_type: ExtendedColorType,
     pub has_icc_profile: bool,
+    /// The colour description the container states about its own samples, which
+    /// is `None` for a file that states none and for one whose codes name no
+    /// property; see [`crate::color::Cicp`].
+    pub cicp: Option<Cicp>,
     /// The exif orientation the file states, which is reported as a property
     /// whatever the caller asked for.
     pub orientation: Orientation,
@@ -179,6 +184,12 @@ pub fn probe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
         .icc_profile()
         .map_err(|error| image_error("read metadata from", path, error))?
         .is_some();
+    // The containers that state a colour description do it somewhere the `image`
+    // decoder has no accessor for: a heif item property inside a `libheif`
+    // handle, or a chunk beside the data of a png. Both are read from the file
+    // rather than from the decoder, and both decline a file of another kind
+    // without opening it.
+    let cicp = formats::heif::cicp(path).or_else(|| formats::png::cicp(path));
     let orientation = decoder
         .orientation()
         .map_err(|error| image_error("read orientation from", path, error))?;
@@ -198,6 +209,7 @@ pub fn probe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
         color_type,
         original_color_type,
         has_icc_profile,
+        cicp,
         orientation,
         transform: if apply_rotation {
             Transform::from_orientation(orientation)

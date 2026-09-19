@@ -38,9 +38,13 @@
 use std::{fs::File, io::Read, path::Path, time::Instant};
 
 use image::{ColorType, metadata::Orientation};
-use libheif_rs::{ColorSpace, HeifContext, LibHeif, Plane};
+use libheif_rs::{
+    ColorPrimaries, ColorProfileNCLX, ColorSpace, HeifContext, LibHeif, MatrixCoefficients, Plane,
+    TransferCharacteristics,
+};
 
 use crate::{
+    color::{Cicp, UNSPECIFIED},
     decoder::{DecodeTimings, DecodedImage, ImageInfo, Pixels, image_error},
     error::{ImgSeqError, Result},
     pixel::{PixelFormat, Transform},
@@ -83,6 +87,120 @@ pub fn output_format(path: &Path, color_type: ColorType) -> Option<PixelFormat> 
     header.format()
 }
 
+/// The colour description a heif file states about its primary image, read
+/// through `libheif` itself.
+///
+/// The `nclx` profile of a heif item is an item property, so reading it means
+/// resolving which item is the primary one and which properties are associated
+/// with it. `libheif` does that for the containers it handles, and the box walk
+/// this module reads an avif with does not have to be taught `pitm` and `ipma`
+/// for the files another library already parses. The cost is opening the
+/// container and reading its metadata, which decodes nothing.
+///
+/// An avif is described by [`image_info`] instead, from the boxes it has already
+/// read; see the module documentation for why that is the cheap path.
+pub fn cicp(path: &Path) -> Option<Cicp> {
+    if !has_heif_extension(path) {
+        return None;
+    }
+    let profile = heif_profile(path)?;
+    Some(Cicp {
+        primaries: profile.color_primaries().code(),
+        transfer: profile.transfer_characteristics().code(),
+        matrix: profile.matrix_coefficients().code(),
+        full_range: profile.full_range_flag() != 0,
+    })
+}
+
+/// The `nclx` profile of the primary image of a heif file.
+fn heif_profile(path: &Path) -> Option<ColorProfileNCLX> {
+    let path = path.to_str()?;
+    let handle = HeifContext::read_from_file(path)
+        .ok()?
+        .primary_image_handle()
+        .ok()?;
+    handle.color_profile_nclx()
+}
+
+/// The h.273 code point a libheif colour enum names.
+///
+/// The enums hold the code points the container stores, so this is the table
+/// that turns what libheif reports back into what a file states. `Unspecified`
+/// and `Unknown` are both "this file says nothing this module can use": the
+/// first is the code point every container family has for it, and libheif
+/// answers the second for a value it does not know, which the file will have
+/// written for one of the codes VapourSynth has no property for.
+trait H273Code {
+    fn code(self) -> u8;
+}
+
+impl H273Code for ColorPrimaries {
+    fn code(self) -> u8 {
+        use ColorPrimaries as P;
+        match self {
+            P::ITU_R_BT_709_5 => 1,
+            P::Unspecified | P::Unknown => UNSPECIFIED,
+            P::ITU_R_BT_470_6_System_M => 4,
+            P::ITU_R_BT_470_6_System_B_G => 5,
+            P::ITU_R_BT_601_6 => 6,
+            P::SMPTE_240M => 7,
+            P::GenericFilm => 8,
+            P::ITU_R_BT_2020_2_and_2100_0 => 9,
+            P::SMPTE_ST_428_1 => 10,
+            P::SMPTE_RP_431_2 => 11,
+            P::SMPTE_EG_432_1 => 12,
+            P::EBU_Tech_3213_E => 22,
+        }
+    }
+}
+
+impl H273Code for TransferCharacteristics {
+    fn code(self) -> u8 {
+        use TransferCharacteristics as T;
+        match self {
+            T::ITU_R_BT_709_5 => 1,
+            T::Unspecified | T::Unknown => UNSPECIFIED,
+            T::ITU_R_BT_470_6_System_M => 4,
+            T::ITU_R_BT_470_6_System_B_G => 5,
+            T::ITU_R_BT_601_6 => 6,
+            T::SMPTE_240M => 7,
+            T::Linear => 8,
+            T::Logarithmic100 => 9,
+            T::Logarithmic100Sqrt10 => 10,
+            T::IEC_61966_2_4 => 11,
+            T::ITU_R_BT_1361 => 12,
+            T::IEC_61966_2_1 => 13,
+            T::ITU_R_BT_2020_2_10bit => 14,
+            T::ITU_R_BT_2020_2_12bit => 15,
+            T::ITU_R_BT_2100_0_PQ => 16,
+            T::SMPTE_ST_428_1 => 17,
+            T::ITU_R_BT_2100_0_HLG => 18,
+        }
+    }
+}
+
+impl H273Code for MatrixCoefficients {
+    fn code(self) -> u8 {
+        use MatrixCoefficients as M;
+        match self {
+            M::RGB_GBR => 0,
+            M::ITU_R_BT_709_5 => 1,
+            M::Unspecified | M::Unknown => UNSPECIFIED,
+            M::US_FCC_T47 => 4,
+            M::ITU_R_BT_470_6_System_B_G => 5,
+            M::ITU_R_BT_601_6 => 6,
+            M::SMPTE_240M => 7,
+            M::YCgCo => 8,
+            M::ITU_R_BT_2020_2_NonConstantLuminance => 9,
+            M::ITU_R_BT_2020_2_ConstantLuminance => 10,
+            M::SMPTE_ST_2085 => 11,
+            M::ChromaticityDerivedNonConstantLuminance => 12,
+            M::ChromaticityDerivedConstantLuminance => 13,
+            M::ICtCp => 14,
+        }
+    }
+}
+
 /// What the container of an avif states about its image, when [`image_info`] can
 /// describe the file from it.
 ///
@@ -91,8 +209,8 @@ pub fn output_format(path: &Path, color_type: ColorType) -> Option<PixelFormat> 
 /// (see the module documentation), and that decode is then repeated when a frame
 /// asks for the file. Everything the probe records is in the container instead:
 /// `ispe` holds the size of the image, `av1C` the bit depth and whether the
-/// samples are monochrome, `colr` whether an ICC profile is attached, and `auxC`
-/// whether an alpha item exists.
+/// samples are monochrome, `colr` whether an ICC profile is attached and what
+/// colour it states, and `auxC` whether an alpha item exists.
 ///
 /// `None` means "let the `image` decoder describe this file", which is what an
 /// unusual container gets: a second `ispe` that disagrees with the first, coded
@@ -119,6 +237,7 @@ pub fn image_info(path: &Path) -> Option<ImageInfo> {
         // containers report as the original one.
         original_color_type: header.file_color_type().into(),
         has_icc_profile: header.has_icc_profile,
+        cicp: header.cicp,
         // The avif decoder reports no orientation: it does not read the exif
         // metadata the `image` trait would take one from. The box walk this
         // probe is built on could read the `Exif` item the same way it reads
@@ -140,6 +259,8 @@ struct AvifHeader {
     /// Whether an auxiliary item holds alpha.
     alpha: bool,
     has_icc_profile: bool,
+    /// The colour description the `colr` box states, when it holds one.
+    cicp: Option<Cicp>,
 }
 
 impl AvifHeader {
@@ -224,6 +345,7 @@ fn avif_header(boxes: &[u8]) -> Option<AvifHeader> {
     let mut monochrome = true;
     let mut alpha = false;
     let mut has_icc_profile = false;
+    let mut cicp = None;
     for (kind, payload) in item_properties(boxes)? {
         match &kind {
             b"ispe" => {
@@ -246,7 +368,16 @@ fn avif_header(boxes: &[u8]) -> Option<AvifHeader> {
                 depth = Some(record);
                 monochrome &= flags & MONO_CHROME != 0;
             }
-            b"colr" => has_icc_profile |= matches!(payload.get(..4)?, b"prof" | b"rICC"),
+            b"colr" => {
+                let kind = payload.get(..4)?;
+                has_icc_profile |= matches!(kind, b"prof" | b"rICC");
+                // A file may hold both an opaque profile and the codes, and
+                // it is the codes the properties are written from; an ICC
+                // profile on its own is reported by `ImgSeqHasICC` alone.
+                if let Some(stated) = nclx_cicp(payload) {
+                    cicp = Some(stated);
+                }
+            }
             b"auxC" => {
                 alpha |= ALPHA_AUX_TYPES
                     .iter()
@@ -271,6 +402,33 @@ fn avif_header(boxes: &[u8]) -> Option<AvifHeader> {
         monochrome,
         alpha,
         has_icc_profile,
+        cicp,
+    })
+}
+
+/// The colour description an `nclx` `colr` payload states.
+///
+/// The payload is the four byte type name, then the primaries, transfer and
+/// matrix code points as big endian 16 bit numbers, then one flag byte whose top
+/// bit says whether the samples use the full range. The other kinds of `colr`
+/// payload hold an ICC profile, which states no codes at all.
+fn nclx_cicp(payload: &[u8]) -> Option<Cicp> {
+    const FULL_RANGE: u8 = 0x80;
+    if payload.get(..4)? != b"nclx" {
+        return None;
+    }
+    // The code points are stored as 16 bit numbers and every one of them fits
+    // in a byte, so a value that does not is a file this module reads the size
+    // and the depth of but states no colour for.
+    let code = |at: usize| -> Option<u8> {
+        let stored = u16::from_be_bytes(payload.get(at..at + 2)?.try_into().ok()?);
+        u8::try_from(stored).ok()
+    };
+    Some(Cicp {
+        primaries: code(4)?,
+        transfer: code(6)?,
+        matrix: code(8)?,
+        full_range: (payload.get(10)? & FULL_RANGE) != 0,
     })
 }
 
@@ -646,6 +804,7 @@ mod tests {
             color_type,
             original_color_type: ExtendedColorType::L8,
             has_icc_profile: false,
+            cicp: None,
             orientation: Orientation::NoTransforms,
             transform: Transform::IDENTITY,
             format: PixelFormat::from_color_type(color_type).expect("a supported color type"),
@@ -828,6 +987,92 @@ mod tests {
         // `nclx` names the colour primaries instead of holding a profile.
         let boxes = container(b"avif", &[ispe(3, 2), av1c(0x10), colr(b"nclx")]);
         assert!(!avif_header(&boxes).expect("no profile").has_icc_profile);
+    }
+
+    /// A `colr` box holding an `nclx` payload of the given code points.
+    fn colr_nclx(primaries: u16, transfer: u16, matrix: u16, full_range: bool) -> Vec<u8> {
+        let mut payload = b"nclx".to_vec();
+        payload.extend_from_slice(&primaries.to_be_bytes());
+        payload.extend_from_slice(&transfer.to_be_bytes());
+        payload.extend_from_slice(&matrix.to_be_bytes());
+        payload.push(if full_range { 0x80 } else { 0 });
+        box_with(b"colr", &payload)
+    }
+
+    #[test]
+    fn an_nclx_box_states_the_colour_of_the_file() {
+        let boxes = container(
+            b"avif",
+            &[ispe(3, 2), av1c(0x10), colr_nclx(1, 13, 6, true)],
+        );
+        let header = avif_header(&boxes).expect("a stated colour");
+        assert_eq!(
+            header.cicp,
+            Some(Cicp {
+                primaries: 1,
+                transfer: 13,
+                matrix: 6,
+                full_range: true
+            })
+        );
+        assert!(!header.has_icc_profile);
+
+        // The flag is a bit of the byte after the three code points, and a file
+        // that leaves it clear states the limited range.
+        let boxes = container(
+            b"avif",
+            &[ispe(3, 2), av1c(0x10), colr_nclx(9, 18, 9, false)],
+        );
+        assert_eq!(
+            avif_header(&boxes).expect("a stated colour").cicp,
+            Some(Cicp {
+                primaries: 9,
+                transfer: 18,
+                matrix: 9,
+                full_range: false
+            })
+        );
+    }
+
+    #[test]
+    fn a_colour_box_without_code_points_states_no_colour() {
+        // An `nclx` whose payload stops before its code points, and a profile,
+        // which states its colour in bytes this module does not read.
+        for properties in [
+            vec![ispe(3, 2), av1c(0x10), colr(b"nclx")],
+            vec![ispe(3, 2), av1c(0x10), colr(b"prof")],
+            vec![ispe(3, 2), av1c(0x10), colr_nclx(0xffff, 13, 6, true)],
+        ] {
+            let boxes = container(b"avif", &properties);
+            assert!(avif_header(&boxes).expect("a header").cicp.is_none());
+        }
+    }
+
+    #[test]
+    fn a_heif_file_states_the_colour_its_handle_carries() {
+        // The rgba fixture states primaries 1, transfer 13 and matrix 6 with the
+        // full range flag, which is the item property libheif resolves for the
+        // primary image. A colour box is an item property, so this is the one
+        // source of colour metadata that is not read out of the boxes here.
+        let stated = cicp(Path::new("tests/fixtures/alpha-rgba8.heic")).expect("a stated colour");
+        assert_eq!(
+            stated,
+            Cicp {
+                primaries: 1,
+                transfer: 13,
+                matrix: 6,
+                full_range: true
+            }
+        );
+    }
+
+    #[test]
+    fn only_heif_extensions_are_read_for_colour() {
+        // Nothing else is opened: an avif is described from its boxes by
+        // `image_info`, and no other container holds a heif colour box.
+        for path in ["a.avif", "b.png", "c.jxl", "d.jpg", "e"] {
+            assert!(cicp(Path::new(path)).is_none(), "{path}");
+        }
     }
 
     #[test]

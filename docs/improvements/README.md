@@ -11,16 +11,23 @@ plus `src/source.rs`, 02 in `src/clip.rs` with the generic pool in
 type in `src/decoder.rs`. [09](09-exif-orientation.md) is implemented too, in
 `src/pixel.rs` and `src/clip.rs` behind `apply_rotation`.
 
-[06](06-jpeg-2000-backend.md) to [10](10-nominal-bit-depth.md) are open. they
+[06](06-jpeg-2000-backend.md) to [10](10-nominal-bit-depth.md) are the rest of
+the list. they
 are the parts of [IMPLEMENTATION.md](../IMPLEMENTATION.md) that the build does
 not have: a jpeg 2000 backend the plan names and nothing compiles, the two
 `image` features the doc's own configuration block lists (`dds` and `ff`), the
-colour properties its `# Color Metadata` section asks for with no source to read
-them from, the exif orientation it probes and never applies, and the nominal
-10/12-bit depths its scope list defers. none of the five is a speed plan, so none
-of them carries a measurement: two are formats no sandbox set covers, two change
-what a frame holds or claims about itself, and one is a transform the file asks
-for and does not get.
+colour properties its `# Color Metadata` section asks for, the exif orientation
+it probes and never applies, and the nominal 10/12-bit depths its scope list
+defers. only the first four of those were open when the list was written.
+[08](08-color-metadata.md) is implemented in `src/color.rs` with a container
+read in `src/formats/heif.rs`, `src/formats/jxl.rs` and the new
+`src/formats/png.rs`, and it keeps its measurement because it is the one of the
+five whose probe cost can move: 0.15 ms per heic file and 0.04 ms per png file,
+measured against the sets it describes.
+
+nothing left in the list is a speed plan: two are formats no sandbox set covers,
+[10](10-nominal-bit-depth.md) changes what a frame holds, and 09 was a transform
+the file asked for and did not get.
 
 [11](11-jxl-direct.md) is the odd one out and came out of the last row of that
 list: reading the orientation for a jxl showed that the decoder the plugin wraps
@@ -29,8 +36,18 @@ rotated picture whatever `apply_rotation` says. dropping the `image` adapter for
 the `jxl` crate underneath it fixes that, and it is what lets
 [08](08-color-metadata.md) and [10](10-nominal-bit-depth.md) read a jxl's colour
 encoding and its bit depth. it is implemented in `src/formats/jxl.rs`, with no
-change to what a jxl decodes to: 35 pages, frame for frame identical. 06, 07, 08
-and 10 are the open ones.
+change to what a jxl decodes to: 35 pages, frame for frame identical. 06, 07 and
+10 are the open ones.
+
+[12](12-heif-avif-yuv-output.md) came out of the samples in
+`sandbox/hitokage-sample` and is the first plan here that is about what a frame
+*is* rather than what it says: heif, heic and avif are stored as yuv and handed
+out as rgb, so a 4:2:0 page costs 72 MB of frame where its planes are 36 MB, a
+ten bit page loses its depth into `RGB48`, and both libheif and `image` spend a
+conversion per frame that the graph may not even want. it hands out the planes
+the decoders have instead, which needs [08](08-color-metadata.md)'s matrix and
+range to label them honestly — and which changes the format of every colour heic
+and avif frame, the largest output change this plugin would ever have made.
 
 ## evidence in short
 
@@ -99,10 +116,11 @@ open plus frames to 4.99 s.
 | [05 monochrome heif](05-monochrome-heif.md) | `src/formats/heif.rs`, `src/pixel.rs` | the 31 monochrome heic files in `sandbox/heic` decode as `Gray8` instead of failing, and a monochrome avif is handed out as `Gray8` instead of `RGB24` | low, used to repair an always-failing path | implemented |
 | [06 jpeg 2000 backend](06-jpeg-2000-backend.md) | `Cargo.toml`, `vcpkg.json`, `build.rs`, README, notices, `LICENSES/`, `src/formats/jp2.rs` (new), `src/decoder.rs` | a `.jp2`/`.j2k` file reads as `Gray8`/`RGB24`/`Gray16`/`RGB48` instead of failing the probe, and the probe stays a header walk | medium, a fourth native dependency | proposed |
 | [07 dds and farbfeld](07-dds-and-farbfeld.md) | `Cargo.toml`, `README.md`, fixtures, `tests/readalpha.vpy` | `.dds` and `.ff` files stop failing the probe, for two feature flags and no native code | low | proposed |
-| [08 color metadata](08-color-metadata.md) | `src/decoder.rs`, `src/formats/heif.rs`, `src/formats/png.rs` (new), `src/color.rs` | `_Primaries`/`_Transfer` from the container's `nclx`/`cICP`, and `_Matrix`/`_Range` from the file for a yuv frame, while an icc-only file changes nothing | low to medium, a wrong claim is worse than none | proposed |
+| [08 color metadata](08-color-metadata.md) | `src/decoder.rs`, `src/formats/heif.rs`, `src/formats/jxl.rs`, `src/formats/png.rs` (new), `src/color.rs` | `_Primaries`/`_Transfer` from the container's `nclx`, `cICP` or jxl codestream header, and `_Matrix`/`_Range` from the file for a yuv frame, while an icc-only file changes nothing | low to medium, a wrong claim is worse than none | implemented |
 | [09 exif orientation](09-exif-orientation.md) | `src/decoder.rs`, `src/source.rs`, `src/clip.rs`, `src/pixel.rs`, fixtures, `tests/readalpha.vpy` | a file whose exif says 6 comes out the way its thumbnail looks, behind an `apply_rotation` argument that defaults on, and `ImgSeqOrientation` keeps saying what the file said | medium, it swaps width and height | implemented |
 | [10 nominal bit depth](10-nominal-bit-depth.md) | `src/pixel.rs`, `src/decoder.rs`, `src/formats/heif.rs`, `src/formats/jxl.rs`, `src/clip.rs`, `src/source.rs` | a 10-bit avif is `Gray10`/`RGB30` instead of `Gray16`/`RGB48`, with the samples shifted into the words a 10-bit frame holds, and the 16-bit files stay 16-bit | medium, every 9-to-15-bit file changes format | proposed |
 | [11 jxl without the image integration](11-jxl-direct.md) | `Cargo.toml`, `src/formats/jxl.rs` (new), `src/formats/mod.rs`, `src/decoder.rs`, `src/pixel.rs`, fixtures, `tests/readalpha.vpy` | a jxl that states an orientation reports it and `apply_rotation=False` gives the stored picture back, and the codestream's colour encoding and bit depth reach the probe | medium, the decode loop becomes ours | implemented |
+| [12 heif and avif planes](12-heif-avif-yuv-output.md) | `Cargo.toml`, `src/pixel.rs`, `src/decoder.rs`, `src/formats/heif.rs`, `src/formats/avif.rs` (new), `src/color.rs`, `src/clip.rs`, `src/source.rs`, fixtures, `tests/readalpha.vpy` | a colour heic or avif page is `YUV420P8`/`YUV444P10` instead of `RGB24`/`RGB48`, at half the bytes and with no conversion in the plugin, and a rotated heic reports its `irot`/`imir` code | high, it changes the format of every colour heic and avif frame | proposed |
 
 the dependencies were thin: 01 and 02 were independent of each other, 03 needed
 04, and 05 was independent of all of them and is the only one that fixes
@@ -120,6 +138,17 @@ with the adapter's own 367 lines replaced by the module that reads the header. i
 went first because 08's jxl row and 10's jxl row have no other source, and
 because it was the one item on this list that is a live defect rather than a
 missing feature.
+
+12 is the one that reorders the queue. its yuv hand-out needs the matrix and the
+range the file states, which is 08's read of the container, so 12 comes after 08
+and consumes `ImageInfo.cicp` instead of adding a second reader. it also takes
+most of 10's avif and heic rows with it: on the yuv path the depth is carried by
+the format, so there is nothing to shift and no `RGB30`-versus-`RGB48` choice to
+make, and 10 keeps the jxl rows, the rgb files that state 9 to 15 bits, and the
+monochrome ones. that makes the order 08, 12, 10 the cheapest one — but 12 is
+also the widest change on the list, so doing the small metadata win and the
+smaller depth work first is a defensible alternative, it just means writing the
+avif depth shift for the rgb path that 12 would then retire.
 
 order of value, as it turned out: 04 + 03 were the only route past bestsource on
 webp, 02 was worth 5% to 35% on the frames it was written for and took the manga

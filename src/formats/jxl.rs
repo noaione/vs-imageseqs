@@ -35,13 +35,15 @@ use std::{
 use image::{ColorType, metadata::Orientation};
 use jxl::{
     api::{
-        Endianness, JxlBitDepth, JxlColorType, JxlDataFormat, JxlDecoder, JxlDecoderOptions,
-        JxlOutputBuffer, JxlPixelFormat, ProcessingResult, states,
+        Endianness, JxlBitDepth, JxlColorEncoding, JxlColorProfile, JxlColorType, JxlDataFormat,
+        JxlDecoder, JxlDecoderOptions, JxlOutputBuffer, JxlPixelFormat, JxlPrimaries,
+        JxlTransferFunction, JxlWhitePoint, ProcessingResult, states,
     },
     headers::{Orientation as JxlOrientation, extra_channels::ExtraChannel},
 };
 
 use crate::{
+    color::{Cicp, UNSPECIFIED},
     decoder::{DecodeTimings, DecodedImage, ImageInfo, Pixels, image_error},
     error::{ImgSeqError, Result},
     pixel::{PixelFormat, Transform, inverse_orientation},
@@ -102,7 +104,15 @@ struct Header {
     extra_channels: usize,
     /// Whether the file's embedded color profile is an icc profile rather than a
     /// set of primaries and a transfer function.
+    ///
+    /// This is the variant the codestream states, not `try_as_icc`, which
+    /// answers for a file that states codes as well: the crate can generate a
+    /// profile from an encoding, and `ImgSeqHasICC` is about a profile the file
+    /// carries.
     has_icc_profile: bool,
+    /// The colour description the codestream states with its codes, which is
+    /// `None` for a file that carries an icc profile instead.
+    cicp: Option<Cicp>,
 }
 
 impl Header {
@@ -122,6 +132,7 @@ impl Header {
         let grayscale = decoder.current_pixel_format().color_type.is_grayscale();
         let (color_type, jxl_color_type, data_format) =
             output_format(&info.bit_depth, grayscale, has_alpha);
+        let profile = decoder.embedded_color_profile();
         Ok(Self {
             width,
             height,
@@ -130,7 +141,8 @@ impl Header {
             jxl_color_type,
             data_format,
             extra_channels,
-            has_icc_profile: decoder.embedded_color_profile().try_as_icc().is_some(),
+            has_icc_profile: matches!(profile, JxlColorProfile::Icc(_)),
+            cicp: cicp_of(profile),
         })
     }
 
@@ -216,6 +228,81 @@ const fn jxl_color_type(grayscale: bool, has_alpha: bool) -> JxlColorType {
     }
 }
 
+/// The colour description the codestream states, when it states it as codes.
+///
+/// A file whose embedded profile is an icc profile states no codes at all: its
+/// colour is opaque to this module and `ImgSeqHasICC` is the whole story, which
+/// is what `docs/improvements/08-color-metadata.md` decided. A file that states
+/// codes is handed out as r,g,b whatever those codes are, so the matrix is not
+/// one of them, and jpeg xl defines its samples as full range, so the flag is
+/// always set.
+fn cicp_of(profile: &JxlColorProfile) -> Option<Cicp> {
+    let JxlColorProfile::Simple(encoding) = profile else {
+        return None;
+    };
+    let (primaries, transfer) = match encoding {
+        JxlColorEncoding::RgbColorSpace {
+            white_point,
+            primaries,
+            transfer_function,
+            ..
+        } => (
+            primaries_of(primaries, white_point),
+            transfer_of(transfer_function),
+        ),
+        // A gray file states a transfer function and no primaries: the codes a
+        // grayscale colour space is made of are the transfer function alone.
+        JxlColorEncoding::GrayscaleColorSpace {
+            transfer_function, ..
+        } => (UNSPECIFIED, transfer_of(transfer_function)),
+        // The colour space the codestream is coded in rather than the one it
+        // describes; the file's own colour is in the profile this is read from,
+        // which is not x,y,b for such a file either.
+        JxlColorEncoding::XYB { .. } => (UNSPECIFIED, UNSPECIFIED),
+    };
+    Some(Cicp {
+        primaries,
+        transfer,
+        matrix: UNSPECIFIED,
+        full_range: true,
+    })
+}
+
+/// The h.273 primaries code the codestream's primaries and white point state.
+///
+/// Each code names a set of chromaticities *and* the white point they are
+/// defined against, so the two fields are read together: the sRGB primaries this
+/// format calls `SRGB` are the ones code 1 names, the bt.2100 ones are code 9,
+/// and the wide gamut `P3` primaries are code 11 with the dci white point and
+/// code 12 with d65. Chromaticities of the file's own, or a white point that
+/// disagrees with the code, state no code.
+fn primaries_of(primaries: &JxlPrimaries, white_point: &JxlWhitePoint) -> u8 {
+    let d65 = *white_point == JxlWhitePoint::D65;
+    let dci = *white_point == JxlWhitePoint::DCI;
+    match primaries {
+        JxlPrimaries::SRGB if d65 => 1,
+        JxlPrimaries::BT2100 if d65 => 9,
+        JxlPrimaries::P3 if dci => 11,
+        JxlPrimaries::P3 if d65 => 12,
+        _ => UNSPECIFIED,
+    }
+}
+
+/// The h.273 transfer code the codestream states.
+///
+/// The dci transfer function and a gamma of the file's own are the two the
+/// codes VapourSynth has no property for name, so they state nothing here.
+fn transfer_of(transfer: &JxlTransferFunction) -> u8 {
+    match transfer {
+        JxlTransferFunction::BT709 => 1,
+        JxlTransferFunction::Linear => 8,
+        JxlTransferFunction::SRGB => 13,
+        JxlTransferFunction::PQ => 16,
+        JxlTransferFunction::HLG => 18,
+        _ => UNSPECIFIED,
+    }
+}
+
 /// The orientation code of a jpeg xl file, as the `image` crate names the same
 /// eight transformations.
 ///
@@ -254,6 +341,7 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
         // extended one.
         original_color_type: header.color_type.into(),
         has_icc_profile: header.has_icc_profile,
+        cicp: header.cicp,
         orientation: header.orientation,
         // The decoder has already handed the picture out the way the file
         // describes it, so the identity is what the caller asked for when
@@ -765,5 +853,97 @@ mod tests {
             assert_eq!(bytes.len(), 24);
             assert_eq!(bytes.as_ptr() as usize % alignment, 0, "{alignment}");
         }
+    }
+
+    #[test]
+    fn the_primaries_code_pairs_a_white_point_with_its_chromaticities() {
+        use JxlPrimaries as P;
+        use JxlWhitePoint as W;
+        let own_chromaticities = P::Chromaticities {
+            rx: 0.64,
+            ry: 0.33,
+            gx: 0.3,
+            gy: 0.6,
+            bx: 0.15,
+            by: 0.06,
+        };
+        let cases = [
+            (P::SRGB, W::D65, 1),
+            (P::BT2100, W::D65, 9),
+            (P::P3, W::DCI, 11),
+            (P::P3, W::D65, 12),
+            // A white point the code does not name, and chromaticities the file
+            // states of its own, name no code.
+            (P::SRGB, W::DCI, UNSPECIFIED),
+            (P::SRGB, W::E, UNSPECIFIED),
+            (P::BT2100, W::E, UNSPECIFIED),
+            (P::P3, W::E, UNSPECIFIED),
+            (own_chromaticities, W::D65, UNSPECIFIED),
+        ];
+        for (primaries, white_point, expected) in cases {
+            assert_eq!(
+                primaries_of(&primaries, &white_point),
+                expected,
+                "{primaries:?} with {white_point:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_transfer_codes_are_the_ones_vapoursynth_has() {
+        use JxlTransferFunction as T;
+        let cases = [
+            (T::BT709, 1),
+            (T::Linear, 8),
+            (T::SRGB, 13),
+            (T::PQ, 16),
+            (T::HLG, 18),
+            // The dci transfer function is code point 17, which has no property,
+            // and a gamma of the file's own names no code point at all.
+            (T::DCI, UNSPECIFIED),
+            (T::Gamma(2.2), UNSPECIFIED),
+        ];
+        for (transfer, expected) in cases {
+            assert_eq!(transfer_of(&transfer), expected, "{transfer:?}");
+        }
+    }
+
+    #[test]
+    fn a_file_that_carries_an_icc_profile_states_no_codes() {
+        assert!(cicp_of(&JxlColorProfile::Icc(vec![0; 128])).is_none());
+    }
+
+    #[test]
+    fn a_codestream_that_states_codes_states_them() {
+        // Both jxl fixtures state the sRGB primaries with the sRGB transfer
+        // function, which is primaries 1 and transfer 13, and neither carries an
+        // icc profile: a codestream states one or the other, not both.
+        let color =
+            image_info(Path::new("tests/fixtures/alpha-rgba8.jxl"), true).expect("the fixture");
+        assert_eq!(
+            color.cicp,
+            Some(Cicp {
+                primaries: 1,
+                transfer: 13,
+                matrix: UNSPECIFIED,
+                full_range: true
+            })
+        );
+        assert!(!color.has_icc_profile);
+
+        // A gray colour space is a transfer function and a white point, so it
+        // has no primaries to state.
+        let gray =
+            image_info(Path::new("tests/fixtures/orientation-6.jxl"), true).expect("the fixture");
+        assert_eq!(
+            gray.cicp,
+            Some(Cicp {
+                primaries: UNSPECIFIED,
+                transfer: 13,
+                matrix: UNSPECIFIED,
+                full_range: true
+            })
+        );
+        assert!(!gray.has_icc_profile);
     }
 }

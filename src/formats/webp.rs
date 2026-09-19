@@ -477,6 +477,7 @@ mod tests {
             color_type,
             original_color_type: ExtendedColorType::Rgb8,
             has_icc_profile: false,
+            cicp: None,
             orientation: image::metadata::Orientation::NoTransforms,
             transform: crate::pixel::Transform::IDENTITY,
             format: crate::pixel::PixelFormat::from_color_type(color_type)

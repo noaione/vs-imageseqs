@@ -28,6 +28,13 @@ half the logical cores (capped at four) and `0` disables lookahead decoding.
 192 MiB and one frame of the largest image per worker, and `0` is rejected
 because `prefetch=0` is how lookahead is disabled.
 
+frames are tagged with the colour their container states: `_Primaries` and
+`_Transfer` for every family, `_Matrix` and `_Range` for a yuv frame, from an
+`nclx` box, a `cICP` chunk or a jxl codestream header. a code VapourSynth has no
+name for, code 2 (`unspecified`), and a file that states nothing all leave those
+properties unset, and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the
+file says.
+
 ## repository rules
 
 - use `pyproject.toml` and hatchling. do not add `setup.py`.
@@ -53,10 +60,12 @@ because `prefetch=0` is how lookahead is disabled.
   for monochrome heif/heic, for the monochrome avif format and for the avif
   probe, which answers `decoder::probe` from the container boxes so that probing
   an avif does not decode it, `jxl.rs` for every jpeg xl, which the `jxl` crate
-  decodes directly because `image` has no jxl format of its own, and `webp.rs`
-  for the libwebp decode and the lossy yuv format).
+  decodes directly because `image` has no jxl format of its own, `png.rs` for
+  the `cICP` chunk, which `image` has no accessor for, and `webp.rs` for the
+  libwebp decode and the lossy yuv format).
 - `src/pixel.rs`: supported pixel formats and planar frame writes.
-- `src/color.rs`: frame properties and color metadata.
+- `src/color.rs`: frame properties, and the container's color metadata mapped
+  onto them as `_Primaries`, `_Transfer`, `_Matrix` and `_Range`.
 - `src/error.rs`: errors returned through the VapourSynth boundary.
 - `hatch_build.py`: Cargo build, plugin staging, wheel tagging, and legal-file
   inclusion.
@@ -70,7 +79,11 @@ because `prefetch=0` is how lookahead is disabled.
   script documents and `cjxl` makes, and its yuv orientation section reads the
   `orientation-{2,6,8}.webp` files that script cuts out of
   `orientation-split.webp`, whose bitstream is likewise made once by hand
-  (`magick … -quality 90 -define webp:method=4`).
+  (`magick … -quality 90 -define webp:method=4`). its colour section reads the
+  `cicp-rgb8.png` written by `tests/make-cicp-fixtures.py` and the
+  `cicp-rgb8.avif` encoded from it with `avifenc --lossless --cicp 9/18/0 -r
+  full`, which that script documents, beside the `alpha-rgb8.png` that holds the
+  same picture and states nothing.
 - `docs/IMPLEMENTATION.md`: design notes and deferred ideas.
 
 ## local build

@@ -176,6 +176,22 @@ a decoded frame already drops the last chroma row and column of an odd sized
 page, because a `4:2:0` plane in a VapourSynth frame is `floor(size / 2)`.
 [BENCH.md](docs/BENCH.md) has the measurements.
 
+### colour metadata comes from the container
+
+a file that states its own colour is tagged with it. `_Primaries` and
+`_Transfer` are written for every family, and `_Matrix` and `_Range` for a yuv
+frame — where the file's own values now replace the `470bg`/`limited` pair the
+line above assumes, so read them instead of assuming them. the code points are
+the H.273 numbers VapourSynth already uses, read from an `nclx` colour box in
+avif and heif/heic, a `cICP` chunk in png, and the codestream header in jxl.
+
+a code VapourSynth has no name for, and code 2 (`unspecified`), leave the
+property unset rather than guessed at, which is also what a file with no colour
+statement at all does: an untagged png is handed out exactly as it always was. an
+rgb frame keeps `_Matrix=0` and `_Range=1` whatever the file says, because what
+the file describes is the yuv it codes, and an ICC profile on its own is still
+only `ImgSeqHasICC`.
+
 ### frame properties
 
 - `ImgSeqPath` - the original file path

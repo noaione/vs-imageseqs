@@ -596,6 +596,7 @@ mod tests {
             color_type,
             original_color_type: ExtendedColorType::from(color_type),
             has_icc_profile: false,
+            cicp: None,
             orientation: Orientation::NoTransforms,
             transform: crate::pixel::Transform::IDENTITY,
             format: PixelFormat::from_color_type(color_type).expect("a supported color type"),

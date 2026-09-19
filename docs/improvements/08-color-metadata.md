@@ -1,12 +1,24 @@
 # 08 — color metadata
 
-- status: proposed
+- status: implemented
 - touches: `src/decoder.rs`, `src/formats/heif.rs`, `src/formats/png.rs` (new),
-  `src/formats/mod.rs`, `src/color.rs`, fixtures, `tests/readalpha.vpy`
+  `src/formats/mod.rs`, `src/formats/jxl.rs`, `src/color.rs`, fixtures,
+  `tests/make-cicp-fixtures.py` (new), `tests/readalpha.vpy`
 - expected: `_Primaries` and `_Transfer` are written for a file whose container
   states them, `_Matrix`/`_Range` follow the file for a yuv frame instead of
   the family default, and a file that carries only an icc profile still changes
   nothing
+- result: 9 of the 33 files in `tests/fixtures`, all 35 heic pages, 1 of the 35
+  avif pages, all 35 jxl pages and 12 of the 35 mixed pages gained
+  `_Primaries`/`_Transfer`; the 35 jxl pages also lost the `ImgSeqHasICC`
+  [11](11-jxl-direct.md) was claiming for them. No file anywhere moved a pixel,
+  a format, a size, a `_Matrix` or a `_Range`: the only properties that changed
+  are the two this plan writes and that stale `ImgSeqHasICC`. The probe pays
+  0.15 ms per
+  heic file and 0.04 ms per png file for it — 5.1 ms and 1.4 ms on a 35 page
+  set against the 7.0 s and 0.5 s those pages take to decode — and the two fresh
+  fixtures state 9/18 through a `cICP` chunk and through an `nclx` box with
+  `ffprobe` reading both the same way
 - risk: low to medium — a wrong colour claim is worse than an absent one, so
   every rule below ends in "unset"
 
@@ -39,7 +51,7 @@ it is the one that cannot make a frame wrong.
 
 | container | what states them | how to read it |
 | --- | --- | --- |
-| avif | a `colr` box of type `nclx` among the item properties | the box walk in `formats::heif::avif_header`, already there for `prof`/`rICC`, extended to parse the payload |
+| avif | a `colr` box of type `nclx` among the item properties | the box walk in `formats::heif::avif_header`, already there for `prof`/`rICC`, extended to parse the payload. **34 of the 35 files in `sandbox/avif` have no `colr` box at all** — `av1C`'s copy of the sequence header carries the depth but not the CICP — so the useful value for that set lives in the AV1 sequence header's `color_config` at the head of `mdat`: `avifdec --info` reports primaries 1, transfer 13, matrix 6, full range for those pages. Reading it is a bit read of one OBU, or it comes free from [12](12-heif-avif-yuv-output.md)'s `dav1d` path, which is too late for a probe-time property |
 | heif/heic | the same box, inside libheif | `libheif_rs`'s `ColorProfile` from a handle — `Nclx{..}` or `Icc(..)`; the module already opens handles for the monochrome path |
 | png | a `cICP` chunk: four bytes, the H.273 codes for primaries, transfer, matrix and the full range flag | a new `src/formats/png.rs` chunk walk; `image` has no accessor for the chunk |
 | jpeg | nothing — an APP14 marker and an `ICCP` chunk at most | — |
@@ -59,16 +71,20 @@ the frame.
 the identity where it is defined:
 
 ```text
-_Primaries   ffi::VSColorPrimaries            1, 2, 4..=12, 22
-_Transfer    ffi::VSTransferCharacteristics   1, 2, 4..=11, 13..=16, 18
-_Matrix      ffi::VSMatrixCoefficients        0, 1, 2, 4..=10, 12..=14
+_Primaries   ffi::VSColorPrimaries            1, 4..=12, 22
+_Transfer    ffi::VSTransferCharacteristics   1, 4..=11, 13..=16, 18
+_Matrix      ffi::VSMatrixCoefficients        0, 1, 4..=10, 12..=14
 _Range       ffi::VSRange                     from the full range flag
 ```
 
 and where it is not, the property stays unset: VapourSynth defines no primaries
 3 or 18 and above, no transfer 3, 12 or 17, and no matrix 3, 11 or 15 and above.
 A file that states one of those is described the way an untagged file is, which
-is honest and cheap to keep honest.
+is honest and cheap to keep honest. Code 2 is missing from all three rows for
+the reason rule 1 gives: VapourSynth names it, but it says "unspecified" rather
+than describing anything, so it leaves the property unset like a file with no
+box at all. A unit test walks 0..=255 against each of these rows, which is what
+keeps them true as the enums change.
 
 **the rules.**
 
@@ -89,32 +105,94 @@ is honest and cheap to keep honest.
    png that states sRGB primaries is describing the rgb it hands out, and that
    is what a graph converting from it needs.
 
-## validation
+## result
 
-- **first print what the current sets state.** The avif fixtures were encoded
-  with `avifenc` and no `--cicp`, so they most likely say 2/2/2 — in which case
-  every existing set stays exactly as it is, and that is the control this change
-  has to pass: no sandbox set and no `tests/readalpha.vpy` clip gains a property
-  it did not have. The heic set and the png set are the same check.
-- **two fixtures that do state one**, encoded for the purpose:
-  `avifenc --cicp 9/18/9 --range full` (bt.2020 primaries, hlg transfer, bt.2020
-  non-constant matrix) from an existing png, and a png with a hand-written
-  `cICP` chunk — four bytes, then the chunk crc, about fifteen lines of python
-  beside the fixture script. Then one frame's property map has to read
-  `_Primaries=9`, `_Transfer=18`, `_Matrix=9`, `_Range=1`, and the untagged file
-  beside it has to read none of them.
-- **the same two files through `ffprobe`.** Its png decoder reads `cICP` and its
-  avif decoder reads `nclx`, and it prints the four fields under the names
-  `color_primaries`, `transfer_characteristics`, `matrix_coefficients` and
-  `color_range`. The numbers must agree with the frame properties; where they
-  disagree, one of the two readers is wrong about the box, which is the bug this
-  plan exists to find.
-- **a unit test for the mapping**, walking 0..=255 and asserting that the codes
-  VapourSynth defines map to their own value and every other code maps to
-  `None`. That is what keeps rule 1 true as the enum list changes.
-- `cargo test --locked`, `cargo fmt`, `cargo clippy --workspace --all-targets
-  --locked -- -D warnings`, and one `Read` over each sandbox set to confirm the
-  property dumps moved only where a file states something.
+**what the sets state.** The prediction above that the existing files would most
+likely say 2/2/2 was wrong for two formats out of five and right for the rest:
+
+| set | files that gained a property | what they state |
+| --- | --- | --- |
+| `tests/fixtures` | 9 of 33 | the avif, heic and jxl fixtures state bt.709/sRGB, the two `cicp-rgb8` ones bt.2020/hlg |
+| `sandbox/png` | 0 of 35 | no `cICP` chunk anywhere in the set |
+| `sandbox/heic` | 35 of 35 | every page states bt.709 primaries with the sRGB transfer |
+| `sandbox/avif` | 1 of 35 | `snek - p003.avif` carries a `colr` box, and the other 34 state nothing, so the av1 sequence header stays the only place a colour sits for them |
+| `sandbox/jxl` | 35 of 35 | the sRGB transfer on every page, sRGB primaries on 4 of them |
+| `sandbox/webp`, `sandbox/jpeg` | 0 of 35 | vp8 and jpeg state no code, so the family default stands |
+| `sandbox/mixed` | 12 of 35 | its heic and jxl pages, and nothing else |
+
+so the control the plan asked for held for png, webp and jpeg, and the files that
+did gain a property are the ones a real encoder wrote a colour for. Nothing else
+moved with them: the property diff over all seven sets and the fixtures shows
+`_Primaries`, `_Transfer` and the `ImgSeqHasICC` correction [11](11-jxl-direct.md)
+left behind as the only changes, and a per-frame hash of every plane of every set
+(`frame-parity.py`) is identical between the two builds line for line — same
+formats, same sizes, same samples, `_Matrix` and `_Range` included.
+
+**the two fixtures.** `tests/make-cicp-fixtures.py` writes `cicp-rgb8.png` with a
+hand-built `cICP` chunk, and `avifenc --lossless --cicp 9/18/0 -r full` encodes
+`cicp-rgb8.avif` from it. Both hold the same picture as `alpha-rgb8.png` sample
+for sample, and `ffprobe` reads them as:
+
+| file | ffprobe | frame |
+| --- | --- | --- |
+| `cicp-rgb8.png` | bt2020 / arib-std-b67 / gbr / pc | `_Primaries=9 _Transfer=18 _Matrix=0 _Range=1` |
+| `alpha-rgb8.png` | unknown / unknown / gbr / pc | no `_Primaries`, no `_Transfer`, `_Matrix=0 _Range=1` |
+| `cicp-rgb8.avif` | bt2020 / arib-std-b67 / bt2020nc / pc | `_Primaries=9 _Transfer=18 _Matrix=0 _Range=1` |
+| `alpha-rgba8.heic` | bt709 / iec61966-2-1 / smpte170m / pc | `_Primaries=1 _Transfer=13 _Matrix=0 _Range=1` |
+
+the two readers agree on primaries, transfer and range everywhere and differ on
+the matrix in the two files whose container describes the yuv it codes: `ffprobe`
+reports the file's `nclx` matrix — 9 for the avif, 6 for the heic — where the
+frame reports 0, because rule 4 hands those files out as rgb and an rgb frame's
+matrix is the identity. The `_Matrix=9` the plan expected for the avif frame was
+written before rule 4 was applied to that case; what a file's own matrix and
+range describe is what [12](12-heif-avif-yuv-output.md) will write when it hands
+those pages out as the yuv they are. `ffprobe` also names its four fields
+`color_primaries`, `color_transfer`, `color_space` and `color_range` rather than
+the ffmpeg argument names, and it reports the unchanged fixtures the same way
+this build does.
+
+**the png chunk.** The payload is four one-byte fields — primaries, transfer,
+matrix, then the video full range flag — and two details of it decide what a
+reader does with the rest. The matrix "shall be" 0, because rgb is the only
+colour model a png has: the first fixture written with a matrix of 9 was refused
+outright by the `png` crate inside `image` and never decoded at all. The flag is
+a whole byte that conforming files write as 0 or 1 — `09 12 00 01` is the
+specification's own example — and not the top bit of a bit field the way an
+`nclx` box stores it, so `src/formats/png.rs` reads a nonzero byte as the full
+range and a unit test pins both the 0/1 pair and the `0x80` a writer carrying the
+other convention over would set. Neither detail can be seen in a frame
+property — a png always hands out rgb, whose range is full whatever the flag says
+— which is why the unit test is the only thing holding them.
+
+**the rest.** `cargo test --locked` (96 tests), `cargo fmt`, `cargo clippy
+--workspace --all-targets --locked -- -D warnings` and `tests/readalpha.vpy` all
+pass, and the validator's colour section asserts the codes above plus the three
+cases the rules are about: an rgb frame keeping matrix 0 and full range beside a
+heic that states smpte 170m, a jxl that states the transfer function but not the
+primaries writing one property and not the other, and a lossy webp keeping
+bt470bg and the limited range.
+
+**the cost.** Both new reads happen once per file at probe time, so the probe is
+the only thing that can pay for them. `target/bench/probe-cost-08.py` times clip
+creation over 35 pages per format, five rounds each, the baseline and this build
+alternating inside one batch:
+
+| set | probe, before | probe, after | decode of the same 35 pages |
+| --- | --- | --- | --- |
+| `sandbox/png` | 1.8 ms | 3.2 ms | 506 ms |
+| `sandbox/heic` | 4.7 ms | 10.1 ms | 7017 ms |
+| `sandbox/jxl` | 2.1 ms | 1.8 ms | 5749 ms |
+
+which is 0.04 ms per png file for the chunk walk, 0.15 ms per heic file for the
+second handle open, and nothing measurable for jxl, whose codes come out of the
+header [11](11-jxl-direct.md) already reads. As a share of reading the same pages
+it is 0.3% and 0.08%. The per-frame stages are the control (`stage-split.py`,
+eight pages each way, four rounds, `prefetch=0`): png 61.50 → 61.88 ms/frame and
+heic 682.75 → 683.11 ms/frame at each build's best, both inside the spread of the
+same binary run twice, and the `open` stage of the heic run measured *lower* with
+this build, which is the page cache the probe warmed rather than anything the
+decode path does. Nothing here is a trade a frame-rate plan would recognise.
 
 ## left over
 

@@ -4,6 +4,10 @@
 - touches: `src/pixel.rs`, `src/decoder.rs` (the probe), `src/formats/heif.rs`,
   `src/formats/jxl.rs`, `src/clip.rs`, `src/source.rs`, fixtures,
   `tests/readalpha.vpy`, `README.md`
+- depends on: [12](12-heif-avif-yuv-output.md) if 12 lands first, which takes the
+  avif and heic rows of this plan with it (a yuv page's depth is the format) and
+  leaves jxl, the rgb files that state 9 to 15 bits, and the monochrome cases
+  here
 - expected: a 10-bit avif is handed out as `Gray10`/`RGB30` instead of
   `Gray16`/`RGB48`, with its samples in the words a 10-bit frame holds, and a
   12-bit file as `Gray12`/`RGB36`
@@ -77,6 +81,13 @@ without 08.
   source sample four times over, and right aligned in ten bits that is what a
   `Gray10` frame holds. Its row in the monochrome table changes those two
   numbers, and nothing else in `tests/readalpha.vpy` is allowed to move.
+- **`sandbox/hitokage-sample` is the set for this**: one 6000x4000 picture
+  through `avif` at 8, 10 and 12 bits (4:2:0, 4:2:2 and 4:4:4), `jxl` and `png`
+  at 16 bits, `tiff` at 8 and 16, and an `exr`. The samples agree with each
+  other, so they are also the cross-format check. Today the plugin answers
+  `RGB24` for the three 8-bit avif files, `RGB48` with `max=65472` for the ten bit
+  one and `max=65520` for the twelve bit one, and `RGB48` with `max=65535` for
+  `jxl`, `png` and `tiff` — the last three are full scale and must not move.
 - **a 10-bit jxl fixture**, so the shift is proven to be `16 - bits` and not a
   hard-coded 6, and so the jxl row of this plan has a file that states its own
   depth. It does not need `cjxl --override_bitdepth`, which also exists and also
@@ -108,8 +119,9 @@ without 08.
 - **`YUV420P10` is not produced by anything.** The only yuv the plugin hands out
   is libwebp's 8-bit, and a 10-bit avif is still converted to rgb by the `image`
   hook before the plugin sees it. Format variant, no source; it stays unbuilt
-  until [08](08-color-metadata.md) or a new decoder makes a 10-bit yuv clip
-  possible.
+  until [12](12-heif-avif-yuv-output.md) hands out a heif's or an avif's own
+  planes, at which point the ten bit yuv formats come from that plan and this one
+  keeps the rgb and gray rows.
 - **a 16-bit file whose decoder does not fill the range** is a different
   problem: the format claims the full 16 bits and the decoder hands what the
   file holds. Every other reader makes the same claim, so this plan does not

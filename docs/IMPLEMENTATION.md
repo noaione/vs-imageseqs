@@ -795,14 +795,16 @@ orientation
 CICP/color information where available
 ```
 
-Of that list, the size, both colour types, the presence of an icc profile and
-the orientation are read today, and the orientation is applied to the picture by
-default — [09](improvements/09-exif-orientation.md) is implemented, and
-`apply_rotation=0` is what asks for the stored picture. CICP is not read, which
-is [08](improvements/08-color-metadata.md).
-The other field this section leaves out is the nominal bit depth: a 10-bit file
-is probed as `Gray16`/`RGB48` today, and [10](improvements/10-nominal-bit-depth.md)
-is what would stop that.
+Of that list, every field is read today. The size, both colour types and the
+presence of an icc profile come from the decoder, the orientation from the exif
+block and the picture is turned to it by default — [09](improvements/09-exif-orientation.md)
+is implemented, and `apply_rotation=0` is what asks for the stored picture — and
+the colour information comes from the container, which is
+[08](improvements/08-color-metadata.md): an `nclx` box, a `cICP` chunk or a jxl
+codestream header, read once per file and kept in `ImageInfo` as the h.273 code
+points the file states. The one field this section leaves out is the nominal bit
+depth: a 10-bit file is probed as `Gray16`/`RGB48` today, and
+[10](improvements/10-nominal-bit-depth.md) is what would stop that.
 
 Conceptually:
 
@@ -1100,7 +1102,7 @@ _ChromaLocation
 _FieldBased
 ```
 
-What is written today is three of those six. Every frame gets `_FieldBased=0`
+What is written today is five of those six. Every frame gets `_FieldBased=0`
 and `_Range`; `_Matrix` is written for the RGB and YUV families only, because a
 gray frame has no matrix to name:
 
@@ -1114,15 +1116,28 @@ is what [03](improvements/03-webp-yuv-output.md) established for the one yuv
 format the plugin hands out: vp8 defines those coefficients and ffmpeg reports
 the same two values for the same bitstreams.
 
-`_Primaries`, `_Transfer` and `_ChromaLocation` are not written, because nothing
-reads a source for them yet. The containers that state them (an `nclx` colour box
-in avif and heif, a `cICP` chunk in png, the codestream header in jxl), the
-mapping onto VapourSynth's enums, and the rule that a value is written only when
-the file states it, are [08](improvements/08-color-metadata.md). The rule this
-doc already had stands and is already implemented: a file that supplies only an
-icc profile is never turned into sRGB or BT.709 metadata, and the profile's bytes
-are read and dropped — `ImgSeqHasICC` says it is there, and full icc conversion
-stays in the defer list below.
+Those two are the values a yuv frame falls back to. [08](improvements/08-color-metadata.md)
+is implemented, so a file that states its own matrix and range is handed out with
+what it states, while an rgb frame keeps the identity and the full range whatever
+the file says, because the file is describing the yuv it codes and not the r,g,b
+this plugin hands out. `_Primaries` and `_Transfer` come from the same read and
+are written for every family, since they describe a picture and not a plane
+layout: a png that states sRGB primaries is describing the rgb it holds. The
+containers read are an `nclx` colour box in avif and heif, a `cICP` chunk in png
+and the codestream header in jxl, and the code points are the h.273 numbers the
+VapourSynth enums already use, so the mapping is the identity where VapourSynth
+names the code and the property stays unset where it does not. Code 2
+(`unspecified`) is a statement rather than a description and leaves the property
+unset, which is also what happens to a file with no box at all.
+
+`_ChromaLocation` is the one of the six that stays unwritten: among these
+containers only av1's sequence header states it, files that store 4:2:0 usually
+leave it `unknown`, and a guess there is exactly the mistake the next paragraph
+forbids. A graph that needs it passes the location into its own resize. The rule
+this doc already had stands and is implemented: a file that supplies only an icc
+profile is never turned into sRGB or BT.709 metadata, and the profile's bytes are
+read and dropped — `ImgSeqHasICC` says it is there, and full icc conversion stays
+in the defer list below.
 
 An exif orientation is metadata of the same kind, and [09](improvements/09-exif-orientation.md)
 is implemented: the code reaches every frame as `ImgSeqOrientation` either way,
@@ -1342,6 +1357,7 @@ pixel.rs
 color.rs
     ICC detection and the frame properties
     the matrix/range tags of the yuv and rgb families
+    the h.273 code points the container states, mapped onto those properties
 
 error.rs
     plugin errors
@@ -1435,6 +1451,8 @@ Sequence (shared by every clip of one call)
              ├── heif.rs        monochrome heif/heic and monochrome avif, and
              │                  the avif probe that answers before a decode
              ├── jxl.rs         every jpeg xl, which `image` has no format for
+             ├── png.rs         the `cICP` chunk of every png, which `image`
+             │                  has no accessor for
              └── webp.rs        every webp's pixels, planar yuv for a lossy one
          │
          ▼

@@ -1,8 +1,9 @@
 """Validates ``ReadAlpha`` against the fixtures made by ``make-alpha-fixtures.py``.
 
-Run from the repository root after ``cargo build --release``:
+Run from the repository root after ``cargo build --release``, with the
+repository's virtual environment active:
 
-    .venv\\Scripts\\python.exe tests\\readalpha.vpy
+    python tests/readalpha.vpy
 """
 
 from __future__ import annotations
@@ -617,6 +618,119 @@ def test_orientation_jxl() -> None:
     )
 
 
+def test_color_metadata() -> None:
+    """The colour a file states reaches the frame, and only where it states one.
+
+    ``cicp-rgb8.png`` and ``cicp-rgb8.avif`` hold the same picture as
+    ``alpha-rgb8.png`` and one statement more: the png carries a ``cICP`` chunk
+    and the avif an ``nclx`` box, both of them stating bt.2020 primaries with the
+    hlg transfer function, so both frames have to report those two codes while
+    the plain png reports neither. The widths are different -- four one-byte
+    fields against four sixteen-bit ones -- and the containers are read by
+    different code, which is what the pair is for; ``make-cicp-fixtures.py``
+    documents the chunk and the encode.
+
+    The files a real encoder wrote are read beside them: a heic, an avif and a
+    jxl all state bt.709 primaries with the sRGB transfer function, and the
+    monochrome pair states them for a gray frame, which carries no matrix. A
+    jpeg xl that states only some of the codes writes only those properties, and
+    the matrix a heic states for its coded yuv is not adopted by the rgb frame
+    it is handed out as. The code points are the ones ``docs/IMPLEMENTATION.md``
+    and ``docs/improvements/08-color-metadata.md`` name, which are the h.273
+    codes vapoursynth itself uses.
+    """
+    plain, stated, boxed = (
+        fixture("alpha-rgb8.png"),
+        fixture("cicp-rgb8.png"),
+        fixture("cicp-rgb8.avif"),
+    )
+    clip = core.imgseqs.Read(files=[plain, stated, boxed])
+    check(len(clip) == 3, "colour: one frame per file")
+    frames = [clip.get_frame(index) for index in range(3)]
+    check(
+        all(samples(frame) == samples(frames[0]) for frame in frames[1:]),
+        "colour: the three files hand out the same picture",
+    )
+    check(
+        "_Primaries" not in frames[0].props and "_Transfer" not in frames[0].props,
+        "colour: a file that states no colour gains no property",
+    )
+    for index, label in ((1, "png cICP chunk"), (2, "avif nclx box")):
+        props = frames[index].props
+        check(
+            props.get("_Primaries") == 9,
+            f"colour {label}: bt.2020 primaries (got {props.get('_Primaries')})",
+        )
+        check(
+            props.get("_Transfer") == 18,
+            f"colour {label}: the hlg transfer function (got {props.get('_Transfer')})",
+        )
+
+    # What encoders wrote, one file at a time so each frame's properties come
+    # from its own file.
+    stated_srgb = (
+        "alpha-rgba8.avif",
+        "alpha-rgba8.heic",
+        "alpha-rgba8.jxl",
+        "mono-alpha.heic",
+        "mono-alpha.avif",
+        "mono-alpha-10.avif",
+    )
+    for name in stated_srgb:
+        frame = core.imgseqs.Read(files=[fixture(name)]).get_frame(0)
+        props = frame.props
+        check(
+            props.get("_Primaries") == 1,
+            f"colour {name}: bt.709 primaries (got {props.get('_Primaries')})",
+        )
+        check(
+            props.get("_Transfer") == 13,
+            f"colour {name}: the sRGB transfer function (got {props.get('_Transfer')})",
+        )
+        check(
+            props.get("ImgSeqHasICC", 0) == 0,
+            f"colour {name}: a file with no icc profile reports none "
+            f"(got {props.get('ImgSeqHasICC')})",
+        )
+
+    # The heic states a smpte 170m matrix beside those primaries, for the yuv it
+    # codes, and the frame is handed out as rgb, whose matrix is the identity
+    # whatever the coded yuv used.
+    heic = core.imgseqs.Read(files=[fixture("alpha-rgba8.heic")]).get_frame(0)
+    check(
+        heic.props.get("_Matrix") == 0,
+        f"colour heic: an rgb frame keeps its own matrix (got {heic.props.get('_Matrix')})",
+    )
+    check(
+        heic.props.get("_Range") == 1,
+        f"colour heic: and its own range (got {heic.props.get('_Range')})",
+    )
+
+    # A jxl that states the transfer function but not the primaries writes one
+    # property and not the other, rather than guessing the other one.
+    jxl = core.imgseqs.Read(files=[fixture("orientation-6.jxl")]).get_frame(0)
+    check(
+        jxl.props.get("_Transfer") == 13 and "_Primaries" not in jxl.props,
+        "colour jxl: a code the file does not state writes no property "
+        f"(got {jxl.props.get('_Primaries')} and {jxl.props.get('_Transfer')})",
+    )
+
+    # A format that states its colour some other way keeps what it had: a lossy
+    # webp holds bt.601 yuv, and neither code is one the plugin reads out of a
+    # file, so its frame stays the bt.470 background matrix in the limited range
+    # the plugin assumed before it read any colour out of a container.
+    webp = core.imgseqs.Read(files=[fixture("lossy.webp")]).get_frame(0)
+    check(
+        webp.props.get("_Matrix") == 5 and webp.props.get("_Range") == 0,
+        f"colour webp: the assumed matrix and range "
+        f"(got {webp.props.get('_Matrix')} and {webp.props.get('_Range')})",
+    )
+    check(
+        "_Primaries" not in webp.props and "_Transfer" not in webp.props,
+        "colour webp: no primaries or transfer is written",
+    )
+
+
 def main() -> None:
     for test in (
         test_rgba8,
@@ -630,6 +744,7 @@ def main() -> None:
         test_read_is_unchanged,
         test_monochrome_containers,
         test_color_containers,
+        test_color_metadata,
         test_orientation,
         test_orientation_yuv,
         test_orientation_jxl,
