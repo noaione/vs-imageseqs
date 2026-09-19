@@ -11,6 +11,11 @@ each of those carries its status, so that index is the answer to "what is left":
 its `plans` table for what is still a plan, and its `deferred` section for what
 the landed ones left over.
 
+The proposed ICC work is [13](improvements/13-icc-color-management.md). It is
+design-only for now: `icc_profile=False` keeps the current frame properties,
+while `icc_profile=True` would expose the embedded bytes as the standard
+`ICCProfile` binary frame property for a downstream color-management filter.
+
 ## Goal
 
 Implement a native VapourSynth image-sequence source plugin in Rust.
@@ -1398,7 +1403,10 @@ with `100..111` in its alpha — are read as `Gray10`, `Gray12` and `RGB30` with
 `Gray10` alpha plane, and the ten bit rows of the monochrome and yuv tables state
 the depth's own samples, `round(value * 1023 / 255)`, which is what `avifenc`
 stored, rather than the same numbers left aligned in the sixteen bit word those
-rows used to be checked in.
+rows used to be checked in. The fixture set now also has native-depth grayscale
+PNG sources, 10- and 12-bit monochrome HEIF pages, and a 12-bit monochrome AVIF
+with alpha; `tests/readalpha.vpy` checks their right-aligned color and alpha
+samples, including the opaque fills.
 
 ---
 
@@ -1517,7 +1525,7 @@ Implement:
 Defer:
 
 ```text
-full ICC color management
+embedded ICC profile export (see improvements/13-icc-color-management.md)
 GPU/Vulkan output
 manual SIMD
 custom Rayon inside get_frame()
@@ -1545,8 +1553,11 @@ The list has moved three times since it was written:
   is left of the depth question is a decoder that does not fill the range of a
   sixteen bit file, and a fixture for the depths nobody has a file at.
 
-The rest is policy and stays where it is: icc conversion, gpu output (waiting on
-`vapoursynth4-rs`), SIMD, custom Rayon, and the two python-side helpers.
+The rest is policy and stays where it is: gpu output (waiting on
+`vapoursynth4-rs`), SIMD, custom Rayon, and the two python-side helpers. ICC
+conversion remains the responsibility of a downstream color-management filter;
+plan [13](improvements/13-icc-color-management.md) only covers exporting the
+embedded profile bytes.
 `docs/improvements/README.md`'s `not planned` section has the reason for each,
 and the plans this doc still asks for are 06 and 07 in that same folder.
 

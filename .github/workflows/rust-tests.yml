@@ -36,6 +36,11 @@ jobs:
       - name: set up rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: set up python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
       - name: cache rust dependencies
         uses: Swatinem/rust-cache@v2
 
@@ -46,3 +51,12 @@ jobs:
 
       - name: run rust tests
         run: cargo test --locked
+
+      - name: install VapourSynth
+        run: python -m pip install "VapourSynth>=79,<81"
+
+      - name: build release plugin
+        run: cargo build --release --locked
+
+      - name: run VapourSynth validation
+        run: python tests/readalpha.vpy

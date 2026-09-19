@@ -8,14 +8,25 @@ repository's virtual environment active:
 
 from __future__ import annotations
 
+import os
 import struct
+import sys
 from pathlib import Path
 
 import vapoursynth as vs
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-PLUGIN = ROOT / "target" / "release" / "vs_imageseqs.dll"
+PLUGIN_NAME = {
+    "win32": "vs_imageseqs.dll",
+    "darwin": "libvs_imageseqs.dylib",
+}.get(sys.platform, "libvs_imageseqs.so")
+PLUGIN = Path(
+    os.environ.get(
+        "IMGSEQS_PLUGIN",
+        str(ROOT / "target" / "release" / PLUGIN_NAME),
+    )
+)
 FIXTURES = HERE / "fixtures"
 
 core = vs.core
@@ -380,6 +391,23 @@ def ten_bit(value: int) -> int:
     return round(value * 1023 / 255)
 
 
+def depth_samples(depth: int) -> tuple[list[int], list[int]]:
+    """Return the gray and alpha samples in a native-depth fixture."""
+    maximum = (1 << depth) - 1
+    return (
+        [
+            maximum // 4 + 17 * x + 31 * y
+            for y in range(MONO_HEIGHT)
+            for x in range(MONO_WIDTH)
+        ],
+        [
+            maximum - 13 * x - 29 * y
+            for y in range(MONO_HEIGHT)
+            for x in range(MONO_WIDTH)
+        ],
+    )
+
+
 def test_monochrome_containers() -> None:
     """A monochrome heif and avif hand out one plane per sample.
 
@@ -390,10 +418,11 @@ def test_monochrome_containers() -> None:
     bit one scaled onto the ten bit range: the format names the depth the file
     states and the samples are the ones that depth holds, rather than the same
     numbers left aligned in the sixteen bit word it used to be described as.
-    Both avifs report three channels through the ``image`` decoder and are
-    described from their container instead, so this covers that probe, the format
-    it corrects, the writer that fills a grey plane from the wider buffer the
-    decoder returns and the alpha plane of the same depth.
+    The native-depth sources are sixteen-bit PNGs whose gray samples are
+    left-aligned for the encoder. AVIF's normalized alpha samples are full-range
+    scaled, so its output comes back as the exact right-aligned twelve-bit
+    values. This covers the monochrome libheif path at both depths and the
+    monochrome AVIF correction at twelve bits.
     """
     grey = [8 + 11 * x + 23 * y for y in range(MONO_HEIGHT) for x in range(MONO_WIDTH)]
     alpha_plane = [
@@ -427,6 +456,35 @@ def test_monochrome_containers() -> None:
             f"mono {label}: the alpha plane",
         )
         check(frame.props["ImgSeqAlpha"] == 1, f"mono {label}: alpha frames carry ImgSeqAlpha")
+
+    for depth in (10, 12):
+        depth_grey, depth_alpha = depth_samples(depth)
+        format_name = f"Gray{depth}"
+        name = f"mono-{depth}.heic"
+        clip, alpha = read_alpha(files=[fixture(name)])
+        color = clip.get_frame(0)
+        frame = alpha.get_frame(0)
+        check(
+            color.format.name == format_name,
+            f"mono {name}: the color clip is {format_name} (got {color.format.name})",
+        )
+        check(
+            frame.format.name == format_name,
+            f"mono {name}: the alpha clip is {format_name} (got {frame.format.name})",
+        )
+        check(samples(color) == depth_grey, f"mono {name}: the gray plane")
+        check(samples(frame) == [((1 << depth) - 1)] * len(depth_grey), f"mono {name}: opaque alpha")
+
+    depth_grey, depth_alpha = depth_samples(12)
+    name = "mono-alpha-12.avif"
+    clip, alpha = read_alpha(files=[fixture(name)])
+    color = clip.get_frame(0)
+    frame = alpha.get_frame(0)
+    check(color.format.name == "Gray12", f"mono {name}: the color clip is Gray12 (got {color.format.name})")
+    check(frame.format.name == "Gray12", f"mono {name}: the alpha clip is Gray12 (got {frame.format.name})")
+    check(samples(color) == depth_grey, f"mono {name}: the gray plane")
+    check(samples(frame) == depth_alpha, f"mono {name}: the alpha plane")
+    check(frame.props["ImgSeqAlpha"] == 1, f"mono {name}: alpha frames carry ImgSeqAlpha")
 
     # The png pair the containers were encoded from has to agree with them.
     plain_clip, plain_alpha = read_alpha(files=[fixture("mono-alpha.png")])

@@ -8,6 +8,11 @@ has measured it as worth doing — and `not planned` is the decisions.
 [HANDOFF.md](../HANDOFF.md) is the same thing from the other end: where the tree
 stands and what to do first.
 
+[13](13-icc-color-management.md) is a design-only plan for exposing embedded
+ICC profiles as the standard binary `ICCProfile` frame property. It is not
+implemented yet; the current behavior remains the safe default of detecting and
+preserving only the `ImgSeqHasICC` fact.
+
 all five are implemented: 05 in `src/formats/heif.rs` (with one writer change in
 `src/pixel.rs` and the avif probe in `src/decoder.rs`), 01 in `src/prefetch.rs`
 plus `src/source.rs`, 02 in `src/clip.rs` with the generic pool in
@@ -74,10 +79,11 @@ is why jxl keeps asking for sixteen bit words and takes the same shift as every
 other reader instead of being the exception the plan describes. it is implemented
 in `src/pixel.rs` and the three container modules, against three hand-made jxl
 fixtures: the two deep pages of `sandbox/hitokage-sample` are `RGB30` and `RGB36`
-now, `jxl-gray10`/`jxl-gray12`/`jxl-rgba10` are `Gray10`/`Gray12`/`RGB30`, 105 of
-the 106 parity lines are byte identical to the build before it, and the paired
-convert stage moved 112.0 → 112.1 ms on the ten bit avif, which is to say the
-shift cost nothing.
+now, `jxl-gray10`/`jxl-gray12`/`jxl-rgba10` are `Gray10`/`Gray12`/`RGB30`, and
+`mono-10.heic`/`mono-12.heic`/`mono-alpha-12.avif` cover the native-depth
+monochrome paths. 105 of the 106 parity lines are byte identical to the build
+before it, and the paired convert stage moved 112.0 → 112.1 ms on the ten bit
+avif, which is to say the shift cost nothing.
 
 ## evidence in short
 
@@ -151,6 +157,7 @@ open plus frames to 4.99 s.
 | [10 nominal bit depth](10-nominal-bit-depth.md) | `src/pixel.rs`, `src/formats/avif.rs`, `src/formats/heif.rs`, `src/formats/jxl.rs`, fixtures, `tests/readalpha.vpy` | a 10-bit avif is `Gray10`/`RGB30` instead of `Gray16`/`RGB48`, with the samples shifted into the words a 10-bit frame holds, and the 16-bit files stay 16-bit: 112.0 → 112.1 ms per frame on the convert stage, so the shift is free | medium, every 9-to-15-bit file changes format | implemented |
 | [11 jxl without the image integration](11-jxl-direct.md) | `Cargo.toml`, `src/formats/jxl.rs` (new), `src/formats/mod.rs`, `src/decoder.rs`, `src/pixel.rs`, fixtures, `tests/readalpha.vpy` | a jxl that states an orientation reports it and `apply_rotation=False` gives the stored picture back, and the codestream's colour encoding and bit depth reach the probe | medium, the decode loop becomes ours | implemented |
 | [12 heif and avif planes](12-heif-avif-yuv-output.md) | `Cargo.toml`, `src/pixel.rs`, `src/decoder.rs`, `src/formats/heif.rs`, `src/formats/avif.rs` (new), `src/color.rs`, `src/clip.rs`, `src/source.rs`, fixtures, `tests/readalpha.vpy` | a colour heic or avif page is `YUV420P8`/`YUV444P10` instead of `RGB24`/`RGB48`, at half the bytes and with no conversion in the plugin: 55.40 → 27.70 MiB a frame, the avif decode pass 35% faster | high, it changes the format of every colour heic and avif frame | implemented |
+| [13 expose embedded icc profiles](13-icc-color-management.md) | `src/source.rs`, `src/decoder.rs`, `src/formats/`, `src/color.rs`, fixtures, `tests/readalpha.vpy` | `False` preserves current properties; `True` exposes the raw embedded profile as `ICCProfile` without changing pixels or formats | medium, every reader needs exact profile extraction | design only |
 
 the dependencies were thin: 01 and 02 were independent of each other, 03 needed
 04, and 05 was independent of all of them and is the only one that fixes
@@ -263,10 +270,10 @@ format-based clip grouping — is in `not planned` below, with its reasons.
   ([08](08-color-metadata.md)).
 - **png's `cHRM`, `gAMA` and `sRGB` chunks**, which state the same thing as the
   `cICP` chunk less directly ([08](08-color-metadata.md)).
-- **the icc bytes**, read and dropped: nothing in this workspace reads a raw
-  profile, and turning one into primaries is the guess rule 3 forbids
-  ([08](08-color-metadata.md)). `full ICC color management` is the `defer:` entry
-  in `IMPLEMENTATION.md` that this sits on.
+- **the icc bytes**, read and dropped: nothing in this workspace exports a raw
+  profile yet. [13](13-icc-color-management.md) defines the opt-in
+  `ICCProfile` frame property and the extraction work needed before a downstream
+  color-management filter can use those bytes.
 - **animation, previews and tone mapping** in a jxl and their equivalents
   elsewhere: one frame per file is the whole contract
   ([11](11-jxl-direct.md)).
@@ -344,8 +351,8 @@ C:/vcpkg/vcpkg.exe install --triplet x64-windows-static-md --x-manifest-root="$P
   ([01](01-lookahead-scheduling.md)), but the measured answer is still no: the
   cheap sets gain nothing from depth and the deepest rows only add cpu, so the
   default stays small and a caller who wants more asks for it.
-- **the python `imgseqs.from_folder(...)` helper, a format-based clip grouping
-  utility, and in-plugin globbing.** all three are in `IMPLEMENTATION.md` as
+- **the python `imgseqs.from_folder(...)` helper, a format-based clip grouping**
+  **utility, and in-plugin globbing.** all three are in `IMPLEMENTATION.md` as
   things that "can later" be provided, and all three are policy rather than
   work: the caller passes the ordered list, and a graph that needs a folder
   walked, or clips split by format, does it in python where the list comes from.
