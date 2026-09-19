@@ -917,7 +917,7 @@ RGBA32F           RGBS + alpha
 planar yuv 4:2:0   YUV420P8
 planar yuv 4:2:0   10 bit  YUV420P10
 planar yuv 4:2:2   YUV422P8 / YUV422P10
-planar yuv 4:4:4   YUV444P8 / YUV444P10 / YUV444P12
+planar yuv 4:4:4   YUV444P8 / YUV444P10 / YUV444P12 / YUV444P16
 
 GRAY10            10-bit gray, for the alpha of a 10-bit yuv page
 GRAY12            12-bit gray, for the alpha of a 12-bit yuv page

@@ -203,25 +203,15 @@ fn output_format(header: &Header, path: &Path) -> Result<(ColorType, PixelFormat
                     path.display()
                 )));
             }
-            if header.color == EnumeratedColor::Sycc {
-                let chroma = &header.components[1..];
-                let is_420 = chroma
-                    .iter()
-                    .all(|component| component.dx == 2 && component.dy == 2)
-                    && header.components[0].dx == 1
-                    && header.components[0].dy == 1;
-                if let Some(format) = match (is_420, depth) {
-                    (true, 8) => Some(PixelFormat::Yuv420P8),
-                    (true, 10) => Some(PixelFormat::Yuv420P10),
-                    _ => None,
-                } {
-                    let color_type = if depth <= 8 {
-                        ColorType::Rgb8
-                    } else {
-                        ColorType::Rgb16
-                    };
-                    return Ok((color_type, format));
-                }
+            if header.color == EnumeratedColor::Sycc
+                && let Some(format) = sycc_format(&header.components, depth)
+            {
+                let color_type = if depth <= 8 {
+                    ColorType::Rgb8
+                } else {
+                    ColorType::Rgb16
+                };
+                return Ok((color_type, format));
             }
             if header.color != EnumeratedColor::Sycc
                 && header
@@ -248,6 +238,23 @@ fn output_format(header: &Header, path: &Path) -> Result<(ColorType, PixelFormat
             "image '{}' has {count} JPEG 2000 components; only gray and RGB are supported",
             path.display()
         ))),
+    }
+}
+
+fn sycc_format(components: &[ComponentHeader], depth: u32) -> Option<PixelFormat> {
+    let [luma, cb, cr] = components else {
+        return None;
+    };
+    match ((luma.dx, luma.dy), (cb.dx, cb.dy), (cr.dx, cr.dy), depth) {
+        ((1, 1), (2, 2), (2, 2), 8) => Some(PixelFormat::Yuv420P8),
+        ((1, 1), (2, 2), (2, 2), 10) => Some(PixelFormat::Yuv420P10),
+        ((1, 1), (2, 1), (2, 1), 8) => Some(PixelFormat::Yuv422P8),
+        ((1, 1), (2, 1), (2, 1), 10) => Some(PixelFormat::Yuv422P10),
+        ((1, 1), (1, 1), (1, 1), 8) => Some(PixelFormat::Yuv444P8),
+        ((1, 1), (1, 1), (1, 1), 10) => Some(PixelFormat::Yuv444P10),
+        ((1, 1), (1, 1), (1, 1), 12) => Some(PixelFormat::Yuv444P12),
+        ((1, 1), (1, 1), (1, 1), 16) => Some(PixelFormat::Yuv444P16),
+        _ => None,
     }
 }
 
@@ -304,10 +311,10 @@ fn decode_interleaved(image: &Image, color_type: ColorType, path: &Path) -> Resu
     Ok(Pixels::Interleaved { color_type, buffer })
 }
 
-/// Convert an sYCC page to RGB when its SIZ sampling is not the one this
+/// Convert an sYCC page to RGB when its SIZ sampling or depth is not one this
 /// plugin can hand out as a VapourSynth yuv format. The JP2 enumerated colour
-/// space uses full-range sRGB/BT.601 coefficients; the 4:2:0 case stays planar
-/// and never enters this conversion.
+/// space uses full-range sRGB/BT.601 coefficients; supported layouts stay
+/// planar and never enter this conversion.
 fn decode_sycc_rgb(image: &Image, color_type: ColorType, path: &Path) -> Result<Pixels> {
     let components = image.components();
     if components.len() != 3 {
@@ -811,33 +818,35 @@ mod tests {
             PixelFormat::Rgb8
         );
 
-        let yuv = Header {
-            color: EnumeratedColor::Sycc,
-            components: vec![
-                ComponentHeader {
-                    precision: 10,
+        for (depth, chroma, expected) in [
+            (8, (2, 2), PixelFormat::Yuv420P8),
+            (10, (2, 2), PixelFormat::Yuv420P10),
+            (8, (2, 1), PixelFormat::Yuv422P8),
+            (10, (2, 1), PixelFormat::Yuv422P10),
+            (8, (1, 1), PixelFormat::Yuv444P8),
+            (10, (1, 1), PixelFormat::Yuv444P10),
+            (12, (1, 1), PixelFormat::Yuv444P12),
+            (16, (1, 1), PixelFormat::Yuv444P16),
+        ] {
+            let components = [(1, 1), chroma, chroma]
+                .into_iter()
+                .map(|(dx, dy)| ComponentHeader {
+                    precision: depth,
                     signed: false,
-                    dx: 1,
-                    dy: 1,
-                },
-                ComponentHeader {
-                    precision: 10,
-                    signed: false,
-                    dx: 2,
-                    dy: 2,
-                },
-                ComponentHeader {
-                    precision: 10,
-                    signed: false,
-                    dx: 2,
-                    dy: 2,
-                },
-            ],
-            ..rgb
-        };
-        assert_eq!(
-            output_format(&yuv, Path::new("yuv.jp2")).unwrap().1,
-            PixelFormat::Yuv420P10
-        );
+                    dx,
+                    dy,
+                })
+                .collect();
+            let yuv = Header {
+                color: EnumeratedColor::Sycc,
+                components,
+                ..rgb
+            };
+            assert_eq!(
+                output_format(&yuv, Path::new("yuv.jp2")).unwrap().1,
+                expected,
+                "depth={depth}, chroma={chroma:?}"
+            );
+        }
     }
 }

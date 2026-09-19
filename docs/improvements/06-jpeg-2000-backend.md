@@ -58,7 +58,8 @@ points as `heif.rs` and `webp.rs`:
   producing a wrong clip.
 - `decode(info)` — through the crate, into `Pixels::Interleaved` for a file the
   `colr` box calls rgb or grey, and into the planar `Pixels` of
-  [03](03-webp-yuv-output.md) only for a file the header proves is 4:2:0.
+  [03](03-webp-yuv-output.md) for a file whose sYCC header names a supported
+  sampling layout and depth.
 
 **the formats.** `prec <= 8` is `Gray8`/`RGB24`; deeper components use the
 nominal `Gray9`–`Gray16` or `RGB27`–`RGB48` format, with the decoder's wider
@@ -93,9 +94,9 @@ are untouched.
 
 ## left over
 
-- **`sYCC` is not automatically `YUV420P8`.** The yuv path is taken only for
-  8/10-bit `dx = dy = 2`; other sYCC sampling is converted to RGB, with the
-  decision kept beside the format it returns.
+- **`sYCC` is not automatically `YUV420P8`.** the yuv path covers 4:2:0 and
+  4:2:2 at 8/10 bits, and 4:4:4 at 8/10/12 bits; unsupported sYCC sampling or
+  depth is converted to RGB.
 - **`jpx`/`jp2` metadata that is not read**: `pclr` palettes, `cdef` channel
   definitions, `res`/`resc` resolutions and the `uuid` boxes. A file that needs
   one of them to be interpreted correctly is out of scope; the colour space in

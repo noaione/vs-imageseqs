@@ -25,6 +25,7 @@ pub enum PixelFormat {
     Yuv444P8,
     Yuv444P10,
     Yuv444P12,
+    Yuv444P16,
     /// Gray or r,g,b at the depth a container states, for the four depths
     /// between the eight bits and the sixteen bits a decoder's colour type
     /// knows: `Gray11` and `Rgb13` are the `Gray11` and `RGB39` a file that
@@ -114,7 +115,7 @@ impl PixelFormat {
             Self::Gray13 | Self::Rgb13 => Self::Gray13,
             Self::Gray14 | Self::Rgb14 => Self::Gray14,
             Self::Gray15 | Self::Rgb15 => Self::Gray15,
-            Self::Gray16 | Self::Rgb16 => Self::Gray16,
+            Self::Gray16 | Self::Rgb16 | Self::Yuv444P16 => Self::Gray16,
             Self::Gray32F | Self::Rgb32F => Self::Gray32F,
         }
     }
@@ -147,7 +148,8 @@ impl PixelFormat {
             | Self::Yuv422P10
             | Self::Yuv444P8
             | Self::Yuv444P10
-            | Self::Yuv444P12 => ColorFamily::YUV,
+            | Self::Yuv444P12
+            | Self::Yuv444P16 => ColorFamily::YUV,
         }
     }
 
@@ -168,7 +170,7 @@ impl PixelFormat {
             Self::Gray13 | Self::Rgb13 => 13,
             Self::Gray14 | Self::Rgb14 => 14,
             Self::Gray15 | Self::Rgb15 => 15,
-            Self::Gray16 | Self::Rgb16 => 16,
+            Self::Gray16 | Self::Rgb16 | Self::Yuv444P16 => 16,
             Self::Gray32F | Self::Rgb32F => 32,
         }
     }
@@ -304,6 +306,7 @@ impl PixelFormat {
             Self::Yuv444P8 => "YUV444P8",
             Self::Yuv444P10 => "YUV444P10",
             Self::Yuv444P12 => "YUV444P12",
+            Self::Yuv444P16 => "YUV444P16",
         }
     }
 }

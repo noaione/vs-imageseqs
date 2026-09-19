@@ -91,12 +91,12 @@ and total frame time to the vapoursynth log.
 | avif | dav1d; monochrome uses `Gray8`/`Gray10`/`Gray12`, color may use its YUV planes |
 | heif, heic | libheif/libde265; monochrome uses `Gray8`/`Gray10`/`Gray12`, color may use its YUV planes |
 | jxl | jpeg xl decoder |
-| jp2, j2k, jpf, jpx, j2c | JPEG 2000 through OpenJPEG; gray and RGB at 8–16 bits |
+| jp2, j2k, jpf, jpx, j2c | JPEG 2000 through OpenJPEG; gray/RGB at 8–16 bits, and sYCC may use YUV planes |
 | exr, hdr, pnm, qoi, tga | standard image decoder |
 
 supported output includes gray and rgb at 8–16 bits, rgb 32-bit float, and the
 YUV formats needed by the source: `YUV420P8`, `YUV420P10`, `YUV422P8`,
-`YUV422P10`, `YUV444P8`, `YUV444P10`, and `YUV444P12`.
+`YUV422P10`, `YUV444P8`, `YUV444P10`, `YUV444P12`, and `YUV444P16`.
 
 `Read` ignores alpha. `ReadAlpha` uses the source depth for alpha: `Gray8`–
 `Gray16`, or `GrayS`. the alpha channel is the second channel of `LA` and the
