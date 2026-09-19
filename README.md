@@ -97,8 +97,10 @@ include probing, decoding, frame allocation, planar conversion, frame
 properties, and total frame time.
 
 supported output formats are gray 8/16-bit, rgb 8/16-bit, rgb 32-bit float,
-and `YUV420P8` for a lossy webp file. `Read` ignores alpha channels; use
-`ReadAlpha` to read them.
+and the yuv families a file's own planes need (`YUV420P8`, `YUV420P10`,
+`YUV422P8`, `YUV422P10`, `YUV444P8`, `YUV444P10`, `YUV444P12`), plus `Gray10`
+and `Gray12` for the alpha clip of a ten or twelve bit yuv page. `Read` ignores
+alpha channels; use `ReadAlpha` to read them.
 
 ### common inputs
 
@@ -109,8 +111,10 @@ and `YUV420P8` for a lossy webp file. `Read` ignores alpha channels; use
 - `ico`
 - `tiff`
 - `webp` - via libwebp, lossy files without alpha as `YUV420P8`, see below
-- `avif` - via dav1d, monochrome pages as `Gray8`/`Gray16`
-- `heif`/`heic` - via libheif/libde265, monochrome pages as `Gray8`/`Gray16`
+- `avif` - via dav1d, monochrome pages as `Gray8`/`Gray16`, colour pages as
+their own yuv planes, see below
+- `heif`/`heic` - via libheif/libde265, monochrome pages as `Gray8`/`Gray16`,
+colour pages as their own yuv planes, see below
 - `jxl (jpeg xl)` - via jxl
 - `exr`
 - `hdr`
@@ -118,31 +122,46 @@ and `YUV420P8` for a lossy webp file. `Read` ignores alpha channels; use
 - `qoi`
 - `tga`
 
-### lossy webp comes back as yuv
+### a file whose planes are yuv comes back as yuv
 
 a lossy webp with no alpha channel decodes into its own planes and comes back as
 `YUV420P8`, tagged `_Matrix=5` (bt470bg) and `_Range=0` (limited), because that
-is what the bitstream holds. lossless webp, a webp with an alpha channel, and
-every other format keep the `RGB24`/`Gray8` output they always had.
+is what the bitstream holds. a colour heif, heic or avif page is handed out the
+same way — the item's own planes, `YUV420P8` for the common 4:2:0 case and
+`YUV444P10` for a ten bit one — tagged with the matrix and range from the file's
+`nclx` colour box, or from the AV1 sequence header when an avif has no `colr` box
+at all. a page whose container states code 2 (`unspecified`) or nothing keeps the
+`RGB24`/`RGB48` the plugin builds, which is why `sandbox/hitokage-sample`'s
+colour avifs are still rgb; lossless webp, a webp with an alpha channel, and
+every other format keep the `RGB24`/`Gray8` output they always had. `ReadAlpha`
+over a ten bit yuv page gives a `Gray10` alpha clip, and one over an 8 bit page a
+`Gray8` one.
 
-a graph that needs rgb converts back once:
+a graph that needs rgb converts back once. `zimg` takes the matrix and the range
+from the frame's own properties when the arguments are left out, so one line
+covers every page of a mixed clip:
+
+```python
+clip = core.resize.Bicubic(clip, format=vs.RGB24)  # _Matrix and _Range come from the frame
+```
+
+the same call with the arguments spelled out is what an untagged source needs,
+because a frame with no `_Matrix` is guessed at from its size:
 
 ```python
 clip = core.resize.Bicubic(clip, format=vs.RGB24, matrix_in_s="470bg", range_in_s="limited")
 ```
 
-that one line already covers a folder in any mix of formats and sizes: `zimg`
+either line already covers a folder in any mix of formats and sizes: `zimg`
 converts a variable clip frame by frame, at each page's own size, and the
-arguments are ignored for `RGB24` and `Gray8` frames. the exception is an odd
-sized `4:2:0` page, which `zimg` refuses with `Resize error 1027`. this chain
-handles those per frame and clamps the result to one format, which a filter that
-needs a constant one (`std.GPUUpload`, and so `ogsov.AnalyzeVk`) requires:
+arguments are ignored for `RGB24` frames. the exception is an odd sized `4:2:0`
+page, which `zimg` refuses with `Resize error 1027`. this chain handles those
+per frame and clamps the result to one format, which a filter that needs a
+constant one (`std.GPUUpload`, and so `ogsov.AnalyzeVk`) requires:
 
 ```python
 source = core.imgseqs.Read(files=files, mismatch=True)  # the clip the chain reads from
-plain_rgb = core.resize.Bicubic(
-    source, format=vs.RGB24, matrix_in_s="470bg", range_in_s="limited"
-)
+plain_rgb = core.resize.Bicubic(source, format=vs.RGB24)
 
 
 def chain(n=0, **_):  # FrameEval passes the frame number as a keyword
@@ -152,7 +171,7 @@ def chain(n=0, **_):  # FrameEval passes the frame number as a keyword
     if not right and not bottom:
         return plain_rgb
     even = core.std.CropAbs(source, width=frame.width - right, height=frame.height - bottom)
-    rgb = core.resize.Bicubic(even, format=vs.RGB24, matrix_in_s="470bg", range_in_s="limited")
+    rgb = core.resize.Bicubic(even, format=vs.RGB24)
     return core.std.AddBorders(rgb, right=right, bottom=bottom)
 
 
@@ -183,7 +202,14 @@ a file that states its own colour is tagged with it. `_Primaries` and
 frame — where the file's own values now replace the `470bg`/`limited` pair the
 line above assumes, so read them instead of assuming them. the code points are
 the H.273 numbers VapourSynth already uses, read from an `nclx` colour box in
-avif and heif/heic, a `cICP` chunk in png, and the codestream header in jxl.
+avif and heif/heic, a `cICP` chunk in png, the codestream header in jxl, and the
+AV1 sequence header of an avif that has no `colr` box at all.
+
+`_ChromaLocation` is written only when the file names a sample position
+(`chroma_sample_position` in an AV1 sequence header, which the avif pages of the
+sandbox all leave `unknown`); a frame whose file states no position carries no
+property rather than a guessed one, since a wrong location misplaces the chroma
+of the next resize.
 
 a code VapourSynth has no name for, and code 2 (`unspecified`), leave the
 property unset rather than guessed at, which is also what a file with no colour
@@ -218,8 +244,11 @@ by the names of its return type (`clip` and `alpha`).
 alpha keeps the sample depth of the source: 8-bit input becomes `GRAY8`,
 16-bit input becomes `GRAY16`, and float input becomes `GRAYS`. the alpha of
 `LA` input is its second channel and the alpha of `RGBA` input is its fourth.
-files without an alpha channel produce an opaque plane (`255`, `65535`, or
-`1.0`), so an alpha clip always has a meaningful value.
+files without an alpha channel produce an opaque plane, filled with the largest
+sample the alpha format holds: `255` for `Gray8`, `1023` for `Gray10`, `4095` for
+`Gray12`, `65535` for `Gray16`, and `1.0` for `Gray32F`. the alpha clip of a yuv
+source is the gray format of the same depth, so it never widens a ten bit page to
+sixteen bits to hold an opacity it could state at ten.
 
 both clips share the frame count, the frame rate, and the frame indexes, and
 both are read from one decode per file, so asking for the alpha clip does not
@@ -240,15 +269,16 @@ and with [bestsource](https://github.com/vapoursynth/bestsource), timing every
 the measured results, split per image format, are in
 [benchmarks](docs/BENCH.md). in short, on the same 35 pages saved in six
 containers: imgseqs is 2.73x faster than bestsource on `jpeg` (4.98x once the
-open is counted), 1.37x faster on `png`, and 2.65x slower on `webp`, where
+open is counted), 1.37x faster on `png`, and 1.80x slower on `webp`, where
 ffmpeg threads a single vp8 frame across every core while `webp` is decoded in
 one pure rust thread. bestsource cannot open `avif`, `heic` or `jxl` at all in
 that build, and imgseqs reads a folder that mixes jpeg and png pages as one
 clip.
 
 creating a clip only reads what each container states about its file, so opening
-35 avif pages of 130 MB costs 2 ms and 35 pages of any other of these formats
-costs 5 ms at most. the decode happens per frame, in the background pool.
+35 avif pages of 130 MB costs 2 ms, the 35 heic pages cost 6 ms because their
+colour needs the handle a second time, and any other of these formats costs less
+than that. the decode happens per frame, in the background pool.
 
 when comparing with bestsource, open it with `cachemode=0` and
 `apply_rotation=False`, and pass `apply_rotation=False` to `Read` as well: the

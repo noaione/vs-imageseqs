@@ -1,14 +1,28 @@
 # 12 — heif and avif hand out their own planes
 
-- status: proposed
+- status: implemented
 - touches: `Cargo.toml` (the `dav1d` crate becomes a direct dependency),
   `src/pixel.rs` (the format variants and their subsampling), `src/decoder.rs`,
   `src/formats/heif.rs`, `src/formats/avif.rs` (new), `src/color.rs`,
   `src/clip.rs`, `src/source.rs`, fixtures, `tests/readalpha.vpy`, `README.md`
+  (the yuv hand-out and the format list), `AGENTS.md`, `docs/BENCH.md`,
+  `docs/IMPLEMENTATION.md` (the decoder backends, the pixel-format table and the
+  colour metadata section), and a pointer each in 05, 08, 09 and 10
 - expected: a colour heic or avif page is handed out as the yuv its bitstream
   holds — `YUV420P8` for the sandbox sets, `YUV444P10` for a ten bit page —
   instead of r,g,b reconstructed into `RGB24`/`RGB48`, with `_Matrix` and
   `_Range` stating what the file said
+- result: 34 of the 35 `sandbox/avif` pages and the 4 colour pages of
+  `sandbox/heic` moved from `RGB24` to `YUV420P8`; the 31 monochrome heic pages,
+  the unspecified-matrix `hitokage-sample` avifs and every other container are
+  unchanged, plane for plane. a 3672x5274 colour page is 58,731,264 bytes of
+  frame before and 29,365,632 after, and the avif set's decode pass is 4621 →
+  2979 ms (-35.5%) in the interleaved A/B while the heic set (7252 → 7168 ms)
+  and the untouched rgb set (1317 → 1308 ms) are flat. four deviations are
+  recorded under "what it did, measured": a heic's `irot`/`imir` is still
+  applied by libheif without being reported, the alpha item is still decoded for
+  `Read`, `iinf`/`pixi` are not read, and a monochrome avif keeps the `image`
+  decode path
 - risk: high — every colour heic and avif frame changes format, bytes per frame,
   plane sizes, and the answer `clip.format` gives a graph, which is the largest
   output change this plugin has made
@@ -167,6 +181,102 @@ has no av1 decoder (`libde265` is its only one), so `12a` cannot serve avif.
 - the alpha clip of a yuv source is the gray format of the same depth, so
   `ReadAlpha` over a `YUV420P10` page gives a `Gray10` alpha instead of the
   `Gray16` opaque fill it would produce today.
+
+## what it did, measured
+
+Both hand-outs moved as planned. `format-summary.py` with `--frame 0` for each
+set, before and after:
+
+| set | files | before | after |
+| --- | --- | --- | --- |
+| `sandbox/avif` | 35 | 34 `RGB24`, `p003` `Gray8` | 34 `YUV420P8`, `p003` `Gray8` |
+| `sandbox/heic` | 35 | 4 `RGB24`, 31 `Gray8` | 4 `YUV420P8`, 31 `Gray8` |
+| `sandbox/hitokage-sample` | 10 | all `RGB24`/`RGB48` | all `RGB24`/`RGB48` (matrix 2) |
+| `tests/fixtures` | 34 | `alpha-rgba8.heic` `RGB24` | `alpha-rgba8.heic` `YUV420P8` |
+
+frame bytes, row padding included: a 3672x5274 colour page is 58,731,264 bytes
+(55.40 MiB of planes) as `RGB24` and 29,365,632 bytes (27.70 MiB) as `YUV420P8`,
+so the 192 MiB budget holds seven of them instead of three and a half. `p000`
+(3312x4717) goes 47,094,528 → 23,545,600, and `p003`, the monochrome page, stays
+19,577,088. a `YUV444P10` page is 48.0 MB where its `RGB48` was 96.0.
+
+same-batch interleaved A/B against `vs_imageseqs_baseline.dll`, three rounds,
+fastest of each:
+
+| set | probe before → after | decode before → after |
+| --- | --- | --- |
+| avif 35 | 1.6 → 1.9 ms | 4621.1 → 2979.3 ms (-35.5%) |
+| heic 35 | 10.6 → 6.1 ms (-42%) | 7252.0 → 7167.5 ms (-1.2%) |
+| hitokage 5 | 0.5 → 0.6 ms | 1316.9 → 1307.7 ms (-0.7%) |
+| fixtures 99 | 1.6 → 1.5 ms | 7.3 → 5.2 ms |
+| mixed 35 | 25.0 → 26.4 ms | 4218.5 → 4020.5 ms (-4.7%) |
+| png 35 | 4.1 → 4.6 ms | 571.4 → 578.0 ms (+1.2%) |
+
+the avif set is the conversion leaving. at `prefetch=4` over sixteen files of the
+set, measured back to back in one session, its `convert` stage drops from 114.56
+to 31.41 ms/frame and its frame-to-frame total from 125.28 to 97.63 (-22%),
+which is the same mechanism the A/B above sees at the whole-set level (-35.5%
+over 35 files at the default depth: the deeper window is where the removed
+conversion was most hidden). the heic set barely moves (203.5 against 206.4
+ms/frame) because libheif's decode dominates, and `hitokage` — the set whose
+files state matrix 2 and keep the rgb path — is flat, which is the control: a
+file this plan does not touch costs nothing more. the `png` column is machine
+drift (its frames are byte identical).
+
+pixels: every frame whose format did not change is identical to the baseline's,
+plane for plane and byte for byte (92 of the 104 rows of `frame-parity.py`; the
+12 that differ are the moved colour pages, and `alpha-yuv420p.avif` is a new
+fixture the baseline had no row for). for the moved ones the picture is measured
+by converting back with `resize.Point`/`resize.Bicubic` from the `_Matrix` and
+`_Range` the file states and comparing with the rgb the baseline built
+(`yuv-rgb-parity.py`): the mean difference is 0.25 and 0.46 of one code value out
+of 255 on the avif and heic sets, 0.72% and 1.22% of samples differ by more than
+8, and the generated fixture pages — whose rgb the old path built sample for
+sample — come back exactly, `max 0` on every plane. the rest is chroma
+upsampling: `image` interpolated the chroma of a 4:2:0 page where zimg's `Point`
+replicates it and `Bicubic` interpolates in its own phase, which is now a choice
+the graph makes rather than one the plugin made.
+
+what that choice costs, on four even-sized colour pages of `sandbox/avif` at
+`prefetch=4` (`yuv-rgb-penalty.py`, wall clock per delivered frame): `read` alone
+100.7 ms, `read + resize.Point(RGB24)` 100.1–102.8, `read +
+resize.Bicubic(RGB24)` 134.2–137.8, and the crop-then-Bicubic route an odd page
+needs the same as Bicubic alone. `zimg` takes the matrix and the range from the
+frame's own `_Matrix`/`_Range` when the arguments are left out, so the conversion
+is one line for a mixed clip rather than a per-format table in python. that is
+the trade this plan makes: 35 ms of the graph's time instead of 114 ms of a
+worker's, and a graph that wants the file's samples as they are pays nothing.
+
+validation: `cargo test --locked` 116 passed, `cargo fmt`, `cargo clippy
+--workspace --all-targets --locked -- -D warnings` clean, `cargo build --release
+--locked`, and `tests/readalpha.vpy` passes 264 checks, including the new yuv
+section and the opaque alpha fill of a ten bit page.
+
+### deviations from the plan
+
+- **a heic's orientation is still libheif's.** `format.heif` keeps
+  `ignore_transformations` off, so a rotated heic is handed out display-oriented
+  with `ImgSeqOrientation` reporting 1, exactly as before this plan: the
+  `irot`/`imir` read that 12a describes is not in it, and
+  [09](09-exif-orientation.md) still cannot undo the rotation for that
+  container. nothing about the yuv hand-out depends on it, and it is the one
+  promise of this plan that is not kept.
+- **the alpha item is still decoded for `Read`.** the frame request knows which
+  clip asked, so skipping it was possible, but the alpha is what decides whether
+  the picture is `Rgb8` or `Rgba8` at probe time, and the two files with an alpha
+  item in the fixtures and the sandbox are a few kilobytes. it stays work the
+  `Read` clip pays.
+- **`iinf` and `pixi` are not read.** the item types come from `iref`'s `auxl`
+  reference and its `auxC` property, and the depth from `av1C` and the sequence
+  header, which is enough to decide every file met so far; `iinf`'s item type
+  and `pixi`'s per-plane depth would be a second opinion on values the
+  bitstream already states.
+- **a monochrome avif still decodes through `image`.** its probe answers `Gray8`
+  or `Gray16`, which `formats::avif::handles` reads as "not yuv" and declines, so
+  [05](05-monochrome-heif.md)'s correction stays for that path and
+  [10](10-nominal-bit-depth.md) keeps the nominal-depth question there. a
+  monochrome item is one plane and dav1d hands it over directly, so this is the
+  obvious next step for 10 rather than a gap here.
 
 ## what this unblocks
 

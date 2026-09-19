@@ -342,6 +342,9 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
         original_color_type: header.color_type.into(),
         has_icc_profile: header.has_icc_profile,
         cicp: header.cicp,
+        // A jpeg xl codestream states no chroma sample position: its yuv planes
+        // are implied by its own upsampling filters.
+        chroma_location: None,
         orientation: header.orientation,
         // The decoder has already handed the picture out the way the file
         // describes it, so the identity is what the caller asked for when

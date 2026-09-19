@@ -597,6 +597,7 @@ mod tests {
             original_color_type: ExtendedColorType::from(color_type),
             has_icc_profile: false,
             cicp: None,
+            chroma_location: None,
             orientation: Orientation::NoTransforms,
             transform: crate::pixel::Transform::IDENTITY,
             format: PixelFormat::from_color_type(color_type).expect("a supported color type"),
@@ -629,7 +630,9 @@ mod tests {
         fn bytes(&self) -> usize {
             match &self.pixels {
                 Pixels::Interleaved { buffer, .. } => buffer.len(),
-                Pixels::Planar(planes) => planes.iter().map(Vec::len).sum(),
+                Pixels::Planar { planes, alpha } => {
+                    planes.iter().map(Vec::len).sum::<usize>() + alpha.as_ref().map_or(0, Vec::len)
+                }
             }
         }
     }

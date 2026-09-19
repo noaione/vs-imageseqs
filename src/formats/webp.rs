@@ -393,7 +393,15 @@ fn decode_yuv(info: &ImageInfo, source: &Source<'_>) -> Result<DecodedImage> {
         ));
     }
 
-    Ok(source.decoded(info, Pixels::Planar(planes), buffer, read_started.elapsed()))
+    Ok(source.decoded(
+        info,
+        Pixels::Planar {
+            planes,
+            alpha: None,
+        },
+        buffer,
+        read_started.elapsed(),
+    ))
 }
 
 /// Size libwebp reads from the header of `data`.
@@ -478,6 +486,7 @@ mod tests {
             original_color_type: ExtendedColorType::Rgb8,
             has_icc_profile: false,
             cicp: None,
+            chroma_location: None,
             orientation: image::metadata::Orientation::NoTransforms,
             transform: crate::pixel::Transform::IDENTITY,
             format: crate::pixel::PixelFormat::from_color_type(color_type)
@@ -748,9 +757,10 @@ mod tests {
 
         let decoded = decode(&probed).expect("the fixture to decode");
         assert_eq!(decoded.format, PixelFormat::Yuv420P8);
-        let Pixels::Planar(planes) = &decoded.pixels else {
+        let Pixels::Planar { planes, alpha } = &decoded.pixels else {
             panic!("a lossy webp decodes into planes");
         };
+        assert!(alpha.is_none(), "a lossy webp has no alpha plane");
         assert_eq!(
             planes.iter().map(Vec::len).collect::<Vec<_>>(),
             vec![16 * 16, 8 * 8, 8 * 8]
@@ -780,7 +790,7 @@ mod tests {
     fn the_planes_rebuild_the_rgb_libwebp_decodes() {
         let (path, probed) = lossy_fixture();
         let decoded = decode(&probed).expect("the fixture to decode");
-        let Pixels::Planar(planes) = &decoded.pixels else {
+        let Pixels::Planar { planes, .. } = &decoded.pixels else {
             panic!("a lossy webp decodes into planes");
         };
         let (width, height) = (16_usize, 16_usize);

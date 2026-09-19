@@ -297,7 +297,7 @@ fn write_frame(
 ) -> Result<WriteTimings> {
     let transform = decoded.transform;
     match (clip, &decoded.pixels) {
-        (Clip::Color, Pixels::Planar(planes)) => write_decoded_planes(
+        (Clip::Color, Pixels::Planar { planes, .. }) => write_decoded_planes(
             frame,
             decoded.format,
             decoded.width,
@@ -313,9 +313,23 @@ fn write_frame(
             buffer,
             transform,
         ),
-        // Planar decodes have no alpha channel to read: the format that decodes
-        // to planes only takes files without one.
-        (Clip::Alpha, Pixels::Planar(_)) => write_opaque_alpha(
+        // The alpha plane of a planar decode is a plane of its own, and the
+        // frame it is written into is the gray format of the same depth, which
+        // already has the geometry of the image rather than of its chroma.
+        (
+            Clip::Alpha,
+            Pixels::Planar {
+                alpha: Some(alpha), ..
+            },
+        ) => write_decoded_planes(
+            frame,
+            format,
+            decoded.width,
+            decoded.height,
+            std::slice::from_ref(alpha),
+            transform,
+        ),
+        (Clip::Alpha, Pixels::Planar { alpha: None, .. }) => write_opaque_alpha(
             frame,
             format,
             decoded.output_width(),

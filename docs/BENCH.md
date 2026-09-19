@@ -33,8 +33,10 @@ their own defaults unless the row says otherwise.
   drops every 25th image.
 - the two plugins produce the same planes for webp and not for anything else.
   imgseqs returns the image's own format when the file has one (`GRAY8` for
-  monochrome jpeg, png, jxl, heif and avif pages, `RGB24` for colour ones, and
-  `YUV420P8` for a lossy webp without an alpha channel), while bestsource keeps whatever
+  monochrome jpeg, png, jxl, heif and avif pages, `RGB24` for colour ones,
+  `YUV420P8` for a lossy webp without an alpha channel, and the file's own planes
+  for a colour heic or avif page whose container states a matrix — see
+  [12](improvements/12-heif-avif-yuv-output.md)), while bestsource keeps whatever
   format its decoder emits: `YUV420P8` for webp, `YUV444P8` for jpeg, a
   variable format for a mixed folder. on the webp set the two decoders agree
   byte for byte; everywhere else this compares read throughput, not identical
@@ -54,14 +56,18 @@ pages are one channel. what imgseqs makes of them depends on the container:
 | set | what imgseqs returns | decoded |
 | --- | --- | --- |
 | webp | 35 `YUV420P8` frames | 964 MiB, one 22.3 MiB frame and 34 of 27.7 MiB |
-| avif | 34 `RGB24` frames and one `Gray8` | 1892 MiB: one 44.7 MiB frame, 33 of 55.4 MiB and one of 18.5 MiB |
-| jpeg, png, jxl, heic | 31 `Gray8` frames of 18.5 MiB and 4 `RGB24` | 784 MiB |
+| avif | 34 `YUV420P8` frames and one `Gray8` | 965 MiB: one 22.3 MiB frame, 33 of 27.7 MiB and one of 18.5 MiB |
+| heic | 31 `Gray8` frames of 18.5 MiB and 4 `YUV420P8` | 685 MiB, one 22.3 MiB frame and three of 27.7 MiB |
+| jpeg, png, jxl | 31 `Gray8` frames of 18.5 MiB and 4 `RGB24` | 784 MiB |
 
-every set needs `mismatch=True` for this. those frame sizes (18.5 to 55.4 MiB)
-are what the lookahead budget is up against: 192 MiB holds ten of the gray
-frames and seven of the webp ones but only three and a half of the 55 MiB rgb
-ones, so the budget is `max(192 MiB, window x largest frame)` and a deep
-lookahead on these pages is allowed to use more memory than that. see
+every set needs `mismatch=True` for this. the avif and heic rows are
+[12](improvements/12-heif-avif-yuv-output.md): those frames were `RGB24` of 55.4
+MiB and are now the file's own planes, which halved every colour frame (the
+`RGB24` frames left are the jpeg/png/jxl ones and the unspecified-matrix avif
+pages). those frame sizes are what the lookahead budget is up against: 192 MiB
+holds ten of the gray frames and seven of the yuv ones but only three and a half
+of a 55 MiB rgb page, so the budget is `max(192 MiB, window x largest frame)` and
+a deep lookahead on these pages is allowed to use more memory than that. see
 [01](improvements/01-lookahead-scheduling.md).
 
 ```console
@@ -76,12 +82,16 @@ frames, best pass of three:
 | jpeg | 2.75 s | 7.49 s | imgseqs 2.73x faster, 4.98x including the open |
 | png | 0.62 s | 0.86 s | imgseqs 1.37x faster, 2.96x including the open |
 | jxl | 6.50 s | cannot read | 4.13x over imgseqs's own serial row |
-| avif | 5.14 s | cannot open | 2.36x over imgseqs's own serial row |
-| heic | 8.24 s | cannot open | 3.06x over imgseqs's own serial row |
+| avif | 3.19 s | cannot open | 2.09x over imgseqs's own serial row |
+| heic | 7.21 s | cannot open | 3.22x over imgseqs's own serial row |
 
-`prefetch=16` is the best row on five of the six sets — webp, jpeg, png, jxl and
-avif — and heic is the exception, with its default 30% ahead of it. the deeper
-pattern is in the single-worker rows: the lookahead is worth 2.4x to 6.4x over
+`prefetch=16` is the best row on four of the six sets — webp, jpeg, png and jxl
+— and heic beats its default by 1.5x (4.80 s against 7.21 s), which is what
+[12](improvements/12-heif-avif-yuv-output.md)'s smaller colour frames did to a
+pool that used to re-decode what its budget could not hold; avif is now a tie
+(3.29 s against 3.19 s) for the same reason, where the default used to be 5.14 s
+and the deeper window's second decode was hidden rather than removed. the deeper
+pattern is in the single-worker rows: the lookahead is worth 2.1x to 6.4x over
 the serial row on every set, which is what
 [01](improvements/01-lookahead-scheduling.md) made reliable, and the webp figure
 nearly doubled when its frames halved in size
@@ -278,27 +288,42 @@ the clip is free because the probe only reads the header.
 
 35 files, 130 MB, 34 colour pages and one monochrome page. avif is the only set
 whose colour pages are all coded with three channels: the grey pages beside
-`p003` are stored that way too, so 34 files come back as `RGB24` of 55.4 MiB
-(and `p000` as `RGB24` of 44.7 MiB) and `p003`, the one file whose bitstream says
-`mono_chrome`, comes back as `Gray8` of 18.5 MiB. 1892 MiB decoded, against
-1928 MiB before [05](improvements/05-monochrome-heif.md) corrected that page.
-bestsource cannot open the set.
+`p003` are stored that way too, so the 34 colour files come back as `YUV420P8` —
+their own planes, since [12](improvements/12-heif-avif-yuv-output.md) — and
+`p003`, the one file whose bitstream says `mono_chrome`, as `Gray8` of 18.5 MiB.
+965 MiB decoded, against 1244 MiB as `RGB24` and 1928 MiB before
+[05](improvements/05-monochrome-heif.md) corrected that page. bestsource cannot
+open the set.
 
 | reading the set | frames | median frame | open | total |
 | --- | --- | --- | --- | --- |
-| imgseqs `Read` | 4.99 s | 121.4 ms | 0.002 s | 4.99 s |
-| imgseqs `Read`, `prefetch=0` | 11.77 s | 336.4 ms | 0.003 s | 11.77 s |
-| imgseqs `Read`, `prefetch=16` | 5.14 s | 0.4 ms | 0.003 s | 5.14 s |
+| imgseqs `Read` | 3.19 s | 40.7 ms | 0.003 s | 3.19 s |
+| imgseqs `Read`, `prefetch=0` | 6.65 s | 183.6 ms | 0.004 s | 6.65 s |
+| imgseqs `Read`, `prefetch=16` | 3.29 s | 0.4 ms | 0.004 s | 3.30 s |
 
-this is the set where the budget mattered most. the decode reports ~165 ms per
-frame: 98 ms building the decoder, which has to decode the picture before it can
-report a size, and 67 ms converting it to r,g,b and copying it into the frame.
-the frames are `RGB24` of 55.4 MiB, so the old fixed 192 MiB
-budget held three and a half of them and the pool re-decoded whatever it had to
-drop: the default was 9.25 s and `prefetch=16` was 19.11 s, twice as slow as
-doing nothing in parallel. with the budget following the window the same three
-rows are 4.99 s, 11.77 s and 5.14 s, so the default is now 2.36x faster than the
-serial row and asking for sixteen workers costs nothing.
+before [12](improvements/12-heif-avif-yuv-output.md) the same three rows were
+4.99 s, 11.77 s and 5.14 s with a 121.4 ms median: the conversion to r,g,b that
+12 removed was 114.56 ms of every frame at `prefetch=4`, and it was also what the
+budget could not hold — 55.4 MiB frames against 192 MiB — so removing it helps
+the lookahead twice, once in the work and once in the memory. the paragraph below
+is the history of the budget itself, measured on the rgb frames; see
+[12](improvements/12-heif-avif-yuv-output.md) for the yuv figures.
+
+the rest of this section is how those frames behaved as `RGB24`, which is the
+state [01](improvements/01-lookahead-scheduling.md),
+[02](improvements/02-frame-write-path.md) and
+[05](improvements/05-monochrome-heif.md) were measured in, and its figures are
+this page's record of them. this is the set where the budget mattered most. the
+decode reported ~165 ms per frame as rgb: 98 ms building the decoder, which has
+to decode the picture before it can report a size, and 67 ms converting it to
+r,g,b and copying it into the frame. the frames were `RGB24` of 55.4 MiB, so the
+old fixed 192 MiB budget held three and a half of them and the pool re-decoded
+whatever it had to drop: the default was 9.25 s and `prefetch=16` was 19.11 s,
+twice as slow as doing nothing in parallel. with the budget following the window
+the same three rows became 4.99 s, 11.77 s and 5.14 s, so the default was then
+2.36x faster than the serial row and asking for sixteen workers cost nothing.
+[12](improvements/12-heif-avif-yuv-output.md) then halved the frames, which is
+why the same three rows read 3.19 s, 6.65 s and 3.29 s above.
 
 creating the clip took 6.43 s before [05](improvements/05-monochrome-heif.md)
 taught the probe to read the container instead of building the decoder, which
@@ -314,34 +339,126 @@ first rather than removed, so a cheaper probe has little left to give it.
 ## heic
 
 35 files, 236 MB, and bestsource cannot open the set. imgseqs reads all 35: 31
-monochrome pages of 18.5 MiB decoded as `Gray8`, three colour pages of 55.4 MiB
-and `p000` at 44.7 MiB as `RGB24`. it is the only set here whose frames mix
-formats and sizes.
+monochrome pages decoded as `Gray8`, and the four colour pages — `p000` at
+44.7 MiB and three at 55.4 MiB as `RGB24` before
+[12](improvements/12-heif-avif-yuv-output.md) — as their own `YUV420P8` planes
+now, which is what their container's matrix says they are. it is the only set
+here whose frames mix formats and sizes.
 
 | reading the set | frames | median frame | open | total |
 | --- | --- | --- | --- | --- |
-| imgseqs `Read` | 8.24 s | 203.4 ms | 0.005 s | 8.24 s |
-| imgseqs `Read`, `prefetch=0` | 25.17 s | 749.7 ms | 0.006 s | 25.18 s |
-| imgseqs `Read`, `prefetch=16` | 5.63 s | 11.4 ms | 0.006 s | 5.64 s |
+| imgseqs `Read` | 7.21 s | 164.9 ms | 0.007 s | 7.21 s |
+| imgseqs `Read`, `prefetch=0` | 23.20 s | 684.0 ms | 0.007 s | 23.21 s |
+| imgseqs `Read`, `prefetch=16` | 4.80 s | 0.1 ms | 0.007 s | 4.81 s |
+
+before [12](improvements/12-heif-avif-yuv-output.md) the same three rows were
+8.24 s, 25.17 s and 5.63 s with a 203.4 ms median. the colour frames are still
+three of the most expensive ones — libheif's decode dominates them, so 12's
+-1.2% on this set is inside the spread — but they are half the size, which is why
+the default row moved 12% and the `prefetch=16` row moved 15% while the serial
+row only moved 8%. the paragraph below is the history of the budget, measured on
+the rgb frames; the default row once read 7.50 s with `prefetch=0` at 24.11 s,
+which is the machine drift of that pair of runs rather than a change, since the
+serial path is untouched by both.
 
 three of the frames are ten times the cost of the rest, so the median and the
-total disagree: the lookahead is worth 4.47x over the serial row, and the median
-frame falls from 749.7 ms to 11.4 ms at `prefetch=16`, which is the cheapest
-median here. `prefetch=16` is 1.5x faster than the default on this set, which is
-what the budget change was for: the 31 gray frames fit 192 MiB but the four
-colour ones do not, so the old default spent its time re-decoding. the default
-row is the one number on this page that looks worse than before (8.24 s against
-7.50 s) and the `prefetch=0` row moved the same way (25.17 s against 24.11 s),
+total disagree: the lookahead was worth 4.47x over the serial row as rgb, and the
+median frame fell from 749.7 ms to 11.4 ms at `prefetch=16`, the cheapest median
+there. `prefetch=16` is 1.5x faster than the default on this set, which is what
+the budget change was for: the 31 gray frames fit 192 MiB but the four colour
+ones did not, so the old default spent its time re-decoding, and 12's smaller
+colour frames only removed what was left of that. the default row was the one
+number on this page that looked worse than before (8.24 s against 7.50 s) and the
+`prefetch=0` row moved the same way (25.17 s against 24.11 s),
 which is machine drift over that pair of runs rather than the change: the serial
 path is untouched. the monochrome pages are also the one place where the decode
 is not the `image` crate's: they go through `libheif` directly, see
 [05](improvements/05-monochrome-heif.md).
 
+## heif/avif yuv hand-out
+
+[12](improvements/12-heif-avif-yuv-output.md) stopped converting a heif or avif
+page to r,g,b in the plugin. a colour page whose container states a matrix the
+VapourSynth enum can name is handed out as the file's own yuv planes, tagged with
+that matrix and range; a page whose container states code 2 or nothing at all
+keeps the rgb it had, and the `sandbox/hitokage-sample` colour pages (matrix 2)
+are the corpus's example of that. it is the only change on this page that makes
+the *graph* do different work rather than the plugin, so both halves are
+measured.
+
+frame bytes, row padding included, for one 3672x5274 colour page:
+
+| as | planes | allocated | `prefetch` window holds |
+| --- | --- | --- | --- |
+| `RGB24` before | 55.40 MiB | 58,731,264 B | 3.5 frames of 192 MiB |
+| `YUV420P8` after | 27.70 MiB | 29,365,632 B | 7 frames of 192 MiB |
+| `RGB48` before | 96.0 MB | — | — |
+| `YUV444P10` after | 48.0 MB | — | — |
+
+`p000` (3312x4717) goes 47,094,528 → 23,545,600 and the monochrome `p003` stays
+19,577,088. what that did to the two sets is in the avif and heic sections above:
+avif 4.99 → 3.19 s, heic 8.24 → 7.21 s at the default depth.
+
+same-batch interleaved A/B against the pre-12 build, three rounds, fastest of
+each (probe is clip creation, decode is the frames):
+
+| set | probe before → after | decode before → after |
+| --- | --- | --- |
+| avif 35 | 1.6 → 1.9 ms | 4621.1 → 2979.3 ms (-35.5%) |
+| heic 35 | 10.6 → 6.1 ms (-42%) | 7252.0 → 7167.5 ms (-1.2%) |
+| hitokage 5 | 0.5 → 0.6 ms | 1316.9 → 1307.7 ms (-0.7%) |
+| mixed 35 | 25.0 → 26.4 ms | 4218.5 → 4020.5 ms (-4.7%) |
+| png 35 | 4.1 → 4.6 ms | 571.4 → 578.0 ms (+1.2%) |
+| fixtures 99 | 1.6 → 1.5 ms | 7.3 → 5.2 ms |
+
+`hitokage` is the control: a set the change does not touch costs the same, and the
+`png` column is drift (its frames are byte identical). the heic set barely moves
+because libheif's decode dominates its colour pages; the avif set is where the
+conversion was.
+
+per stage, avif, both builds measured back to back in one session:
+
+| avif | files | convert before → after | total before → after |
+| --- | --- | --- | --- |
+| `prefetch=0` | 4 | 35.09 → 14.03 ms/frame | 156.46 → 108.72 ms/frame |
+| `prefetch=4` | 16 | 114.56 → 31.41 ms/frame | 125.28 → 97.63 ms/frame |
+
+the copy that stays is the plane copy into the frame, which a yuv page needs as
+much as an rgb one; the part that left is the yuv-to-rgb arithmetic and the
+interleave it had to undo. at `prefetch=4` the removed 83 ms/frame is most of the
+-22% the total moved, and at the whole-set level the same set is -35.5% because a
+55 MiB frame was also what the budget could not hold.
+
+the conversion that left is not free for a graph that wants rgb back, and that is
+the trade. `target/bench/yuv-rgb-penalty.py` on four even-sized colour pages of
+`sandbox/avif` at `prefetch=4`, wall clock per delivered frame: `read` alone is
+100.7 ms, `read + resize.Point(RGB24)` 100.1–102.8, `read +
+resize.Bicubic(RGB24)` 134.2–137.8, and the crop-then-Bicubic route an odd page
+needs costs the same as Bicubic alone. so the rgb route is 35 ms of the graph's
+own time where the plugin's conversion was 114 ms of a worker's, and `Point`,
+which is free here, replicates chroma rather than interpolating it — the plugin
+made that choice before, and the graph makes it now. it is also why an odd-sized
+4:2:0 page needs the crop: zimg refuses to convert 4:2:0 to rgb at all when a
+dimension is odd, so `sandbox/avif`'s `p000` (3312x4717) only converts after a
+crop to even, which is exactly what the parity measurement below does.
+
+pixels: every frame of the corpus whose format did not change is identical to the
+pre-12 build's, plane for plane and byte for byte — 92 of the 104 rows of
+`frame-parity.py`; the 12 that differ are the moved colour pages. for those, the
+picture is checked by converting back with `resize.Point`/`resize.Bicubic` from
+the `_Matrix` and `_Range` the file states and comparing with the rgb the old
+path built: the mean difference is 0.25 and 0.46 of one code value out of 255 on
+the avif and heic sets, 0.72% and 1.22% of samples differ by more than 8, and the
+generated fixture pages come back exactly (`max 0` on every plane). the residual
+is chroma upsampling phase, not a wrong plane: the frames of a graph that does not
+resize are the file's own samples, which is what the format change means.
+
 ## per stage cost
 
 `debug=True` with `prefetch=0`, averaged over the first four files of each
 sandbox set, which are three of the colour pages plus the first monochrome one
-where the set has any:
+where the set has any. the avif row is pre-12 and is the cost of building r,g,b
+frames; its yuv stages are in the section above:
 
 | set | decode | copy into the frame | total |
 | --- | --- | --- | --- |

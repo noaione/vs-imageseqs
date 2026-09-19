@@ -6,6 +6,7 @@ use std::{
 
 use image::metadata::Orientation;
 use image::{ColorType, ExtendedColorType, ImageDecoder, ImageReader};
+use vapoursynth4_rs::ffi;
 
 use crate::{
     color::Cicp,
@@ -26,6 +27,9 @@ fn register_decoder_hooks() {
 /// Format modules that decode what the registered hooks cannot; see
 /// [`crate::formats`].
 fn format_decoder(info: &ImageInfo) -> Option<Result<DecodedImage>> {
+    if formats::avif::handles(info) {
+        return Some(formats::avif::decode(info));
+    }
     if formats::heif::handles(info) {
         return Some(formats::heif::decode(info));
     }
@@ -42,7 +46,7 @@ fn format_decoder(info: &ImageInfo) -> Option<Result<DecodedImage>> {
 /// color type suggests; see [`crate::formats`].
 fn format_override(path: &Path, color_type: ColorType) -> Option<PixelFormat> {
     formats::webp::output_format(path, color_type)
-        .or_else(|| formats::heif::output_format(path, color_type))
+        .or_else(|| formats::avif::output_format(path, color_type))
 }
 
 #[derive(Clone, Debug)]
@@ -57,6 +61,10 @@ pub struct ImageInfo {
     /// is `None` for a file that states none and for one whose codes name no
     /// property; see [`crate::color::Cicp`].
     pub cicp: Option<Cicp>,
+    /// The position of the chroma samples the file states, which is written as
+    /// `_ChromaLocation` for a subsampled frame and is `None` for a file that
+    /// names no position; see [`crate::color::chroma_location`].
+    pub chroma_location: Option<ffi::VSChromaLocation>,
     /// The exif orientation the file states, which is reported as a property
     /// whatever the caller asked for.
     pub orientation: Orientation,
@@ -98,7 +106,15 @@ pub enum Pixels {
         buffer: Vec<u8>,
     },
     /// One tightly packed buffer per plane of the frame format.
-    Planar(Vec<Vec<u8>>),
+    ///
+    /// `alpha` is the alpha item of the file, tightly packed and the size of
+    /// the image, which is `None` for a file without one. It is a plane of its
+    /// own rather than a channel of the last plane because the alpha clip is a
+    /// gray frame of the same depth.
+    Planar {
+        planes: Vec<Vec<u8>>,
+        alpha: Option<Vec<u8>>,
+    },
 }
 
 #[derive(Debug)]
@@ -165,8 +181,11 @@ pub(crate) fn image_error(action: &str, path: &Path, error: impl std::fmt::Displ
 pub fn probe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
     // A file a format module can describe from its container skips the decoder,
     // which for an avif means skipping a decode of the whole picture; see
-    // [`crate::formats::heif::image_info`].
+    // [`crate::formats::avif::image_info`] and [`crate::formats::heif::image_info`].
     if let Some(info) = formats::heif::image_info(path) {
+        return Ok(info);
+    }
+    if let Some(info) = formats::avif::image_info(path) {
         return Ok(info);
     }
     // A jpeg xl is read here whether or not the `image` crate could reach a
@@ -210,6 +229,10 @@ pub fn probe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
         original_color_type,
         has_icc_profile,
         cicp,
+        // The `image` decoders have no accessor for a chroma sample position,
+        // and the containers that state one are read by the modules that know
+        // how to read it out of their own boxes.
+        chroma_location: None,
         orientation,
         transform: if apply_rotation {
             Transform::from_orientation(orientation)

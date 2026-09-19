@@ -4,10 +4,11 @@
 - touches: `src/pixel.rs`, `src/decoder.rs` (the probe), `src/formats/heif.rs`,
   `src/formats/jxl.rs`, `src/clip.rs`, `src/source.rs`, fixtures,
   `tests/readalpha.vpy`, `README.md`
-- depends on: [12](12-heif-avif-yuv-output.md) if 12 lands first, which takes the
-  avif and heic rows of this plan with it (a yuv page's depth is the format) and
-  leaves jxl, the rgb files that state 9 to 15 bits, and the monochrome cases
-  here
+- depends on: [12](12-heif-avif-yuv-output.md), which has landed and took the
+  avif and heic rows of this plan with it (a yuv page's depth is the format,
+  which is why `sandbox/avif` reads as `YUV420P8` and a ten bit crop as
+  `YUV444P10` today), leaving jxl, the rgb files that state 9 to 15 bits, and the
+  monochrome cases here
 - expected: a 10-bit avif is handed out as `Gray10`/`RGB30` instead of
   `Gray16`/`RGB48`, with its samples in the words a 10-bit frame holds, and a
   12-bit file as `Gray12`/`RGB36`
@@ -25,11 +26,14 @@ representations stored inside `u16`"), and the cost is two things at once:
 - **the format is wrong.** A graph that wants `RGB30` or `YUV420P10` gets a
   conversion it did not need, and one that resizes from `RGB48` treats a 10-bit
   picture as a 16-bit one.
-- **the samples are not full scale.** dav1d hands avif's ten-bit samples back
-  left aligned in sixteen bits — `tests/readalpha.vpy` says it in the monochrome
-  table, "the same numbers times 256" — so the largest value a 10-bit file can
+- **the samples are not full scale.** `image` hands a ten-bit avif back left
+  aligned in sixteen bits — `tests/readalpha.vpy` says it in the monochrome
+  table, "the same numbers times 256" — so the largest value such a file can
   produce is 65280 where `Gray16` says the range ends at 65535. That is 0.4%
-  short, 0.02% for 12 bits, and nothing in the frame admits it.
+  short, 0.02% for 12 bits, and nothing in the frame admits it. This applies to
+  the paths that go through `image`, which is rgb and the monochrome pages;
+  `dav1d`'s own planes are right aligned, which is why the yuv hand-out needs no
+  shift and why the row above is already gone for those files.
 
 VapourSynth has the formats. R80 answers `GRAY9`, `GRAY10`, `GRAY12`, `GRAY14`,
 `RGB30`, `RGB36`, `RGB42` and `YUV420P10`/`P12`/`P14`, and a 10-bit frame stores

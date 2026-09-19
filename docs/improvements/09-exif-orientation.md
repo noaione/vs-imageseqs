@@ -167,7 +167,11 @@ there, and it is not done.
   orientation and comes out the stored way whatever the argument says. Reading
   the `Exif` item in the avif box walk is the same walk
   [08](08-color-metadata.md) extends for `nclx`, and the two should be done
-  together if either is.
+  together if either is. [12](12-heif-avif-yuv-output.md) built that walk out
+  into `src/formats/avif.rs` and read the colour through it, but left the `Exif`
+  item alone; on the heif side libheif applies the container's `irot`/`imir`
+  itself, which is why a rotated heic already comes out display-oriented with
+  `ImgSeqOrientation` reporting 1 and why reporting it means reading those boxes.
 - **jxl was worse than unread and is now fixed** by
   [11](11-jxl-direct.md). The file states its
   orientation in the codestream, the `jxl` crate the plugin reached jxl through

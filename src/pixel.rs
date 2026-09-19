@@ -14,13 +14,24 @@ use crate::error::{ImgSeqError, Result};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PixelFormat {
     Gray8,
+    /// Planar 4:2:0, the format lossy webp is decoded into.
+    Yuv420P8,
+    /// Planar 4:2:0 at ten bits, which is what a ten bit heif or avif holds.
+    Yuv420P10,
+    /// Planar 4:2:2.
+    Yuv422P8,
+    Yuv422P10,
+    /// Planar 4:4:4.
+    Yuv444P8,
+    Yuv444P10,
+    Yuv444P12,
+    Gray10,
+    Gray12,
     Gray16,
     Gray32F,
     Rgb8,
     Rgb16,
     Rgb32F,
-    /// Planar 4:2:0 8 bit, the format lossy webp is decoded into.
-    Yuv420P8,
 }
 
 impl PixelFormat {
@@ -38,7 +49,11 @@ impl PixelFormat {
     /// Gray format that carries the alpha channel of this format.
     pub const fn alpha_format(self) -> Self {
         match self {
-            Self::Gray8 | Self::Rgb8 | Self::Yuv420P8 => Self::Gray8,
+            Self::Gray8 | Self::Rgb8 | Self::Yuv420P8 | Self::Yuv422P8 | Self::Yuv444P8 => {
+                Self::Gray8
+            }
+            Self::Gray10 | Self::Yuv420P10 | Self::Yuv422P10 | Self::Yuv444P10 => Self::Gray10,
+            Self::Gray12 | Self::Yuv444P12 => Self::Gray12,
             Self::Gray16 | Self::Rgb16 => Self::Gray16,
             Self::Gray32F | Self::Rgb32F => Self::Gray32F,
         }
@@ -46,24 +61,32 @@ impl PixelFormat {
 
     pub const fn color_family(self) -> ColorFamily {
         match self {
-            Self::Gray8 | Self::Gray16 | Self::Gray32F => ColorFamily::Gray,
+            Self::Gray8 | Self::Gray10 | Self::Gray12 | Self::Gray16 | Self::Gray32F => {
+                ColorFamily::Gray
+            }
             Self::Rgb8 | Self::Rgb16 | Self::Rgb32F => ColorFamily::RGB,
-            Self::Yuv420P8 => ColorFamily::YUV,
+            Self::Yuv420P8
+            | Self::Yuv420P10
+            | Self::Yuv422P8
+            | Self::Yuv422P10
+            | Self::Yuv444P8
+            | Self::Yuv444P10
+            | Self::Yuv444P12 => ColorFamily::YUV,
         }
     }
 
     pub const fn sample_type(self) -> SampleType {
         match self {
-            Self::Gray8 | Self::Gray16 | Self::Rgb8 | Self::Rgb16 | Self::Yuv420P8 => {
-                SampleType::Integer
-            }
             Self::Gray32F | Self::Rgb32F => SampleType::Float,
+            _ => SampleType::Integer,
         }
     }
 
     pub const fn bits_per_sample(self) -> i32 {
         match self {
-            Self::Gray8 | Self::Rgb8 | Self::Yuv420P8 => 8,
+            Self::Gray8 | Self::Rgb8 | Self::Yuv420P8 | Self::Yuv422P8 | Self::Yuv444P8 => 8,
+            Self::Gray10 | Self::Yuv420P10 | Self::Yuv422P10 | Self::Yuv444P10 => 10,
+            Self::Gray12 | Self::Yuv444P12 => 12,
             Self::Gray16 | Self::Rgb16 => 16,
             Self::Gray32F | Self::Rgb32F => 32,
         }
@@ -71,23 +94,41 @@ impl PixelFormat {
 
     pub const fn bytes_per_sample(self) -> usize {
         match self {
-            Self::Gray8 | Self::Rgb8 | Self::Yuv420P8 => 1,
+            Self::Gray8 | Self::Rgb8 | Self::Yuv420P8 | Self::Yuv422P8 | Self::Yuv444P8 => 1,
             Self::Gray16 | Self::Rgb16 => 2,
             Self::Gray32F | Self::Rgb32F => 4,
+            // Every depth a planar yuv format names is stored in a 16 bit word.
+            _ => 2,
+        }
+    }
+
+    /// Largest sample an integer format holds, which is what an opaque alpha
+    /// plane is filled with.
+    ///
+    /// A ten or twelve bit format is not stored wider than its depth allows, so
+    /// the two byte integer formats do not share one maximum. Float samples have
+    /// no largest value, and nothing asks one for them.
+    pub const fn integer_max(self) -> u16 {
+        let bits = self.bits_per_sample();
+        if bits >= 16 {
+            u16::MAX
+        } else {
+            ((1u32 << bits) - 1) as u16
         }
     }
 
     pub const fn plane_count(self) -> usize {
         match self {
-            Self::Gray8 | Self::Gray16 | Self::Gray32F => 1,
-            Self::Rgb8 | Self::Rgb16 | Self::Rgb32F | Self::Yuv420P8 => 3,
+            Self::Gray8 | Self::Gray10 | Self::Gray12 | Self::Gray16 | Self::Gray32F => 1,
+            _ => 3,
         }
     }
 
     /// Chroma subsampling of this format, as VapourSynth reports it.
     pub const fn sub_sampling(self) -> (i32, i32) {
         match self {
-            Self::Yuv420P8 => (1, 1),
+            Self::Yuv420P8 | Self::Yuv420P10 => (1, 1),
+            Self::Yuv422P8 | Self::Yuv422P10 => (1, 0),
             _ => (0, 0),
         }
     }
@@ -99,8 +140,10 @@ impl PixelFormat {
     /// one row or column; [`Self::frame_plane_dimensions`] is the size a frame
     /// actually holds.
     pub fn plane_dimensions(self, plane: usize, width: usize, height: usize) -> (usize, usize) {
-        match self {
-            Self::Yuv420P8 if plane > 0 => (width.div_ceil(2), height.div_ceil(2)),
+        match (self.sub_sampling(), plane) {
+            (_, 0) => (width, height),
+            ((1, 1), _) => (width.div_ceil(2), height.div_ceil(2)),
+            ((1, 0), _) => (width.div_ceil(2), height),
             _ => (width, height),
         }
     }
@@ -115,8 +158,10 @@ impl PixelFormat {
         width: usize,
         height: usize,
     ) -> (usize, usize) {
-        match self {
-            Self::Yuv420P8 if plane > 0 => (width / 2, height / 2),
+        match (self.sub_sampling(), plane) {
+            (_, 0) => (width, height),
+            ((1, 1), _) => (width / 2, height / 2),
+            ((1, 0), _) => (width / 2, height),
             _ => (width, height),
         }
     }
@@ -143,12 +188,20 @@ impl PixelFormat {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Gray8 => "Gray8",
+            Self::Gray10 => "Gray10",
+            Self::Gray12 => "Gray12",
             Self::Gray16 => "Gray16",
             Self::Gray32F => "GrayS",
             Self::Rgb8 => "RGB24",
             Self::Rgb16 => "RGB48",
             Self::Rgb32F => "RGBS",
             Self::Yuv420P8 => "YUV420P8",
+            Self::Yuv420P10 => "YUV420P10",
+            Self::Yuv422P8 => "YUV422P8",
+            Self::Yuv422P10 => "YUV422P10",
+            Self::Yuv444P8 => "YUV444P8",
+            Self::Yuv444P10 => "YUV444P10",
+            Self::Yuv444P12 => "YUV444P12",
         }
     }
 }
@@ -953,7 +1006,7 @@ pub fn write_opaque_alpha(
     let started = Instant::now();
     match format.bytes_per_sample() {
         1 => fill_plane::<u8>(target, u8::MAX),
-        2 => fill_plane::<u16>(target, u16::MAX),
+        2 => fill_plane::<u16>(target, format.integer_max()),
         4 => fill_plane::<f32>(target, 1.0),
         bytes => {
             return Err(ImgSeqError::new(format!(
@@ -1269,6 +1322,21 @@ mod tests {
         assert_eq!(PixelFormat::Gray32F.bits_per_sample(), 32);
         assert_eq!(PixelFormat::Gray32F.plane_count(), 1);
         assert_eq!(PixelFormat::Gray32F.name(), "GrayS");
+    }
+
+    #[test]
+    fn the_opaque_fill_is_the_largest_sample_of_the_format() {
+        assert_eq!(PixelFormat::Gray8.integer_max(), 255);
+        assert_eq!(PixelFormat::Rgb8.integer_max(), 255);
+        assert_eq!(PixelFormat::Gray10.integer_max(), 1023);
+        assert_eq!(PixelFormat::Yuv420P10.integer_max(), 1023);
+        assert_eq!(PixelFormat::Gray12.integer_max(), 4095);
+        assert_eq!(PixelFormat::Yuv444P12.integer_max(), 4095);
+        assert_eq!(PixelFormat::Gray16.integer_max(), u16::MAX);
+        // The fill of a format is the maximum of the alpha format it hands out.
+        for format in [PixelFormat::Gray10, PixelFormat::Yuv444P12] {
+            assert_eq!(format.alpha_format().integer_max(), format.integer_max());
+        }
     }
 
     #[test]

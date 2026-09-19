@@ -28,12 +28,19 @@ half the logical cores (capped at four) and `0` disables lookahead decoding.
 192 MiB and one frame of the largest image per worker, and `0` is rejected
 because `prefetch=0` is how lookahead is disabled.
 
+a frame is not always rgb: a lossy webp is handed out as its own yuv planes, and
+so is a colour heif/heic page (libheif's planes) and a colour avif (dav1d's),
+whenever the container states a matrix VapourSynth names. a container that states
+code 2 or nothing keeps the rgb the plugin builds, and a monochrome page of any
+family is gray at its own depth.
+
 frames are tagged with the colour their container states: `_Primaries` and
 `_Transfer` for every family, `_Matrix` and `_Range` for a yuv frame, from an
-`nclx` box, a `cICP` chunk or a jxl codestream header. a code VapourSynth has no
-name for, code 2 (`unspecified`), and a file that states nothing all leave those
-properties unset, and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the
-file says.
+`nclx` box, a `cICP` chunk, a jxl codestream header or an av1 sequence header
+(`color_config`), and `_ChromaLocation` only when a subsampled frame's container
+names a sample position. a code VapourSynth has no name for, code 2
+(`unspecified`), and a file that states nothing all leave those properties unset,
+and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
 
 ## repository rules
 
@@ -57,12 +64,15 @@ file says.
 - `src/decoder.rs`: image probing and lazy decoding.
 - `src/formats/`: per-format paths for what the `image` crate cannot express or
   reports wrongly, one module per container and picked by extension (`heif.rs`
-  for monochrome heif/heic, for the monochrome avif format and for the avif
-  probe, which answers `decoder::probe` from the container boxes so that probing
-  an avif does not decode it, `jxl.rs` for every jpeg xl, which the `jxl` crate
-  decodes directly because `image` has no jxl format of its own, `png.rs` for
-  the `cICP` chunk, which `image` has no accessor for, and `webp.rs` for the
-  libwebp decode and the lossy yuv format).
+  for monochrome heif/heic and for the colour pages of both containers, which are
+  decoded through libheif's own yuv planes and handed out as they are, `avif.rs`
+  for every colour avif, which `dav1d` decodes and which also answers
+  `decoder::probe` from the container boxes and the av1 sequence header so that
+  probing an avif does not decode it, `jxl.rs` for every jpeg xl, which the `jxl`
+  crate decodes directly because `image` has no jxl format of its own, `png.rs`
+  for the `cICP` chunk, which `image` has no accessor for, and `webp.rs` for the
+  libwebp decode and the lossy yuv format). a monochrome avif still goes through
+  `image` and is corrected to `Gray8` here.
 - `src/pixel.rs`: supported pixel formats and planar frame writes.
 - `src/color.rs`: frame properties, and the container's color metadata mapped
   onto them as `_Primaries`, `_Transfer`, `_Matrix` and `_Range`.
@@ -74,7 +84,10 @@ file says.
   that script's `mono-alpha.png` and `alpha-rgba8.png` with `heif-enc` and
   `avifenc` (`mono-alpha-10.avif` is the 10 bit one), and `alpha-rgba8.jxl` from
   the last with `cjxl`, so a changed source needs them re-encoded by hand. its
-  orientation section reads the `tests/fixtures/orientation-*.png` files written by
+  yuv avif section reads the three crops `avif-yuv420p.avif`, `avif-yuv422p.avif`
+  and `avif-yuv444p10.avif` cut out of the `sandbox/hitokage-sample` yuv avifs,
+  plus `alpha-yuv420p.avif`, and those four are likewise described by hand in
+  that script's header. its orientation section reads the `tests/fixtures/orientation-*.png` files written by
   `tests/make-orientation-fixtures.py`, plus `orientation-6.jxl`, which that
   script documents and `cjxl` makes, and its yuv orientation section reads the
   `orientation-{2,6,8}.webp` files that script cuts out of

@@ -111,6 +111,24 @@ impl Cicp {
     }
 }
 
+/// The `_ChromaLocation` a chroma sample position states, from the two bit field
+/// of an av1 coding record.
+///
+/// The field names three things: unknown, the chroma samples vertically between
+/// the luma samples and co-sited with them horizontally, and the samples
+/// co-sited both ways. The first is not a position, so it leaves the property
+/// unset exactly like a file with no field at all; the other two are the two
+/// positions VapourSynth has for them, which is how a dav1d based tool reports
+/// the same bitstream.
+#[must_use]
+pub const fn chroma_location(position: u8) -> Option<ffi::VSChromaLocation> {
+    match position {
+        1 => Some(ffi::VSChromaLocation::VSC_CHROMA_LEFT),
+        2 => Some(ffi::VSChromaLocation::VSC_CHROMA_TOP_LEFT),
+        _ => None,
+    }
+}
+
 /// Attaches the source metadata of `image` to a frame of `format`.
 ///
 /// `format` is the pixel format of the clip that owns the frame, so an alpha
@@ -231,6 +249,21 @@ pub fn set_frame_properties(
             AppendMode::Replace,
         )
         .map_err(ImgSeqError::from_display)?;
+
+    // The position of the chroma samples is a statement about a subsampled yuv
+    // frame, and a file that does not name one leaves the property unset rather
+    // than claiming the samples sit where they do not.
+    if format.sub_sampling() != (0, 0)
+        && let Some(location) = image.chroma_location
+    {
+        properties
+            .set(
+                key!(c"_ChromaLocation"),
+                Value::Int(i64::from(location as i32)),
+                AppendMode::Replace,
+            )
+            .map_err(ImgSeqError::from_display)?;
+    }
 
     if let Some(alpha) = alpha_marker {
         properties

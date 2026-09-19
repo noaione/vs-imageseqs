@@ -23,6 +23,27 @@ commands from the repository root whenever a source png changes, with
     avifenc --lossless --qalpha 100 -o tests/fixtures/alpha-rgba8.avif tests/fixtures/alpha-rgba8.png
     cjxl -d 0 tests/fixtures/alpha-rgba8.png tests/fixtures/alpha-rgba8.jxl
 
+The yuv avif fixtures are the same kind of hand-made container: every one of
+them states a matrix the frame properties can name, which is what moves a file
+onto the plugin's own avif path. The three crops come from the
+``sandbox/hitokage-sample`` files of the same layout, because those are the only
+yuv avifs in the sandbox, and they are cut with ``magick`` through a png, so the
+samples are the decoder's rgb of the crop re-encoded as yuv:
+
+    magick "sandbox/hitokage-sample/avif-yuv420p.avif[64x48+0+0]" crop.png
+    avifenc -q 100 --cicp 1/13/6 -r full --yuv 420 crop.png tests/fixtures/avif-yuv420p.avif
+    magick "sandbox/hitokage-sample/avif-yuv422p.avif[64x48+0+0]" crop.png
+    avifenc -q 100 --cicp 1/13/6 -r full --yuv 422 crop.png tests/fixtures/avif-yuv422p.avif
+    magick "sandbox/hitokage-sample/avif-yuv444p10le.avif[32x24+0+0]" crop.png
+    avifenc -q 100 -d 10 --cicp 1/13/6 -r full --yuv 444 crop.png tests/fixtures/avif-yuv444p10.avif
+
+The alpha fixture is the four by four source below, encoded as the yuv page it
+is the alpha of, so that the validator can state its planes: the samples are
+neutral, which makes the two chroma planes 128 everywhere, and the alpha of the
+four columns differs while the colour of the four rows differs:
+
+    avifenc -q 100 --qalpha 100 --cicp 1/13/6 -r full --yuv 420 tests/fixtures/yuv-rgba8.png tests/fixtures/alpha-yuv420p.avif
+
 ``heif-enc`` is x265 through libheif and ``avifenc`` is aom through libavif; both
 are asked for lossless output so the validator can state the exact samples, and
 both keep the alpha plane at full quality. The heif encoder writes a monochrome
@@ -52,6 +73,12 @@ HEIGHT = 2
 # Size of the source image the heif and avif fixtures are encoded from.
 MONO_WIDTH = 7
 MONO_HEIGHT = 5
+
+# Size of the neutral source the yuv avif fixture with an alpha item is encoded
+# from. Both sides are even, because a 4:2:0 encode needs a chroma plane of half
+# the height and the width.
+YUV_WIDTH = 4
+YUV_HEIGHT = 4
 
 # PNG color types.
 GRAY = 0
@@ -211,6 +238,24 @@ def main() -> None:
         ],
         width=MONO_WIDTH,
         height=MONO_HEIGHT,
+    )
+    # The source of the yuv avif fixture that holds an alpha item. Neutral
+    # samples, so the chroma of the encode is 128 everywhere, with the colour of
+    # the four rows and the alpha of the four columns differing.
+    png(
+        write("yuv-rgba8.png"),
+        RGB_ALPHA,
+        8,
+        [
+            [
+                sample
+                for x in range(YUV_WIDTH)
+                for sample in (72 * y, 72 * y, 72 * y, 85 * x)
+            ]
+            for y in range(YUV_HEIGHT)
+        ],
+        width=YUV_WIDTH,
+        height=YUV_HEIGHT,
     )
     tiff_rgba32f(
         write("alpha-rgba32f.tiff"),

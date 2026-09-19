@@ -9,14 +9,21 @@
 //! A module exposes two entry points for [`decoder::decode`](crate::decoder::decode):
 //!
 //! - `handles(info)` — whether this module owns that image
-//! - `decode(info)` — decode it into the interleaved buffer the frame writer
-//!   expects, with the same timings and the same consistency checks as the
-//!   `image` path
+//! - `decode(info)` — decode it into the planes, or the interleaved buffer, the
+//!   frame writer expects, with the same timings and the same consistency checks
+//!   as the `image` path
+//!
+//! A module that can describe a file from its own container without decoding it
+//! also exposes `image_info(path)` for the probe, and `output_format` for the
+//! files it describes but leaves to the `image` path: [`heif`] answers both, and
+//! [`avif`] answers them for a file the `image` decoder would have had to decode
+//! whole before it could report a size.
 //!
 //! A module that only reads a container exposes neither, because the `image`
 //! path decodes those files: [`png`] answers what a png states about the colour
 //! of its samples and nothing else.
 
+pub mod avif;
 pub mod heif;
 pub mod jxl;
 pub mod png;

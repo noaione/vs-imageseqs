@@ -64,15 +64,17 @@ Rust
 │     ├── PNG
 │     ├── JPEG
 │     ├── TIFF
-│     ├── AVIF
 │     ├── EXR
-│     └── other supported formats
+│     └── other supported formats, a monochrome AVIF among them
 │
 ├── libwebp
 │     └── WebP, lossy files as planar yuv
 │
+├── dav1d
+│     └── AVIF, the item's own planes, read by `src/formats/avif.rs`
+│
 ├── libheif-rs
-│     └── HEIF / HEIC pages, and a monochrome AVIF
+│     └── HEIF / HEIC pages, as planar yuv
 │
 └── jxl
       └── JPEG XL, decoded by `src/formats/jxl.rs`
@@ -267,7 +269,6 @@ image-rs
 ├── TIFF
 ├── GIF
 ├── BMP
-├── AVIF
 ├── EXR
 ├── DDS
 ├── Farbfeld
@@ -275,11 +276,17 @@ image-rs
 ├── QOI
 ├── TGA
 ├── ICO
-└── HDR
+├── HDR
+└── a monochrome AVIF (the colour path is below)
 
 JPEG XL
 └── jxl
     └── decoded by `src/formats/jxl.rs`
+
+AVIF
+└── dav1d
+    └── the primary item's own planes, described and fed by
+        `src/formats/avif.rs`
 
 HEIF / HEIC
 └── libheif-rs
@@ -381,7 +388,7 @@ Use `libheif-rs`.
 HEIF is treated separately from AVIF:
 
 ```text
-AVIF        -> image-rs avif-native
+AVIF        -> dav1d, through `src/formats/avif.rs`
 HEIF / HEIC -> libheif-rs
 ```
 
@@ -393,27 +400,73 @@ x64-windows-static-md
 
 HEIC decoding uses the HEVC decoder provided by the `libheif` dependency stack; HEVC encoding support is not required for this plugin.
 
-Colour HEIF/HEIC is read through the `image-rs` decoding hook that `libheif-rs` ships (`libheif_rs::integration::image`), registered once in `src/decoder.rs`. That hook decodes into an interleaved buffer and requires `planes.interleaved` to exist, so it cannot return a monochrome image, which decodes into a single luma plane.
+Every HEIF/HEIC page is decoded through `libheif-rs` in `src/formats/heif.rs`.
+Asking for `ColorSpace::Rgb` made libheif run its own yuv to rgb conversion into
+an interleaved buffer, which the plugin then split into three planes again; the
+module asks for `ColorSpace::YCbCr` with the chroma the file states instead, so
+the planes libheif decodes are the ones the frame is filled from. A 4:2:0 page
+costs half the bytes and its depth is carried by the format, and no conversion
+happens in either direction — `docs/improvements/12-heif-avif-yuv-output.md` has
+the measurement. The planes it reads are `planes.y`/`cb`/`cr`/`a`, each a
+`Plane` with its own width, height and stride, which the module already walked
+for the monochrome path, and its `color_profile_nclx()`,
+`luma_bits_per_pixel()` and `has_alpha_channel()` answer the rest of the probe.
 
-Monochrome HEIF/HEIC is therefore decoded directly through `libheif-rs` in `src/formats/heif.rs`, which asks for `ColorSpace::Monochrome` and packs the planes into the same interleaved layout the frame writer accepts. `src/formats/` holds one module per container that the `image` crate cannot express; `decoder::decode` asks each module whether it handles the image before falling back to `image-rs`.
+Two things did not move with it. libheif applies the container's `irot`/`imir`
+itself, so a rotated heic is still handed out display-oriented with
+`ImgSeqOrientation` reporting 1, the one promise of
+[12](improvements/12-heif-avif-yuv-output.md) that is not kept: reporting the
+code means reading the transform boxes, each of which also states a size the
+module has to keep straight. And the alpha item is decoded whenever the probe
+found one, for `Read` as well as `ReadAlpha`, because the colour type a probe
+reports is decided before either clip is asked for a frame. libheif decodes the
+whole handle at once, so asking for the alpha separately would open it twice.
 
-AVIF still decodes through `image-rs`, but a monochrome avif is handed out in a
-corrected format. `image-rs`'s avif decoder converts every file to r,g,b as it
-decodes it, so it reports `Rgba8` for a page whose bitstream is monochrome and
-the file would come back as `RGB24`, three times the bytes of the single plane it
-holds. The container says what the samples are, so `src/formats/heif.rs` gained
-`output_format(path, color_type)`, which the probe calls beside the webp one when
-it has to build a decoder anyway: it reads the leading boxes of an avif and, when
-the `av1C` sequence header sets `mono_chrome`, answers `Gray8` or `Gray16` plus
-the alpha an `auxl`/`auxC` entry names, so a monochrome avif with alpha becomes
-`La8`/`La16`. The pixels are the ones `image-rs` already produced and they were
-always right — all three channels
-hold the luma — so this changes the format, not the samples. Decoding avif
-through `libheif` instead would copy the plane the file holds, but only a
-`libheif` built with a decoder for av1 can read avif at all, and the windows
-build linked here has none: `LibHeif::decoder_descriptors(16, None)` reports
-`["libde265"]`, and enabling av1 in vcpkg's libheif would add libaom as a native
-dependency. Correcting the format keeps one code path on every platform.
+Monochrome HEIF/HEIC asks for `ColorSpace::Monochrome` and writes the single
+plane into a `Gray8`/`Gray10`/`Gray16` frame. `src/formats/` holds one module per
+container that the `image` crate cannot express; `decoder::decode` asks each
+module whether it handles the image before falling back to `image-rs`.
+
+### AVIF
+
+AVIF goes through the `dav1d` crate in `src/formats/avif.rs`, and not through
+`image`'s avif decoder: that decoder converts to rgb in rust, always reports four
+channels whatever the file holds, always decodes the alpha item, and left-aligns
+the samples into 16 bit words, which is where a ten bit page used to lose its
+depth into `RGB48`. `dav1d` is the same decoder `image` already linked for avif,
+so this adds a direct dependency and no native code; the picture arrives as the
+planes the bitstream holds, **right aligned**, which is what a VapourSynth ten
+bit frame holds too — no shift, no conversion.
+
+The module is in the shape of `formats/heif.rs` and `formats/jxl.rs`:
+
+- **the probe** is a box walk that answers `image_info(path)` without decoding:
+  the leading boxes give the brand, `meta` gives `iprp`, its `ipco` properties
+  and its `ipma` associations (which index the property list from one), `iloc`
+  the extents and `pitm` the primary item, and `iref`'s `auxl` reference with
+  its `auxC` property names the alpha item beside it. `ispe` agrees on a size,
+  `av1C` gives the depth and the subsampling, and `colr` of type `nclx` gives
+  the matrix and the range when the file has one. **34 of the 35 files in
+  `sandbox/avif` have none**, so the value comes from the AV1 sequence header's
+  `color_config` at the head of the item's own bytes: a bit read of one OBU,
+  where the sequence header's optional `timing_info` and `decoder_model_info`
+  blocks have to be stepped over first.
+- **the decode** feeds the primary item's payload to `dav1d::Decoder::send_data`,
+  takes the `Picture`, and copies `picture.plane(Y/U/V)` into the planes the
+  frame owns, using `picture.pixel_layout()` for the chroma geometry and the
+  layout the frame has for the rest. A **grid** — a primary item that is a
+  `dimg` reference to tiles — is refused with a clear error rather than half
+  read.
+- **a monochrome item is still `image`'s.** `avif::handles` takes a file whose
+  probe answered a yuv format and whose extension is `avif`, so a monochrome
+  avif keeps [05](improvements/05-monochrome-heif.md)'s corrected
+  `Gray8`/`Gray16` and the `image` decode behind it, and
+  [10](improvements/10-nominal-bit-depth.md) owns the nominal depth question
+  there. A monochrome item is a single plane dav1d hands over directly, which is
+  the obvious next step for that plan rather than a gap here.
+- **the alpha item** is decoded only when the colour type says the file has one,
+  into the gray format of the same depth (`YUV420P10` gives a `Gray10` alpha),
+  and its own bit depth is checked against that format before it is copied.
 
 A frame can then have fewer planes than the buffer behind it, which is why
 `pixel::write_planar` asks `planes_to_write` for the smaller of the two counts
@@ -421,17 +474,6 @@ instead of writing every plane the frame has: a `Gray8` frame with an `Rgba8`
 buffer is one plane and three channels, and only the first channel is written.
 The two counts disagree the other way only on a bug, which is what the error
 reports.
-
-The same boxes let the module answer the probe itself, through
-`image_info(path)`: `ispe` agrees on a size, `av1C` gives the depth and whether
-the samples are monochrome, `colr` of type `prof`/`rICC` means an ICC profile and
-`auxC` names the alpha item, which is what `color_type`, `original_color_type`,
-`has_icc_profile` and `format` are built from. It declines, and the file goes
-back through `AvifDecoder`, on a `clap`, `irot` or `imir` transform it does not
-apply, on two sizes or two coded records that disagree, and on a file whose brand
-is not `avif`/`avis`, so a file it describes is one whose decode matches what it
-promised. `decoder::decode` compares width, height and color type against the
-probe all the same and fails the frame if they disagree.
 
 ### WebP
 
@@ -822,24 +864,26 @@ let original = decoder.original_color_type();
 This allows the plugin to construct the correct `VSVideoInfo` without decoding the entire image.
 
 A container can also answer the whole probe, which is what `decoder::probe` asks
-for first: `formats::heif::image_info` describes an avif from `ispe`, `av1C`,
-`colr` and `auxC` and returns before a decoder is built. `image-rs`'s avif
-decoder decodes the picture, and the alpha item beside it, inside
-`AvifDecoder::new` and keeps them, because the size it reports is the decoded
-picture's own, so building one to probe a file decodes that file for the second
-time. Probing the 35 page 130 MB avif set of [BENCH.md](BENCH.md) took 6.4 s that
-way, 183 ms per file, and takes 2 ms from the container. A file the module cannot
-fully predict falls through to the decoder.
+for first: `formats::avif::image_info` describes an avif from `ispe`, `av1C`,
+`iloc`, `ipma` and the AV1 sequence header, and returns before a decoder is
+built, and `formats::heif::image_info` answers a heic from the libheif handle.
+`image-rs`'s avif decoder decodes the picture, and the alpha item beside it,
+inside `AvifDecoder::new` and keeps them, because the size it reports is the
+decoded picture's own, so building one to probe a file decodes that file for the
+second time. Probing the 35 page 130 MB avif set of [BENCH.md](BENCH.md) took
+6.4 s that way, 183 ms per file, and takes 2 ms from the container. A file a
+module cannot fully predict falls through to the decoder.
 
 One step is then added after the color types above: `decoder::probe` passes them
 to `format_override`, which is where a container can correct the format the
-decoder reports — the correction the avif probe applies itself when it does
-describe the file. `src/formats/webp.rs` uses it to hand back a lossy webp
+decoder reports. `src/formats/webp.rs` uses it to hand back a lossy webp
 without alpha as `YUV420P8` when the decoder reports rgb, and
-`src/formats/heif.rs` uses it to hand back a monochrome avif as
-`Gray8`/`Gray16` when `image-rs` reports `Rgba8` for it. Both read only the
-leading boxes of the file, and both answer `None` for a file they do not need to
-correct.
+`src/formats/avif.rs` uses it for a monochrome avif, which `image-rs` reports as
+`Rgba8` and whose `av1C` says is `Gray8`/`Gray16`. Both read only the leading
+boxes of the file, and both answer `None` for a file they do not need to
+correct. A colour avif or heic never reaches that step: `formats::avif::handles`
+and the heif module answer the probe themselves, yuv and all, so there is nothing
+left for `image-rs` to report.
 
 ---
 
@@ -865,6 +909,12 @@ RGBA16            RGB48 + alpha
 RGBA32F           RGBS + alpha
 
 planar yuv 4:2:0   YUV420P8
+planar yuv 4:2:0   10 bit  YUV420P10
+planar yuv 4:2:2   YUV422P8 / YUV422P10
+planar yuv 4:4:4   YUV444P8 / YUV444P10 / YUV444P12
+
+GRAY10            10-bit gray, for the alpha of a 10-bit yuv page
+GRAY12            12-bit gray, for the alpha of a 12-bit yuv page
 ```
 
 For the initial implementation, use:
@@ -875,16 +925,27 @@ u16 -> 16-bit VS format
 f32 -> 32-bit float VS format
 ```
 
-That leaves one hole. A file whose nominal depth is 9 to 15 is handed out as the
-16-bit format, so a 10-bit avif comes back as `Gray16` with its samples left
-aligned in the word rather than as the `Gray10` it is — 0.4% short of the scale
-the format claims, and with the wrong answer for a graph that wanted a 10-bit
-clip. Nothing infers a nominal depth from a `u16` today:
+That leaves one hole. A file whose nominal depth is 9 to 15 and which *is* rgb
+is handed out as the 16-bit format, so a 10-bit tiff comes back as `RGB48` with
+its samples left aligned in the word rather than as a `RGB30`-shaped format —
+0.4% short of the scale the format claims, and with the wrong answer for a graph
+that wanted a 10-bit clip. Nothing infers a nominal depth from a `u16` today:
 [10](improvements/10-nominal-bit-depth.md) is the plan that would, and it is the
 one with the widest blast radius here, because a frame's format is what a graph
-branches on. `YUV420P8` is the exception in the other direction: it is the only
-format this plugin hands out that `image` has no equivalent for, and it exists
-because lossy webp is yuv in the file.
+branches on.
+
+The yuv formats are the exception, and they are why
+[12](improvements/12-heif-avif-yuv-output.md) needed plan
+[08](improvements/08-color-metadata.md) first: a yuv page whose container states
+a matrix the properties can name is handed out as the planes the file holds,
+`YUV420P8` for the sandbox avif and heic sets and `YUV444P10` for a ten bit page,
+with `_Matrix` and `_Range` saying what those planes are. `YUV420P8` was added
+for lossy webp by [03](improvements/03-webp-yuv-output.md), and
+[12](improvements/12-heif-avif-yuv-output.md) extended the table with the
+depths and the chroma the two new readers can produce, together with the gray
+depths an alpha plane of those pages needs. A file that states no usable matrix
+— avif's code 2, or nothing at all — keeps the rgb hand-out it had, which is the
+rule that keeps `sandbox/hitokage-sample` unchanged.
 
 ---
 
@@ -1102,7 +1163,7 @@ _ChromaLocation
 _FieldBased
 ```
 
-What is written today is five of those six. Every frame gets `_FieldBased=0`
+What is written today is six of those six. Every frame gets `_FieldBased=0`
 and `_Range`; `_Matrix` is written for the RGB and YUV families only, because a
 gray frame has no matrix to name:
 
@@ -1111,29 +1172,40 @@ RGB / GRAY   _Matrix = RGB (identity)   _Range = full
 yuv          _Matrix = bt470bg           _Range = limited
 ```
 
-The rgb and gray pair is the meaning of the formats themselves, and the yuv pair
-is what [03](improvements/03-webp-yuv-output.md) established for the one yuv
-format the plugin hands out: vp8 defines those coefficients and ffmpeg reports
-the same two values for the same bitstreams.
+The rgb and gray pair is the meaning of the formats themselves. The yuv pair is
+what [03](improvements/03-webp-yuv-output.md) established for a lossy webp,
+whose vp8 defines those coefficients and for which ffmpeg reports the same two
+values: it is the fallback for a yuv frame that states nothing of its own.
 
-Those two are the values a yuv frame falls back to. [08](improvements/08-color-metadata.md)
+[08](improvements/08-color-metadata.md)
 is implemented, so a file that states its own matrix and range is handed out with
 what it states, while an rgb frame keeps the identity and the full range whatever
 the file says, because the file is describing the yuv it codes and not the r,g,b
-this plugin hands out. `_Primaries` and `_Transfer` come from the same read and
+this plugin hands out.
+[12](improvements/12-heif-avif-yuv-output.md) extended that to hand out the yuv
+planes themselves, so a colour avif or heic page whose container states a matrix
+the enum can name is tagged with the file's own values — matrix 6 and full range
+for the sandbox sets — rather than the fallback pair. `_Primaries` and
+`_Transfer` come from the same read and
 are written for every family, since they describe a picture and not a plane
 layout: a png that states sRGB primaries is describing the rgb it holds. The
-containers read are an `nclx` colour box in avif and heif, a `cICP` chunk in png
+containers read are an `nclx` colour box in avif and heif, a `cICP` chunk in png,
+the AV1 sequence header (`color_config`) when an avif has no `colr` box at all,
 and the codestream header in jxl, and the code points are the h.273 numbers the
 VapourSynth enums already use, so the mapping is the identity where VapourSynth
 names the code and the property stays unset where it does not. Code 2
 (`unspecified`) is a statement rather than a description and leaves the property
-unset, which is also what happens to a file with no box at all.
+unset, which is also what happens to a file with no box at all, and which is why
+such a file keeps its rgb hand-out instead of gaining planes nothing labels.
 
-`_ChromaLocation` is the one of the six that stays unwritten: among these
-containers only av1's sequence header states it, files that store 4:2:0 usually
-leave it `unknown`, and a guess there is exactly the mistake the next paragraph
-forbids. A graph that needs it passes the location into its own resize. The rule
+`_ChromaLocation` is written only for a subsampled frame whose container names a
+position: `chroma_sample_position` in an av1 sequence header, whose three values
+map onto `_ChromaLocation`'s left, top-left and top-collocated. It is
+`unknown` (0) in every sandbox file and absent from every other container the
+plugin reads, so the property stays off a frame rather than guessing a position
+that would misplace the chroma of the next resize — the same rule as code 2,
+applied to a sample position. A graph that needs one passes it into its own
+resize. The rule
 this doc already had stands and is implemented: a file that supplies only an icc
 profile is never turned into sRGB or BT.709 metadata, and the profile's bytes are
 read and dropped — `ImgSeqHasICC` says it is there, and full icc conversion stays
@@ -1259,17 +1331,31 @@ vendored.
 
 `cargo test` covers the pixel plumbing, the prefetch pool (one decode shared by
 two consumers, failed decodes retried, frames of a variable sequence kept
-apart), the clip format mapping, and the container reader an avif is described
-from (its size, bit depth, alpha item, ICC box, file type, the boxes that move
-the picture, the header limit, and a fixture probed from its own container).
+apart), the clip format mapping, and the container readers a file is described
+from: the avif walk (its size, bit depth, alpha item, ICC box, file type, the
+properties an `ipma` table associates from one, the boxes that move the picture,
+the header limit, the AV1 sequence header with and without a colour description,
+and seven real fixtures probed or decoded from their own containers), the heif
+handle and its own colour read, the png chunk walk and the jxl header.
+
 `tests/readalpha.vpy` covers the plugin itself against the fixtures written by
 `tests/make-alpha-fixtures.py`: LA/RGBA 8/16-bit and float, opaque fills, mixed
-alpha presence, variable depth, `ImgSeqAlpha`, `_Matrix`, prefetch variants,
-the shared decode, and the monochrome containers — `mono-alpha.heic`,
+alpha presence, variable depth, `ImgSeqAlpha`, `_Matrix`/`_Range`, prefetch
+variants, the shared decode, the monochrome containers — `mono-alpha.heic`,
 `mono-alpha.avif` and the ten bit `mono-alpha-10.avif`, whose planes are the
-exact samples of the 7x5 `mono-alpha.png` they are encoded from — beside the
-colour containers (`alpha-rgba8.heic`, `alpha-rgba8.avif`) that must keep
-`RGB24`.
+exact samples of the 7x5 `mono-alpha.png` they are encoded from — and the colour
+containers: `alpha-rgba8.avif`, which states the identity matrix and stays
+`RGB24`, beside `alpha-rgba8.heic`, which states bt.601 and is now `YUV420P8`.
+
+[12](improvements/12-heif-avif-yuv-output.md) added a yuv section to it: the
+three crop fixtures (`avif-yuv420p`, `avif-yuv422p`, `avif-yuv444p10`, the last
+at `YUV444P10`) are read as one clip with `mismatch=True` and each frame is
+checked for its format, its size, its chroma plane's own size, its `_Matrix` (6)
+and `_Range` (1), and for `_ChromaLocation` staying off a file that states no
+position; the 4x4 `alpha-yuv420p.avif` is checked plane by plane against the
+`yuv-rgba8.png` it is encoded from, alpha included; the opaque fill is checked to
+be the depth's own maximum (255 on the 8-bit page, 1023 on the ten bit one); and
+a yuv page beside an rgb one is rejected without `mismatch`.
 
 ---
 
@@ -1341,7 +1427,7 @@ prefetch.rs
     worker threads
 
 decoder.rs
-    image-rs decoder creation and the hooks of libheif-rs
+    image-rs decoder creation and the routing to the modules
     metadata-only probing
     image decoding
 
@@ -1397,22 +1483,27 @@ format-based clip grouping
 special 10/12-bit preservation
 ```
 
-The list has moved twice since it was written:
+The list has moved three times since it was written:
 
 - **`native YUV preservation` is done**, for the one format that stores yuv and
   can be handed out that way: a lossy webp without alpha is a `YUV420P8` clip.
   Decoding it to rgb first cost a conversion nothing asked for and half the
   lookahead budget — the sandbox webp set reads in 3.39 s instead of 5.66 s at
   the default `prefetch` and 11.94 s instead of 19.97 s at `prefetch=0`, which
-  [03](improvements/03-webp-yuv-output.md) measured.
+  [03](improvements/03-webp-yuv-output.md) measured. A colour heif, heic or avif
+  page followed in [12](improvements/12-heif-avif-yuv-output.md), where the
+  container's own planes and its own matrix decide the format.
 - **`special 10/12-bit preservation` is no longer deferred but planned**: it is
   [10](improvements/10-nominal-bit-depth.md), which is work rather than a
-  decision to leave alone.
+  decision to leave alone. [12](improvements/12-heif-avif-yuv-output.md) took the
+  half of it that a yuv page needs, because those planes carry their depth in the
+  format; what is left is rgb and jxl, where a nominal depth has to be chosen for
+  a 16 bit buffer.
 
 The rest is policy and stays where it is: icc conversion, gpu output (waiting on
 `vapoursynth4-rs`), SIMD, custom Rayon, and the two python-side helpers.
 `docs/improvements/README.md`'s `not planned` section has the reason for each,
-and the other plans this doc asks for are 06 to 10 in that same folder.
+and the plans this doc still asks for are 06, 07 and 10 in that same folder.
 
 ---
 
@@ -1443,13 +1534,16 @@ Sequence (shared by every clip of one call)
    decoder::probe / decoder::decode
          │
          ├── image-rs           PNG, JPEG, TIFF, GIF, BMP, EXR, PNM, QOI,
-         │   │                  TGA, ICO, HDR, and avif, whose samples it
-         │   │                  decodes as rgb whatever the file holds
-         │   └── libheif-rs     colour heif/heic, through its image hook
+         │   │                  TGA, ICO, HDR, and a monochrome avif, whose
+         │   │                  samples it decodes as rgb whatever the file holds
+         │   └── libheif-rs     colour heif/heic, which it decodes as its own
+         │                      yuv planes rather than through the image hook
          │
          └── src/formats/       the files those paths describe wrongly
-             ├── heif.rs        monochrome heif/heic and monochrome avif, and
-             │                  the avif probe that answers before a decode
+             ├── heif.rs        monochrome heif/heic and the heif handle's own
+             │                  colour, bit depth and alpha
+             ├── avif.rs        every colour avif, through `dav1d`, and the avif
+             │                  probe that answers before any decode
              ├── jxl.rs         every jpeg xl, which `image` has no format for
              ├── png.rs         the `cICP` chunk of every png, which `image`
              │                  has no accessor for

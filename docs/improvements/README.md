@@ -47,7 +47,15 @@ ten bit page loses its depth into `RGB48`, and both libheif and `image` spend a
 conversion per frame that the graph may not even want. it hands out the planes
 the decoders have instead, which needs [08](08-color-metadata.md)'s matrix and
 range to label them honestly — and which changes the format of every colour heic
-and avif frame, the largest output change this plugin would ever have made.
+and avif frame, the largest output change this plugin has made. it is implemented
+in `src/formats/heif.rs` and the new `src/formats/avif.rs` (`dav1d` reading the
+avif item, with the container walked by the module itself), with the yuv variants
+in `src/pixel.rs`: 34 of the 35 `sandbox/avif` pages and the 4 colour pages of
+`sandbox/heic` are `YUV420P8` now, a frame is 55.40 → 27.70 MiB, and the avif
+decode pass is 35% faster. the 31 monochrome heic pages, the unspecified-matrix
+`hitokage-sample` avifs and every other container are unchanged, and the four
+promises it does not keep — a heic's orientation code, the alpha item on `Read`,
+`iinf`/`pixi`, and the monochrome avif decode — are listed in the plan.
 
 ## evidence in short
 
@@ -120,7 +128,7 @@ open plus frames to 4.99 s.
 | [09 exif orientation](09-exif-orientation.md) | `src/decoder.rs`, `src/source.rs`, `src/clip.rs`, `src/pixel.rs`, fixtures, `tests/readalpha.vpy` | a file whose exif says 6 comes out the way its thumbnail looks, behind an `apply_rotation` argument that defaults on, and `ImgSeqOrientation` keeps saying what the file said | medium, it swaps width and height | implemented |
 | [10 nominal bit depth](10-nominal-bit-depth.md) | `src/pixel.rs`, `src/decoder.rs`, `src/formats/heif.rs`, `src/formats/jxl.rs`, `src/clip.rs`, `src/source.rs` | a 10-bit avif is `Gray10`/`RGB30` instead of `Gray16`/`RGB48`, with the samples shifted into the words a 10-bit frame holds, and the 16-bit files stay 16-bit | medium, every 9-to-15-bit file changes format | proposed |
 | [11 jxl without the image integration](11-jxl-direct.md) | `Cargo.toml`, `src/formats/jxl.rs` (new), `src/formats/mod.rs`, `src/decoder.rs`, `src/pixel.rs`, fixtures, `tests/readalpha.vpy` | a jxl that states an orientation reports it and `apply_rotation=False` gives the stored picture back, and the codestream's colour encoding and bit depth reach the probe | medium, the decode loop becomes ours | implemented |
-| [12 heif and avif planes](12-heif-avif-yuv-output.md) | `Cargo.toml`, `src/pixel.rs`, `src/decoder.rs`, `src/formats/heif.rs`, `src/formats/avif.rs` (new), `src/color.rs`, `src/clip.rs`, `src/source.rs`, fixtures, `tests/readalpha.vpy` | a colour heic or avif page is `YUV420P8`/`YUV444P10` instead of `RGB24`/`RGB48`, at half the bytes and with no conversion in the plugin, and a rotated heic reports its `irot`/`imir` code | high, it changes the format of every colour heic and avif frame | proposed |
+| [12 heif and avif planes](12-heif-avif-yuv-output.md) | `Cargo.toml`, `src/pixel.rs`, `src/decoder.rs`, `src/formats/heif.rs`, `src/formats/avif.rs` (new), `src/color.rs`, `src/clip.rs`, `src/source.rs`, fixtures, `tests/readalpha.vpy` | a colour heic or avif page is `YUV420P8`/`YUV444P10` instead of `RGB24`/`RGB48`, at half the bytes and with no conversion in the plugin: 55.40 → 27.70 MiB a frame, the avif decode pass 35% faster | high, it changes the format of every colour heic and avif frame | implemented |
 
 the dependencies were thin: 01 and 02 were independent of each other, 03 needed
 04, and 05 was independent of all of them and is the only one that fixes
@@ -148,13 +156,17 @@ make, and 10 keeps the jxl rows, the rgb files that state 9 to 15 bits, and the
 monochrome ones. that makes the order 08, 12, 10 the cheapest one — but 12 is
 also the widest change on the list, so doing the small metadata win and the
 smaller depth work first is a defensible alternative, it just means writing the
-avif depth shift for the rgb path that 12 would then retire.
+avif depth shift for the rgb path that 12 would then retire. 08 and 12 both
+landed, so 10 is next and only its jxl, rgb and monochrome rows are left.
 
 order of value, as it turned out: 04 + 03 were the only route past bestsource on
 webp, 02 was worth 5% to 35% on the frames it was written for and took the manga
 jpeg corpus from 1.6x to 2.5x of bestsource, 05 repaired a format that never
 worked at all, and 09 removed the last place where the two plugins disagreed
-about what a file means. 09 also cost the most of the small ones: a transposing
+about what a file means. 12 is the second widest of the small-output changes
+(35% off the avif decode pass and half the bytes per frame) and the only one that
+makes a graph do different work rather than the plugin, which is why its plan
+page carries a parity measurement beside its speed one. 09 also cost the most of the small ones: a transposing
 write reads across the decoder buffer instead of along it, which was 9x the
 identity write before the walk was blocked, and 1.7x on an interleaved page and
 2.9x on a planar one once the mirrors went back to whole rows, the channels of a

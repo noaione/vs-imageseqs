@@ -355,22 +355,138 @@ def test_monochrome_containers() -> None:
 
 
 def test_color_containers() -> None:
-    """Colour files inside a heif or avif container keep their colour format."""
-    files = [fixture("alpha-rgba8.heic"), fixture("alpha-rgba8.avif")]
-    clip, alpha = read_alpha(files=files, mismatch=True)
-    # The heif uses 4:2:0 chroma, so its blue plane rounds up by one sample.
-    blue = {"heic": [4, 7, 10, 13, 16, 19], "avif": [3, 6, 9, 12, 15, 18]}
-    for index, label in enumerate(("heic", "avif")):
-        color = clip.get_frame(index)
-        frame = alpha.get_frame(index)
+    """A colour container that states no usable matrix keeps its rgb format.
+
+    ``alpha-rgba8.avif`` states the identity matrix, whose samples are already
+    r,g,b, so the file keeps the ``RGB24`` it has always been handed out as and
+    the alpha item beside it is unchanged. ``alpha-rgba8.heic`` holds the same
+    picture and states bt.601 for the yuv it codes instead, which is what
+    ``test_yuv_containers`` covers.
+    """
+    clip, alpha = read_alpha(files=[fixture("alpha-rgba8.avif")])
+    check(len(clip) == 1 and len(alpha) == 1, "color avif: both clips have one frame")
+    color = clip.get_frame(0)
+    frame = alpha.get_frame(0)
+    check(
+        color.format.name == "RGB24",
+        f"color avif: the color clip stays RGB24 (got {color.format.name})",
+    )
+    check(samples(color, 0) == [1, 4, 7, 10, 13, 16], "color avif: red plane")
+    check(samples(color, 1) == [2, 5, 8, 11, 14, 17], "color avif: green plane")
+    check(samples(color, 2) == [3, 6, 9, 12, 15, 18], "color avif: blue plane")
+    check(samples(frame) == [9, 8, 7, 6, 5, 4], "color avif: alpha plane")
+
+
+def test_yuv_containers() -> None:
+    """A container whose samples it describes hands out the yuv it holds.
+
+    The three avif fixtures are crops of the ``sandbox/hitokage-sample`` files of
+    the same layout and ``alpha-rgba8.heic`` is the heif a real encoder wrote for
+    the same picture as ``alpha-rgba8.avif``: all four state bt.601 with the full
+    range, so every one of them is handed out as the planar format its own
+    samples are in rather than as the rgb a decoder used to build, the chroma
+    planes have their own size, and the two properties that describe those
+    samples are written.
+
+    ``alpha-yuv420p.avif`` is the four by four source of ``yuv-rgba8.png``, whose
+    four colour rows are 72 apart and whose four alpha columns are 0, 85, 170 and
+    255, so a plane that was shifted, subsampled the wrong way or scaled shows up
+    in the numbers below; see "make-alpha-fixtures.py" for the encodes.
+    """
+    cases = (
+        ("avif-yuv420p.avif", "YUV420P8", 64, 48, 2, 2),
+        ("avif-yuv422p.avif", "YUV422P8", 64, 48, 2, 1),
+        ("avif-yuv444p10.avif", "YUV444P10", 32, 24, 1, 1),
+        ("alpha-rgba8.heic", "YUV420P8", 3, 2, 2, 2),
+    )
+    files = [fixture(name) for name, *_ in cases]
+    clip = core.imgseqs.Read(files=files, mismatch=True)
+    check(len(clip) == len(files), "yuv: one frame per file")
+    for index, (name, format_name, width, height, step_x, step_y) in enumerate(cases):
+        frame = clip.get_frame(index)
         check(
-            color.format.name == "RGB24",
-            f"color {label}: the color clip stays RGB24 (got {color.format.name})",
+            frame.format.name == format_name,
+            f"yuv {name}: the clip is {format_name} (got {frame.format.name})",
         )
-        check(samples(color, 0) == [1, 4, 7, 10, 13, 16], f"color {label}: red plane")
-        check(samples(color, 1) == [2, 5, 8, 11, 14, 17], f"color {label}: green plane")
-        check(samples(color, 2) == blue[label], f"color {label}: blue plane")
-        check(samples(frame) == [9, 8, 7, 6, 5, 4], f"color {label}: alpha plane")
+        check(
+            (frame.width, frame.height) == (width, height),
+            f"yuv {name}: the clip is {width}x{height} "
+            f"(got {frame.width}x{frame.height})",
+        )
+        check(
+            len(samples(frame, 1)) == (width // step_x) * (height // step_y),
+            f"yuv {name}: the chroma plane is its own size",
+        )
+        check(
+            frame.props.get("_Matrix") == 6,
+            f"yuv {name}: the bt.601 matrix the file states "
+            f"(got {frame.props.get('_Matrix')})",
+        )
+        check(
+            frame.props.get("_Range") == 1,
+            f"yuv {name}: the full range the file states "
+            f"(got {frame.props.get('_Range')})",
+        )
+        check(
+            "_ChromaLocation" not in frame.props,
+            f"yuv {name}: a file that states no chroma position gains no property",
+        )
+
+    # None of those four holds an alpha item, so its alpha clip is the opaque
+    # fill of the depth the page is at.
+    fill = core.imgseqs.ReadAlpha(files=[files[0], files[2]], mismatch=True)["alpha"]
+    check(
+        set(samples(fill.get_frame(0))) == {255},
+        "yuv: an eight bit page without an alpha item is filled with 255",
+    )
+    check(
+        set(samples(fill.get_frame(1))) == {1023},
+        "yuv: a ten bit page without an alpha item is filled with 1023",
+    )
+
+    # The 4:2:0 page with an alpha item, whose every sample the fixture states.
+    clip, alpha = read_alpha(files=[fixture("alpha-yuv420p.avif")])
+    color = clip.get_frame(0)
+    frame = alpha.get_frame(0)
+    check(
+        color.format.name == "YUV420P8",
+        f"yuv alpha-yuv420p: the color clip is YUV420P8 (got {color.format.name})",
+    )
+    check(samples(color, 1) == [128] * 4, "yuv alpha-yuv420p: the chroma of a neutral source")
+    check(samples(color, 2) == [128] * 4, "yuv alpha-yuv420p: and its other chroma plane")
+    check(
+        samples(color)
+        == [
+            0, 0, 0, 0, 72, 72, 72, 72,
+            144, 144, 144, 144, 216, 216, 216, 216,
+        ],
+        "yuv alpha-yuv420p: the luma plane is the four rows of the source",
+    )
+    check(
+        frame.format.name == "Gray8",
+        f"yuv alpha-yuv420p: the alpha clip is YUV420P8's Gray8 (got {frame.format.name})",
+    )
+    check(
+        samples(frame) == [0, 85, 170, 255] * 4,
+        "yuv alpha-yuv420p: the alpha plane is the four columns of the source",
+    )
+    check(frame.props["ImgSeqAlpha"] == 1, "yuv alpha-yuv420p: alpha frames carry ImgSeqAlpha")
+
+    # The heic of the same picture as the avif keeps its own alpha item.
+    _, heic_alpha = read_alpha(files=[fixture("alpha-rgba8.heic")])
+    check(
+        samples(heic_alpha.get_frame(0)) == [9, 8, 7, 6, 5, 4],
+        "yuv alpha-rgba8.heic: the alpha item is unchanged",
+    )
+
+    # A yuv page beside an rgb one is two formats, so the sequence needs
+    # ``mismatch``, the same promise a mixed file list keeps.
+    try:
+        core.imgseqs.Read(files=[fixture("avif-yuv420p.avif"), fixture("alpha-rgb8.png")])
+    except Exception as error:
+        check(True, f"yuv: a yuv page beside an rgb one is rejected ({str(error).strip()})")
+    else:
+        check(False, "yuv: a yuv page beside an rgb one is rejected")
 
 
 def test_errors() -> None:
@@ -693,17 +809,27 @@ def test_color_metadata() -> None:
             f"(got {props.get('ImgSeqHasICC')})",
         )
 
-    # The heic states a smpte 170m matrix beside those primaries, for the yuv it
-    # codes, and the frame is handed out as rgb, whose matrix is the identity
-    # whatever the coded yuv used.
+    # The heic states a smpte 170m matrix beside those primaries, which is the
+    # matrix of the yuv samples it hands out and of the full range they are in.
     heic = core.imgseqs.Read(files=[fixture("alpha-rgba8.heic")]).get_frame(0)
     check(
-        heic.props.get("_Matrix") == 0,
-        f"colour heic: an rgb frame keeps its own matrix (got {heic.props.get('_Matrix')})",
+        heic.props.get("_Matrix") == 6,
+        f"colour heic: the matrix of its coded yuv (got {heic.props.get('_Matrix')})",
     )
     check(
         heic.props.get("_Range") == 1,
-        f"colour heic: and its own range (got {heic.props.get('_Range')})",
+        f"colour heic: and the range of those samples (got {heic.props.get('_Range')})",
+    )
+    # The avif of the same picture states the identity beside its primaries, and
+    # the rgb frame it keeps has the identity matrix of an rgb frame.
+    avif = core.imgseqs.Read(files=[fixture("alpha-rgba8.avif")]).get_frame(0)
+    check(
+        avif.props.get("_Matrix") == 0,
+        f"colour avif: an rgb frame keeps its own matrix (got {avif.props.get('_Matrix')})",
+    )
+    check(
+        avif.props.get("_Range") == 1,
+        f"colour avif: and its own range (got {avif.props.get('_Range')})",
     )
 
     # A jxl that states the transfer function but not the primaries writes one
@@ -744,6 +870,7 @@ def main() -> None:
         test_read_is_unchanged,
         test_monochrome_containers,
         test_color_containers,
+        test_yuv_containers,
         test_color_metadata,
         test_orientation,
         test_orientation_yuv,

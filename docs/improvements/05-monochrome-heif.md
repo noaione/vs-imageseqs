@@ -69,7 +69,11 @@ asks `formats::heif::handles(info)` first, and the module takes over when the
 file has a heif extension **and** the probe reported a monochrome color type
 (`L8`, `La8`, `L16`, `La16`) — which is exactly the case the hook cannot
 represent. everything else, colour heif and avif included, keeps the hook and
-its colour conversion.
+its colour conversion. (that last part is what
+[12](12-heif-avif-yuv-output.md) changed: a colour page is now read from
+libheif's or dav1d's own planes in this module and `src/formats/avif.rs`, and
+only a file whose colour statement the properties cannot carry still reaches the
+hook.)
 
 what the module does:
 
