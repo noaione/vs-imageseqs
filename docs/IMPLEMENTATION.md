@@ -317,6 +317,15 @@ match detect_format(path)? {
 
 The resulting decoder-specific output should be normalized into the plugin's internal `DecodedImage` representation before conversion into a VapourSynth frame.
 
+Format routing itself is `image`'s: `ImageReader::with_guessed_format` sniffs the
+signatures and `into_decoder` routes to the codec that registered for them, the
+`image` hook of `libheif-rs` and `jxl-image-rs-integration` included. The modules
+in `src/formats/` are picked by extension instead, because what they answer is
+about the container and not about the samples: a monochrome avif is a file
+`image` reads, but one whose format only its `av1C` box states. A module asked
+about a file that is not its own answers `None`, and `decoder::probe` and
+`decoder::decode` then leave the file to `image`.
+
 ### JPEG XL
 
 Use `jxl-rs`, preferably through its `image-rs` integration where practical.
@@ -345,6 +354,42 @@ HEIC decoding uses the HEVC decoder provided by the `libheif` dependency stack; 
 Colour HEIF/HEIC is read through the `image-rs` decoding hook that `libheif-rs` ships (`libheif_rs::integration::image`), registered once in `src/decoder.rs`. That hook decodes into an interleaved buffer and requires `planes.interleaved` to exist, so it cannot return a monochrome image, which decodes into a single luma plane.
 
 Monochrome HEIF/HEIC is therefore decoded directly through `libheif-rs` in `src/formats/heif.rs`, which asks for `ColorSpace::Monochrome` and packs the planes into the same interleaved layout the frame writer accepts. `src/formats/` holds one module per container that the `image` crate cannot express; `decoder::decode` asks each module whether it handles the image before falling back to `image-rs`.
+
+AVIF still decodes through `image-rs`, but a monochrome avif is handed out in a
+corrected format. `image-rs`'s avif decoder converts every file to r,g,b as it
+decodes it, so it reports `Rgba8` for a page whose bitstream is monochrome and
+the file would come back as `RGB24`, three times the bytes of the single plane it
+holds. The container says what the samples are, so `src/formats/heif.rs` gained
+`output_format(path, color_type)`, which the probe calls beside the webp one when
+it has to build a decoder anyway: it reads the leading boxes of an avif and, when
+the `av1C` sequence header sets `mono_chrome`, answers `Gray8` or `Gray16` plus
+the alpha an `auxl`/`auxC` entry names, so a monochrome avif with alpha becomes
+`La8`/`La16`. The pixels are the ones `image-rs` already produced and they were
+always right — all three channels
+hold the luma — so this changes the format, not the samples. Decoding avif
+through `libheif` instead would copy the plane the file holds, but only a
+`libheif` built with a decoder for av1 can read avif at all, and the windows
+build linked here has none: `LibHeif::decoder_descriptors(16, None)` reports
+`["libde265"]`, and enabling av1 in vcpkg's libheif would add libaom as a native
+dependency. Correcting the format keeps one code path on every platform.
+
+A frame can then have fewer planes than the buffer behind it, which is why
+`pixel::write_planar` asks `planes_to_write` for the smaller of the two counts
+instead of writing every plane the frame has: a `Gray8` frame with an `Rgba8`
+buffer is one plane and three channels, and only the first channel is written.
+The two counts disagree the other way only on a bug, which is what the error
+reports.
+
+The same boxes let the module answer the probe itself, through
+`image_info(path)`: `ispe` agrees on a size, `av1C` gives the depth and whether
+the samples are monochrome, `colr` of type `prof`/`rICC` means an ICC profile and
+`auxC` names the alpha item, which is what `color_type`, `original_color_type`,
+`has_icc_profile` and `format` are built from. It declines, and the file goes
+back through `AvifDecoder`, on a `clap`, `irot` or `imir` transform it does not
+apply, on two sizes or two coded records that disagree, and on a file whose brand
+is not `avif`/`avis`, so a file it describes is one whose decode matches what it
+promised. `decoder::decode` compares width, height and color type against the
+probe all the same and fails the frame if they disagree.
 
 ### Native Library Linkage
 
@@ -682,6 +727,26 @@ let original = decoder.original_color_type();
 
 This allows the plugin to construct the correct `VSVideoInfo` without decoding the entire image.
 
+A container can also answer the whole probe, which is what `decoder::probe` asks
+for first: `formats::heif::image_info` describes an avif from `ispe`, `av1C`,
+`colr` and `auxC` and returns before a decoder is built. `image-rs`'s avif
+decoder decodes the picture, and the alpha item beside it, inside
+`AvifDecoder::new` and keeps them, because the size it reports is the decoded
+picture's own, so building one to probe a file decodes that file for the second
+time. Probing the 35 page 130 MB avif set of [BENCH.md](BENCH.md) took 6.4 s that
+way, 183 ms per file, and takes 2 ms from the container. A file the module cannot
+fully predict falls through to the decoder.
+
+One step is then added after the color types above: `decoder::probe` passes them
+to `format_override`, which is where a container can correct the format the
+decoder reports — the correction the avif probe applies itself when it does
+describe the file. `src/formats/webp.rs` uses it to hand back a lossy webp
+without alpha as `YUV420P8` when the decoder reports rgb, and
+`src/formats/heif.rs` uses it to hand back a monochrome avif as
+`Gray8`/`Gray16` when `image-rs` reports `Rgba8` for it. Both read only the
+leading boxes of the file, and both answer `None` for a file they do not need to
+correct.
+
 ---
 
 # VapourSynth Pixel Formats
@@ -1012,10 +1077,17 @@ vendored.
 
 `cargo test` covers the pixel plumbing, the prefetch pool (one decode shared by
 two consumers, failed decodes retried, frames of a variable sequence kept
-apart), and the clip format mapping. `tests/readalpha.vpy` covers the plugin
-itself against the fixtures written by `tests/make-alpha-fixtures.py`: LA/RGBA
-8/16-bit and float, opaque fills, mixed alpha presence, variable depth,
-`ImgSeqAlpha`, `_Matrix`, prefetch variants, and the shared decode.
+apart), the clip format mapping, and the container reader an avif is described
+from (its size, bit depth, alpha item, ICC box, file type, the boxes that move
+the picture, the header limit, and a fixture probed from its own container).
+`tests/readalpha.vpy` covers the plugin itself against the fixtures written by
+`tests/make-alpha-fixtures.py`: LA/RGBA 8/16-bit and float, opaque fills, mixed
+alpha presence, variable depth, `ImgSeqAlpha`, `_Matrix`, prefetch variants,
+the shared decode, and the monochrome containers — `mono-alpha.heic`,
+`mono-alpha.avif` and the ten bit `mono-alpha-10.avif`, whose planes are the
+exact samples of the 7x5 `mono-alpha.png` they are encoded from — beside the
+colour containers (`alpha-rgba8.heic`, `alpha-rgba8.avif`) that must keep
+`RGB24`.
 
 ---
 
@@ -1100,6 +1172,7 @@ decoder.rs
 
 formats/
     containers image-rs cannot express, one module each
+    and the format corrections for the ones it can
 
 pixel.rs
     image-rs -> VapourSynth mapping

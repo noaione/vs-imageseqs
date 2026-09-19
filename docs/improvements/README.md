@@ -4,7 +4,8 @@ one file per change, each with the evidence, the intended edit, and how to
 check the result. the measurements come from [benchmarks](../BENCH.md) and from
 the probes described there.
 
-all five are implemented: 05 in `src/formats/heif.rs`, 01 in `src/prefetch.rs`
+all five are implemented: 05 in `src/formats/heif.rs` (with one writer change in
+`src/pixel.rs` and the avif probe in `src/decoder.rs`), 01 in `src/prefetch.rs`
 plus `src/source.rs`, 02 in `src/clip.rs` with the generic pool in
 `src/prefetch.rs`, and 04 + 03 in `src/formats/webp.rs` with the planar `Pixels`
 type in `src/decoder.rs`.
@@ -57,6 +58,14 @@ own canvas, our zeroed `pixels` buffer, then the frame).
 [04](04-webp-decoder.md) removed the canvas and the zero fill, and
 [03](03-webp-yuv-output.md) removed the conversion that was left.
 
+one more comes from the same family, and [05](05-monochrome-heif.md) is where it
+was found: an avif used to be decoded twice, once by the probe and once for its
+frame, because `image`'s avif decoder decodes the picture and its alpha item
+inside `AvifDecoder::new`, before it can report a size. the probe now answers
+from the container boxes instead, so probing the 130 MB avif set went from 6.43 s
+of clip creation, 183 ms per file, to 2 ms, and reading that set from 11.92 s of
+open plus frames to 4.99 s.
+
 ## plans
 
 | plan | touches | expected | risk | status |
@@ -65,7 +74,7 @@ own canvas, our zeroed `pixels` buffer, then the frame).
 | [02 frame write path](02-frame-write-path.md) | `src/clip.rs` (new), `src/prefetch.rs`, `src/source.rs`, `src/decoder.rs`, `src/pixel.rs` | a few ms per frame from the buffer, and up to 1.6x on webp if the copy leaves the requesting thread | medium, frame lifetime | implemented, 2b only |
 | [03 yuv output for lossy webp](03-webp-yuv-output.md) | `src/formats/webp.rs`, `src/decoder.rs`, `src/pixel.rs`, `src/source.rs`, `src/color.rs` | webp 4.24 → 3.39 s, half the bytes per frame | medium, changes the output | implemented, with 04 |
 | [04 webp decoder](04-webp-decoder.md) | `Cargo.toml`, `build.rs`, `vcpkg.json`, notices, `LICENSES/`, `src/formats/webp.rs`, `src/decoder.rs` | decode 265 → 111 ms per frame, and it enables 02 and 03 | medium, native dependency | implemented, with 03 |
-| [05 monochrome heif](05-monochrome-heif.md) | `src/formats/heif.rs` | the 31 monochrome heic files in `sandbox/heic` decode as `Gray8` instead of failing | low, used to repair an always-failing path | implemented |
+| [05 monochrome heif](05-monochrome-heif.md) | `src/formats/heif.rs`, `src/pixel.rs` | the 31 monochrome heic files in `sandbox/heic` decode as `Gray8` instead of failing, and a monochrome avif is handed out as `Gray8` instead of `RGB24` | low, used to repair an always-failing path | implemented |
 
 the dependencies were thin: 01 and 02 were independent of each other, 03 needed
 04, and 05 was independent of all of them and is the only one that fixes

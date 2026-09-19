@@ -332,13 +332,14 @@ fn write_channel<T: Sample, const CHANNELS: usize, const CHANNEL: usize>(
 fn write_planes<T: Sample, const CHANNELS: usize>(
     frame: &mut VideoFrame,
     layout: &ImageLayout,
+    planes: usize,
     pixels: &[u8],
 ) -> Result<()> {
     let plane_row_bytes = layout
         .width
         .checked_mul(T::SIZE)
         .ok_or_else(|| ImgSeqError::new("image plane row is too large"))?;
-    for plane in 0..layout.format.plane_count() {
+    for plane in 0..planes {
         let stride = frame.stride(i32::try_from(plane).expect("plane count fits in i32"));
         let destination = frame.plane_mut(i32::try_from(plane).expect("plane count fits in i32"));
         match plane {
@@ -369,6 +370,24 @@ fn write_planes<T: Sample, const CHANNELS: usize>(
     Ok(())
 }
 
+/// Planes of a frame a decoder buffer of `channels` channels can fill.
+///
+/// A frame can ask for fewer planes than the buffer holds channels, which is how
+/// a monochrome avif is handed out: the `image` decoder converts it to r,g,b,
+/// every channel holding the one sample the file stores, so the leading channel
+/// fills the single gray plane. A frame that asks for more planes than the
+/// buffer has channels cannot be filled at all.
+fn planes_to_write(frame_planes: i32, channels: usize) -> Result<usize> {
+    let planes = usize::try_from(frame_planes)
+        .map_err(|_| ImgSeqError::new("VapourSynth returned a negative plane count"))?;
+    if planes > channels {
+        return Err(ImgSeqError::new(format!(
+            "the frame has {planes} planes, but the decoder returned {channels} channels"
+        )));
+    }
+    Ok(planes)
+}
+
 /// Convert one interleaved decoded image directly into the VapourSynth planes.
 pub fn write_planar(
     frame: &mut VideoFrame,
@@ -378,18 +397,19 @@ pub fn write_planar(
     pixels: &[u8],
 ) -> Result<WriteTimings> {
     let layout = image_layout(color_type, width, height, pixels)?;
+    let planes = planes_to_write(frame.get_video_format().num_planes, layout.channels)?;
     let started = Instant::now();
     match (layout.format.bytes_per_sample(), layout.channels) {
-        (1, 1) => write_planes::<u8, 1>(frame, &layout, pixels)?,
-        (1, 2) => write_planes::<u8, 2>(frame, &layout, pixels)?,
-        (1, 3) => write_planes::<u8, 3>(frame, &layout, pixels)?,
-        (1, 4) => write_planes::<u8, 4>(frame, &layout, pixels)?,
-        (2, 1) => write_planes::<u16, 1>(frame, &layout, pixels)?,
-        (2, 2) => write_planes::<u16, 2>(frame, &layout, pixels)?,
-        (2, 3) => write_planes::<u16, 3>(frame, &layout, pixels)?,
-        (2, 4) => write_planes::<u16, 4>(frame, &layout, pixels)?,
-        (4, 3) => write_planes::<f32, 3>(frame, &layout, pixels)?,
-        (4, 4) => write_planes::<f32, 4>(frame, &layout, pixels)?,
+        (1, 1) => write_planes::<u8, 1>(frame, &layout, planes, pixels)?,
+        (1, 2) => write_planes::<u8, 2>(frame, &layout, planes, pixels)?,
+        (1, 3) => write_planes::<u8, 3>(frame, &layout, planes, pixels)?,
+        (1, 4) => write_planes::<u8, 4>(frame, &layout, planes, pixels)?,
+        (2, 1) => write_planes::<u16, 1>(frame, &layout, planes, pixels)?,
+        (2, 2) => write_planes::<u16, 2>(frame, &layout, planes, pixels)?,
+        (2, 3) => write_planes::<u16, 3>(frame, &layout, planes, pixels)?,
+        (2, 4) => write_planes::<u16, 4>(frame, &layout, planes, pixels)?,
+        (4, 3) => write_planes::<f32, 3>(frame, &layout, planes, pixels)?,
+        (4, 4) => write_planes::<f32, 4>(frame, &layout, planes, pixels)?,
         (bytes_per_sample, channels) => {
             return Err(ImgSeqError::new(format!(
                 "unsupported sample size {bytes_per_sample} with {channels} channels"
@@ -648,9 +668,18 @@ fn fill_alpha_plane<T: Sample>(
 
 #[cfg(test)]
 mod tests {
-    use super::{PixelFormat, alpha_channel, extract_channel, image_layout};
+    use super::{PixelFormat, alpha_channel, extract_channel, image_layout, planes_to_write};
     use image::ColorType;
     use vapoursynth4_rs::{ColorFamily, SampleType};
+
+    #[test]
+    fn a_gray_frame_can_be_filled_from_a_wider_buffer() {
+        assert_eq!(planes_to_write(1, 3).unwrap(), 1);
+        assert_eq!(planes_to_write(1, 4).unwrap(), 1);
+        assert_eq!(planes_to_write(3, 3).unwrap(), 3);
+        let error = planes_to_write(3, 1).expect_err("one channel cannot fill three planes");
+        assert!(error.to_string().contains("3 planes"), "{error}");
+    }
 
     #[test]
     fn maps_supported_color_types() {

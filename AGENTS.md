@@ -40,15 +40,26 @@ because `prefetch=0` is how lookahead is disabled.
 
 - `src/lib.rs`: plugin declaration and registration.
 - `src/source.rs`: `Read` and `ReadAlpha` filter creation, validation, and frame requests.
+- `src/prefetch.rs`: the lookahead pool, its window, and its byte budget.
+- `src/clip.rs`: the clips a sequence hands out and the frames they cache, which
+  the lookahead workers build.
 - `src/decoder.rs`: image probing and lazy decoding.
-- `src/formats/`: per-format decode paths that the `image` crate cannot express,
-  one module per container and picked by extension (`heif.rs` for monochrome
-  heif/heic).
+- `src/formats/`: per-format paths for what the `image` crate cannot express or
+  reports wrongly, one module per container and picked by extension (`heif.rs`
+  for monochrome heif/heic, for the monochrome avif format and for the avif
+  probe, which answers `decoder::probe` from the container boxes so that probing
+  an avif does not decode it, `webp.rs` for the libwebp decode and the lossy yuv
+  format).
 - `src/pixel.rs`: supported pixel formats and planar frame writes.
 - `src/color.rs`: frame properties and color metadata.
 - `src/error.rs`: errors returned through the VapourSynth boundary.
 - `hatch_build.py`: Cargo build, plugin staging, wheel tagging, and legal-file
   inclusion.
+- `tests/readalpha.vpy`: the VapourSynth validator, against the fixtures written
+  by `tests/make-alpha-fixtures.py`; the heif and avif fixtures are encoded from
+  that script's `mono-alpha.png` and `alpha-rgba8.png` with `heif-enc` and
+  `avifenc` (`mono-alpha-10.avif` is the 10 bit one), so a changed source needs
+  them re-encoded by hand.
 - `docs/IMPLEMENTATION.md`: design notes and deferred ideas.
 
 ## local build

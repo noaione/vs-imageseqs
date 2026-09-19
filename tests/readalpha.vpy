@@ -243,37 +243,52 @@ MONO_HEIGHT = 5
 
 
 def test_monochrome_containers() -> None:
-    """A monochrome heif and a monochrome avif both hand out grey frames.
+    """A monochrome heif and avif hand out one plane per sample.
 
-    ``mono-alpha.png`` holds ``8 + 11x + 23y`` grey and ``240 - 9x - 13y`` alpha,
-    and both encoders store those samples unchanged, so each container has to
-    bring back the same numbers in a ``Gray8`` colour clip and a ``Gray8`` alpha
-    clip. The avif reports three channels through the ``image`` decoder and is
-    corrected from its container instead, so this covers that path too.
+    ``mono-alpha.png`` holds ``8 + 11x + 23y`` grey and ``240 - 9x - 13y`` alpha.
+    The eight bit containers bring those numbers back unchanged in a ``Gray8``
+    colour clip and a ``Gray8`` alpha clip. The ten bit avif stores each sample
+    four times over, and dav1d hands the ten bit samples back left aligned in
+    sixteen bits, so its planes are the same numbers times 256 within the
+    rounding of that encode. Both avifs report three channels through the
+    ``image`` decoder and are described from their container instead, so this
+    covers that probe, the format it corrects and the writer that fills a grey
+    plane from the wider buffer the decoder returns.
     """
     grey = [8 + 11 * x + 23 * y for y in range(MONO_HEIGHT) for x in range(MONO_WIDTH)]
     alpha_plane = [
         240 - 9 * x - 13 * y for y in range(MONO_HEIGHT) for x in range(MONO_WIDTH)
     ]
-    files = [fixture("mono-alpha.heic"), fixture("mono-alpha.avif")]
+    cases = [
+        ("mono-alpha.heic", "heic", "Gray8", 1, 0),
+        ("mono-alpha.avif", "avif", "Gray8", 1, 0),
+        ("mono-alpha-10.avif", "avif 10 bit", "Gray16", 256, 256),
+    ]
+    files = [fixture(name) for name, *_ in cases]
     clip, alpha = read_alpha(files=files, mismatch=True)
     check(len(clip) == len(files), "mono: every file becomes one frame")
-    for index, label in enumerate(("heic", "avif")):
+    for index, (_, label, format_name, scale, tolerance) in enumerate(cases):
         color = clip.get_frame(index)
         frame = alpha.get_frame(index)
         check(
-            color.format.name == "Gray8",
-            f"mono {label}: the color clip is Gray8 (got {color.format.name})",
+            color.format.name == format_name,
+            f"mono {label}: the color clip is {format_name} (got {color.format.name})",
         )
         check(
-            frame.format.name == "Gray8",
-            f"mono {label}: the alpha clip is Gray8 (got {frame.format.name})",
+            frame.format.name == format_name,
+            f"mono {label}: the alpha clip is {format_name} (got {frame.format.name})",
         )
-        check(samples(color) == grey, f"mono {label}: the gray plane")
-        check(samples(frame) == alpha_plane, f"mono {label}: the alpha plane")
+        check(
+            almost(samples(color), [value * scale for value in grey], tolerance),
+            f"mono {label}: the gray plane",
+        )
+        check(
+            almost(samples(frame), [value * scale for value in alpha_plane], tolerance),
+            f"mono {label}: the alpha plane",
+        )
         check(frame.props["ImgSeqAlpha"] == 1, f"mono {label}: alpha frames carry ImgSeqAlpha")
 
-    # The png pair the two containers were encoded from has to agree with them.
+    # The png pair the containers were encoded from has to agree with them.
     plain_clip, plain_alpha = read_alpha(files=[fixture("mono-alpha.png")])
     check(samples(plain_clip.get_frame(0)) == grey, "mono: the source png keeps the same gray plane")
     check(samples(plain_alpha.get_frame(0)) == alpha_plane, "mono: the source png keeps the same alpha")

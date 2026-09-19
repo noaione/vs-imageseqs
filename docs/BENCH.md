@@ -30,8 +30,8 @@ their own defaults unless the row says otherwise.
   drops every 25th image.
 - the two plugins produce the same planes for webp and not for anything else.
   imgseqs returns the image's own format when the file has one (`GRAY8` for
-  monochrome jpeg, png and jxl pages, `RGB24` for colour ones, and `YUV420P8`
-  for a lossy webp without an alpha channel), while bestsource keeps whatever
+  monochrome jpeg, png, jxl, heif and avif pages, `RGB24` for colour ones, and
+  `YUV420P8` for a lossy webp without an alpha channel), while bestsource keeps whatever
   format its decoder emits: `YUV420P8` for webp, `YUV444P8` for jpeg, a
   variable format for a mixed folder. on the webp set the two decoders agree
   byte for byte; everywhere else this compares read throughput, not identical
@@ -51,7 +51,7 @@ pages are one channel. what imgseqs makes of them depends on the container:
 | set | what imgseqs returns | decoded |
 | --- | --- | --- |
 | webp | 35 `YUV420P8` frames | 964 MiB, one 22.3 MiB frame and 34 of 27.7 MiB |
-| avif | 35 `RGB24` frames | 1928 MiB, one 44.7 MiB frame and 34 of 55.4 MiB |
+| avif | 34 `RGB24` frames and one `Gray8` | 1892 MiB: one 44.7 MiB frame, 33 of 55.4 MiB and one of 18.5 MiB |
 | jpeg, png, jxl, heic | 31 `Gray8` frames of 18.5 MiB and 4 `RGB24` | 784 MiB |
 
 every set needs `mismatch=True` for this. those frame sizes (18.5 to 55.4 MiB)
@@ -73,11 +73,11 @@ frames, best pass of three:
 | jpeg | 2.75 s | 7.49 s | imgseqs 2.73x faster, 4.98x including the open |
 | png | 0.62 s | 0.86 s | imgseqs 1.37x faster, 2.96x including the open |
 | jxl | 6.50 s | cannot read | 4.13x over imgseqs's own serial row |
-| avif | 4.74 s | cannot open | 2.52x over imgseqs's own serial row |
+| avif | 5.14 s | cannot open | 2.36x over imgseqs's own serial row |
 | heic | 8.24 s | cannot open | 3.06x over imgseqs's own serial row |
 
 `prefetch=16` is the best row on five of the six sets — webp, jpeg, png, jxl and
-heic — and avif is the exception, with its default 14% ahead of it. the deeper
+avif — and heic is the exception, with its default 30% ahead of it. the deeper
 pattern is in the single-worker rows: the lookahead is worth 2.4x to 6.4x over
 the serial row on every set, which is what
 [01](improvements/01-lookahead-scheduling.md) made reliable, and the webp figure
@@ -266,31 +266,47 @@ bench reports the failure and then measures imgseqs on its own.
 | imgseqs `Read`, `prefetch=0` | 18.86 s | 544.1 ms | 0.003 s | 18.86 s |
 | imgseqs `Read`, `prefetch=16` | 4.57 s | 10.6 ms | 0.005 s | 4.58 s |
 
-jxl needs the most cpu per frame of the six (751 ms in the stage table below)
+jxl needs the most cpu per frame of the six (485 ms in the stage table below)
 and gets the most from lookahead, 4.13x over its serial row, with a median frame
 that drops from 544.1 ms to 10.6 ms. `prefetch=16` is its best row, and opening
 the clip is free because the probe only reads the header.
 
 ## avif
 
-35 files, 130 MB, all colour and therefore all `RGB24` like the webp set, 1928
-MiB decoded. bestsource cannot open it.
+35 files, 130 MB, 34 colour pages and one monochrome page. avif is the only set
+whose colour pages are all coded with three channels: the grey pages beside
+`p003` are stored that way too, so 34 files come back as `RGB24` of 55.4 MiB
+(and `p000` as `RGB24` of 44.7 MiB) and `p003`, the one file whose bitstream says
+`mono_chrome`, comes back as `Gray8` of 18.5 MiB. 1892 MiB decoded, against
+1928 MiB before [05](improvements/05-monochrome-heif.md) corrected that page.
+bestsource cannot open the set.
 
 | reading the set | frames | median frame | open | total |
 | --- | --- | --- | --- | --- |
-| imgseqs `Read` | 4.74 s | 111.5 ms | 6.27 s | 11.01 s |
-| imgseqs `Read`, `prefetch=0` | 11.97 s | 348.1 ms | 6.22 s | 18.19 s |
-| imgseqs `Read`, `prefetch=16` | 5.41 s | 109.2 ms | 6.34 s | 11.75 s |
+| imgseqs `Read` | 4.99 s | 121.4 ms | 0.002 s | 4.99 s |
+| imgseqs `Read`, `prefetch=0` | 11.77 s | 336.4 ms | 0.003 s | 11.77 s |
+| imgseqs `Read`, `prefetch=16` | 5.14 s | 0.4 ms | 0.003 s | 5.14 s |
 
-this is the set where the budget mattered most. creating the clip takes 6.27 s,
-which is 179 ms for each of the 35 files, and the decode reports another ~150 ms
-of container parsing per frame on top of the av1 decode itself. the frames are
-`RGB24` of 55.4 MiB, so the old fixed 192 MiB budget held three and a half of
-them and the pool re-decoded whatever it had to drop: the default was 9.25 s and
-`prefetch=16` was 19.11 s, twice as slow as doing nothing in parallel. with the
-budget following the window the same three rows are 4.74 s, 11.97 s and 5.41 s,
-so the default is now 2.52x faster than the serial row and asking for sixteen
-workers no longer costs anything.
+this is the set where the budget mattered most. the decode reports ~165 ms per
+frame: 98 ms building the decoder, which has to decode the picture before it can
+report a size, and 67 ms converting it to r,g,b and copying it into the frame.
+the frames are `RGB24` of 55.4 MiB, so the old fixed 192 MiB
+budget held three and a half of them and the pool re-decoded whatever it had to
+drop: the default was 9.25 s and `prefetch=16` was 19.11 s, twice as slow as
+doing nothing in parallel. with the budget following the window the same three
+rows are 4.99 s, 11.77 s and 5.14 s, so the default is now 2.36x faster than the
+serial row and asking for sixteen workers costs nothing.
+
+creating the clip took 6.43 s before [05](improvements/05-monochrome-heif.md)
+taught the probe to read the container instead of building the decoder, which
+decodes the picture and the alpha item before it can report a size. it is 2 ms
+now: 183 ms per file became 0.06 ms, so the set went from 6.43 s plus 5.49 s of
+frames to 0.002 s plus 4.99 s, 11.92 s of work against 4.99 s. a file used to be
+decoded twice, once to probe it and once for its frame, and the frame column moved
+the same way in the row with no lookahead, 12.58 s against 11.77 s. `prefetch=16`
+is the exception at 5.14 s against 5.06 s, which is inside the run to run spread
+of this machine: with sixteen workers the second decode was hidden behind the
+first rather than removed, so a cheaper probe has little left to give it.
 
 ## heic
 
@@ -326,11 +342,11 @@ where the set has any:
 
 | set | decode | copy into the frame | total |
 | --- | --- | --- | --- |
-| webp 3672x5274 | 185 ms | 8 ms | 193 ms |
-| jpeg 3672x5274 | 535 ms | 51 ms | 586 ms |
-| png 3672x5274 | 132 ms | 59 ms | 191 ms |
-| jxl 3672x5274 | 751 ms | 63 ms | 814 ms |
-| avif 3672x5274 | 263 ms | 81 ms | 345 ms |
+| webp 3672x5274 | 204 ms | 14 ms | 220 ms |
+| jpeg 3672x5274 | 341 ms | 44 ms | 389 ms |
+| png 3672x5274 | 90 ms | 43 ms | 137 ms |
+| jxl 3672x5274 | 485 ms | 47 ms | 540 ms |
+| avif 3672x5274 | 165 ms | 73 ms | 244 ms |
 
 the decode figure includes the first-touch page faults of the decode buffer,
 27.7 MiB for a colour webp frame, 55.4 MiB for an rgb one and 18.5 MiB for a
@@ -344,8 +360,10 @@ what [03](improvements/03-webp-yuv-output.md) and
 86 ms of write with `image-webp` and an rgb frame, and its planes are now copied
 into the frame row by row instead of converted from an interleaved buffer, which
 is why its write is the smallest of the five. avif is the one row holding a
-second cost: 150 ms of its 263 ms is parsing the container, before any av1
-decoding happens. jxl is the slowest of the five, and it is the format whose
+second cost: 98 ms of its 165 ms is building the decoder, which decodes the
+picture and its alpha item before it can report a size — parsing the container is
+half a millisecond of that — and the copy then converts the yuv it holds to the
+r,g,b the frame takes. jxl is the slowest of the five, and it is the format whose
 frames the lookahead helps most.
 
 ## frame write path

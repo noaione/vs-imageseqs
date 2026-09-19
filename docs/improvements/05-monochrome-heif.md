@@ -1,8 +1,11 @@
 # 05 — monochrome heif and heic fail to decode
 
-- status: implemented in `src/formats/heif.rs`
-- touches: `src/formats/heif.rs` (new), `src/formats/mod.rs` (new), `src/decoder.rs`, `src/lib.rs`
-- result: 35 of 35 `sandbox/heic` files decode, the 31 monochrome ones as `Gray8`
+- status: implemented in `src/formats/heif.rs`; both leftovers below are closed
+- touches: `src/formats/heif.rs` (new), `src/formats/mod.rs` (new), `src/decoder.rs`, `src/lib.rs`, `src/pixel.rs`
+- result: 35 of 35 `sandbox/heic` files decode, the 31 monochrome ones as `Gray8`,
+  and so do the monochrome avif pages of `sandbox/avif` and of `tests/fixtures`;
+  an avif is also probed without being decoded, 6.43 s of clip creation for the
+  35 page set down to 0.002 s
 - risk: low, it is a decode path that currently always fails
 
 ## problem
@@ -94,6 +97,12 @@ question applies to heif. probing once and reusing that work, or making the
 probe read only the header boxes, would remove seconds from every avif and heif
 chapter.
 
+that guess at the cause was wrong — the ~150 ms of `open` is the decoder's
+constructor, which decodes the picture and its alpha item, and the container
+parse is half a millisecond of it — but the conclusion held, see *probing an avif
+without decoding it*. it is worth the whole paragraph here anyway, because it is
+the measurement this plan went on to act on.
+
 ## result
 
 `target/bench/heic-validate.py` opens `sandbox/heic` as one clip with
@@ -111,16 +120,110 @@ monochrome page against the same page re-saved as png:
   in [BENCH.md](../BENCH.md).
 - the four files that already decoded still go through the hook, untouched.
 
+## monochrome heif with alpha
+
+closed by a fixture rather than by a change, because the packing path already
+worked: `tests/fixtures/mono-alpha.heic` is encoded from the seven by five
+`mono-alpha.png` that `tests/make-alpha-fixtures.py` writes, and `ReadAlpha`
+returns it as a `Gray8` colour clip and a `Gray8` alpha clip with every sample
+equal to the source formula
+(`8 + 11x + 23y` grey, `240 - 9x - 13y` alpha, so a shifted row or a byte of
+`La8` interleaving shows up instead of cancelling out).
+`tests/readalpha.vpy` now asserts both planes, and the colour files that share
+the container (`tests/fixtures/alpha-rgba8.heic`, `alpha-rgba8.avif`) are
+asserted to stay `RGB24` with their own alpha, so the take over cannot widen.
+
+## monochrome avif
+
+closed, by a different route than the one this plan guessed. the guess was that
+`handles` could take over the avif extensions too, but on windows the libheif
+build has no AV1 decoder at all — `LibHeif::decoder_descriptors(16, None)`
+reports `["libde265"]`, and vcpkg's libheif has no `dav1d` feature, so taking the
+decode over would have meant a new native dependency (libaom) and a
+platform-dependent code path. the `image` crate's avif decoder stays, and only
+the *format* is corrected:
+
+- `src/formats/heif.rs` gained `output_format(path, color_type)`, which the probe
+  calls beside the webp one whenever it builds a decoder; the container probe
+  below reaches the same format on its own. it returns `None` unless the file is
+  an avif whose `av1C` sequence header says `mono_chrome`; for those it returns
+  `Gray8`/`Gray16`, plus the alpha reported by the item's `auxl`/`auxC` entry, so
+  a monochrome avif with alpha becomes `La8`/`La16`.
+- the pixels are the ones the `image` decoder already produced and always had the
+  right value: it converts the monochrome bitstream into rgb, where all three
+  channels hold the luma. the result of `Read` on
+  `sandbox/avif/snek - p003.avif` is 98.97% identical to the same page decoded
+  from `sandbox/png/snek - p003.png` (mean absolute difference 0.0347, and the
+  avif is a lossy encode), against 55.4 MiB of `RGB24` before and 18.5 MiB of
+  `Gray8` now.
+- `src/pixel.rs` needed one change for this: `write_planar` used to write every
+  plane the frame has, from the interleaved buffer the decoder filled. a gray
+  frame filled from an `Rgba8` buffer has one plane and three channels, so
+  `planes_to_write` now takes the smaller of the two counts and fails only when
+  the frame wants more planes than the buffer has channels. the unit test
+  `a_gray_frame_can_be_filled_from_a_wider_buffer` covers it.
+
+`tests/fixtures/mono-alpha.avif` is encoded from the same `mono-alpha.png` with
+`avifenc`, so it exercises the whole path — container probe, format override,
+writer — and its planes come back equal to the source like the heic ones.
+`tests/fixtures/mono-alpha-10.avif` is the same source at ten bits per sample,
+the one fixture that reaches a 16-bit avif: its planes come back as the source
+numbers times 256, within the rounding of that encode.
+`sandbox/avif` has exactly one monochrome page out of 35 (`p003`), which is the
+file the paragraph above measures, and the other 34 still read as `RGB24`.
+`target/bench/container-survey.py` prints the container facts of a set beside
+what the plugin returns for each file, `target/bench/avif-probe-check.py` does
+the same for every file of the avif corpus with an independent python parse of
+its boxes, `target/bench/avif-survey.py` counts the `av1C` flags of the whole
+corpus, and `target/bench/avif-mono-parity.py` compares one page with the png it
+was made from.
+
+## probing an avif without decoding it
+
+closed as well, and it is what the plan called the probe cost. the `image` avif
+decoder decodes the whole picture — and the alpha item beside it — inside its
+constructor, because that is what gives it a size to report, so every avif was
+decoded once to probe it and again when a frame asked for it. measured on four
+pages of `sandbox/avif`, before the change:
+
+| step | cost |
+| --- | --- |
+| `leading_boxes`, the container read this module already did | 0.27 to 0.55 ms |
+| the probe, through the decoder | 42 to 106 ms |
+| the frame request, another decode plus the copy out | 120 to 167 ms |
+
+everything the probe records is in the container, so `src/formats/heif.rs` now
+answers the probe itself in `image_info`: `ispe` holds the size, `av1C` the bit
+depth and whether the samples are monochrome, `colr` whether an ICC profile is
+attached, and `auxC` whether an alpha item exists. `decoder::probe` asks for that
+first and only builds a decoder when the answer is `None`. a file is decoded
+once again: when a frame asks for it.
+
+`image_info` answers `None` — and the file keeps the decoder, the old cost and
+the format override below — when anything about the container is not something
+this reader can predict from: a file type other than `avif` or `avis` (an `mif1`
+file under an `.avif` name can decode through the heif hook, whose color type
+this module cannot predict), two `ispe` boxes that disagree, coded records of
+different bit depths, a size of zero, and the `clap`, `irot` and `imir` boxes
+that move the picture the decoder reports. the boxes are walked rather than
+searched, so a name that appears inside a payload is not read as a box.
+
+on the whole set, `open` — the time to create the clip — went from **6.43 s to
+0.002 s** for the 35 pages, and the wall clock of `Read` plus that `open` from
+11.92 s to 4.99 s at the default prefetch, with all 35 files reporting the same
+format and size as before. `target/bench/avif-probe-check.py` confirms the
+plugin's answer against its own parse of the same file's boxes, and the frame
+request compares the size and color type the probe recorded with what the
+decoder reports, so a container this reader gets wrong fails loudly instead of
+writing a wrong frame.
+
 ## left over
 
-- **monochrome avif**: `sandbox/avif` is all colour, so nothing exercises it,
-  but the same wall exists there (the `image` crate's own avif decoder is a
-  different path). the `handles` check can cover the avif extensions once a
-  monochrome sample exists.
-- **monochrome heif with alpha**: the packing is unit tested, no file exercised
-  it end to end, and no such file is in the corpus.
-- **the probe cost** below is untouched: heif is still probed through the hook
-  and then parsed again by libheif when a monochrome page is decoded.
+- **heif and heic keep the hook probe**: it parses the header with libheif and
+  costs 5 ms for all 35 pages of `sandbox/heic`, and a monochrome page is parsed
+  a second time by libheif when it is decoded. that is small enough to leave.
+- **a heif container is still not probed here**: the same `ispe`/`av1C` read
+  would apply to a `.heic` that stores av1, but nothing in the corpus does.
 
 ## acceptance
 
@@ -130,7 +233,31 @@ monochrome page against the same page re-saved as png:
   for the mixed set.
 - the four files that already worked are unchanged, because they still use the
   hook.
-- `cargo test --locked` passes: 21 tests, 8 of them new, covering the extension
+- `cargo test --locked` passes: 58 tests. the heif side covers the extension
   check, the color type split, packed rows with padding, `La8` interleaving,
-  16-bit copies, a plane wider than its stride, and a plane the probe disagrees
-  with.
+  16-bit copies, a plane wider than its stride and a plane the probe disagrees
+  with. the avif side covers the container reader (a monochrome record with its
+  depth, a colour record, an alpha item by either auxiliary type, the metadata
+  boxes, a payload that must not be read as a box, the boxes stopping at the
+  media data, a header past the read limit) and the probe built on it (a
+  container it declines, a file type that is not `avif`/`avis`, and, when the
+  fixtures are present, that `mono-alpha.avif` and `alpha-rgba8.avif` are
+  described from their own containers while a declined file keeps the decoder
+  and its format correction), plus the writer's
+  `a_gray_frame_can_be_filled_from_a_wider_buffer`.
+- `tests/readalpha.vpy` asserts `mono-alpha.heic` and `mono-alpha.avif` as
+  `Gray8` colour plus `Gray8` alpha with the exact source samples,
+  `mono-alpha-10.avif` as `Gray16` with the source samples times 256, and
+  `alpha-rgba8.heic` and `alpha-rgba8.avif` as `RGB24` with their own alpha.
+- `target/bench/sandbox-per-file.py` opens all six sandbox sets file by file:
+  the only row that changed is `avif`'s monochrome page, `Gray8` 18.5 MiB where
+  it was `RGB24` 55.4 MiB, and the decoded total of that set went 1928 → 1892
+  MiB. it still reports those numbers with the container probe in place, which
+  is what makes the `ispe` sizes trustworthy: a size the probe got wrong is
+  rejected when the frame is decoded.
+- `target/bench/avif-probe-check.py` agrees with the plugin on all 37 avifs of
+  the sandbox and fixture sets: the same `ispe` size, the same format, and the
+  same `ImgSeqOriginalColorType` for each one.
+- a ten bit avif with an ICC profile, which is not in the corpus, was encoded by
+  hand and decoded: `Gray16` colour and alpha, and `ImgSeqHasICC=1` where the
+  `colr` box holds a `prof` payload.

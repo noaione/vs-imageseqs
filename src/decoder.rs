@@ -39,6 +39,7 @@ fn format_decoder(info: &ImageInfo) -> Option<Result<DecodedImage>> {
 /// color type suggests; see [`crate::formats`].
 fn format_override(path: &Path, color_type: ColorType) -> Option<PixelFormat> {
     formats::webp::output_format(path, color_type)
+        .or_else(|| formats::heif::output_format(path, color_type))
 }
 
 #[derive(Clone, Debug)]
@@ -105,6 +106,13 @@ pub(crate) fn image_error(action: &str, path: &Path, error: impl std::fmt::Displ
 }
 
 pub fn probe(path: &Path) -> Result<ImageInfo> {
+    // A file a format module can describe from its container skips the decoder,
+    // which for an avif means skipping a decode of the whole picture; see
+    // [`crate::formats::heif::image_info`].
+    if let Some(info) = formats::heif::image_info(path) {
+        return Ok(info);
+    }
+
     let mut decoder = open_decoder(path)?;
     let (width, height) = decoder.dimensions();
     let color_type = decoder.color_type();
