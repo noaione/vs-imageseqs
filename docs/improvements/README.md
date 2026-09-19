@@ -5,6 +5,8 @@ check the result. the measurements come from [benchmarks](../BENCH.md) and from
 the probes described there. `plans` below is the list itself, `deferred` is
 everything the landed ones left over — work that is not a plan because nothing
 has measured it as worth doing — and `not planned` is the decisions.
+[HANDOFF.md](../HANDOFF.md) is the same thing from the other end: where the tree
+stands and what to do first.
 
 all five are implemented: 05 in `src/formats/heif.rs` (with one writer change in
 `src/pixel.rs` and the avif probe in `src/decoder.rs`), 01 in `src/prefetch.rs`
@@ -13,11 +15,10 @@ plus `src/source.rs`, 02 in `src/clip.rs` with the generic pool in
 type in `src/decoder.rs`. [09](09-exif-orientation.md) is implemented too, in
 `src/pixel.rs` and `src/clip.rs` behind `apply_rotation`.
 
-[06](06-jpeg-2000-backend.md) and [07](07-dds-and-farbfeld.md) are the rest of
-the list. they are the parts of [IMPLEMENTATION.md](../IMPLEMENTATION.md) that
-the build does not have: a jpeg 2000 backend the plan names and nothing
-compiles, and the two `image` features the doc's own configuration block lists
-(`dds` and `ff`). the three other rows the list was written from all landed —
+[06](06-jpeg-2000-backend.md) is the remaining open item. [07](07-dds-and-farbfeld.md)
+landed through the two `image` features the doc's own configuration block lists
+(`dds` and `ff`), with hand-written DXT5 and farbfeld alpha fixtures. the three
+other rows the list was written from all landed —
 the colour properties its `# Color Metadata` section asks for, in `src/color.rs`
 with a container read in `src/formats/heif.rs`, `src/formats/jxl.rs` and the new
 `src/formats/png.rs` ([08](08-color-metadata.md)), the exif orientation it

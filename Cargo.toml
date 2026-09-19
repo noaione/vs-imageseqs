@@ -25,7 +25,9 @@ image = { version = "0.25.10", default-features = false, features = [
     # formats
     "avif-native",
     "bmp",
+    "dds",
     "exr",
+    "ff",
     "gif",
     "ico",
     "jpeg",

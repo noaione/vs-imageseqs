@@ -16,3 +16,5 @@ out/
 build/
 .venv/
 sandbox/
+
+docs/HANDOFF*

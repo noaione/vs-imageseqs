@@ -1,6 +1,6 @@
 # 07 — dds and farbfeld
 
-- status: proposed
+- status: implemented
 - touches: `Cargo.toml`, `README.md`, `docs/IMPLEMENTATION.md` (only if the
   write-up moves), fixtures, `tests/readalpha.vpy`
 - expected: `.dds` and `.ff` files stop failing the probe, for two feature flags
@@ -90,3 +90,7 @@ the `image` crate this plugin compiles against.
   a format correction in `src/formats/` the way
   [05](05-monochrome-heif.md) corrected a monochrome avif, not a new
   `PixelFormat`. Write the fixture with masks if the goal is to find out.
+
+The `image` 0.25.10 DDS backend currently accepts DXT1, DXT3 and DXT5 files;
+it does not accept uncompressed mask-based DDS files. The fixture uses one DXT5
+block so the supported path is covered without adding a native dependency.

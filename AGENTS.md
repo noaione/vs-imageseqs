@@ -111,6 +111,11 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   full`, which that script documents, beside the `alpha-rgb8.png` that holds the
   same picture and states nothing.
 - `docs/IMPLEMENTATION.md`: design notes and deferred ideas.
+- `docs/improvements/`: one plan per change, with its status; its `README.md` is
+  the index of what is open, what the landed work left over and what was decided
+  against.
+- `docs/HANDOFF.md`: the state of the tree and the first steps for each open
+  item.
 
 ## local build
 

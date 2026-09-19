@@ -138,6 +138,56 @@ def png(
         handle.write(document)
 
 
+def farbfeld(path: str, rows: list[list[tuple[int, int, int, int]]]) -> None:
+    """Writes a farbfeld RGBA16 image."""
+    height = len(rows)
+    width = len(rows[0])
+    payload = b"".join(
+        struct.pack(">4H", *pixel)
+        for row in rows
+        for pixel in row
+    )
+    with open(path, "wb") as handle:
+        handle.write(b"farbfeld" + struct.pack(">II", width, height) + payload)
+
+
+def dds_dxt5(path: str) -> None:
+    """Writes one 4x4 DXT5 block with an exact red/alpha checkerboard."""
+    width = height = 4
+    flags = 0x00081007  # caps, height, width, linear size and pixel format
+    header = struct.pack(
+        "<7I11I",
+        124,
+        flags,
+        height,
+        width,
+        16,  # one DXT5 block
+        0,
+        0,
+        *([0] * 11),
+    )
+    pixel_format = struct.pack(
+        "<II4s5I",
+        32,
+        0x4,  # DDPF_FOURCC
+        b"DXT5",
+        0,
+        0,
+        0,
+        0,
+        0,
+    )
+    caps = struct.pack("<5I", 0x1000, 0, 0, 0, 0)  # DDSCAPS_TEXTURE
+
+    alpha_indices = sum(
+        (position % 2) << (position * 3) for position in range(width * height)
+    )
+    alpha_block = bytes((0, 255)) + alpha_indices.to_bytes(6, "little")
+    color_block = struct.pack("<HHI", 0xF800, 0x0000, 0)
+    with open(path, "wb") as handle:
+        handle.write(b"DDS " + header + pixel_format + caps + alpha_block + color_block)
+
+
 def netpbm(path: str, maximum: int, rows: list[list[int]], depth: int = 1) -> None:
     """Writes a binary grayscale PGM, or a four channel PAM when `depth` is four.
 
@@ -256,6 +306,14 @@ def main() -> None:
             ],
         ],
     )
+    farbfeld(
+        write("alpha-rgba16.ff"),
+        [
+            [(1000, 2000, 3000, 100), (4000, 5000, 6000, 200)],
+            [(7000, 8000, 9000, 300), (10000, 11000, 12000, 400)],
+        ],
+    )
+    dds_dxt5(write("alpha-dds.dds"))
     png(
         write("alpha-rgb8.png"),
         RGB,

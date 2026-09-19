@@ -118,6 +118,35 @@ def test_rgba16() -> None:
     )
 
 
+def test_dds_and_farbfeld() -> None:
+    """The image crate's DDS and farbfeld readers reach the normal frame path."""
+    clip, alpha = read_alpha(files=[fixture("alpha-dds.dds")])
+    color = clip.get_frame(0)
+    frame = alpha.get_frame(0)
+    check(color.format.name == "RGB24", f"dds: color clip is RGB24 (got {color.format.name})")
+    check(frame.format.name == "Gray8", f"dds: alpha clip is Gray8 (got {frame.format.name})")
+    check(samples(color, 0) == [255] * 16, "dds: DXT5 red plane")
+    check(samples(color, 1) == [0] * 16, "dds: DXT5 green plane")
+    check(samples(color, 2) == [0] * 16, "dds: DXT5 blue plane")
+    check(samples(frame) == [0, 255] * 8, "dds: DXT5 alpha plane")
+
+    clip, alpha = read_alpha(files=[fixture("alpha-rgba16.ff")])
+    color = clip.get_frame(0)
+    frame = alpha.get_frame(0)
+    check(
+        color.format.name == "RGB48",
+        f"farbfeld: color clip is RGB48 (got {color.format.name})",
+    )
+    check(
+        frame.format.name == "Gray16",
+        f"farbfeld: alpha clip is Gray16 (got {frame.format.name})",
+    )
+    check(samples(color, 0) == [1000, 4000, 7000, 10000], "farbfeld: red plane")
+    check(samples(color, 1) == [2000, 5000, 8000, 11000], "farbfeld: green plane")
+    check(samples(color, 2) == [3000, 6000, 9000, 12000], "farbfeld: blue plane")
+    check(samples(frame) == [100, 200, 300, 400], "farbfeld: alpha plane")
+
+
 def test_opaque_fill() -> None:
     _, alpha = read_alpha(files=[fixture("alpha-rgb8.png")])
     check(alpha.format.name == "Gray8", "rgb8: an alpha clip is still produced")
@@ -944,6 +973,7 @@ def main() -> None:
         test_la8,
         test_la16,
         test_rgba16,
+        test_dds_and_farbfeld,
         test_float,
         test_opaque_fill,
         test_alpha_presence_mixed,
