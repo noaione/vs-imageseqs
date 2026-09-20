@@ -26,6 +26,7 @@ use std::{
     io::{Read, Seek, SeekFrom},
     ops::Range,
     path::Path,
+    sync::Arc,
     time::Instant,
 };
 
@@ -109,6 +110,7 @@ pub fn image_info(path: &Path) -> Option<ImageInfo> {
             color_type: header.decoded_color_type(),
             original_color_type: header.file_color_type(has_alpha).into(),
             has_icc_profile: header.has_icc_profile,
+            icc_profile: header.icc_profile.clone(),
             cicp,
             // A single plane has no chroma to place.
             chroma_location: None,
@@ -146,6 +148,7 @@ pub fn image_info(path: &Path) -> Option<ImageInfo> {
         color_type,
         original_color_type: color_type.into(),
         has_icc_profile: header.has_icc_profile,
+        icc_profile: header.icc_profile,
         cicp,
         chroma_location: crate::color::chroma_location(header.chroma_position),
         orientation: Orientation::NoTransforms,
@@ -516,6 +519,7 @@ struct AvifHeader {
     /// for a subsampled picture and is zero for a picture that names none.
     chroma_position: u8,
     has_icc_profile: bool,
+    icc_profile: Option<Arc<[u8]>>,
     /// The colour description a `colr` box of the primary item states, when it
     /// holds one.
     cicp: Option<Cicp>,
@@ -530,6 +534,7 @@ impl AvifHeader {
         let mut subsampling = None;
         let mut chroma_position = 0;
         let mut has_icc_profile = false;
+        let mut icc_profile = None;
         let mut cicp = None;
         for property in properties {
             match property.kind {
@@ -551,7 +556,12 @@ impl AvifHeader {
                 }
                 b"colr" => {
                     let kind = property.payload.get(..4)?;
-                    has_icc_profile |= matches!(kind, b"prof" | b"rICC");
+                    if matches!(kind, b"prof" | b"rICC") {
+                        has_icc_profile = true;
+                        if icc_profile.is_none() {
+                            icc_profile = Some(Arc::from(property.payload.get(4..)?));
+                        }
+                    }
                     // A file may hold both an opaque profile and the codes, and
                     // the codes are what the frame properties are written from;
                     // an ICC profile on its own is `ImgSeqHasICC`.
@@ -571,6 +581,7 @@ impl AvifHeader {
             chroma: subsampling?,
             chroma_position,
             has_icc_profile,
+            icc_profile,
             cicp,
         })
     }
@@ -1383,6 +1394,7 @@ mod tests {
             color_type,
             original_color_type: ExtendedColorType::Rgb8,
             has_icc_profile: false,
+            icc_profile: None,
             cicp: None,
             chroma_location: None,
             orientation: Orientation::NoTransforms,

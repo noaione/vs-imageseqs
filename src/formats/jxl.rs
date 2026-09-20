@@ -29,6 +29,7 @@ use std::{
     fs::File,
     io::{BufRead, BufReader},
     path::Path,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -115,6 +116,7 @@ struct Header {
     /// profile from an encoding, and `ImgSeqHasICC` is about a profile the file
     /// carries.
     has_icc_profile: bool,
+    icc_profile: Option<Arc<[u8]>>,
     /// The colour description the codestream states with its codes, which is
     /// `None` for a file that carries an icc profile instead.
     cicp: Option<Cicp>,
@@ -152,6 +154,10 @@ impl Header {
             depth,
             extra_channels,
             has_icc_profile: matches!(profile, JxlColorProfile::Icc(_)),
+            icc_profile: match profile {
+                JxlColorProfile::Icc(bytes) => Some(Arc::from(bytes.as_slice())),
+                JxlColorProfile::Simple(_) => None,
+            },
             cicp: cicp_of(profile),
         })
     }
@@ -365,6 +371,7 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
         // extended one.
         original_color_type: header.color_type.into(),
         has_icc_profile: header.has_icc_profile,
+        icc_profile: header.icc_profile.clone(),
         cicp: header.cicp,
         // A jpeg xl codestream states no chroma sample position: its yuv planes
         // are implied by its own upsampling filters.

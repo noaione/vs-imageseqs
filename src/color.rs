@@ -140,6 +140,7 @@ pub fn set_frame_properties(
     index: usize,
     format: PixelFormat,
     alpha_marker: Option<bool>,
+    export_icc_profile: bool,
 ) -> Result<()> {
     let Some(mut properties) = frame.properties_mut() else {
         return Err(ImgSeqError::new("VapourSynth frame has no property map"));
@@ -169,6 +170,15 @@ pub fn set_frame_properties(
             AppendMode::Replace,
         )
         .map_err(ImgSeqError::from_display)?;
+    if export_icc_profile && let Some(profile) = image.icc_profile.as_deref() {
+        properties
+            .set(
+                key!(c"ICCProfile"),
+                Value::Data(profile),
+                AppendMode::Replace,
+            )
+            .map_err(ImgSeqError::from_display)?;
+    }
     properties
         .set(
             key!(c"ImgSeqOrientation"),

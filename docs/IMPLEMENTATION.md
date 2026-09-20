@@ -6,15 +6,16 @@ where it agrees, and annotated where it does not. Each change the doc asks for
 is one plan in [docs/improvements/](improvements/README.md) — 06 for a jpeg 2000
 backend, 07 for the two `image` features this doc's own configuration block
 names, 08 for the colour properties, 09 for the exif orientation, 10 for the
-nominal 10/12-bit depths and 12 for a heif's or an avif's own yuv planes — and
+nominal 10/12-bit depths, 12 for a heif's or an avif's own yuv planes, and 13
+for embedded ICC export — and
 each of those carries its status, so that index is the answer to "what is left":
 its `plans` table for what is still a plan, and its `deferred` section for what
 the landed ones left over.
 
-The proposed ICC work is [13](improvements/13-icc-color-management.md). It is
-design-only for now: `icc_profile=False` keeps the current frame properties,
-while `icc_profile=True` would expose the embedded bytes as the standard
-`ICCProfile` binary frame property for a downstream color-management filter.
+The ICC work is [13](improvements/13-icc-color-management.md). It is
+implemented: `icc_profile=False` keeps the current frame properties, while
+`icc_profile=True` exposes the embedded bytes as the standard `ICCProfile`
+binary frame property for a downstream color-management filter.
 
 ## Goal
 
@@ -1237,9 +1238,9 @@ that would misplace the chroma of the next resize — the same rule as code 2,
 applied to a sample position. A graph that needs one passes it into its own
 resize. The rule
 this doc already had stands and is implemented: a file that supplies only an icc
-profile is never turned into sRGB or BT.709 metadata, and the profile's bytes are
-read and dropped — `ImgSeqHasICC` says it is there, and full icc conversion stays
-in the defer list below.
+profile is never turned into sRGB or BT.709 metadata. `ImgSeqHasICC` says it is
+there, and `icc_profile=True` additionally exposes the exact raw bytes as
+`ICCProfile`; full icc conversion stays in the defer list below.
 
 An exif orientation is metadata of the same kind, and [09](improvements/09-exif-orientation.md)
 is implemented: the code reaches every frame as `ImgSeqOrientation` either way,
@@ -1251,14 +1252,15 @@ say different things about the same file.
 
 # Image-Specific Frame Properties
 
-Useful custom properties — all six are written, and the last one only on an alpha
-clip:
+Useful custom properties — all seven are written, and the last one only on an
+alpha clip:
 
 ```text
 ImgSeqPath               the file this frame was read from
 ImgSeqIndex              its position in the list
 ImgSeqOriginalColorType  the decoder's own colour type, before any correction
 ImgSeqHasICC             whether the file carries an icc profile
+ICCProfile               raw icc bytes when icc_profile is enabled
 ImgSeqOrientation        the exif orientation code, as the file stores it
 ImgSeqAlpha              present on an alpha clip only, always 1
 ```
@@ -1310,7 +1312,8 @@ The same pattern works for 16-bit and float images.
 ## Implemented design
 
 `ReadAlpha` accepts exactly the same arguments as `Read` (`files`, `fpsnum`,
-`fpsden`, `mismatch`, `debug`, `prefetch`, `prefetch_memory`) and declares
+`fpsden`, `mismatch`, `apply_rotation`, `icc_profile`, `debug`, `prefetch`,
+`prefetch_memory`) and declares
 `clip:vnode;alpha:vnode;`.
 
 ```text
@@ -1517,7 +1520,8 @@ Implement:
 7. Constant-format clips.
 8. Optional variable format/resolution via `mismatch=True`.
 9. Basic color metadata.
-10. The `ImgSeq*` frame properties (six of them; see the section above).
+10. The `ImgSeq*` frame properties and optional `ICCProfile` (see the section
+    above).
 11. VapourSynth-managed frame-level concurrency.
 12. Keep the `image-rs` Rayon feature enabled initially.
 13. `ReadAlpha` for a separate alpha clip.
@@ -1525,7 +1529,6 @@ Implement:
 Defer:
 
 ```text
-embedded ICC profile export (see improvements/13-icc-color-management.md)
 GPU/Vulkan output
 manual SIMD
 custom Rayon inside get_frame()
@@ -1555,9 +1558,9 @@ The list has moved three times since it was written:
 
 The rest is policy and stays where it is: gpu output (waiting on
 `vapoursynth4-rs`), SIMD, custom Rayon, and the two python-side helpers. ICC
-conversion remains the responsibility of a downstream color-management filter;
-plan [13](improvements/13-icc-color-management.md) only covers exporting the
-embedded profile bytes.
+conversion remains the responsibility of a downstream color-management
+filter; plan [13](improvements/13-icc-color-management.md) covers exporting the
+embedded profile bytes, which is now implemented.
 `docs/improvements/README.md`'s `not planned` section has the reason for each,
 and the plans this doc still asks for are 06 and 07 in that same folder.
 

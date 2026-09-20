@@ -485,6 +485,7 @@ mod tests {
             color_type,
             original_color_type: ExtendedColorType::Rgb8,
             has_icc_profile: false,
+            icc_profile: None,
             cicp: None,
             chroma_location: None,
             orientation: image::metadata::Orientation::NoTransforms,

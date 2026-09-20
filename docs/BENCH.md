@@ -637,6 +637,34 @@ plane of every frame of seven sets (six from `sandbox/` plus `tests/fixtures`),
 for `Read` and for both clips of `ReadAlpha`. the 75 line dump is identical
 before and after except for the header that names the plugin.
 
+## ICC frame-property export
+
+`icc_profile=True` adds the raw `ICCProfile` property to frames that carry an
+embedded profile. the option is exposed by the benchmark helper as
+`--icc-profile`; its default remains `False`.
+
+the comparison used the 35-page png corpus after adding the same 588-byte sRGB
+profile to each file in `target/bench/png-icc/`. five-pass runs on the release
+build, with the ranges showing all five measured totals:
+
+| mode | default | `prefetch=0` | `prefetch=16` | open |
+| --- | ---: | ---: | ---: | ---: |
+| `icc_profile=False` | 0.453–0.497 s | 1.149–1.605 s | 0.374–0.412 s | 6.7–8.0 ms |
+| `icc_profile=True` | 0.458–0.496 s | 1.154–1.436 s | 0.361–0.375 s | 6.8–7.0 ms |
+
+the ranges overlap and are dominated by scheduling noise; exporting the binary
+property has no measurable throughput penalty here. the 200-file 3x2 ICC
+fixture gives the same result: 7 ms versus 7 ms at the default, 20 ms versus
+19 ms with `prefetch=0`, and 8 ms versus 8 ms with `prefetch=4`.
+
+the ordinary webp corpus also stays near its previous baseline: current
+`icc_profile=False` measured 3.51 s by default, 12.21 s at `prefetch=0`, and
+1.93 s at `prefetch=16`, against the recorded 3.39 s, 11.94 s, and 1.87 s.
+the webp files do not carry the tested ICC payload, so this is a regression
+check rather than an export-cost measurement. the historical png rows remain
+0.62 s, 1.43 s, and 0.60 s; those absolute values are not compared directly
+with the ICC-bearing copies because ImageMagick regenerated their PNG streams.
+
 ## known headroom
 
 the numbers point at one thing: a decoder that cannot use more than one core.

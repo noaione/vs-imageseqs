@@ -172,6 +172,7 @@ impl ClipFrames {
         image: &ImageInfo,
         index: i32,
         decoded: DecodedImage,
+        export_icc_profile: bool,
     ) -> Result<Self> {
         let index = usize::try_from(index)
             .map_err(|_| ImgSeqError::new(format!("requested invalid frame {index}")))?;
@@ -188,7 +189,14 @@ impl ClipFrames {
             let allocate = allocate_started.elapsed();
             let write = write_frame(&mut frame, clip, format, &decoded)?;
             let properties_started = Instant::now();
-            set_frame_properties(&mut frame, image, index, format, clip.alpha_marker())?;
+            set_frame_properties(
+                &mut frame,
+                image,
+                index,
+                format,
+                clip.alpha_marker(),
+                export_icc_profile,
+            )?;
             let properties = properties_started.elapsed();
             bytes = bytes.saturating_add(frame_bytes(&frame));
             frames.push(frame);
@@ -241,6 +249,7 @@ impl SharedCore {
 pub struct FrameBuilder {
     core: SharedCore,
     clips: Arc<[Clip]>,
+    export_icc_profile: bool,
 }
 
 impl FrameBuilder {
@@ -250,7 +259,7 @@ impl FrameBuilder {
     /// a filter is freed before its core, so a handle kept by a filter cannot
     /// outlive what it points at.
     #[must_use]
-    pub fn new(core: CoreRef<'_>, clips: &[Clip]) -> Self {
+    pub fn new(core: CoreRef<'_>, clips: &[Clip], export_icc_profile: bool) -> Self {
         // SAFETY: the filter built from this core owns the builder, so the
         // handle cannot outlive the core. `SharedCore` records why the workers
         // that use it may do so.
@@ -259,6 +268,7 @@ impl FrameBuilder {
         Self {
             core,
             clips: Arc::from(clips),
+            export_icc_profile,
         }
     }
 }
@@ -271,7 +281,14 @@ impl Prepare for FrameBuilder {
     }
 
     fn build(&self, image: &ImageInfo, index: i32, decoded: DecodedImage) -> Result<Self::Payload> {
-        ClipFrames::build(self.core.core(), &self.clips, image, index, decoded)
+        ClipFrames::build(
+            self.core.core(),
+            &self.clips,
+            image,
+            index,
+            decoded,
+            self.export_icc_profile,
+        )
     }
 }
 

@@ -3,6 +3,43 @@
 a rust vapoursynth source plugin for reading an ordered list of images as a
 clip.
 
+## features
+
+- one frame per file, in the order supplied to `Read` or `ReadAlpha`;
+- separate color and alpha clips with depth-preserving opaque alpha fallback;
+- lots of [formats](#formats) support
+- native YUV output for supported WebP, HEIF/HEIC, AVIF, and JPEG 2000 files;
+- nominal 9–15-bit preservation, including 10/12-bit gray, RGB, alpha, and
+  YUV formats;
+- EXIF and codestream orientation handling with an `apply_rotation` switch;
+- CICP/container color metadata and optional raw ICC export through
+  `ICCProfile`;
+- background prefetching, bounded lookahead memory, variable-format clips.
+
+## requirements
+
+for normal use:
+
+- VapourSynth R79 or newer;
+- Python 3.12 or newer when installing the wheel;
+- the plugin binary for the current operating system and architecture.
+
+the wheel does not install VapourSynth or a Python helper module. Unix builds
+also need the `dav1d` and `libde265` shared libraries at runtime. Windows
+artifacts use the static `x64-windows-static-md` vcpkg triplet.
+
+for source builds:
+
+- Rust 1.88 or newer and Cargo;
+- CMake, Ninja, and pkg-config;
+- Debian/Ubuntu: `libdav1d-dev`, `libde265-dev`, and `libwebp-dev`;
+- macOS: Homebrew `dav1d`, `libde265`, and `webp` packages;
+- Windows: vcpkg with the `x64-windows-static-md` triplet.
+
+JPEG 2000 uses bundled OpenJPEG sources, and libheif is built as part of the
+project. see the build section for platform commands and the legal files for
+native dependency obligations.
+
 ## install
 
 the python wheel is plugin-only. it installs the native library at
@@ -65,6 +102,7 @@ clip, alpha = result["clip"], result["alpha"]
 | `fpsnum`, `fpsden` | `24/1` | output frame rate |
 | `mismatch` | `False` | allow variable sizes and pixel formats |
 | `apply_rotation` | `True` | apply the file's exif/codestream orientation |
+| `icc_profile` | `False` | expose embedded ICC bytes as `ICCProfile` |
 | `debug` | `False` | log create and per-frame timings |
 | `prefetch` | half the logical cores, capped at 4 | background decode workers; `0` disables lookahead |
 | `prefetch_memory` | max of 192 MiB and one largest frame per worker | lookahead budget in MiB; `0` is invalid |
@@ -184,6 +222,7 @@ frames.
 | `ImgSeqIndex` | input-list index |
 | `ImgSeqOriginalColorType` | decoder's original color type |
 | `ImgSeqHasICC` | whether the source has an ICC profile |
+| `ICCProfile` | raw embedded ICC bytes when `icc_profile=True` |
 | `ImgSeqOrientation` | orientation code carried by the source |
 | `ImgSeqAlpha` | `1` on frames from the alpha clip |
 
@@ -191,8 +230,9 @@ container color metadata is mapped to `_Primaries`, `_Transfer`, `_Matrix`,
 `_Range`, and, when explicitly named, `_ChromaLocation`. sources include avif
 and heif/heic `nclx`, png `cICP`, jxl codestream headers, and av1 sequence
 headers. unknown or unspecified codes are left unset. RGB frames always keep
-`_Matrix=0` and `_Range=1`; an ICC profile alone only affects
-`ImgSeqHasICC`.
+`_Matrix=0` and `_Range=1`. `ImgSeqHasICC` reports an embedded profile;
+`icc_profile=True` also exposes its raw bytes as `ICCProfile` without changing
+pixels or applying a color transform.
 
 ## performance
 
@@ -219,8 +259,6 @@ listed formats less in the recorded benchmark.
 
 ## build
 
-requirements: rust/cargo, a local vcpkg install on windows, and python 3.12+.
-
 ```console
 python -m pip install ".[dev]"
 python -m build
@@ -240,6 +278,19 @@ libwebp is linked from its static archive when available, so it is not needed
 at runtime. JPEG 2000 uses the OpenJPEG sources bundled by `openjpeg-sys`.
 dav1d and libde265 remain shared on unix; windows uses the static vcpkg triplet.
 
-see [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) and [LICENSES](LICENSES) for
-native dependency obligations. the project itself is licensed under the
-MPL-2.0; see [LICENSE](LICENSE).
+## license
+
+`vs-imageseqs` is licensed under the Mozilla Public License 2.0. see
+[LICENSE](LICENSE).
+
+the plugin also contains native code under these licenses:
+
+- dav1d and OpenJPEG: BSD-2-Clause;
+- libwebp: BSD-3-Clause with its accompanying patent grant;
+- libheif and libde265: LGPL-3.0.
+
+see [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) and [LICENSES/](LICENSES/) for
+the dependency versions, notices, and complete license texts. when a binary
+uses static LGPL linkage, these files are not the entire obligation: the
+release must also provide the applicable corresponding source and a practical
+way to relink the plugin with modified LGPL libraries.

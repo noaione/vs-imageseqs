@@ -32,12 +32,12 @@
 //! whose colour statement the frame properties cannot carry. Those files are the
 //! only ones the libheif hook still decodes.
 
-use std::{path::Path, time::Instant};
+use std::{path::Path, sync::Arc, time::Instant};
 
 use image::{ColorType, metadata::Orientation};
 use libheif_rs::{
-    Chroma, ColorPrimaries, ColorSpace, HeifContext, ImageHandle, LibHeif, MatrixCoefficients,
-    Plane, RgbChroma, TransferCharacteristics,
+    Chroma, ColorPrimaries, ColorProfile, ColorSpace, HeifContext, ImageHandle, LibHeif,
+    MatrixCoefficients, Plane, RgbChroma, TransferCharacteristics, color_profile_types,
 };
 use vapoursynth4_rs::ColorFamily;
 
@@ -82,6 +82,7 @@ pub fn image_info(path: &Path) -> Option<ImageInfo> {
         // the probe it replaces reported this one.
         original_color_type: header.color_type.into(),
         has_icc_profile: header.has_icc_profile,
+        icc_profile: header.icc_profile.clone(),
         cicp: header.cicp,
         // The position of the chroma samples of a hevc picture is in its vui,
         // which libheif does not report, and not in any item property this walk
@@ -141,6 +142,7 @@ struct HeifHeader {
     depth: u8,
     color_type: ColorType,
     has_icc_profile: bool,
+    icc_profile: Option<Arc<[u8]>>,
     /// The colour description the container states, when it states one.
     cicp: Option<Cicp>,
 }
@@ -180,13 +182,15 @@ impl HeifHeader {
             (_, true) if is_hdr => ColorType::Rgba16,
             (_, true) => ColorType::Rgba8,
         };
+        let icc_profile = icc_profile(handle);
         Some(Self {
             width: handle.width(),
             height: handle.height(),
             color_space,
             depth,
             color_type,
-            has_icc_profile: handle.color_profile_raw().is_some(),
+            has_icc_profile: icc_profile.is_some(),
+            icc_profile,
             cicp: handle.color_profile_nclx().map(|profile| Cicp {
                 primaries: profile.color_primaries().code(),
                 transfer: profile.transfer_characteristics().code(),
@@ -217,6 +221,16 @@ impl HeifHeader {
             _ => None,
         }
     }
+}
+
+/// Returns the raw ICC payload of the primary image, excluding an nclx profile.
+fn icc_profile(handle: &ImageHandle) -> Option<Arc<[u8]>> {
+    let profile = handle.color_profile_raw()?;
+    matches!(
+        profile.profile_type(),
+        color_profile_types::R_ICC | color_profile_types::PROF
+    )
+    .then(|| Arc::from(profile.data))
 }
 
 /// Whether the chroma subsampling libheif reports is one this module hands out.
@@ -590,6 +604,7 @@ mod tests {
             color_type,
             original_color_type: ExtendedColorType::L8,
             has_icc_profile: false,
+            icc_profile: None,
             cicp: None,
             chroma_location: None,
             orientation: Orientation::NoTransforms,

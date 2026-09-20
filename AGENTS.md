@@ -27,6 +27,10 @@ half the logical cores (capped at four) and `0` disables lookahead decoding.
 `prefetch_memory` is the lookahead budget in MiB; it defaults to the larger of
 192 MiB and one frame of the largest image per worker, and `0` is rejected
 because `prefetch=0` is how lookahead is disabled.
+`icc_profile` defaults to false; when true, a source's embedded ICC bytes are
+copied to the binary `ICCProfile` frame property without changing pixels or
+applying a color transform. `ImgSeqHasICC` is still set independently, and
+`ReadAlpha` copies `ICCProfile` to both output clips.
 
 a frame is not always rgb: a lossy webp is handed out as its own yuv planes, and
 so is a colour heif/heic page (libheif's planes) and a colour avif (dav1d's),
@@ -85,8 +89,9 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   corrected to `Gray8` here.
 - `src/pixel.rs`: supported pixel formats, the format a nominal depth names, and
   planar frame writes, which move a wider word down to the frame's own depth.
-- `src/color.rs`: frame properties, and the container's color metadata mapped
-  onto them as `_Primaries`, `_Transfer`, `_Matrix` and `_Range`.
+- `src/color.rs`: frame properties, the optional raw `ICCProfile`, and the
+  container's color metadata mapped onto `_Primaries`, `_Transfer`, `_Matrix`
+  and `_Range`.
 - `src/error.rs`: errors returned through the VapourSynth boundary.
 - `hatch_build.py`: Cargo build, plugin staging, wheel tagging, and legal-file
   inclusion.
@@ -110,7 +115,9 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   `cicp-rgb8.png` written by `tests/make-cicp-fixtures.py` and the
   `cicp-rgb8.avif` encoded from it with `avifenc --lossless --cicp 9/18/0 -r
   full`, which that script documents, beside the `alpha-rgb8.png` that holds the
-  same picture and states nothing.
+  same picture and states nothing. its ICC section reads `icc-rgb8.png` and
+  `icc-rgba8.png`, generated with the embedded `icc-srgb.icc` profile, and
+  checks the opt-in `ICCProfile` property.
 - `docs/IMPLEMENTATION.md`: design notes and deferred ideas.
 - `docs/improvements/`: one plan per change, with its status; its `README.md` is
   the index of what is open, what the landed work left over and what was decided

@@ -5,6 +5,7 @@ active:
 
     python tests/bench-imgseqs-vs-bestsource.vpy
     python tests/bench-imgseqs-vs-bestsource.vpy --frames 10 --extra
+    python tests/bench-imgseqs-vs-bestsource.vpy --icc-profile
 
 Every configuration reads the same ordered files once per repetition and every
 ``get_frame`` is timed on its own, so the table shows where the time goes per
@@ -64,6 +65,7 @@ def parse_args() -> argparse.Namespace:
         "--extra", action="store_true", help="also run imgseqs without lookahead and bestsource with one thread"
     )
     parser.add_argument("--prefetch", type=int, default=None, help="also run imgseqs with this many lookahead workers")
+    parser.add_argument("--icc-profile", action="store_true", help="export embedded ICC profiles as frame properties")
     return parser.parse_args()
 
 
@@ -116,8 +118,12 @@ def staged_files(files: list[Path], pattern: str, staging: Path) -> list[Path]:
     return links
 
 
-def open_imgseqs(files: list[Path], prefetch: Optional[int]) -> vs.VideoNode:
-    arguments: dict = {"files": [str(path) for path in files], "mismatch": True}
+def open_imgseqs(files: list[Path], prefetch: Optional[int], icc_profile: bool) -> vs.VideoNode:
+    arguments: dict = {
+        "files": [str(path) for path in files],
+        "mismatch": True,
+        "icc_profile": icc_profile,
+    }
     if prefetch is not None:
         arguments["prefetch"] = prefetch
     return core.imgseqs.Read(**arguments)
@@ -211,18 +217,18 @@ def main() -> None:
     first = first_number(files, args.pattern)
     directory = files[0].parent
 
-    configs = [Config("imgseqs", lambda: open_imgseqs(files, None))]
+    configs = [Config("imgseqs", lambda: open_imgseqs(files, None, args.icc_profile))]
     if first is None:
         print(f"{args.pattern!r} does not describe {files[0].name}, so bestsource is left out")
     else:
         configs.append(Config("bestsource", lambda: open_bestsource(directory, args.pattern, first, None)))
     if args.extra:
-        configs.append(Config("imgseqs p=0", lambda: open_imgseqs(files, 0)))
+        configs.append(Config("imgseqs p=0", lambda: open_imgseqs(files, 0, args.icc_profile)))
         if first is not None:
             configs.append(Config("bestsource t=1", lambda: open_bestsource(directory, args.pattern, first, 1)))
     if args.prefetch is not None:
         workers = args.prefetch
-        configs.append(Config(f"imgseqs p={workers}", lambda: open_imgseqs(files, workers)))
+        configs.append(Config(f"imgseqs p={workers}", lambda: open_imgseqs(files, workers, args.icc_profile)))
 
     bestsource = core.bs.VideoSource.plugin
     start = "" if first is None else f", first number {first}"

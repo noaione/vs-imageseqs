@@ -1,6 +1,6 @@
 use std::{
     path::{Path, PathBuf},
-    sync::Once,
+    sync::{Arc, Once},
     time::{Duration, Instant},
 };
 
@@ -60,6 +60,8 @@ pub struct ImageInfo {
     pub color_type: ColorType,
     pub original_color_type: ExtendedColorType,
     pub has_icc_profile: bool,
+    /// The source's embedded ICC profile, when it has one.
+    pub icc_profile: Option<Arc<[u8]>>,
     /// The colour description the container states about its own samples, which
     /// is `None` for a file that states none and for one whose codes name no
     /// property; see [`crate::color::Cicp`].
@@ -205,10 +207,10 @@ pub fn probe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
     let (width, height) = decoder.dimensions();
     let color_type = decoder.color_type();
     let original_color_type = decoder.original_color_type();
-    let has_icc_profile = decoder
+    let icc_profile = decoder
         .icc_profile()
         .map_err(|error| image_error("read metadata from", path, error))?
-        .is_some();
+        .map(Arc::<[u8]>::from);
     // The containers that state a colour description do it somewhere the `image`
     // decoder has no accessor for: a heif item property inside a `libheif`
     // handle, or a chunk beside the data of a png. Both are read from the file
@@ -233,7 +235,8 @@ pub fn probe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
         height,
         color_type,
         original_color_type,
-        has_icc_profile,
+        has_icc_profile: icc_profile.is_some(),
+        icc_profile,
         cicp,
         // The `image` decoders have no accessor for a chroma sample position,
         // and the containers that state one are read by the modules that know

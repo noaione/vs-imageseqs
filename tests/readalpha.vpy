@@ -1057,6 +1057,43 @@ def test_color_metadata() -> None:
     )
 
 
+def test_icc_profile_properties() -> None:
+    """Exports exact embedded ICC bytes without changing the decoded frames."""
+    expected = (FIXTURES / "icc-srgb.icc").read_bytes()
+
+    disabled = core.imgseqs.Read(files=[fixture("icc-rgb8.png")]).get_frame(0)
+    check(disabled.props.get("ImgSeqHasICC") == 1, "icc: the source reports its profile")
+    check("ICCProfile" not in disabled.props, "icc: export is disabled by default")
+
+    enabled = core.imgseqs.Read(
+        files=[fixture("icc-rgb8.png")],
+        icc_profile=True,
+    ).get_frame(0)
+    check(
+        enabled.props.get("ICCProfile") == expected,
+        "icc: enabled export keeps the exact profile bytes",
+    )
+    check(samples(enabled) == samples(disabled), "icc: export does not change pixels")
+
+    plain = read_alpha(files=[fixture("icc-rgba8.png")])
+    result = core.imgseqs.ReadAlpha(
+        files=[fixture("icc-rgba8.png")],
+        icc_profile=True,
+    )
+    color = result["clip"].get_frame(0)
+    alpha = result["alpha"].get_frame(0)
+    check(
+        color.props.get("ICCProfile") == expected
+        and alpha.props.get("ICCProfile") == expected,
+        "icc: ReadAlpha copies the profile to both frames",
+    )
+    check(
+        samples(color) == samples(plain[0].get_frame(0))
+        and samples(alpha) == samples(plain[1].get_frame(0)),
+        "icc: ReadAlpha export does not change either clip",
+    )
+
+
 def main() -> None:
     for test in (
         test_rgba8,
@@ -1075,6 +1112,7 @@ def main() -> None:
         test_color_containers,
         test_yuv_containers,
         test_color_metadata,
+        test_icc_profile_properties,
         test_orientation,
         test_orientation_yuv,
         test_orientation_jxl,

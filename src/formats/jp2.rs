@@ -13,6 +13,7 @@
 
 use std::{
     path::Path,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -57,6 +58,7 @@ struct Header {
     components: Vec<ComponentHeader>,
     color: EnumeratedColor,
     has_icc_profile: bool,
+    icc_profile: Option<Arc<[u8]>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -100,6 +102,7 @@ pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<ImageInfo> {
         color_type,
         original_color_type: color_type.into(),
         has_icc_profile: header.has_icc_profile,
+        icc_profile: header.icc_profile,
         cicp: cicp(header.color),
         chroma_location: None,
         orientation: image::metadata::Orientation::NoTransforms,
@@ -482,7 +485,7 @@ fn parse_header(data: &[u8], path: &Path) -> Result<Header> {
         parse_jp2(data, path)
     } else if data.starts_with(&J2K_SIGNATURE) {
         let siz = parse_siz(data, path)?;
-        header_from_siz(siz, None, EnumeratedColor::Unspecified, false, path)
+        header_from_siz(siz, None, EnumeratedColor::Unspecified, false, None, path)
     } else {
         Err(image_error(
             "identify",
@@ -498,7 +501,14 @@ fn parse_jp2(data: &[u8], path: &Path) -> Result<Header> {
     let siz = state
         .siz
         .ok_or_else(|| image_error("identify", path, "the JP2 file has no SIZ marker"))?;
-    header_from_siz(siz, state.ihdr, state.color, state.has_icc_profile, path)
+    header_from_siz(
+        siz,
+        state.ihdr,
+        state.color,
+        state.has_icc_profile,
+        state.icc_profile,
+        path,
+    )
 }
 
 #[derive(Default)]
@@ -507,6 +517,7 @@ struct Jp2State {
     siz: Option<SizHeader>,
     color: EnumeratedColor,
     has_icc_profile: bool,
+    icc_profile: Option<Arc<[u8]>>,
 }
 
 fn walk_boxes(
@@ -603,7 +614,12 @@ fn parse_colr(payload: &[u8], state: &mut Jp2State, path: &Path) -> Result<()> {
                 _ => EnumeratedColor::Other,
             };
         }
-        2 => state.has_icc_profile = true,
+        2 => {
+            state.has_icc_profile = true;
+            if state.icc_profile.is_none() {
+                state.icc_profile = Some(Arc::from(&payload[3..]));
+            }
+        }
         _ => state.color = EnumeratedColor::Unspecified,
     }
     Ok(())
@@ -698,6 +714,7 @@ fn header_from_siz(
     ihdr: Option<(u32, u32, u16, Option<u32>)>,
     color: EnumeratedColor,
     has_icc_profile: bool,
+    icc_profile: Option<Arc<[u8]>>,
     path: &Path,
 ) -> Result<Header> {
     if let Some((width, height, components, depth)) = ihdr {
@@ -736,6 +753,7 @@ fn header_from_siz(
         components: siz.components,
         color,
         has_icc_profile,
+        icc_profile,
     })
 }
 
@@ -812,6 +830,7 @@ mod tests {
             ],
             color: EnumeratedColor::Srgb,
             has_icc_profile: false,
+            icc_profile: None,
         };
         assert_eq!(
             output_format(&rgb, Path::new("rgb.jp2")).unwrap().1,
@@ -840,7 +859,7 @@ mod tests {
             let yuv = Header {
                 color: EnumeratedColor::Sycc,
                 components,
-                ..rgb
+                ..rgb.clone()
             };
             assert_eq!(
                 output_format(&yuv, Path::new("yuv.jp2")).unwrap().1,

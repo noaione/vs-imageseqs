@@ -25,7 +25,7 @@ use crate::{
 };
 
 /// Arguments accepted by `Read` and `ReadAlpha`.
-const SEQUENCE_ARGS: &CStr = c"files:data[];fpsnum:int:opt;fpsden:int:opt;mismatch:int:opt;apply_rotation:int:opt;debug:int:opt;prefetch:int:opt;prefetch_memory:int:opt;";
+const SEQUENCE_ARGS: &CStr = c"files:data[];fpsnum:int:opt;fpsden:int:opt;mismatch:int:opt;apply_rotation:int:opt;debug:int:opt;prefetch:int:opt;prefetch_memory:int:opt;icc_profile:int:opt;";
 
 /// `Read` filter instance: the color clip of one image sequence.
 pub struct Read {
@@ -73,6 +73,8 @@ struct SequenceArgs {
     variable: bool,
     debug: bool,
     prefetch_workers: usize,
+    /// Whether embedded ICC bytes should be copied to frame properties.
+    export_icc_profile: bool,
     timings: SetupTimings,
 }
 
@@ -101,6 +103,8 @@ impl SequenceArgs {
             key!(c"prefetch_memory"),
             "prefetch_memory",
         )?)?;
+        let export_icc_profile =
+            read_optional_int(input, key!(c"icc_profile"), "icc_profile")?.unwrap_or(0) != 0;
         let (fps_num, fps_den) = reduce_fps(fps_num, fps_den)?;
 
         let probe_started = Instant::now();
@@ -135,7 +139,7 @@ impl SequenceArgs {
             format: images[0].format,
             prefetcher: Arc::new(Prefetcher::new(
                 Arc::clone(&images),
-                FrameBuilder::new(core, clips),
+                FrameBuilder::new(core, clips, export_icc_profile),
                 prefetch_workers,
                 prefetch_memory,
             )),
@@ -149,6 +153,7 @@ impl SequenceArgs {
             num_frames,
             variable,
             debug,
+            export_icc_profile,
             prefetch_workers,
             timings: SetupTimings {
                 probe,
@@ -374,12 +379,13 @@ fn log_create(core: &mut CoreRef<'_>, args: &SequenceArgs, clips: &[Clip]) {
     log_debug(
         core,
         format_args!(
-            "create: frames={} clips={} mismatch={} variable={} apply_rotation={} probe={} validate={} prefetch={} prefetch_memory={} total={}",
+            "create: frames={} clips={} mismatch={} variable={} apply_rotation={} icc_profile={} probe={} validate={} prefetch={} prefetch_memory={} total={}",
             args.images.len(),
             clips,
             args.mismatch,
             args.variable,
             args.apply_rotation,
+            args.export_icc_profile,
             format_duration(args.timings.probe),
             format_duration(args.timings.validate),
             args.prefetch_workers,
