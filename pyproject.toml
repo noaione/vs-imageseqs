@@ -1,14 +1,40 @@
 [project]
 name = "vapoursynth-imageseqs"
 version = "0.1.0"
-description = "VapourSynth image sequence reader plugin"
+description = "A native VapourSynth source plugin for ordered image sequences"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MPL-2.0" }
 authors = [
     { name = "noaione", email = "noaione@n4o.xyz" },
 ]
-keywords = ["vapoursynth", "image-reader"]
+keywords = [
+    "vapoursynth",
+    "image-sequence",
+    "image-reader",
+    "video-processing",
+    "rust",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Plugins",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Rust",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Multimedia :: Video",
+]
+
+[project.urls]
+Homepage = "https://github.com/noaione/vs-imageseqs"
+Repository = "https://github.com/noaione/vs-imageseqs"
+Issues = "https://github.com/noaione/vs-imageseqs/issues"
+Changelog = "https://github.com/noaione/vs-imageseqs/blob/master/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [
@@ -43,6 +69,7 @@ include = [
     "hatch_build.py",
     "pyproject.toml",
     "README.md",
+    "CHANGELOG.md",
     "docs/**/*.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES",
