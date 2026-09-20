@@ -322,8 +322,6 @@ jobs:
             test -n "$plugin"
             plugin_dir=$(dirname "$plugin")
 
-            cp "$plugin" "release-assets/${platform}-$(basename "$plugin")"
-
             bundle="release-assets/${platform}-plugin"
             mkdir -p "$bundle"
             cp "$plugin" "$bundle/"
