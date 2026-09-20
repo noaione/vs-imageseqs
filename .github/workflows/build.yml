@@ -318,9 +318,9 @@ jobs:
           find artifacts -type f \( -name '*.whl' -o -name '*.tar.gz' \) -exec cp {} release-assets/ \;
 
           for platform in linux-x86_64 macos-arm64 windows-x86_64; do
-            plugin_dir="artifacts/${platform}-plugins/native"
-            plugin=$(find "$plugin_dir" -maxdepth 1 -type f \( -name '*.dll' -o -name '*.so' -o -name '*.dylib' \) -print -quit)
+            plugin=$(find "artifacts/${platform}-plugins" -type f \( -name '*.dll' -o -name '*.so' -o -name '*.dylib' \) -print -quit)
             test -n "$plugin"
+            plugin_dir=$(dirname "$plugin")
 
             cp "$plugin" "release-assets/${platform}-$(basename "$plugin")"
 
