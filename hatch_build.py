@@ -81,6 +81,18 @@ def build_plugin(root: Path, environment: dict[str, str]) -> Path:
     return artifact
 
 
+def wheel_platform_tag() -> str:
+    platform_tags = tuple(tags.platform_tags())
+    if sys.platform == "linux":
+        # packaging 26.3 puts the generic linux tag before the manylinux and
+        # musllinux tags. PyPI does not accept that generic tag for uploads.
+        for platform in platform_tags:
+            if platform.startswith(("manylinux_", "musllinux_")):
+                return platform
+        raise RuntimeError("could not determine a manylinux or musllinux tag")
+    return platform_tags[0]
+
+
 # Do not subscript ``BuildHookInterface``: hatchling 1.27-1.32.2 declare it
 # with one type parameter and 1.32.3 added a second one, so any fixed
 # subscript makes the hook unloadable for the other releases. The plain class
@@ -120,7 +132,7 @@ class NativePluginHook(BuildHookInterface):  # type: ignore[type-arg]
         # The wheel contains a native plugin, so it must not be tagged as a
         # universal pure-Python wheel.
         build_data["pure_python"] = False
-        build_data["tag"] = f"py3-none-{next(tags.platform_tags())}"
+        build_data["tag"] = f"py3-none-{wheel_platform_tag()}"
 
     def finalize(
         self,
