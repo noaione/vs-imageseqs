@@ -45,6 +45,7 @@ dev = [
     "vsrepo>=2.0"
 ]
 dev-bench = [
+    "natsort>=8.4.0",
     "vapoursynth-bestsource>=22",
 ]
 

@@ -463,6 +463,19 @@ The module is in the shape of `formats/heif.rs` and `formats/jxl.rs`:
   layout the frame has for the rest. A **grid** — a primary item that is a
   `dimg` reference to tiles — is refused with a clear error rather than half
   read.
+- **the item loop ends on decoder progress.** `send_data` and `get_picture` can
+  each answer `Again`, and an item that holds no frame leaves them answering each
+  other forever; `take_picture` tracks whether the decoder still has input to
+  take, and once it has all of it, an `Again` is the file saying it holds no
+  picture rather than a state to wait out. That answer is only decidable because
+  the item decoder is created with `max_frame_delay = 1`: dav1d's default frame
+  delay decodes the one frame on a worker thread, so a valid item's first
+  `get_picture` and a missing item's only answer are the same call. A still image
+  is one frame, so a frame delay is a pipeline nothing can use, and
+  `n_threads` — which is [19](improvements/19-avif-thread-budget.md)'s subject —
+  is left alone. `dav1d_flush` is *not* part of this: it discards delayed frames
+  rather than draining them, and it destroyed a valid item's picture when it was
+  tried. [15](improvements/15-avif-decoder-progress.md) has the measurements.
 - **a monochrome item is still `image`'s.** `avif::handles` takes a file whose
   probe answered a yuv format and whose extension is `avif`, so a monochrome
   avif keeps [05](improvements/05-monochrome-heif.md)'s corrected

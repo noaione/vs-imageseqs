@@ -155,6 +155,10 @@ the format maximum (`255`, `1023`, `4095`, `65535`, or `1.0`).
 both clips share the frame count, rate, and indexes. each file is decoded once,
 and `mismatch` applies to both clips.
 
+a file that cannot produce a picture is reported as a decode error naming the
+file rather than stalling the frame request; an avif whose item holds no coded
+frame is the case the tests cover.
+
 ### nominal bit depth
 
 when a container states 9–16 bits, the frame format names that depth and the

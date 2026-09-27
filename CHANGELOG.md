@@ -2,6 +2,18 @@
 
 ## unreleased
 
+### fixed
+- a frame request on an AVIF whose item holds no coded frame no longer hangs
+  forever; it fails with a decode error naming the file
+  - the item decoder now runs at low latency, which is what lets "the decoder has
+    all of the item and has no picture" be told apart from "the picture is still
+    being decoded"
+
+### performance
+- AVIF decoding is 15.6% faster on the 35-page sandbox set, and 43% faster on
+  `sandbox/hitokage-sample`: a still image is one frame, so the item is decoded
+  directly instead of through a frame-delay pipeline it cannot use
+
 ### build
 - improvement to linux wheel distribution, manylinux now has dropped down to glibc 2.28
   - linux build now bundles `libdav1d.so.7` and `libde265.so.0` to avoid runtime dependency issues

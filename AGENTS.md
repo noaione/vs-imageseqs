@@ -66,6 +66,8 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   policy changes. this avoids selecting x265.
 - update `THIRD_PARTY_NOTICES` and `LICENSES/` when native dependencies or
   linkage change.
+- NEVER commit anything yourselves, this should be done by human maintainers only. if you need to commit something, please ask for permission first.
+- ALWAYS try to update CHANGELOG.md with your changes, if you are unsure about what to write, please ask for help.
 
 ## source layout
 
@@ -86,7 +88,12 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   for JPEG 2000 header probing and OpenJPEG decoding, `png.rs` for the `cICP`
   chunk, which `image` has no accessor for, and `webp.rs` for the libwebp decode
   and the lossy yuv format). a monochrome avif still goes through `image` and is
-  corrected to `Gray8` here.
+  corrected to `Gray8` here. an avif item is decoded at low latency, because one
+  item is one frame, so an item that holds no picture ends the frame request with
+  a path-qualified error instead of a decode loop that never returns; do not put
+  that loop's exit behind an iteration count or a sleep, and do not call
+  `dav1d_flush` to drain it, because it discards the delayed frame rather than
+  handing it over.
 - `src/pixel.rs`: supported pixel formats, the format a nominal depth names, and
   planar frame writes, which move a wider word down to the frame's own depth.
 - `src/color.rs`: frame properties, the optional raw `ICCProfile`, and the
@@ -192,6 +199,19 @@ C:\Python314\python.exe -m build
 inspect the wheel as a zip archive. confirm the native file is under
 `vapoursynth/plugins/imageseqs/`, its manifest and legal files are present, and no python package is
 included.
+
+## testing and benching
+
+before doing any changes, make sure you run the validator then make a release build and do the following:
+- run `tests/readalpha.vpy` against the release build, and inspect the log for any errors or warnings.
+- look at `docs/BENCH.md` and see how to run the benchmarks.
+- run the benchmarks and record the results. this will give you a baseline to compare against after your changes.
+
+after everything is done, do the same thing. what you need to make sure is:
+- the validator passes with no errors or warnings.
+- the benchmarks are run and the results are compared against the baseline.
+  the code changes should not introduce any **significant** regressions in speed or memory usage.
+  if there is a regression, you need to investigate and fix it before submitting your changes.
 
 ## native licenses
 

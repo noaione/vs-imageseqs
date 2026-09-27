@@ -60,6 +60,13 @@ four columns differs while the colour of the four rows differs:
 
     avifenc -q 100 --qalpha 100 --cicp 1/13/6 -r full --yuv 420 tests/fixtures/yuv-rgba8.png tests/fixtures/alpha-yuv420p.avif
 
+``avif-no-picture.avif`` is hand-written by this script rather than encoded: it
+is a well-formed container whose primary item payload holds AV1 temporal
+delimiters and no frame at all, so a probe describes it as a 3x2 4:4:4 page and
+a decode has no picture to produce. ``tests/readalpha.vpy`` requests a frame from
+it in a child process with a timeout, because the defect it guards against is a
+decode loop that never returns rather than one that returns the wrong answer.
+
 ``heif-enc`` is x265 through libheif and ``avifenc`` is aom through libavif; both
 are asked for lossless output so the validator can state the exact samples, and
 both keep the alpha plane at full quality. The heif encoder writes a monochrome
@@ -213,6 +220,60 @@ def dds_dxt5(path: str) -> None:
         handle.write(b"DDS " + header + pixel_format + caps + alpha_block + color_block)
 
 
+def avif_box(kind: bytes, payload: bytes) -> bytes:
+    """One ISO base media file format box, with a 32 bit size."""
+    return struct.pack(">I", 8 + len(payload)) + kind + payload
+
+
+def avif_no_picture(path: str) -> None:
+    """Writes an avif whose primary item holds no coded frame.
+
+    The container is the shape an encoder writes for a 4:4:4 page — a file type
+    box, the item metadata, and a media data box holding the coded item — with
+    the item payload reduced to fifteen AV1 temporal delimiter units and nothing
+    else. It states no sequence header and no frame, so it passes a probe that
+    reads the container (a size, a coding record and a colour box are all there)
+    and then has no picture to hand over. That is the state a decoder has to end
+    rather than wait out, which is what makes this file the regression fixture
+    for a frame request that never returns.
+    """
+    coded = b"\x12\x00" * 15
+    # A 3x2 picture, coded as one 4:4:4 eight bit sample per channel, with the
+    # colour box that moves it onto the plugin's own yuv decode path.
+    ipco = (
+        avif_box(b"ispe", bytes(4) + struct.pack(">II", 3, 2))
+        + avif_box(b"av1C", bytes((0x81, 0x10, 0x00, 0, 0, 0, 0)))
+        + avif_box(
+            b"colr",
+            b"nclx" + struct.pack(">3H", 1, 13, 6) + bytes((0x80,)),
+        )
+    )
+    ipma = (
+        bytes(4)
+        + struct.pack(">I", 1)
+        + struct.pack(">H", 1)
+        + bytes((3, 0x81, 0x82, 0x83))
+    )
+    pitm = avif_box(b"pitm", bytes(4) + struct.pack(">H", 1))
+    iprp = avif_box(b"iprp", avif_box(b"ipco", ipco) + avif_box(b"ipma", ipma))
+
+    def meta(offset: int) -> bytes:
+        iloc = avif_box(
+            b"iloc",
+            bytes((0, 0, 0, 0, 0x44, 0x00))
+            + struct.pack(">H", 1)
+            + struct.pack(">HHHII", 1, 0, 1, offset, len(coded)),
+        )
+        return avif_box(b"meta", bytes(4) + pitm + iprp + iloc)
+
+    ftyp = avif_box(b"ftyp", b"avif" + bytes(4) + b"avifmif1miafMA1A")
+    # The item's extent is an offset into the file, so the metadata has to be
+    # built once to know where the media data box starts.
+    offset = len(ftyp) + len(meta(0)) + 8
+    with open(path, "wb") as handle:
+        handle.write(ftyp + meta(offset) + avif_box(b"mdat", coded))
+
+
 def netpbm(path: str, maximum: int, rows: list[list[int]], depth: int = 1) -> None:
     """Writes a binary grayscale PGM, or a four channel PAM when `depth` is four.
 
@@ -339,6 +400,7 @@ def main() -> None:
         ],
     )
     dds_dxt5(write("alpha-dds.dds"))
+    avif_no_picture(write("avif-no-picture.avif"))
     png(
         write("alpha-rgb8.png"),
         RGB,

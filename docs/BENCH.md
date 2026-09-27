@@ -317,9 +317,29 @@ open the set.
 
 | reading the set | frames | median frame | open | total |
 | --- | --- | --- | --- | --- |
-| imgseqs `Read` | 3.19 s | 40.7 ms | 0.003 s | 3.19 s |
-| imgseqs `Read`, `prefetch=0` | 6.65 s | 183.6 ms | 0.004 s | 6.65 s |
-| imgseqs `Read`, `prefetch=16` | 3.29 s | 0.4 ms | 0.004 s | 3.30 s |
+| imgseqs `Read` | 2.04 s | 13.0 ms | 0.002 s | 2.04 s |
+| imgseqs `Read`, `prefetch=0` | 4.94 s | 137.0 ms | 0.002 s | 4.94 s |
+| imgseqs `Read`, `prefetch=16` | 1.99 s | 0.1 ms | 0.002 s | 2.00 s |
+
+[15](improvements/15-avif-decoder-progress.md) is what the rows above read now,
+and it is the only change on this page that moved them without touching a sample:
+the item decoder is created for low-latency output, because one item is one frame
+and dav1d's default frame delay decodes it on a worker thread. best pass of three
+per configuration, both builds measured in the same batch:
+
+| avif 35 | before | after |
+| --- | --- | --- |
+| `Read` | 2.226 s | 2.044 s |
+| `Read`, `prefetch=0` | 5.350 s | 4.939 s |
+| `Read`, `prefetch=16` | 2.387 s | 1.994 s |
+| median frame | 47.91 ms | 13.01 ms |
+
+every row is faster, and the serial row by 8%: the pipeline a still image cannot
+use was not paying for itself. the earlier rows this section held (3.19/6.65/3.29)
+were already higher in this session than the same build measured here, so they
+were drift rather than a change; the paired columns are the evidence, and
+`target/bench/ab-sets.py` over the six sets says the same thing (avif 0.844,
+`hitokage` 0.570, and the untouched heic and png sets inside their own spread).
 
 before [12](improvements/12-heif-avif-yuv-output.md) the same three rows were
 4.99 s, 11.77 s and 5.14 s with a 121.4 ms median: the conversion to r,g,b that

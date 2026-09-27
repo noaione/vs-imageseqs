@@ -307,19 +307,124 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
 }
 
 /// Decodes one coded av1 item into its picture.
+///
+/// The decoder is asked for low-latency output, which is what makes the loop
+/// below able to tell "no picture yet" from "no picture at all". dav1d's default
+/// frame delay is `ceil(sqrt(n_threads))` frames, and with one item that is one
+/// frame too many: the picture is decoded on a worker thread, so `get_picture`
+/// answers `Again` until that thread finishes and an item that holds no frame
+/// answers `Again` in exactly the same way. At a frame delay of one the decode is
+/// synchronous — measured on every fixture and on the 6.8 MB sandbox pages, the
+/// picture is ready on the first call — so an `Again` after the decoder has all
+/// of the item is the file saying it has no picture. `n_threads` is left at its
+/// default, so the tile threads that decode one page in parallel are unchanged.
 fn decode_item(coded: &[u8], info: &ImageInfo) -> Result<dav1d::Picture> {
-    let mut decoder = dav1d::Decoder::new().map_err(|error| decode_error(&info.path, error))?;
-    if let Err(error) = decoder.send_data(coded.to_vec(), None, None, None) {
-        return Err(decode_error(&info.path, error));
+    let mut settings = dav1d::Settings::new();
+    settings.set_max_frame_delay(1);
+    let mut decoder = dav1d::Decoder::with_settings(&settings)
+        .map_err(|error| decode_error(&info.path, error))?;
+    take_picture(&mut decoder, coded, &info.path)
+}
+
+/// Whether the decoder has taken all of the input it was given.
+///
+/// Both calls that submit answer `Again` when the decoder kept what it could not
+/// take yet, and `Ok` when it took all of it; the wrapper keeps the rest and
+/// hands it back through [`ItemDecoder::submit_pending`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Submission {
+    /// The decoder has all of the item.
+    Complete,
+    /// The decoder kept some of it and has to be drained before taking more.
+    Pending,
+}
+
+/// The decoder calls the loop over one item makes, so the loop that decides an
+/// item holds no picture can be tested without a coded item to decode.
+trait ItemDecoder {
+    /// What one decoded picture is.
+    type Picture;
+
+    /// Submits the item, reporting whether the decoder took all of it.
+    fn submit(&mut self, coded: &[u8]) -> std::result::Result<Submission, dav1d::Error>;
+
+    /// Takes the next decoded picture, or reports that none is ready.
+    fn next_picture(&mut self) -> std::result::Result<Self::Picture, dav1d::Error>;
+
+    /// Hands the decoder the input it kept, reporting whether it took it now.
+    fn submit_pending(&mut self) -> std::result::Result<Submission, dav1d::Error>;
+}
+
+impl ItemDecoder for dav1d::Decoder {
+    type Picture = dav1d::Picture;
+
+    fn submit(&mut self, coded: &[u8]) -> std::result::Result<Submission, dav1d::Error> {
+        Submission::of(self.send_data(coded.to_vec(), None, None, None))
     }
+
+    fn next_picture(&mut self) -> std::result::Result<Self::Picture, dav1d::Error> {
+        self.get_picture()
+    }
+
+    fn submit_pending(&mut self) -> std::result::Result<Submission, dav1d::Error> {
+        Submission::of(self.send_pending_data())
+    }
+}
+
+impl Submission {
+    /// What a submission that answered `result` left behind.
+    fn of(
+        result: std::result::Result<(), dav1d::Error>,
+    ) -> std::result::Result<Self, dav1d::Error> {
+        match result {
+            Ok(()) => Ok(Self::Complete),
+            Err(dav1d::Error::Again) => Ok(Self::Pending),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// Decodes one coded item into its picture, ending when the decoder cannot
+/// produce one.
+///
+/// dav1d moves input and pictures in two directions, and either one can be the
+/// call that cannot make progress: submitting answers `Again` when the decoder's
+/// input buffer is full and its output has to be drained first, and asking for a
+/// picture answers `Again` when none is ready. An item that holds no frame — a
+/// sequence header without one, or a payload that was truncated — leaves those
+/// two answering each other forever, which is what this loop used to do:
+/// `send_pending_data` answers `Ok` both when it handed the last of the input
+/// over *and* when it had none to hand over, so an empty submission looked like
+/// progress and the loop never ended. `submission` is what tells those two
+/// apart, and with the synchronous decode [`decode_item`] asks for, an `Again`
+/// once the decoder has all of the item is the file saying it holds no picture
+/// rather than a state to wait out.
+fn take_picture<D: ItemDecoder>(decoder: &mut D, coded: &[u8], path: &Path) -> Result<D::Picture> {
+    let mut submission = decoder
+        .submit(coded)
+        .map_err(|error| decode_error(path, error))?;
     loop {
-        match decoder.get_picture() {
-            Err(dav1d::Error::Again) => match decoder.send_pending_data() {
-                Ok(()) | Err(dav1d::Error::Again) => {}
-                Err(error) => return Err(decode_error(&info.path, error)),
-            },
+        match decoder.next_picture() {
             Ok(picture) => return Ok(picture),
-            Err(error) => return Err(decode_error(&info.path, error)),
+            // The decoder has all of the item and has no picture to give.
+            Err(dav1d::Error::Again) if submission == Submission::Complete => {
+                return Err(image_error("decode", path, "the item holds no picture"));
+            }
+            Err(dav1d::Error::Again) => {
+                submission = decoder
+                    .submit_pending()
+                    .map_err(|error| decode_error(path, error))?;
+                if submission == Submission::Pending {
+                    // The decoder refuses input while reporting that it has no
+                    // output to drain, so neither direction can progress.
+                    return Err(image_error(
+                        "decode",
+                        path,
+                        "the decoder stopped making progress",
+                    ));
+                }
+            }
+            Err(error) => return Err(decode_error(path, error)),
         }
     }
 }
@@ -1380,6 +1485,7 @@ fn has_avif_extension(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::path::PathBuf;
 
     use image::ExtendedColorType;
@@ -2023,6 +2129,212 @@ mod tests {
             [
                 0, 85, 170, 255, 0, 85, 170, 255, 0, 85, 170, 255, 0, 85, 170, 255
             ]
+        );
+    }
+
+    /// A decoder whose answers are written out in advance, so the loop that
+    /// decides an item holds no picture can be driven without a coded item.
+    ///
+    /// A call the script does not describe panics: a loop that asked for more
+    /// than the case allows would otherwise spin, and a test that hangs is a
+    /// worse failure than one that panics.
+    struct Scripted {
+        initial: Submission,
+        pictures: VecDeque<std::result::Result<u8, dav1d::Error>>,
+        submissions: VecDeque<std::result::Result<Submission, dav1d::Error>>,
+    }
+
+    impl Scripted {
+        fn new(
+            initial: Submission,
+            pictures: impl IntoIterator<Item = std::result::Result<u8, dav1d::Error>>,
+            submissions: impl IntoIterator<Item = std::result::Result<Submission, dav1d::Error>>,
+        ) -> Self {
+            Self {
+                initial,
+                pictures: pictures.into_iter().collect(),
+                submissions: submissions.into_iter().collect(),
+            }
+        }
+
+        /// Runs the loop over a scripted decoder and reports what it answered.
+        fn run(&mut self) -> Result<u8> {
+            take_picture(self, b"item", Path::new("scripted.avif"))
+        }
+    }
+
+    impl ItemDecoder for Scripted {
+        type Picture = u8;
+
+        fn submit(&mut self, _coded: &[u8]) -> std::result::Result<Submission, dav1d::Error> {
+            Ok(self.initial)
+        }
+
+        fn next_picture(&mut self) -> std::result::Result<u8, dav1d::Error> {
+            self.pictures
+                .pop_front()
+                .expect("the loop asked for a picture the case does not describe")
+        }
+
+        fn submit_pending(&mut self) -> std::result::Result<Submission, dav1d::Error> {
+            self.submissions
+                .pop_front()
+                .expect("the loop submitted pending input the case does not describe")
+        }
+    }
+
+    #[test]
+    fn a_picture_that_is_ready_is_handed_back() {
+        let mut decoder = Scripted::new(Submission::Complete, [Ok(7)], []);
+        assert_eq!(decoder.run().expect("the picture is handed back"), 7);
+    }
+
+    #[test]
+    fn input_the_decoder_kept_is_submitted_again_before_the_picture() {
+        // The decoder takes part of the item and has nothing to hand over until
+        // it has been drained, and only then produces the picture: the initial
+        // backpressure the loop has to drain and resubmit.
+        let mut decoder = Scripted::new(
+            Submission::Pending,
+            [Err(dav1d::Error::Again), Ok(9)],
+            [Ok(Submission::Complete)],
+        );
+        assert_eq!(decoder.run().expect("the picture is handed back"), 9);
+    }
+
+    #[test]
+    fn an_item_that_holds_no_picture_is_an_error() {
+        // The decoder has all of the item and answers that it has no picture.
+        // The script has a second `Again` to spare: asking a third time is not
+        // how the loop decides, so it must not ask.
+        let mut decoder = Scripted::new(
+            Submission::Complete,
+            [Err(dav1d::Error::Again), Err(dav1d::Error::Again)],
+            [],
+        );
+        let error = decoder
+            .run()
+            .expect_err("an item without a picture is an error");
+        assert!(
+            error.to_string().contains("the item holds no picture"),
+            "{error}"
+        );
+        assert_eq!(
+            decoder.pictures.len(),
+            1,
+            "the loop asked for a second picture"
+        );
+    }
+
+    #[test]
+    fn a_decoder_that_stops_making_progress_is_an_error() {
+        // It refuses input while reporting that it has no output to drain, so
+        // neither direction can move and no further call would help.
+        let mut decoder = Scripted::new(
+            Submission::Pending,
+            [Err(dav1d::Error::Again)],
+            [Ok(Submission::Pending)],
+        );
+        let error = decoder
+            .run()
+            .expect_err("a decoder that cannot progress is an error");
+        assert!(
+            error.to_string().contains("stopped making progress"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_decode_error_is_reported_as_it_is() {
+        let mut decoder = Scripted::new(
+            Submission::Complete,
+            [Err(dav1d::Error::UnsupportedBitstream)],
+            [],
+        );
+        let error = decoder.run().expect_err("a decoder error is an error");
+        assert!(
+            error.to_string().contains("Unsupported bitstream"),
+            "{error}"
+        );
+    }
+
+    /// The coded payload of an avif fixture, as the decoder is handed it.
+    fn fixture_payload(path: &Path) -> Vec<u8> {
+        let mut file = File::open(path).expect("the fixture opens");
+        let boxes = leading_boxes(&mut file).expect("the boxes are read");
+        let meta = Meta::read(&boxes).expect("the item boxes are walked");
+        read_range(&mut file, meta.primary_data(usize::MAX).expect("located"))
+            .expect("the item is read")
+    }
+
+    /// A coded payload cut down to its sequence header, which states an image
+    /// without coding a frame of it.
+    fn sequence_header_only(coded: &[u8]) -> Vec<u8> {
+        let body = sequence_header_payload(coded).expect("the fixture states a sequence header");
+        let start = body.as_ptr() as usize - coded.as_ptr() as usize;
+        coded[..start + body.len()].to_vec()
+    }
+
+    /// The shapes of item that hold no frame, which is what used to make this
+    /// loop run forever: the decoder answers `Again` and no further call changes
+    /// its mind.
+    ///
+    /// These drive the real decoder rather than the scripted one, so a change
+    /// that ends the loop on a condition dav1d does not actually produce shows
+    /// up here. `tests/readalpha.vpy` asks the same question of the committed
+    /// fixture in a child process with a timeout, because a regression in this
+    /// loop hangs its caller rather than failing it.
+    #[test]
+    fn an_item_that_states_no_frame_ends_with_an_error() {
+        // A real sequence header, from a fixture that codes a frame after it,
+        // rather than a header this test made up: a bitstream dav1d rejects
+        // would be an error for another reason than the one under test.
+        let coded = fixture_payload(Path::new("tests/fixtures/avif-yuv420p.avif"));
+        let info = info("no-picture.avif", PixelFormat::Yuv444P8, ColorType::Rgb8);
+        for (name, payload) in [
+            ("an empty payload", Vec::new()),
+            ("a temporal delimiter alone", vec![0x12, 0x00]),
+            (
+                "a sequence header without a frame",
+                sequence_header_only(&coded),
+            ),
+        ] {
+            let error = decode_item(&payload, &info).expect_err(name);
+            assert!(
+                error.to_string().contains("no-picture.avif"),
+                "{name}: {error}"
+            );
+        }
+    }
+
+    /// A valid item still hands its picture back with the low-latency settings
+    /// the loop asks for, and it does so on the first call: the synchronous
+    /// decode is what lets an `Again` mean "no picture" rather than "not yet".
+    #[test]
+    fn a_valid_item_hands_its_picture_back_on_the_first_call() {
+        let path = Path::new("tests/fixtures/avif-yuv420p.avif");
+        let info = image_info(path).expect("the container describes it");
+        let picture = decode_item(&fixture_payload(path), &info).expect("the item is decoded");
+        assert_eq!(
+            (picture.width(), picture.height()),
+            (info.width, info.height)
+        );
+    }
+
+    /// The committed fixture end to end: it is described from its container as
+    /// the 4:4:4 page it states, and a frame request on it fails instead of
+    /// never returning.
+    #[test]
+    fn the_no_picture_fixture_is_described_and_then_ends_with_an_error() {
+        let path = Path::new("tests/fixtures/avif-no-picture.avif");
+        let info = image_info(path).expect("the container describes it");
+        assert_eq!((info.width, info.height), (3, 2));
+        assert_eq!(info.format, PixelFormat::Yuv444P8);
+        assert!(handles(&info));
+        let error = decode(&info).expect_err("an item without a picture is an error");
+        assert!(
+            error.to_string().contains("the item holds no picture"),
+            "{error}"
         );
     }
 }

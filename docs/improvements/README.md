@@ -1,8 +1,9 @@
 # improvement plans
 
 one file per change, each with the evidence, the intended edit, and how to
-check the result. the measurements come from [benchmarks](../BENCH.md) and from
-the probes described there. `plans` below is the list itself, `deferred` is
+check the result. performance measurements come from [benchmarks](../BENCH.md)
+and the probes described there; correctness and distribution plans also cite
+code inspection and targeted reproductions. `plans` below is the list itself, `deferred` is
 everything the landed ones left over — work that is not a plan because nothing
 has measured it as worth doing — and `not planned` is the decisions.
 [HANDOFF.md](../HANDOFF.md) is the same thing from the other end: where the tree
@@ -142,6 +143,29 @@ open plus frames to 4.99 s.
 
 ## plans
 
+### proposed for review — 2026-09-27
+
+Plans 16–20 are documentation only. None of their proposed implementation is
+included. Each records the evidence, intended scope and acceptance checks;
+performance ideas explicitly require measurement before choosing a change.
+
+[15](15-avif-decoder-progress.md) has landed. Address
+[17](17-avif-container-robustness.md)'s bounds handling and
+[16](16-container-orientation.md)'s orientation correctness next.
+[20](20-distribution-followups.md)'s source-build consistency is an independent
+distribution follow-up. Measure [18](18-demand-aware-decoding.md) and
+[19](19-avif-thread-budget.md) after those correctness fixes.
+
+| plan | evidence | priority | status |
+| --- | --- | --- | --- |
+| [16 container orientation](16-container-orientation.md) | native probes bypass rotation policy; AVIF rotation symptom reproduced | high | proposed |
+| [17 AVIF container robustness](17-avif-container-robustness.md) | extended-header indexing, extent bounds and native/fallback eligibility gaps | high for bounds | proposed |
+| [18 demand-aware decoding](18-demand-aware-decoding.md) | color-only paths process alpha; disabled ICC export still retains profiles | medium | measurement/design proposed |
+| [19 AVIF thread budget](19-avif-thread-budget.md) | default native decoder threading runs inside the prefetch pool | medium | experiment proposed |
+| [20 distribution follow-ups](20-distribution-followups.md) | sdist input mismatch, untested archive rebuilds, macOS dependencies and release metadata | high for source builds | proposed |
+
+### implemented plans
+
 The current distribution work is [14 — Linux wheel distribution and plugin manifests](14-linux-wheel-distribution.md): manylinux/auditwheel builds,
 bundled Linux dependencies, an `imageseqs/manifest.vs` installation layout,
 and release validation. Implemented and validated locally on Linux and Windows;
@@ -149,6 +173,7 @@ that page records the completed checks and remaining CI validation.
 
 | plan | touches | expected | risk | status |
 | --- | --- | --- | --- | --- |
+| [15 AVIF decoder progress](15-avif-decoder-progress.md) | `src/formats/avif.rs`, fixtures, `tests/readalpha.vpy` | a frame request on an item that holds no picture errors instead of hanging, and the item decoder runs at low latency | low, an error path and decoder settings | implemented |
 | [14 Linux distribution and manifests](14-linux-wheel-distribution.md) | Hatch, CI, packaging tools, notices | manylinux 2.28 wheel and matching ZIP with bundled codecs and manifest | medium, distribution layout | implemented; Linux/Windows checked locally, CI pending |
 | [01 lookahead scheduling](01-lookahead-scheduling.md) | `src/prefetch.rs`, `src/source.rs` | webp 88.8 → ~70 ms at `prefetch=4`, and `prefetch` above 4 stops being a pessimisation | low, internal only | implemented |
 | [02 frame write path](02-frame-write-path.md) | `src/clip.rs` (new), `src/prefetch.rs`, `src/source.rs`, `src/decoder.rs`, `src/pixel.rs` | a few ms per frame from the buffer, and up to 1.6x on webp if the copy leaves the requesting thread | medium, frame lifetime | implemented, 2b only |
@@ -212,12 +237,24 @@ is the cheapest of the lot: it moved the format and the position of every sample
 of the files that state a depth, and the paired convert-stage measurement says it
 cost nothing, because the load and the store were already there.
 
+[15](15-avif-decoder-progress.md) is the first of the 2026-09-27 review to land,
+and the only one of them that was a live defect: an item that holds no picture
+left a frame request running forever. it cost an error path plus one decoder
+setting — the item is decoded at low latency, because a still image is one frame
+and a frame delay is a pipeline nothing can use — and that setting turned out to
+be worth 15.6% of the avif decode pass and 43% of `sandbox/hitokage-sample`
+rather than a cost, so the plan that asked only for termination made the format
+faster as well. the rest of the review is still open: 16 and 17 are the
+correctness work, 20 the distribution follow-up, and 18 and 19 are measurements
+before any change.
+
 ## deferred
 
 what the landed plans recorded under "left over", and what `IMPLEMENTATION.md`
-defers without refusing. none of it is a plan: a plan here needs a corpus and a
-measurement that says the work is worth doing, and these are the notes that
-have neither yet. each bullet names the page that keeps the full argument. the
+defers without refusing. These remain exploratory unless explicitly promoted
+to a numbered plan above. Performance work needs a corpus and a measurement
+before implementation; correctness work needs a reproducible case or a clear
+code-path defect. Each bullet names the page that keeps the full argument. the
 rest of that `defer:` list — gpu output, manual simd, filesystem globbing and
 format-based clip grouping — is in `not planned` below, with its reasons.
 
@@ -269,7 +306,9 @@ format-based clip grouping — is in `not planned` below, with its reasons.
 - **the avif and heif `Exif` item**, so a rotated avif reports a code at all and
   a rotated heic stops reporting 1 — libheif applies `irot`/`imir` itself, and
   the code can only be had by reading those boxes
-  ([09](09-exif-orientation.md)).
+  ([09](09-exif-orientation.md)). Promoted to
+  [16](16-container-orientation.md), including the rotation-policy and
+  double-transform questions.
 - **`_ChromaLocation` from av1's `chroma_sample_position`**: two bits inside the
   sequence header, and `unknown` in every file of the corpus
   ([08](08-color-metadata.md)).

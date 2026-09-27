@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import struct
+import subprocess
 import sys
 from pathlib import Path
 
@@ -29,13 +30,55 @@ PLUGIN = Path(
 )
 FIXTURES = HERE / "fixtures"
 
+# How long a frame request on an item that holds no picture may take before the
+# validator calls it a hang. The request runs in a child process, so a decode
+# loop that never returns fails this check instead of stalling the runner.
+NO_PICTURE_TIMEOUT = 60
+
+# The child that asks for that frame. It loads the plugin under test and reports
+# the error it got, so the parent can tell a failed request from a hanging one.
+NO_PICTURE_CHILD = """
+import os
+import sys
+
+import vapoursynth as vs
+
+
+class Policy(vs.EnvironmentPolicy):
+    def on_policy_registered(self, special_api):
+        self.api = special_api
+        self.environment = special_api.create_environment(vs.CoreCreationFlags.DISABLE_AUTO_LOADING)
+
+    def on_policy_cleared(self):
+        self.api.destroy_environment(self.environment)
+
+    def get_current_environment(self):
+        return self.environment
+
+    def set_environment(self, environment):
+        return self.environment
+
+
+vs.register_policy(Policy())
+core = vs.core
+core.std.LoadPlugin(os.environ["IMGSEQS_PLUGIN"])
+clip = core.imgseqs.Read(files=[sys.argv[1]], prefetch=int(sys.argv[2]))
+try:
+    clip.get_frame(0)
+except Exception as error:
+    print(error)
+    sys.exit(0)
+print("the frame request returned a frame")
+sys.exit(1)
+"""
+
 
 class ValidationPolicy(vs.EnvironmentPolicy):
     """Keep an installed plugin from shadowing the binary under test."""
 
-    def on_policy_registered(self, api):
-        self.api = api
-        self.environment = api.create_environment(vs.CoreCreationFlags.DISABLE_AUTO_LOADING)
+    def on_policy_registered(self, special_api):
+        self.api = special_api
+        self.environment = special_api.create_environment(vs.CoreCreationFlags.DISABLE_AUTO_LOADING)
 
     def on_policy_cleared(self):
         self.api.destroy_environment(self.environment)
@@ -111,7 +154,7 @@ def test_rgba8() -> None:
     check("ImgSeqAlpha" not in color.props, "rgba8: color frames have no ImgSeqAlpha")
     check(frame.props.get("_Matrix") is None, "rgba8: alpha frames are not marked as RGB")
     check(color.props.get("_Matrix") == vs.MATRIX_RGB, "rgba8: color frames are marked as RGB")
-    check(frame.props["ImgSeqPath"].endswith("alpha-rgba8.png"), "rgba8: alpha frame keeps ImgSeqPath")
+    check(str(frame.props["ImgSeqPath"]).endswith("alpha-rgba8.png"), "rgba8: alpha frame keeps ImgSeqPath")
     check(frame.props["ImgSeqIndex"] == 0, "rgba8: alpha frame keeps ImgSeqIndex")
     check(
         frame.props["ImgSeqOriginalColorType"] == color.props["ImgSeqOriginalColorType"],
@@ -719,11 +762,54 @@ def test_errors() -> None:
     )
     for arguments, label in cases:
         try:
-            core.imgseqs.ReadAlpha(**arguments)
+            core.imgseqs.ReadAlpha(**arguments)  # pyright: ignore[reportArgumentType]
         except Exception as error:
             check(True, f"errors: {label} is rejected ({str(error).strip()})")
         else:
             check(False, f"errors: {label} is rejected")
+
+
+def test_no_picture() -> None:
+    """An item that holds no frame fails a frame request instead of hanging.
+
+    The fixture is a well-formed avif whose primary item payload is temporal
+    delimiters and no coded frame, so it passes a probe that reads its container
+    and has no picture to hand over. The request runs in a child process with a
+    timeout, because the defect it guards against is a decode loop that never
+    returns: that stalls the requesting thread, a lookahead worker and the pool's
+    destruction, and a check that hangs cannot report a failure. Both lookahead
+    settings are covered, and the child has to exit on its own for the shutdown
+    to count.
+    """
+    for prefetch in (0, 4):
+        environment = dict(os.environ, IMGSEQS_PLUGIN=str(PLUGIN))
+        try:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    NO_PICTURE_CHILD,
+                    fixture("avif-no-picture.avif"),
+                    str(prefetch),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=NO_PICTURE_TIMEOUT,
+                env=environment,
+            )
+        except subprocess.TimeoutExpired:
+            check(
+                False,
+                f"no picture: a frame request at prefetch={prefetch} ends within "
+                f"{NO_PICTURE_TIMEOUT}s",
+            )
+            continue
+        output = f"{result.stdout.strip()} {result.stderr.strip()}".strip()
+        check(
+            result.returncode == 0 and "holds no picture" in output,
+            f"no picture: a frame request at prefetch={prefetch} fails instead of "
+            f"hanging ({output})",
+        )
 
 
 def test_orientation() -> None:
@@ -1140,6 +1226,7 @@ def main() -> None:
         test_prefetch_variants,
         test_interleaved_consumers,
         test_errors,
+        test_no_picture,
     ):
         print(f"--- {test.__name__}")
         test()
