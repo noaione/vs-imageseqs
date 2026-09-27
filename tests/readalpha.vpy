@@ -812,6 +812,69 @@ def test_no_picture() -> None:
         )
 
 
+def test_avif_extents() -> None:
+    """A container the plugin's own avif reader cannot read keeps a decoder.
+
+    ``avif-split-extents.avif`` is the coded item of ``avif-yuv420p.avif`` cut in
+    half and located as two extents, which is a legal way to write the same item
+    and a way this reader does not join. The two files are therefore the same
+    picture through two decoders: the one the plugin decodes itself, as the yuv
+    its samples are, and the one it hands to the ``image`` decoder, as the r,g,b
+    that decoder builds. A probe that described the second as yuv would promise a
+    frame this plugin then refused to produce, so the format the clip is created
+    with is the check that matters here, and the frame is the check that the
+    decoder really did join the extents.
+
+    The samples are the ones ``avifdec`` reads from both files: they are the same
+    picture, and the plugin's own path is the yuv the container states.
+    """
+    clip = core.imgseqs.Read(files=[fixture("avif-split-extents.avif")])
+    check(
+        clip.format.name == "RGB24",
+        f"extents: the clip is the format the fallback decoder produces "
+        f"(got {clip.format.name})",
+    )
+    check(
+        (clip.width, clip.height) == (64, 48),
+        f"extents: the clip is 64x48 (got {clip.width}x{clip.height})",
+    )
+    frame = clip.get_frame(0)
+    check(
+        frame.format.name == "RGB24",
+        f"extents: the frame is RGB24 (got {frame.format.name})",
+    )
+    check(
+        [samples(frame, plane)[0] for plane in range(3)] == [74, 75, 70],
+        "extents: the first pixel is the one the reference decoder reads "
+        f"(got {[samples(frame, plane)[0] for plane in range(3)]})",
+    )
+    check(
+        [samples(frame, plane)[4] for plane in range(3)] == [70, 73, 66],
+        "extents: and so is the fifth "
+        f"(got {[samples(frame, plane)[4] for plane in range(3)]})",
+    )
+
+    # The file it was cut from holds the same picture, read by the plugin's own
+    # decoder as the yuv samples the container states.
+    whole = core.imgseqs.Read(files=[fixture("avif-yuv420p.avif")])
+    check(
+        whole.format.name == "YUV420P8",
+        f"extents: the file it was cut from is still yuv (got {whole.format.name})",
+    )
+    check(
+        (whole.width, whole.height) == (clip.width, clip.height),
+        "extents: and the same size",
+    )
+
+    # The two are the same picture, so a sequence holding both is two formats.
+    try:
+        core.imgseqs.Read(files=[fixture("avif-split-extents.avif"), fixture("avif-yuv420p.avif")])
+    except Exception as error:
+        check(True, f"extents: the two formats need mismatch ({str(error).strip()})")
+    else:
+        check(False, "extents: the two formats need mismatch")
+
+
 def test_orientation() -> None:
     """The exif orientation is applied, and only when it is asked for.
 
@@ -1334,6 +1397,7 @@ def main() -> None:
         test_interleaved_consumers,
         test_errors,
         test_no_picture,
+        test_avif_extents,
     ):
         print(f"--- {test.__name__}")
         test()

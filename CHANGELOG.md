@@ -15,6 +15,16 @@
     stored size, which neither container could do before
   - a container transform is the normative statement for these two formats, so an
     EXIF tag beside one stays informational and is not applied on top of it
+- an AVIF whose item is split over several extents now decodes instead of failing
+  every frame request
+  - the container reader does not join extents, so such a file is described as the
+    format the fallback decoder produces rather than as the YUV its samples are;
+    that decoder does join them
+- a malformed AVIF container is refused instead of being read past its own bounds
+  - an extent the file does not hold is no longer allocated before the read that
+    fails on it, an `iloc` field wider than an address no longer shifts a value
+    out of its type, and a box with an extended size header is read with the whole
+    header rather than the last eight bytes of it being dropped
 
 ### performance
 - AVIF decoding is 15.6% faster on the 35-page sandbox set, and 43% faster on
@@ -22,6 +32,8 @@
   directly instead of through a frame-delay pipeline it cannot use
 - reading a container's orientation costs 0.006 ms per AVIF file and 0.037 ms per
   HEIF file at clip creation, and nothing per frame
+- bounding an AVIF item's extent costs one file metadata call per file at clip
+  creation, 0.005 ms per file, and nothing per frame
 
 ### build
 - improvement to linux wheel distribution, manylinux now has dropped down to glibc 2.28

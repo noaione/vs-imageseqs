@@ -626,6 +626,44 @@ container transform, so nothing here decodes differently: the heic decode pass
 measured 6175.0 → 6197.4 ms (1.004) and all 120 `frame-parity.py` lines are byte
 identical.
 
+## AVIF container bounds
+
+[17](improvements/17-avif-container-robustness.md) bounds every range the item
+metadata walker hands out, which needs the length of the file the boxes came
+from: one `stat` per probed file, on the handle the walk already has. it changes
+nothing a corpus file does — no file in `sandbox/` has an item in several
+extents, a construction method other than the file, or an extent the file does
+not hold — so the decode column is the same binary run twice and only the probe
+column moves. `ab-sets.py`, 3 rounds, alternating the two builds inside one
+batch:
+
+| set | probe before → after | decode before → after |
+| --- | --- | --- |
+| avif 35 | 1.6 → 1.8 ms (1.125) | 1848.1 → 1830.3 ms (0.990) |
+| heic 35 | 6.5 → 6.6 ms (1.015) | 6305.3 → 6146.2 ms (0.975) |
+| mixed 35 | 16.8 → 17.7 ms (1.054) | 3246.9 → 3244.6 ms (0.999) |
+| png 35 | 3.9 → 4.0 ms (1.026) | 383.2 → 384.0 ms (1.002) |
+| hitokage 5 | 0.5 → 0.5 ms (1.000) | 389.9 → 392.2 ms (1.006) |
+| fixtures 99 | 1.8 → 1.8 ms (1.000) | 6.2 → 6.4 ms (1.032) |
+
+the avif row is the cost: 0.046 → 0.051 ms per file, which is the file metadata
+call the extent bound needs, and it is a fifth of the second open
+[16](improvements/16-container-orientation.md) accepted for the same container.
+every other probe row is inside the spread of the same binary run twice — `mixed`
+and `png` hold no avif at all — and the widest decode row moves 2.5% against a
+`prefetch` pool whose run to run spread on this machine is larger than that.
+eight alternating rounds of the avif set on its own separate the two: best of
+eight is 1.6 ms before against 1.8 ms after for the probe, 1994.0 ms against
+1996.5 ms for the decode, and the per-round paired decode difference swings
+±100 ms in both directions with a mean of −18 ms. the decode path does pay the
+`read_range` guard's own metadata calls — two for a colour item and three when an
+alpha item sits beside it — and they are below what this machine resolves.
+
+pixels: 120 of the 120 `frame-parity.py` lines are byte identical, because no
+file in those sets states a layout this change can move. the one file that does
+is the new `avif-split-extents.avif`, which is outside them and is checked in
+`tests/readalpha.vpy` against the file it was cut from.
+
 ## frame write path
 
 [02](improvements/02-frame-write-path.md) moved the frame build out of the

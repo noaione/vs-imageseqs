@@ -166,6 +166,13 @@ a file that cannot produce a picture is reported as a decode error naming the
 file rather than stalling the frame request; an avif whose item holds no coded
 frame is the case the tests cover.
 
+an avif whose primary item this plugin's own reader cannot decode — a grid of
+tiles, an item split over several extents, a construction method it does not
+follow — is handed to `image`'s avif decoder instead, so the clip is created with
+the RGB format that decoder produces rather than with the YUV the samples are.
+That decoder joins an item written as several extents; a grid of tiles is the one
+layout neither of them joins.
+
 ### nominal bit depth
 
 when a container states 9–16 bits, the frame format names that depth and the

@@ -149,17 +149,16 @@ Plans 17–20 are documentation only. None of their proposed implementation is
 included. Each records the evidence, intended scope and acceptance checks;
 performance ideas explicitly require measurement before choosing a change.
 
-[15](15-avif-decoder-progress.md) and
-[16](16-container-orientation.md) have landed. Address
-[17](17-avif-container-robustness.md)'s bounds handling next, then
-[20](20-distribution-followups.md)'s source-build consistency, which is an
+[15](15-avif-decoder-progress.md),
+[16](16-container-orientation.md) and
+[17](17-avif-container-robustness.md) have landed. Address
+[20](20-distribution-followups.md)'s source-build consistency next, which is an
 independent distribution follow-up. Measure
 [18](18-demand-aware-decoding.md) and
-[19](19-avif-thread-budget.md) after those correctness fixes.
+[19](19-avif-thread-budget.md) after it.
 
 | plan | evidence | priority | status |
 | --- | --- | --- | --- |
-| [17 AVIF container robustness](17-avif-container-robustness.md) | extended-header indexing, extent bounds and native/fallback eligibility gaps | high for bounds | proposed |
 | [18 demand-aware decoding](18-demand-aware-decoding.md) | color-only paths process alpha; disabled ICC export still retains profiles | medium | measurement/design proposed |
 | [19 AVIF thread budget](19-avif-thread-budget.md) | default native decoder threading runs inside the prefetch pool | medium | experiment proposed |
 | [20 distribution follow-ups](20-distribution-followups.md) | sdist input mismatch, untested archive rebuilds, macOS dependencies and release metadata | high for source builds | proposed |
@@ -173,6 +172,7 @@ that page records the completed checks and remaining CI validation.
 
 | plan | touches | expected | risk | status |
 | --- | --- | --- | --- | --- |
+| [17 AVIF container robustness](17-avif-container-robustness.md) | `src/formats/avif.rs`, `tests/make-alpha-fixtures.py`, fixtures, `tests/readalpha.vpy` | a malformed avif container is refused instead of panicking, allocating gigabytes or answering wrongly, and a container this reader will not decode is described as the format the fallback decoder produces | low to medium, it changes what an unsupported container is described as | implemented |
 | [16 container orientation](16-container-orientation.md) | `src/formats/avif.rs`, `src/formats/heif.rs`, `src/decoder.rs`, fixtures, `tests/readalpha.vpy` | an avif or heif that states `irot`/`imir` is handed out the way the file describes it, `apply_rotation=False` gives the stored picture back, and `ImgSeqOrientation` reports the code | medium, it moves the size of every file whose container states a transform | implemented |
 | [15 AVIF decoder progress](15-avif-decoder-progress.md) | `src/formats/avif.rs`, fixtures, `tests/readalpha.vpy` | a frame request on an item that holds no picture errors instead of hanging, and the item decoder runs at low latency | low, an error path and decoder settings | implemented |
 | [14 Linux distribution and manifests](14-linux-wheel-distribution.md) | Hatch, CI, packaging tools, notices | manylinux 2.28 wheel and matching ZIP with bundled codecs and manifest | medium, distribution layout | implemented; Linux/Windows checked locally, CI pending |
@@ -256,8 +256,19 @@ decodes itself and accounts for the one `libheif` has already applied, so
 `apply_rotation=False` reaches the stored picture for both. it is the widest
 output change of the two — a rotated file's width and height move — and no file
 in the sandbox states a transform, so the parity check is what says nothing else
-did. the rest of the review is still open: 17 is the correctness work, 20 the
-distribution follow-up, and 18 and 19 are measurements before any change.
+did.
+
+[17](17-avif-container-robustness.md) is the correctness one, and it is the
+first plan here about what a file the plugin *cannot* read should do. four
+defects were reproduced against the build before it — an extended box header read
+as eight bytes, an extent the file does not hold reaching the allocator before
+the read that fails on it, field widths and bit reads that shifted a value out of
+its type, and a probe that described a container as yuv before `decode` refused
+it. the first three are bounds; the fourth is what makes a file whose item is
+split over several extents decode through the fallback decoder instead of failing
+a frame request, which is the one of the four a reader can see. the rest of the
+review is still open: 20 is the distribution follow-up, and 18 and 19 are
+measurements before any change.
 
 ## deferred
 
@@ -333,6 +344,12 @@ format-based clip grouping — is in `not planned` below, with its reasons.
   ([11](11-jxl-direct.md)).
 - **`pclr`, `cdef`, `res`/`resc` and the `uuid` boxes of a jp2**
   ([06](06-jpeg-2000-backend.md)).
+- **the tiles of a grid avif.** `dimg` names them and the probe already reads
+  that reference; what is missing is each tile's own coding record and the
+  placement of the decoded tiles into a picture of the grid's size. a tiled avif
+  is read by neither this reader nor the `image` decoder it falls back to, which
+  accepts the item type and then hands the grid descriptor to `dav1d`
+  ([17](17-avif-container-robustness.md)).
 - **a heic that stores av1**: the `ispe`/`av1C` read would apply to it and
   nothing in the corpus is one ([05](05-monochrome-heif.md)).
 

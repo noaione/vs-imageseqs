@@ -477,7 +477,21 @@ The module is in the shape of `formats/heif.rs` and `formats/jxl.rs`:
   frame owns, using `picture.pixel_layout()` for the chroma geometry and the
   layout the frame has for the rest. A **grid** — a primary item that is a
   `dimg` reference to tiles — is refused with a clear error rather than half
-  read.
+  read, and no file here is one: `avifenc -g` writes a grid item with no `av1C`
+  of its own, which the probe has no coding record for, and the fallback decoder
+  cannot read one either, because `mp4parse` accepts the item type and then hands
+  the grid descriptor to `dav1d`.
+- **what this reader cannot decode is not described as if it could.** The probe
+  asks `Meta::native_eligible` whether the primary item is one extent of a
+  construction method this reader follows, inside the file and not a grid, and a
+  container it refuses is described as the format the `image` decoder hands back
+  rather than as the yuv its samples are. That is what makes a file whose item is
+  split over several extents decode: `mp4parse`, that decoder's container reader,
+  copies an item spread over several extents into one buffer, where this reader
+  refuses to join them. Every range the walk hands out is bounded by the file, or
+  by the `idat` box for a construction method of one, before the caller allocates
+  it, and the field widths and bit reads are checked against the types they are
+  read into — see [17](improvements/17-avif-container-robustness.md).
 - **the item loop ends on decoder progress.** `send_data` and `get_picture` can
   each answer `Again`, and an item that holds no frame leaves them answering each
   other forever; `take_picture` tracks whether the decoder still has input to

@@ -67,6 +67,14 @@ a decode has no picture to produce. ``tests/readalpha.vpy`` requests a frame fro
 it in a child process with a timeout, because the defect it guards against is a
 decode loop that never returns rather than one that returns the wrong answer.
 
+``avif-split-extents.avif`` is hand-written too, from the payload
+``avif-yuv420p.avif`` holds: the same item, located as two extents instead of
+one. It is the fixture for a container the plugin's own avif reader cannot read
+and the ``image`` decoder can, which is what the plugin's probe has to describe
+as the format that decoder hands back rather than as the yuv its samples are.
+The metadata is written by this script, so re-running it needs that fixture to
+exist first.
+
 ``heif-enc`` is x265 through libheif and ``avifenc`` is aom through libavif; both
 are asked for lossless output so the validator can state the exact samples, and
 both keep the alpha plane at full quality. The heif encoder writes a monochrome
@@ -223,6 +231,101 @@ def dds_dxt5(path: str) -> None:
 def avif_box(kind: bytes, payload: bytes) -> bytes:
     """One ISO base media file format box, with a 32 bit size."""
     return struct.pack(">I", 8 + len(payload)) + kind + payload
+
+
+def avif_boxes(data: bytes):
+    """Every top level box of a container, as its kind and its payload."""
+    at = 0
+    while at + 8 <= len(data):
+        size = struct.unpack(">I", data[at : at + 4])[0]
+        kind = data[at + 4 : at + 8]
+        header = 8
+        if size == 1:
+            size = struct.unpack(">Q", data[at + 8 : at + 16])[0]
+            header = 16
+        elif size == 0:
+            size = len(data) - at
+        yield kind, data[at + header : at + size]
+        at += size
+
+
+def avif_metadata(iloc: bytes) -> bytes:
+    """The item metadata of a single item av01 container, as `iloc` locates it.
+
+    The boxes are the ones a writer states about one colour page: the handler
+    that says the file holds a picture, the primary item, its location, the item
+    information entry that names it an av01 image, and the properties every
+    MIAF reader expects an image item to carry - its size, its channels, its
+    coding record and the colour it states.
+    """
+    ipco = (
+        avif_box(b"ispe", bytes(4) + struct.pack(">II", 64, 48))
+        + avif_box(b"pixi", bytes(4) + bytes((3, 8, 8, 8)))
+        + avif_box(b"av1C", bytes((0x81, 0x10, 0x0C, 0, 0, 0, 0)))
+        + avif_box(b"colr", b"nclx" + struct.pack(">3H", 1, 13, 6) + bytes((0x80,)))
+    )
+    ipma = (
+        bytes(4)
+        + struct.pack(">I", 1)
+        + struct.pack(">H", 1)
+        + bytes((4, 0x81, 0x82, 0x83, 0x84))
+    )
+    return (
+        bytes(4)
+        + avif_box(b"hdlr", bytes(4) + bytes(4) + b"pict" + bytes(12) + b"\0")
+        + avif_box(b"pitm", bytes(4) + struct.pack(">H", 1))
+        + iloc
+        + avif_box(
+            b"iinf",
+            bytes(4)
+            + struct.pack(">H", 1)
+            + avif_box(
+                b"infe",
+                bytes((2, 0, 0, 0)) + struct.pack(">HH", 1, 0) + b"av01" + b"Color\0",
+            ),
+        )
+        + avif_box(b"iprp", avif_box(b"ipco", ipco) + avif_box(b"ipma", ipma))
+    )
+
+
+def avif_split_extents(source: str, path: str) -> None:
+    """Writes the container of `source` with its primary item in two extents.
+
+    The payload is the one the source holds, cut in half and located as two
+    extents rather than one, which is a legal way to write the same item: a
+    reader that joins the extents decodes the same picture, and one that reads
+    only a payload a single extent holds cannot read this file at all. The
+    metadata is written here rather than copied, so the fixture states exactly
+    the properties its payload needs, and the item's extent offsets are the
+    offsets the rewritten metadata puts the media data box at.
+
+    This is the fixture for the eligibility decision of
+    ``docs/improvements/17-avif-container-robustness.md``: the plugin's own avif
+    reader does not join extents, so its probe has to describe this file as the
+    r,g,b the ``image`` decoder produces rather than as the yuv its samples are.
+    """
+    with open(source, "rb") as handle:
+        data = handle.read()
+    coded = next(payload for kind, payload in avif_boxes(data) if kind == b"mdat")
+    split = len(coded) // 2
+
+    def meta(offset: int) -> bytes:
+        iloc = avif_box(
+            b"iloc",
+            bytes((0, 0, 0, 0, 0x44, 0x00))
+            + struct.pack(">H", 1)
+            + struct.pack(">HHH", 1, 0, 2)
+            + struct.pack(">II", offset, split)
+            + struct.pack(">II", offset + split, len(coded) - split),
+        )
+        return avif_box(b"meta", avif_metadata(iloc))
+
+    ftyp = avif_box(b"ftyp", b"avif" + bytes(4) + b"avifmif1miafMA1A")
+    # The extent offsets are offsets into the file, so the metadata has to be
+    # built once to know where the media data box starts.
+    offset = len(ftyp) + len(meta(0)) + 8
+    with open(path, "wb") as handle:
+        handle.write(ftyp + meta(offset) + avif_box(b"mdat", coded))
 
 
 def avif_no_picture(path: str) -> None:
@@ -401,6 +504,13 @@ def main() -> None:
     )
     dds_dxt5(write("alpha-dds.dds"))
     avif_no_picture(write("avif-no-picture.avif"))
+    # The same coded item as the yuv avif fixture, written as two extents. It
+    # reads the fixture the hand-made command above produces, so that one has to
+    # exist before this script runs.
+    avif_split_extents(
+        write("avif-yuv420p.avif"),
+        write("avif-split-extents.avif"),
+    )
     png(
         write("alpha-rgb8.png"),
         RGB,

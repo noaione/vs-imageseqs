@@ -76,17 +76,19 @@ pub fn handles(info: &ImageInfo) -> bool {
 /// [`output_format`].
 pub fn image_info(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
     let mut file = File::open(path).ok()?;
+    let file_len = file_length(&file).ok()?;
     let boxes = leading_boxes(&mut file)?;
     if !has_avif_brand(&boxes) {
         return None;
     }
-    let meta = Meta::read(&boxes)?;
+    let meta = Meta::read(&boxes, file_len)?;
     let header = AvifHeader::read(&meta.primary_properties()?)?;
     let (width, height) = (header.width, header.height);
     if width == 0 || height == 0 {
         return None;
     }
     let has_alpha = meta.has_alpha();
+    let native = meta.native_eligible();
     // `dav1d` hands the item over as it is coded, so the size and the samples
     // here are the stored ones and the container's own transform is the plugin's
     // to apply; see [`container_orientation`].
@@ -136,9 +138,18 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
     // yuv format to be handed out as - keeps the r,g,b the `image` decoder
     // produces, and is still described here, because the colour it states is
     // written into the frame's properties either way.
-    let yuv = cicp
-        .filter(|cicp| usable_matrix(cicp.matrix))
-        .and_then(|_| yuv_format(header.chroma, header.depth));
+    //
+    // The second half of that is a container this reader will not decode: a grid
+    // of tiles, an item split over several extents and a construction method it
+    // does not follow are all described as the r,g,b that decoder hands back,
+    // because a yuv probe would promise a frame this module would then refuse to
+    // produce; see [`Meta::native_eligible`].
+    let yuv = match native {
+        true => cicp
+            .filter(|cicp| usable_matrix(cicp.matrix))
+            .and_then(|_| yuv_format(header.chroma, header.depth)),
+        false => None,
+    };
     let (format, color_type) = match yuv {
         Some(format) => (format, header.colour_color_type(has_alpha)),
         // The color type the `image` decoder reports, which is what the frame
@@ -185,8 +196,9 @@ pub fn output_format(path: &Path, color_type: ColorType) -> Option<PixelFormat> 
         return None;
     }
     let mut file = File::open(path).ok()?;
+    let file_len = file_length(&file).ok()?;
     let boxes = leading_boxes(&mut file)?;
-    let meta = Meta::read(&boxes)?;
+    let meta = Meta::read(&boxes, file_len)?;
     let header = AvifHeader::read(&meta.primary_properties()?)?;
     header
         .monochrome
@@ -200,18 +212,28 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     let open_started = Instant::now();
     let mut file =
         File::open(&info.path).map_err(|error| image_error("open", &info.path, error))?;
+    let file_len =
+        file_length(&file).map_err(|error| image_error("read the boxes of", &info.path, error))?;
     let boxes = leading_boxes(&mut file)
         .ok_or_else(|| image_error("read the boxes of", &info.path, "no leading boxes"))?;
     let open = open_started.elapsed();
 
     let metadata_started = Instant::now();
-    let meta = Meta::read(&boxes)
+    let meta = Meta::read(&boxes, file_len)
         .ok_or_else(|| image_error("read the boxes of", &info.path, "malformed item boxes"))?;
-    if meta.grid {
+    // A container the probe declines never reaches here, so this is the guard
+    // for a file that was described by something else: the layouts it names are
+    // the ones [`Meta::native_eligible`] refuses, and the probe hands those to
+    // the `image` decoder rather than to this one.
+    if !meta.native_eligible() {
         return Err(image_error(
             "read the boxes of",
             &info.path,
-            "its primary item is a grid of tiles, which this reader does not join",
+            if meta.grid {
+                "its primary item is a grid of tiles, which this reader does not join"
+            } else {
+                "its primary item is not one payload this reader can locate"
+            },
         ));
     }
     let header = AvifHeader::read(&meta.primary_properties().ok_or_else(|| {
@@ -682,8 +704,9 @@ fn orientation_of(properties: &[Property<'_>]) -> Orientation {
 /// it has been handed.
 pub(crate) fn container_orientation(path: &Path) -> Option<Orientation> {
     let mut file = File::open(path).ok()?;
+    let file_len = file_length(&file).ok()?;
     let boxes = leading_boxes(&mut file)?;
-    let meta = Meta::read(&boxes)?;
+    let meta = Meta::read(&boxes, file_len)?;
     Some(orientation_of(&meta.primary_properties()?))
 }
 
@@ -859,6 +882,9 @@ type References = Vec<([u8; 4], u32, Vec<u32>)>;
 struct Meta {
     /// The leading boxes this was read from.
     boxes: Vec<u8>,
+    /// Length of the file those boxes came from, which is what an extent that is
+    /// not written into `idat` has to stay inside.
+    file_len: usize,
     /// The item property list, in the order it was written: its kind and the
     /// range of its payload.
     properties: Vec<Listed>,
@@ -882,8 +908,9 @@ struct Meta {
 }
 
 impl Meta {
-    /// Reads the item boxes of a file whose leading boxes are `boxes`.
-    fn read(boxes: &[u8]) -> Option<Self> {
+    /// Reads the item boxes of a file whose leading boxes are `boxes` and whose
+    /// length is `file_len`.
+    fn read(boxes: &[u8], file_len: usize) -> Option<Self> {
         let meta = child(boxes, b"meta", 0)?.1;
         let meta = meta.get(4..)?;
         let base = offset_of(boxes, meta)?;
@@ -938,6 +965,7 @@ impl Meta {
         };
         Some(Self {
             boxes: boxes.to_vec(),
+            file_len,
             properties,
             associations,
             primary,
@@ -978,6 +1006,21 @@ impl Meta {
             })
     }
 
+    /// Whether this module decodes the primary item of this container itself.
+    ///
+    /// The `image` decoder joins a grid of tiles, an item split over several
+    /// extents and a construction method this reader does not follow, and this
+    /// one does none of them. A container laid out that way is therefore
+    /// described as the format that decoder hands back rather than as the yuv
+    /// its samples are, which is what keeps a probe from promising a frame a
+    /// decode would then refuse to produce.
+    ///
+    /// The item has to be locatable for the same reason: a range the file does
+    /// not hold is one this reader cannot read either.
+    fn native_eligible(&self) -> bool {
+        !self.grid && self.primary_data(usize::MAX).is_ok() && self.alpha_data(usize::MAX).is_ok()
+    }
+
     /// The extents of one item, and what their offsets are relative to.
     fn extents_of(&self, item: u32) -> Option<(u8, &[(usize, usize)])> {
         self.extents
@@ -1011,6 +1054,12 @@ impl Meta {
     /// every other one is an offset into the file. Only a payload one extent
     /// holds is read here: a file that splits its item over several extents is
     /// left to the `image` decoder, which joins them.
+    ///
+    /// Every range is checked against the container it is written in before it
+    /// is handed out, because the caller allocates it: an offset the file does
+    /// not reach and a length that overflows an address are both errors rather
+    /// than a large allocation or a panic. `limit` caps the length for a caller
+    /// that wants a prefix of the payload.
     fn data_range(
         &self,
         method: u8,
@@ -1025,13 +1074,15 @@ impl Meta {
                 "the item is split over several extents, which this reader does not join",
             ));
         }
-        let base = match method {
-            0 => 0,
+        // What the extent's offset is relative to, and where that ends.
+        let (base, container_end, container) = match method {
+            0 => (0, self.file_len, "the file"),
             1 => {
-                self.idat
+                let idat = self
+                    .idat
                     .as_ref()
-                    .ok_or_else(|| ImgSeqError::new("the container has no idat box"))?
-                    .start
+                    .ok_or_else(|| ImgSeqError::new("the container has no idat box"))?;
+                (idat.start, idat.end, "the item data box")
             }
             _ => {
                 return Err(ImgSeqError::new(
@@ -1039,10 +1090,19 @@ impl Meta {
                 ));
             }
         };
-        let length = length.min(limit);
-        base.checked_add(offset)
-            .map(|start| start..start + length)
-            .ok_or_else(|| ImgSeqError::new("the item is past the end of the file"))
+        let start = base
+            .checked_add(offset)
+            .ok_or_else(|| ImgSeqError::new(format!("the item is past the end of {container}")))?;
+        let end = start
+            .checked_add(length.min(limit))
+            .ok_or_else(|| ImgSeqError::new(format!("the item is past the end of {container}")))?;
+        if end > container_end {
+            return Err(ImgSeqError::new(format!(
+                "the item is {} bytes past the end of {container}",
+                end - container_end,
+            )));
+        }
+        Ok(start..end)
     }
 }
 
@@ -1085,9 +1145,12 @@ fn child_boxes(payload: &[u8], base: usize) -> Option<Vec<ChildBox<'_>>> {
         if size < header || at.checked_add(size)? > payload.len() {
             return None;
         }
+        // The kind of a box is the first four bytes of it, and a size that
+        // counts the header is what the two offsets below skip.
+        let start = base.checked_add(at)?;
         boxes.push((
             kind,
-            base + at + header..base + at + size,
+            start.checked_add(header)?..start.checked_add(size)?,
             &payload[at + header..at + size],
         ));
         at += size;
@@ -1200,7 +1263,10 @@ fn read_iloc(payload: &[u8]) -> Option<Extents> {
             }
             let offset = read_sized(payload, &mut at, offset_size)?;
             let length = read_sized(payload, &mut at, length_size)?;
-            ranges.push((base + offset, length));
+            // The base offset is stated once per item and added to every one of
+            // its extents, so an item whose sum leaves the address space is a
+            // container this walk does not describe.
+            ranges.push((base.checked_add(offset)?, length));
         }
         items.push((item, method, ranges));
     }
@@ -1208,7 +1274,13 @@ fn read_iloc(payload: &[u8]) -> Option<Extents> {
 }
 
 /// Reads a big endian number of `size` bytes, advancing `at`.
+///
+/// A size wider than an address is one no extent of this file could state, so
+/// it ends the walk rather than shifting the value out of its own type.
 fn read_sized(payload: &[u8], at: &mut usize, size: usize) -> Option<usize> {
+    if size > size_of::<usize>() {
+        return None;
+    }
     let mut value = 0usize;
     for _ in 0..size {
         value = (value << 8) | usize::from(*payload.get(*at)?);
@@ -1483,11 +1555,14 @@ impl<'a> Bits<'a> {
 
     /// An unsigned variable length code, which av1 writes as a run of zeros, a
     /// one, and that many more bits.
+    ///
+    /// A run of thirty two zeros or more describes a value no thirty two bit
+    /// number holds, so it ends the read rather than shifting past the type.
     fn uvlc(&mut self) -> Option<u32> {
         let mut leading = 0;
         while self.bit()? == 0 {
             leading += 1;
-            if leading > 32 {
+            if leading >= 32 {
                 return None;
             }
         }
@@ -1509,38 +1584,75 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// image itself.
 ///
 /// The boxes read here are a prefix of the file, which is what lets a range into
-/// this buffer be read from the file as well.
-fn leading_boxes(file: &mut File) -> Option<Vec<u8>> {
+/// this buffer be read from the file as well. That is also why the walk stops at
+/// the media data box: a file that puts its item metadata after its media data
+/// is one whose boxes are not a prefix, and it is left to the decoder, which
+/// reads the whole container, rather than described from a buffer whose offsets
+/// would no longer be file offsets. `None` says that, and says that a box of the
+/// prefix is malformed or larger than [`HEADER_LIMIT`].
+fn leading_boxes(reader: &mut impl Read) -> Option<Vec<u8>> {
     let mut boxes = Vec::new();
     loop {
         let mut header = [0; 8];
-        if file.read_exact(&mut header).is_err() {
+        if reader.read_exact(&mut header).is_err() {
             break;
         }
-        let mut size = u64::from(u32::from_be_bytes(header[..4].try_into().ok()?));
         if &header[4..] == b"mdat" {
             break;
         }
         let start = boxes.len();
         boxes.extend_from_slice(&header);
-        if size == 1 {
-            let mut extended = [0; 8];
-            file.read_exact(&mut extended).ok()?;
-            boxes.extend_from_slice(&extended);
-            size = u64::from_be_bytes(extended);
-        }
-        let payload = usize::try_from(size.checked_sub((boxes.len() - start) as u64)?).ok()?;
-        if size == 0 || start + header.len() + payload > HEADER_LIMIT {
+        // A box whose size is one carries a sixty four bit size after its kind,
+        // and that size counts the whole header, extended bytes included.
+        let size = match u32::from_be_bytes(header[..4].try_into().ok()?) {
+            1 => {
+                let mut extended = [0; 8];
+                reader.read_exact(&mut extended).ok()?;
+                boxes.extend_from_slice(&extended);
+                u64::from_be_bytes(extended)
+            }
+            size => u64::from(size),
+        };
+        // A size of zero runs to the end of the file, and a size below the
+        // header it was read with is not a box at all.
+        let header_len = boxes.len() - start;
+        let payload = usize::try_from(size.checked_sub(header_len as u64)?).ok()?;
+        let end = start.checked_add(header_len)?.checked_add(payload)?;
+        if end > HEADER_LIMIT {
             return None;
         }
-        boxes.resize(start + header.len() + payload, 0);
-        file.read_exact(&mut boxes[start + header.len()..]).ok()?;
+        boxes.resize(end, 0);
+        reader.read_exact(&mut boxes[start + header_len..]).ok()?;
     }
     (!boxes.is_empty()).then_some(boxes)
 }
 
+/// Length of an open file, which is what an extent of an item is bounded by.
+fn file_length(file: &File) -> std::io::Result<usize> {
+    usize::try_from(file.metadata()?.len()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the file is larger than this platform can address",
+        )
+    })
+}
+
 /// Reads one byte range of an open file.
+///
+/// The range is checked against the file before the buffer is allocated, so a
+/// container that states a length the file does not hold is an error rather than
+/// a large allocation.
 fn read_range(file: &mut File, range: Range<usize>) -> std::io::Result<Vec<u8>> {
+    let end = u64::try_from(range.end).unwrap_or(u64::MAX);
+    if end > file.metadata()?.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            format!(
+                "the range {}..{} is past the end of the file",
+                range.start, range.end
+            ),
+        ));
+    }
     file.seek(SeekFrom::Start(
         u64::try_from(range.start).unwrap_or(u64::MAX),
     ))?;
@@ -1568,6 +1680,7 @@ fn has_avif_extension(path: &Path) -> bool {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+    use std::io::Cursor;
     use std::path::PathBuf;
 
     use image::ExtendedColorType;
@@ -1589,6 +1702,12 @@ mod tests {
             transform: Transform::IDENTITY,
             format,
         }
+    }
+
+    /// The item boxes of a container this module wrote itself, whose extents are
+    /// the eight bytes at offset zero of the buffer they were read from.
+    fn walked(boxes: &[u8]) -> Option<Meta> {
+        Meta::read(boxes, boxes.len())
     }
 
     /// A box whose contents are `payload`.
@@ -1703,6 +1822,9 @@ mod tests {
             &[boxed(b"ipco", &ipco), boxed(b"ipma", &ipma)].concat(),
         ));
         meta.extend_from_slice(&boxed(b"iloc", &iloc));
+        // An item data box, which is what an extent of construction method one
+        // is an offset into.
+        meta.extend_from_slice(&boxed(b"idat", &[0xAB; 16]));
         let mut file = ftyp(b"avif", &[b"mif1", b"miaf"]);
         file.extend_from_slice(&boxed(b"meta", &meta));
         file
@@ -1969,7 +2091,7 @@ mod tests {
     #[test]
     fn the_item_boxes_describe_the_primary_item() {
         let boxes = container(&properties(), &[], None);
-        let meta = Meta::read(&boxes).expect("the container is walked");
+        let meta = walked(&boxes).expect("the container is walked");
         assert_eq!(meta.primary, 1);
         assert!(!meta.has_alpha());
         assert!(!meta.grid);
@@ -2002,7 +2124,7 @@ mod tests {
     #[test]
     fn an_auxiliary_item_that_names_alpha_describes_its_own_data() {
         let boxes = container(&properties(), &[(b"auxl", 2, 1)], Some(ALPHA_AUX_TYPES[0]));
-        let meta = Meta::read(&boxes).expect("the container is walked");
+        let meta = walked(&boxes).expect("the container is walked");
         assert!(meta.has_alpha());
         assert_eq!(meta.alpha_data(usize::MAX).expect("located"), Some(0..8));
     }
@@ -2014,7 +2136,7 @@ mod tests {
             &[(b"auxl", 2, 1)],
             Some(b"urn:mpeg:mpegB:cicp:systems:auxiliary:depth\0"),
         );
-        let meta = Meta::read(&boxes).expect("the container is walked");
+        let meta = walked(&boxes).expect("the container is walked");
         assert!(!meta.has_alpha());
         assert_eq!(
             meta.alpha_data(usize::MAX).expect("nothing to locate"),
@@ -2025,14 +2147,14 @@ mod tests {
     #[test]
     fn a_grid_of_tiles_is_not_the_picture_itself() {
         let boxes = container(&properties(), &[(b"dimg", 1, 2)], None);
-        let meta = Meta::read(&boxes).expect("the container is walked");
+        let meta = walked(&boxes).expect("the container is walked");
         assert!(meta.grid);
     }
 
     #[test]
     fn an_item_split_over_several_extents_is_not_read() {
         let boxes = container(&properties(), &[], None);
-        let mut meta = Meta::read(&boxes).expect("the container is walked");
+        let mut meta = walked(&boxes).expect("the container is walked");
         let (item, method, ranges) = meta.extents.pop().expect("one item");
         assert_eq!((item, method), (1, 0));
         meta.extents.push((1, 0, vec![ranges[0], ranges[0]]));
@@ -2053,6 +2175,257 @@ mod tests {
         payload.extend_from_slice(&0u32.to_be_bytes());
         payload.extend_from_slice(&4u32.to_be_bytes());
         assert_eq!(read_iloc(&payload), Some(vec![(1, 1, vec![(16, 4)])]));
+    }
+
+    /// A box with a sixty four bit size, which is how a writer states one larger
+    /// than four gigabytes and how the header of such a box is sixteen bytes.
+    fn boxed_extended(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(16 + payload.len());
+        bytes.extend_from_slice(&1u32.to_be_bytes());
+        bytes.extend_from_slice(kind);
+        bytes.extend_from_slice(&u64::try_from(16 + payload.len()).unwrap().to_be_bytes());
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    /// The size of a box with an extended header counts that whole header, so
+    /// the bytes the walk reads are the bytes the file holds: a walk that sized
+    /// the buffer by eight instead would drop the last eight bytes of the box
+    /// and start the next one at the wrong offset.
+    #[test]
+    fn an_extended_size_box_is_read_with_its_own_header() {
+        for payload in [vec![1; 4], vec![2; 24]] {
+            let mut file = boxed(b"ftyp", b"avif\0\0\0\0");
+            file.extend_from_slice(&boxed_extended(b"meta", &payload));
+            file.extend_from_slice(&boxed(b"free", &[3; 8]));
+            let boxes = leading_boxes(&mut Cursor::new(&file))
+                .unwrap_or_else(|| panic!("the boxes are read: {} bytes", payload.len()));
+            assert_eq!(boxes, file, "a {} byte payload", payload.len());
+        }
+    }
+
+    /// A box that states a size it cannot have ends the walk, which leaves the
+    /// file to the decoder rather than to a reader that guessed at it.
+    #[test]
+    fn a_box_that_is_not_a_box_ends_the_walk() {
+        // A size of zero runs to the end of the file, which is the media data
+        // box of every file this reads and never a box of the metadata.
+        let mut zero = boxed(b"ftyp", b"avif\0\0\0\0");
+        zero.extend_from_slice(&0u32.to_be_bytes());
+        zero.extend_from_slice(b"meta");
+        assert_eq!(leading_boxes(&mut Cursor::new(&zero)), None);
+
+        // A size below the header it was read with.
+        let mut short = boxed(b"ftyp", b"avif\0\0\0\0");
+        short.extend_from_slice(&4u32.to_be_bytes());
+        short.extend_from_slice(b"meta");
+        assert_eq!(leading_boxes(&mut Cursor::new(&short)), None);
+
+        // A box that states more than the file holds.
+        let mut long = boxed(b"ftyp", b"avif\0\0\0\0");
+        long.extend_from_slice(&64u32.to_be_bytes());
+        long.extend_from_slice(b"meta");
+        long.extend_from_slice(&[0; 4]);
+        assert_eq!(leading_boxes(&mut Cursor::new(&long)), None);
+
+        // An extended header the file stops inside.
+        let mut partial = boxed(b"ftyp", b"avif\0\0\0\0");
+        partial.extend_from_slice(&1u32.to_be_bytes());
+        partial.extend_from_slice(b"meta");
+        partial.extend_from_slice(&[0; 4]);
+        assert_eq!(leading_boxes(&mut Cursor::new(&partial)), None);
+
+        // A box whose metadata alone is past the limit this reads.
+        let mut huge = boxed(b"ftyp", b"avif\0\0\0\0");
+        huge.extend_from_slice(&u32::try_from(HEADER_LIMIT + 1).unwrap().to_be_bytes());
+        huge.extend_from_slice(b"meta");
+        assert_eq!(leading_boxes(&mut Cursor::new(&huge)), None);
+
+        // Nothing at all, and a file with no whole box in it.
+        assert_eq!(leading_boxes(&mut Cursor::new(Vec::new())), None);
+        assert_eq!(leading_boxes(&mut Cursor::new(vec![0; 4])), None);
+    }
+
+    /// The walk stops at the media data box because the buffer it builds is a
+    /// prefix of the file, which is what lets a range into that buffer be read
+    /// from the file as well. A file that writes its item metadata after the
+    /// media data is therefore one this walker cannot describe, and it is left
+    /// to the decoder rather than described from offsets that mean something
+    /// else.
+    #[test]
+    fn a_container_whose_metadata_follows_its_media_data_is_left_to_the_decoder() {
+        let mut file = boxed(b"ftyp", b"avif\0\0\0\0");
+        file.extend_from_slice(&boxed(b"mdat", &[0; 8]));
+        file.extend_from_slice(&boxed(b"meta", &[0; 8]));
+        let boxes = leading_boxes(&mut Cursor::new(&file)).expect("the leading boxes are read");
+        assert_eq!(boxes.len(), 16, "the walk stopped at the media data box");
+        assert!(Meta::read(&boxes, file.len()).is_none());
+    }
+
+    /// The width of an `iloc` field is stated by the box, and a width wider than
+    /// an address is one no extent of this file could be written with.
+    #[test]
+    fn a_field_wider_than_an_address_is_not_read() {
+        let mut at = 0;
+        assert_eq!(read_sized(&[0; 16], &mut at, 16), None);
+        assert_eq!(read_sized(&[0; 8], &mut at, 8), Some(0));
+    }
+
+    /// A base offset and an extent offset that together leave the address space
+    /// are a container this walk does not describe rather than a panic.
+    #[test]
+    fn an_extent_that_leaves_the_address_space_is_not_read() {
+        let mut payload = vec![0, 0, 0, 0, 0x88, 0x80];
+        payload.extend_from_slice(&1u16.to_be_bytes());
+        payload.extend_from_slice(&1u16.to_be_bytes());
+        payload.extend_from_slice(&0u16.to_be_bytes());
+        payload.extend_from_slice(&u64::MAX.to_be_bytes());
+        payload.extend_from_slice(&1u16.to_be_bytes());
+        payload.extend_from_slice(&u64::MAX.to_be_bytes());
+        payload.extend_from_slice(&1u64.to_be_bytes());
+        assert_eq!(read_iloc(&payload), None);
+    }
+
+    /// A run of thirty two zeros describes a value no thirty two bit number
+    /// holds, and the shift that would build it is what this ends.
+    #[test]
+    fn a_variable_length_code_that_does_not_fit_is_not_read() {
+        let mut bits = Bits::new(&[0, 0, 0, 0, 0x80]);
+        assert_eq!(bits.uvlc(), None);
+        // Thirty one zeros, the one that ends the run, and thirty one more
+        // bits: the largest value the code can state.
+        let mut bits = Bits::new(&[0, 0, 0, 0x01, 0xFF, 0xFF, 0xFF, 0xFE]);
+        assert_eq!(bits.uvlc(), Some(u32::MAX - 1));
+    }
+
+    /// An extent the file does not reach is refused before it is handed out,
+    /// because the caller allocates it: an offset the file does not have and a
+    /// length that overflows an address are both errors rather than a large
+    /// allocation or a panic.
+    #[test]
+    fn an_extent_past_the_end_of_the_file_is_refused() {
+        let boxes = container(&properties(), &[], None);
+        let mut meta = walked(&boxes).expect("the container is walked");
+        meta.extents = vec![(1, 0, vec![(boxes.len() - 4, 8)])];
+        let error = meta
+            .primary_data(usize::MAX)
+            .expect_err("the extent is past the end of the file");
+        assert!(
+            error.to_string().contains("past the end of the file"),
+            "{error}"
+        );
+
+        meta.extents = vec![(1, 0, vec![(usize::MAX - 3, 8)])];
+        let error = meta
+            .primary_data(usize::MAX)
+            .expect_err("the extent leaves the address space");
+        assert!(
+            error.to_string().contains("past the end of the file"),
+            "{error}"
+        );
+    }
+
+    /// An extent written into the item data box is an offset into that box, so
+    /// it has to stay inside it rather than merely inside the file.
+    #[test]
+    fn an_extent_written_into_the_item_data_box_stays_inside_it() {
+        let boxes = container(&properties(), &[], None);
+        let mut meta = walked(&boxes).expect("the container is walked");
+        let idat = meta.idat.clone().expect("the container holds one");
+        meta.extents = vec![(1, 1, vec![(0, idat.len())])];
+        assert_eq!(meta.primary_data(usize::MAX).expect("located"), idat);
+
+        meta.extents = vec![(1, 1, vec![(0, idat.len() + 1)])];
+        let error = meta
+            .primary_data(usize::MAX)
+            .expect_err("the extent leaves the item data box");
+        assert!(
+            error
+                .to_string()
+                .contains("past the end of the item data box"),
+            "{error}"
+        );
+
+        // And a construction method one item in a container without the box it
+        // is written into is not located at all.
+        meta.idat = None;
+        let error = meta
+            .primary_data(usize::MAX)
+            .expect_err("the container has no item data box");
+        assert!(error.to_string().contains("no idat box"), "{error}");
+    }
+
+    /// The buffer a range is read into is allocated from the range, so the range
+    /// is checked against the file before it is allocated rather than by the
+    /// read that fills it.
+    #[test]
+    fn a_range_past_the_end_of_a_file_is_not_allocated() {
+        let path = Path::new("tests/fixtures/avif-yuv420p.avif");
+        let mut file = File::open(path).expect("the fixture opens");
+        let length = file_length(&file).expect("the fixture has a length");
+        let error = read_range(&mut file, 0..usize::MAX).expect_err("the range is past the end");
+        assert!(
+            error.to_string().contains("past the end of the file"),
+            "{error}"
+        );
+        assert_eq!(
+            read_range(&mut file, 0..4).expect("the file holds it"),
+            b"\0\0\0\x20"
+        );
+        assert!(length > 4);
+    }
+
+    /// A container this reader cannot decode is not described as the yuv its
+    /// samples are: a grid of tiles, an item in several extents and a
+    /// construction method it does not follow are all layouts the `image`
+    /// decoder joins and this one does not, and a probe that promised a frame
+    /// this module would refuse to produce would be describing a file it cannot
+    /// read.
+    #[test]
+    fn a_container_this_reader_cannot_decode_is_not_native() {
+        let grid = container(&properties(), &[(b"dimg", 1, 2)], None);
+        let meta = walked(&grid).expect("the container is walked");
+        assert!(meta.grid);
+        assert!(!meta.native_eligible(), "a grid of tiles");
+
+        let boxes = container(&properties(), &[], None);
+        let mut meta = walked(&boxes).expect("the container is walked");
+        assert!(meta.native_eligible(), "one item in one extent");
+        let (item, method, ranges) = meta.extents.pop().expect("one item");
+        assert_eq!((item, method), (1, 0));
+
+        meta.extents.push((1, 0, vec![ranges[0], ranges[0]]));
+        assert!(!meta.native_eligible(), "an item in two extents");
+        meta.extents.pop();
+
+        meta.extents.push((1, 2, vec![ranges[0]]));
+        assert!(!meta.native_eligible(), "another construction method");
+        meta.extents.pop();
+
+        meta.extents.push((1, 0, vec![(usize::MAX - 3, 8)]));
+        assert!(
+            !meta.native_eligible(),
+            "an extent past the end of the file"
+        );
+    }
+
+    /// The committed fixture is the yuv one with its item cut into two extents:
+    /// the probe describes it as the r,g,b the `image` decoder produces rather
+    /// than as the yuv its samples are, and that decoder joins the extents and
+    /// reads the same picture the file it was cut from holds.
+    #[test]
+    fn a_split_item_fixture_is_left_to_the_decoder() {
+        let path = Path::new("tests/fixtures/avif-split-extents.avif");
+        let info = crate::decoder::probe(path, true).expect("the container describes it");
+        assert_eq!((info.width, info.height), (64, 48));
+        assert_eq!(info.format, PixelFormat::Rgb8);
+        assert!(!handles(&info));
+        let decoded = crate::decoder::decode(&info).expect("the decoder joins the extents");
+        let Pixels::Interleaved { buffer, .. } = decoded.pixels else {
+            panic!("the image decoder hands out one interleaved buffer");
+        };
+        assert_eq!(buffer.len(), 64 * 48 * 4);
+        assert_eq!(&buffer[..4], &[74, 75, 70, 255]);
     }
 
     #[test]
@@ -2343,8 +2716,9 @@ mod tests {
     /// The coded payload of an avif fixture, as the decoder is handed it.
     fn fixture_payload(path: &Path) -> Vec<u8> {
         let mut file = File::open(path).expect("the fixture opens");
+        let file_len = file_length(&file).expect("the fixture has a length");
         let boxes = leading_boxes(&mut file).expect("the boxes are read");
-        let meta = Meta::read(&boxes).expect("the item boxes are walked");
+        let meta = Meta::read(&boxes, file_len).expect("the item boxes are walked");
         read_range(&mut file, meta.primary_data(usize::MAX).expect("located"))
             .expect("the item is read")
     }

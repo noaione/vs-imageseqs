@@ -98,7 +98,17 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   handing it over. `avif.rs` also holds the ISO base media file format item
   metadata walker both containers share, which `heif.rs` reads the container's
   `irot`/`imir` orientation through because the `libheif-rs` wrapper exposes no
-  getter for it; a second parser is what that avoids, not what it adds.
+  getter for it; a second parser is what that avoids, not what it adds. every
+  range that walker hands out is bounded by the file, or by the `idat` box for a
+  construction method of one, before the caller allocates it, and every offset,
+  length and field width is checked against the type it is read into: a malformed
+  container is refused rather than read past its own bounds, because a release
+  build aborts on a panic. `Meta::native_eligible` is what decides whether this
+  reader decodes the primary item at all, and a container it refuses — a grid of
+  tiles, an item in several extents, a construction method it does not follow —
+  is described as the format the `image` decoder produces rather than as the yuv
+  its samples are; a probe must never promise a frame a decode would refuse to
+  produce.
 - `src/pixel.rs`: supported pixel formats, the format a nominal depth names, and
   planar frame writes, which move a wider word down to the frame's own depth.
 - `src/color.rs`: frame properties, the optional raw `ICCProfile`, and the
@@ -118,7 +128,9 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   re-encoded by hand the same way. its yuv avif section reads the three crops `avif-yuv420p.avif`, `avif-yuv422p.avif`
   and `avif-yuv444p10.avif` cut out of the `sandbox/hitokage-sample` yuv avifs,
   plus `alpha-yuv420p.avif`, and those four are likewise described by hand in
-  that script's header. its orientation section reads the `tests/fixtures/orientation-*.png` files written by
+  that script's header. its split-extent section reads `avif-split-extents.avif`,
+  which that script writes by hand from the coded item `avif-yuv420p.avif` holds,
+  so that fixture has to exist before the script runs. its orientation section reads the `tests/fixtures/orientation-*.png` files written by
   `tests/make-orientation-fixtures.py`, plus `orientation-6.jxl`, which that
   script documents and `cjxl` makes, and its yuv orientation section reads the
   `orientation-{2,6,8}.webp` files that script cuts out of
