@@ -46,6 +46,38 @@ with ``cjxl`` on ``PATH``, if the picture changes:
 It is tiny because ``-d 0`` is lossless and the picture is three by four
 samples. The alpha fixture's own jxl copy, ``alpha-rgba8.jxl``, is encoded the
 same way and ``tests/make-alpha-fixtures.py`` records it.
+
+An avif or heic does not state an orientation in a tag at all: it states it as
+the ``irot`` (rotation) and ``imir`` (mirror) transformative item properties of
+its image item, which is the second thing a file can state and the plugin had
+never read. Those fixtures are encoded by hand from the source this script
+writes, ``orientation-container.png``, which is the same four by three grid as
+the exif fixtures with one grey level per position (7 to 18 in every channel), so
+that an orientation that moves a sample shows up in the plane the plugin hands
+out, and so that the yuv hand-out of a file encoded from it is exact. Re-run
+these from the repository root with ``avifenc`` and ``heif-enc`` on ``PATH``
+whenever the source changes:
+
+    avifenc -q 100 --cicp 1/13/6 -r full --yuv 444 tests/fixtures/orientation-container.png tests/fixtures/orientation-avif-none.avif
+    avifenc -q 100 --cicp 1/13/6 -r full --yuv 444 --irot 1 tests/fixtures/orientation-container.png tests/fixtures/orientation-avif-irot-1.avif
+    avifenc -q 100 --cicp 1/13/6 -r full --yuv 444 --irot 2 tests/fixtures/orientation-container.png tests/fixtures/orientation-avif-irot-2.avif
+    avifenc -q 100 --cicp 1/13/6 -r full --yuv 444 --irot 3 tests/fixtures/orientation-container.png tests/fixtures/orientation-avif-irot-3.avif
+    avifenc -q 100 --cicp 1/13/6 -r full --yuv 444 --imir 0 tests/fixtures/orientation-container.png tests/fixtures/orientation-avif-imir-0.avif
+    avifenc -q 100 --cicp 1/13/6 -r full --yuv 444 --imir 1 tests/fixtures/orientation-container.png tests/fixtures/orientation-avif-imir-1.avif
+    avifenc -q 100 --cicp 1/13/6 -r full --yuv 444 --irot 1 --imir 0 tests/fixtures/orientation-container.png tests/fixtures/orientation-avif-irot-1-imir-0.avif
+    avifenc -q 100 --cicp 1/13/6 -r full --yuv 444 --irot 1 --imir 1 tests/fixtures/orientation-container.png tests/fixtures/orientation-avif-irot-1-imir-1.avif
+    avifenc --lossless --cicp 1/13/0 -r full --yuv 444 --irot 1 tests/fixtures/orientation-container.png tests/fixtures/orientation-avif-rgb-irot-1.avif
+    avifenc --lossless --irot 1 tests/fixtures/alpha-l8.png tests/fixtures/orientation-avif-mono-irot-1.avif
+    heif-enc -q 100 -p x265:lossless=1 --rotate-cw 90 -o tests/fixtures/orientation-heic-rot-90.heic tests/fixtures/orientation-container.png
+    heif-enc -q 100 -p x265:lossless=1 --rotate-cw 180 -o tests/fixtures/orientation-heic-rot-180.heic tests/fixtures/orientation-container.png
+    heif-enc -q 100 -p x265:lossless=1 --rotate-cw 270 -o tests/fixtures/orientation-heic-rot-270.heic tests/fixtures/orientation-container.png
+
+``--irot`` is a quarter turn anticlockwise per unit and ``--imir`` exchanges the
+top and bottom (0) or the left and right (1), which is what the two properties
+mean; ``heif-enc`` writes the rotation only, because it has no mirror option.
+The two avif files that are not a plain yuv hand-out are the rgb fallback (the
+identity matrix the frame properties cannot name, so ``image`` decodes it) and
+the monochrome one, whose item holds a single plane.
 """
 
 from __future__ import annotations
@@ -70,9 +102,28 @@ SPLIT_LEVELS = ((16, 90), (170, 235))
 WEBP_ORIENTATIONS = (2, 6, 8)
 WEBP_SOURCE = "orientation-split.webp"
 
+# The container-transform fixtures, which are encoded by hand from
+# `orientation-container.png`; the script only checks that they are there.
+CONTAINER_FIXTURES = (
+    "orientation-avif-none.avif",
+    "orientation-avif-irot-1.avif",
+    "orientation-avif-irot-2.avif",
+    "orientation-avif-irot-3.avif",
+    "orientation-avif-imir-0.avif",
+    "orientation-avif-imir-1.avif",
+    "orientation-avif-irot-1-imir-0.avif",
+    "orientation-avif-irot-1-imir-1.avif",
+    "orientation-avif-rgb-irot-1.avif",
+    "orientation-avif-mono-irot-1.avif",
+    "orientation-heic-rot-90.heic",
+    "orientation-heic-rot-180.heic",
+    "orientation-heic-rot-270.heic",
+)
+
 # PNG color type of the fixtures: a gray image, so the validator states one
-# plane per frame.
+# plane per frame, and an rgb one for the source the containers are encoded from.
 GRAY = 0
+RGB = 2
 
 # Exif tag and format of the one IFD entry the fixtures carry.
 ORIENTATION_TAG = 0x0112
@@ -183,6 +234,36 @@ def tag_webp(source: bytes, orientation: int) -> bytes:
     )
 
 
+def container_source(path: str) -> None:
+    """Writes the source the container-transform fixtures are encoded from.
+
+    The same four by three grid as the exif fixtures, one grey level per position
+    in every channel, so an orientation that moves a sample is visible and the
+    yuv hand-out of a file encoded from it is exact: a full range bt.601 encode
+    of a grey sample is that sample in the luma plane and 128 in both chroma
+    planes.
+    """
+    rows = [
+        [value for column in range(WIDTH) for value in (row * WIDTH + column + 7,) * 3]
+        for row in range(HEIGHT)
+    ]
+    raw = b"".join(b"\x00" + bytes(row) for row in rows)
+
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        crc = zlib.crc32(kind + payload) & 0xFFFFFFFF
+        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", crc)
+
+    header = struct.pack(">IIBBBBB", WIDTH, HEIGHT, 8, RGB, 0, 0, 0)
+    document = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(raw, 9))
+        + chunk(b"IEND", b"")
+    )
+    with open(path, "wb") as handle:
+        handle.write(document)
+
+
 def main() -> None:
     os.makedirs(FIXTURES, exist_ok=True)
     rows = [[row * WIDTH + column + 1 for column in range(WIDTH)] for row in range(HEIGHT)]
@@ -190,6 +271,20 @@ def main() -> None:
         name = f"orientation-{orientation}.png"
         png(os.path.join(FIXTURES, name), rows, orientation)
     png(os.path.join(FIXTURES, "orientation-split.png"), split_rows(), 1)
+    container_source(os.path.join(FIXTURES, "orientation-container.png"))
+
+    # The container-transform fixtures need an encoder, so the source above is
+    # written here and the files encoded from it are made once by hand with the
+    # commands in this module's header.
+    missing = [
+        name
+        for name in CONTAINER_FIXTURES
+        if not os.path.exists(os.path.join(FIXTURES, name))
+    ]
+    if missing:
+        print(f"the container-transform fixtures are missing: {', '.join(missing)}")
+        print("encode them from orientation-container.png with the commands in this file's header")
+        return
 
     # The bitstream of a lossy webp needs an encoder, so the file the three
     # tagged ones are cut from is made once by hand and the script only states a

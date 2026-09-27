@@ -74,7 +74,7 @@ pub fn handles(info: &ImageInfo) -> bool {
 /// describe. A file this answers with an r,g,b format is described but not
 /// decoded here, and its format correction is read from the same boxes by
 /// [`output_format`].
-pub fn image_info(path: &Path) -> Option<ImageInfo> {
+pub fn image_info(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
     let mut file = File::open(path).ok()?;
     let boxes = leading_boxes(&mut file)?;
     if !has_avif_brand(&boxes) {
@@ -87,6 +87,15 @@ pub fn image_info(path: &Path) -> Option<ImageInfo> {
         return None;
     }
     let has_alpha = meta.has_alpha();
+    // `dav1d` hands the item over as it is coded, so the size and the samples
+    // here are the stored ones and the container's own transform is the plugin's
+    // to apply; see [`container_orientation`].
+    let orientation = header.orientation;
+    let transform = if apply_rotation {
+        Transform::from_orientation(orientation)
+    } else {
+        Transform::IDENTITY
+    };
 
     // The colour the frames are tagged with is the one the `colr` box states,
     // and the sequence header of the coded image when the item has no box:
@@ -114,8 +123,8 @@ pub fn image_info(path: &Path) -> Option<ImageInfo> {
             cicp,
             // A single plane has no chroma to place.
             chroma_location: None,
-            orientation: Orientation::NoTransforms,
-            transform: Transform::IDENTITY,
+            orientation,
+            transform,
             format: PixelFormat::from_color_type(header.file_color_type(has_alpha))?
                 .at_depth(header.depth.into()),
         });
@@ -151,8 +160,8 @@ pub fn image_info(path: &Path) -> Option<ImageInfo> {
         icc_profile: header.icc_profile,
         cicp,
         chroma_location: crate::color::chroma_location(header.chroma_position),
-        orientation: Orientation::NoTransforms,
-        transform: Transform::IDENTITY,
+        orientation,
+        transform,
         format,
     })
 }
@@ -609,6 +618,75 @@ const fn usable_matrix(matrix: u8) -> bool {
     matrix != 0 && matrix != UNSPECIFIED
 }
 
+/// The orientation the container's own `irot` and `imir` properties describe.
+///
+/// `irot` states a rotation in units of 90 degrees anticlockwise and `imir` a
+/// mirror whose axis exchanges the top and bottom (axis 0) or the left and right
+/// (axis 1), and the two are applied to the stored image in that order: MIAF
+/// (ISO/IEC 23000-22 section 7.3.6.7) fixes clean aperture, then rotation, then
+/// mirror, so the mirror is taken in the already rotated frame. Every
+/// combination of the two is one of the eight exif orientations, which is what
+/// lets a container-only transform be reported through `ImgSeqOrientation`:
+///
+/// | `irot` | no `imir` | axis 0 | axis 1 |
+/// | --- | --- | --- | --- |
+/// | 0 | 1 | 4 | 2 |
+/// | 1 (90 ccw) | 8 | 5 | 7 |
+/// | 2 | 3 | 2 | 4 |
+/// | 3 (270 ccw) | 6 | 7 | 5 |
+///
+/// A file that states neither is orientation 1, which is what an exif tag that
+/// states nothing means too. A file that states both has two ways to write some
+/// of the mirrored codes - `irot` 1 with axis 0 and `irot` 3 with axis 1 are both
+/// orientation 5 - which is why this reads the pair and not either one.
+fn orientation_of(properties: &[Property<'_>]) -> Orientation {
+    let mut angle = 0u8;
+    let mut mirror = None;
+    for property in properties {
+        let stated = property.payload.first().copied().unwrap_or(0);
+        match property.kind {
+            // Six reserved bits and the angle in the two below them.
+            b"irot" => angle = stated & 0x03,
+            // Seven reserved bits and the axis in the one below them.
+            b"imir" => mirror = Some(stated & 0x01),
+            _ => {}
+        }
+    }
+    match (angle, mirror) {
+        (0, None) => Orientation::NoTransforms,
+        (1, None) => Orientation::Rotate270,
+        (2, None) => Orientation::Rotate180,
+        (3, None) => Orientation::Rotate90,
+        // The two mirror-only cases, and the half turn, where the axes swap:
+        // rotating half a turn and then exchanging the top and bottom leaves the
+        // same picture as exchanging the left and right of the stored one.
+        (0, Some(0)) | (2, Some(1)) => Orientation::FlipVertical,
+        (0, Some(1)) | (2, Some(0)) => Orientation::FlipHorizontal,
+        (1, Some(0)) | (3, Some(1)) => Orientation::Rotate90FlipH,
+        (1, Some(1)) | (3, Some(0)) => Orientation::Rotate270FlipH,
+        // The angle is masked to two bits and the axis to one, so no other pair
+        // reaches here.
+        _ => Orientation::NoTransforms,
+    }
+}
+
+/// The orientation a container's own transform describes, read from the item
+/// properties of its primary image.
+///
+/// `None` means the boxes could not be walked, which is a file whose transform
+/// is unknown rather than absent. This is the ISO base media file format item
+/// metadata walker this module already reads an avif with, and a heif container
+/// holds the same boxes: [`crate::formats::heif`] uses it because `libheif`
+/// applies a container's `irot` and `imir` as it decodes but the `libheif-rs`
+/// wrapper exposes no getter for them, so the plugin cannot otherwise tell what
+/// it has been handed.
+pub(crate) fn container_orientation(path: &Path) -> Option<Orientation> {
+    let mut file = File::open(path).ok()?;
+    let boxes = leading_boxes(&mut file)?;
+    let meta = Meta::read(&boxes)?;
+    Some(orientation_of(&meta.primary_properties()?))
+}
+
 /// What the item properties of the primary item state about it.
 struct AvifHeader {
     width: u32,
@@ -628,6 +706,9 @@ struct AvifHeader {
     /// The colour description a `colr` box of the primary item states, when it
     /// holds one.
     cicp: Option<Cicp>,
+    /// The orientation the container's own `irot` and `imir` properties
+    /// describe, which is the code `ImgSeqOrientation` carries.
+    orientation: Orientation,
 }
 
 impl AvifHeader {
@@ -688,6 +769,7 @@ impl AvifHeader {
             has_icc_profile,
             icc_profile,
             cicp,
+            orientation: orientation_of(properties),
         })
     }
 
@@ -1996,7 +2078,7 @@ mod tests {
             ),
         ] {
             let path = Path::new("tests/fixtures").join(name);
-            let info = image_info(&path).expect("the container describes it");
+            let info = image_info(&path, true).expect("the container describes it");
             assert_eq!(info.format, format, "{name}");
             assert_eq!(info.color_type, color_type, "{name}");
             assert!(handles(&info), "{name}");
@@ -2022,7 +2104,7 @@ mod tests {
     #[test]
     fn a_yuv_fixture_with_an_alpha_item_is_probed_as_the_page_and_its_alpha() {
         let path = Path::new("tests/fixtures/alpha-yuv420p.avif");
-        let info = image_info(path).expect("the container describes it");
+        let info = image_info(path, true).expect("the container describes it");
         assert_eq!((info.width, info.height), (4, 4));
         assert_eq!(info.format, PixelFormat::Yuv420P8);
         assert_eq!(info.color_type, ColorType::Rgba8);
@@ -2038,7 +2120,7 @@ mod tests {
         // samples are r,g,b, so neither is handed out as yuv.
         for name in ["cicp-rgb8.avif", "alpha-rgba8.avif"] {
             let path = Path::new("tests/fixtures").join(name);
-            let info = image_info(&path).expect("the container describes it");
+            let info = image_info(&path, true).expect("the container describes it");
             assert_eq!(info.format, PixelFormat::Rgb8, "{name}");
             assert!(!handles(&info), "{name}");
             // The colour of the container is still stated for a file that keeps
@@ -2060,7 +2142,7 @@ mod tests {
     #[test]
     fn a_monochrome_fixture_keeps_its_gray_format() {
         let path = Path::new("tests/fixtures/mono-alpha.avif");
-        let info = image_info(path).expect("the container describes it");
+        let info = image_info(path, true).expect("the container describes it");
         assert_eq!(info.format, PixelFormat::Gray8);
         // The item holds one sample per pixel, and the decoder this file is
         // left to reports four channels for it, which is what the frame request
@@ -2080,15 +2162,15 @@ mod tests {
 
     #[test]
     fn another_container_is_not_described_here() {
-        assert!(image_info(Path::new("tests/fixtures/alpha-rgba8.heic")).is_none());
-        assert!(image_info(Path::new("tests/fixtures/alpha-rgba8.jxl")).is_none());
-        assert!(image_info(Path::new("tests/fixtures/nowhere.avif")).is_none());
+        assert!(image_info(Path::new("tests/fixtures/alpha-rgba8.heic"), true).is_none());
+        assert!(image_info(Path::new("tests/fixtures/alpha-rgba8.jxl"), true).is_none());
+        assert!(image_info(Path::new("tests/fixtures/nowhere.avif"), true).is_none());
     }
 
     #[test]
     fn a_probed_fixture_decodes_into_the_planes_its_format_describes() {
         let path = Path::new("tests/fixtures/avif-yuv420p.avif");
-        let info = image_info(path).expect("the container describes it");
+        let info = image_info(path, true).expect("the container describes it");
         let decoded = decode(&info).expect("the item is decoded");
         let Pixels::Planar { planes, alpha } = decoded.pixels else {
             panic!("a yuv page is handed out as planes");
@@ -2107,7 +2189,7 @@ mod tests {
     #[test]
     fn the_planes_of_an_alpha_fixture_are_the_ones_its_source_holds() {
         let path = Path::new("tests/fixtures/alpha-yuv420p.avif");
-        let info = image_info(path).expect("the container describes it");
+        let info = image_info(path, true).expect("the container describes it");
         let decoded = decode(&info).expect("the item is decoded");
         let Pixels::Planar { planes, alpha } = decoded.pixels else {
             panic!("a yuv page is handed out as planes");
@@ -2313,12 +2395,295 @@ mod tests {
     #[test]
     fn a_valid_item_hands_its_picture_back_on_the_first_call() {
         let path = Path::new("tests/fixtures/avif-yuv420p.avif");
-        let info = image_info(path).expect("the container describes it");
+        let info = image_info(path, true).expect("the container describes it");
         let picture = decode_item(&fixture_payload(path), &info).expect("the item is decoded");
         assert_eq!(
             (picture.width(), picture.height()),
             (info.width, info.height)
         );
+    }
+
+    /// The 4x3 grid the container-transform tests rearrange: one distinct sample
+    /// per position, so a rotation, a mirror and a lost transpose are all
+    /// visible.
+    fn container_grid() -> Vec<Vec<u8>> {
+        (0..3)
+            .map(|row| (0..4).map(|column| (row * 4 + column + 1) as u8).collect())
+            .collect()
+    }
+
+    /// A property list of the transform a container states.
+    fn stated(angle: Option<u8>, mirror: Option<u8>) -> Vec<Property<'static>> {
+        static IROT: [u8; 4] = *b"irot";
+        static IMIR: [u8; 4] = *b"imir";
+        static IROT_PAYLOADS: [u8; 4] = [0, 1, 2, 3];
+        static IMIR_PAYLOADS: [u8; 2] = [0, 1];
+        let mut properties = Vec::new();
+        if let Some(angle) = angle {
+            let at = usize::from(angle);
+            properties.push(Property {
+                kind: &IROT,
+                payload: &IROT_PAYLOADS[at..=at],
+            });
+        }
+        if let Some(axis) = mirror {
+            let at = usize::from(axis);
+            properties.push(Property {
+                kind: &IMIR,
+                payload: &IMIR_PAYLOADS[at..=at],
+            });
+        }
+        properties
+    }
+
+    /// One quarter turn anticlockwise, as `irot` states it.
+    fn rotated_ccw(grid: &[Vec<u8>]) -> Vec<Vec<u8>> {
+        let (width, height) = (grid[0].len(), grid.len());
+        (0..width)
+            .map(|row| {
+                (0..height)
+                    .map(|column| grid[column][width - 1 - row])
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The mirror `imir` states: axis 0 exchanges the top and bottom, axis 1 the
+    /// left and right.
+    fn mirrored(grid: &[Vec<u8>], axis: u8) -> Vec<Vec<u8>> {
+        let (width, height) = (grid[0].len(), grid.len());
+        if axis == 0 {
+            (0..height)
+                .map(|row| grid[height - 1 - row].clone())
+                .collect()
+        } else {
+            (0..height)
+                .map(|row| {
+                    (0..width)
+                        .map(|column| grid[row][width - 1 - column])
+                        .collect()
+                })
+                .collect()
+        }
+    }
+
+    /// A grid rearranged by the transform an exif code names.
+    fn rearranged(orientation: Orientation, grid: &[Vec<u8>]) -> Vec<Vec<u8>> {
+        let transform = Transform::from_orientation(orientation);
+        let (width, height) = (grid[0].len(), grid.len());
+        let (output_width, output_height) = transform.output_size(width, height);
+        (0..output_height)
+            .map(|row| {
+                (0..output_width)
+                    .map(|column| {
+                        let (x, y) = transform.source_of(column, row, output_width, output_height);
+                        grid[y][x]
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The mapping from the container's two properties onto an exif code, checked
+    /// against the operations the properties name rather than against the table
+    /// itself: every combination of the four angles and the three mirror states
+    /// has to rearrange a labelled grid exactly the way the code's transform
+    /// does.
+    #[test]
+    fn every_container_transform_is_the_exif_orientation_it_maps_to() {
+        let stored = container_grid();
+        for angle in 0..4u8 {
+            for mirror in [None, Some(0), Some(1)] {
+                // MIAF (ISO/IEC 23000-22 section 7.3.6.7): clean aperture first,
+                // then rotation, then mirror, so the mirror is taken in the
+                // already rotated frame.
+                let mut expected = stored.clone();
+                for _ in 0..angle {
+                    expected = rotated_ccw(&expected);
+                }
+                if let Some(axis) = mirror {
+                    expected = mirrored(&expected, axis);
+                }
+                let orientation = orientation_of(&stated(Some(angle), mirror));
+                assert_eq!(
+                    rearranged(orientation, &stored),
+                    expected,
+                    "irot {angle} imir {mirror:?} mapped to {orientation:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_container_that_states_no_transform_is_orientation_one() {
+        assert_eq!(orientation_of(&[]), Orientation::NoTransforms);
+        assert_eq!(
+            orientation_of(&stated(Some(0), None)),
+            Orientation::NoTransforms
+        );
+    }
+
+    #[test]
+    fn the_reserved_bits_of_a_transform_are_not_part_of_it() {
+        // `irot` keeps six reserved bits above its angle and `imir` seven above
+        // its axis, so a writer that sets them states the same transform.
+        const IROT: [u8; 4] = *b"irot";
+        const IMIR: [u8; 4] = *b"imir";
+        static HIGH: [u8; 1] = [0xFD];
+        static LOW: [u8; 1] = [0x01];
+        let properties = vec![
+            Property {
+                kind: &IROT,
+                payload: &HIGH,
+            },
+            Property {
+                kind: &IMIR,
+                payload: &HIGH,
+            },
+        ];
+        assert_eq!(orientation_of(&properties), Orientation::Rotate270FlipH);
+        let properties = vec![
+            Property {
+                kind: &IROT,
+                payload: &LOW,
+            },
+            Property {
+                kind: &IMIR,
+                payload: &LOW,
+            },
+        ];
+        assert_eq!(orientation_of(&properties), Orientation::Rotate270FlipH);
+    }
+
+    /// The container-transform fixtures, as the code and the two sizes each
+    /// states. The displayed size is the stored one with a transposing code
+    /// swapped, and `apply_rotation=False` has to hand the stored picture back.
+    #[test]
+    fn a_container_transform_fixture_is_probed_with_its_code() {
+        for (name, code, stored, shown) in [
+            (
+                "orientation-avif-none.avif",
+                Orientation::NoTransforms,
+                (4, 3),
+                (4, 3),
+            ),
+            (
+                "orientation-avif-irot-1.avif",
+                Orientation::Rotate270,
+                (4, 3),
+                (3, 4),
+            ),
+            (
+                "orientation-avif-irot-2.avif",
+                Orientation::Rotate180,
+                (4, 3),
+                (4, 3),
+            ),
+            (
+                "orientation-avif-irot-3.avif",
+                Orientation::Rotate90,
+                (4, 3),
+                (3, 4),
+            ),
+            (
+                "orientation-avif-imir-0.avif",
+                Orientation::FlipVertical,
+                (4, 3),
+                (4, 3),
+            ),
+            (
+                "orientation-avif-imir-1.avif",
+                Orientation::FlipHorizontal,
+                (4, 3),
+                (4, 3),
+            ),
+            (
+                "orientation-avif-irot-1-imir-0.avif",
+                Orientation::Rotate90FlipH,
+                (4, 3),
+                (3, 4),
+            ),
+            (
+                "orientation-avif-irot-1-imir-1.avif",
+                Orientation::Rotate270FlipH,
+                (4, 3),
+                (3, 4),
+            ),
+            (
+                "orientation-avif-rgb-irot-1.avif",
+                Orientation::Rotate270,
+                (4, 3),
+                (3, 4),
+            ),
+            (
+                "orientation-avif-mono-irot-1.avif",
+                Orientation::Rotate270,
+                (3, 2),
+                (2, 3),
+            ),
+        ] {
+            let path = Path::new("tests/fixtures").join(name);
+            let shown_info = image_info(&path, true).expect("the container describes it");
+            assert_eq!(shown_info.orientation, code, "{name}");
+            assert_eq!((shown_info.width, shown_info.height), stored, "{name}");
+            assert_eq!(
+                (shown_info.output_width(), shown_info.output_height()),
+                shown,
+                "{name}"
+            );
+            assert_eq!(
+                shown_info.transform,
+                Transform::from_orientation(code),
+                "{name}"
+            );
+
+            let stored_info = image_info(&path, false).expect("the container describes it");
+            assert_eq!(stored_info.orientation, code, "{name}");
+            assert_eq!(
+                (stored_info.output_width(), stored_info.output_height()),
+                stored,
+                "{name}"
+            );
+            assert_eq!(stored_info.transform, Transform::IDENTITY, "{name}");
+        }
+    }
+
+    /// The decoder hands the stored picture over and the transform beside it,
+    /// which is what the frame writer rearranges: this module never rotates a
+    /// sample itself. The fixtures' distinct samples make the stored plane
+    /// visible in order.
+    #[test]
+    fn a_rotated_avif_decodes_its_stored_picture_and_carries_the_transform() {
+        for (name, code) in [
+            ("orientation-avif-irot-1.avif", Orientation::Rotate270),
+            ("orientation-avif-irot-3.avif", Orientation::Rotate90),
+            (
+                "orientation-avif-irot-1-imir-0.avif",
+                Orientation::Rotate90FlipH,
+            ),
+        ] {
+            let path = Path::new("tests/fixtures").join(name);
+            let info = image_info(&path, true).expect("the container describes it");
+            assert_eq!(info.transform, Transform::from_orientation(code), "{name}");
+            let decoded = decode(&info).expect("the item is decoded");
+            assert_eq!(decoded.transform, info.transform, "{name}");
+            let Pixels::Planar { planes, .. } = decoded.pixels else {
+                panic!("a yuv page is handed out as planes");
+            };
+            assert_eq!(planes[0], (7..=18).collect::<Vec<u8>>(), "{name}");
+        }
+    }
+
+    /// A picture that is not rotated is the same frame with or without the
+    /// policy, which is what says the change did not move an unrotated file.
+    #[test]
+    fn an_unrotated_container_is_unchanged_by_the_rotation_policy() {
+        let path = Path::new("tests/fixtures/orientation-avif-none.avif");
+        let shown = image_info(path, true).expect("the container describes it");
+        let stored = image_info(path, false).expect("the container describes it");
+        assert_eq!(shown.transform, Transform::IDENTITY);
+        assert_eq!(stored.transform, Transform::IDENTITY);
+        assert_eq!((shown.width, shown.height), (stored.width, stored.height));
     }
 
     /// The committed fixture end to end: it is described from its container as
@@ -2327,7 +2692,7 @@ mod tests {
     #[test]
     fn the_no_picture_fixture_is_described_and_then_ends_with_an_error() {
         let path = Path::new("tests/fixtures/avif-no-picture.avif");
-        let info = image_info(path).expect("the container describes it");
+        let info = image_info(path, true).expect("the container describes it");
         assert_eq!((info.width, info.height), (3, 2));
         assert_eq!(info.format, PixelFormat::Yuv444P8);
         assert!(handles(&info));

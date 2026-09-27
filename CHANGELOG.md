@@ -8,11 +8,20 @@
   - the item decoder now runs at low latency, which is what lets "the decoder has
     all of the item and has no picture" be told apart from "the picture is still
     being decoded"
+- an AVIF or HEIF/HEIC that states its orientation as the `irot` and `imir` item
+  properties is now handed out the way the file describes it
+  - `ImgSeqOrientation` reports the equivalent EXIF code instead of `1` for such
+    a file, and `apply_rotation=False` hands the stored picture back at the
+    stored size, which neither container could do before
+  - a container transform is the normative statement for these two formats, so an
+    EXIF tag beside one stays informational and is not applied on top of it
 
 ### performance
 - AVIF decoding is 15.6% faster on the 35-page sandbox set, and 43% faster on
   `sandbox/hitokage-sample`: a still image is one frame, so the item is decoded
   directly instead of through a frame-delay pipeline it cannot use
+- reading a container's orientation costs 0.006 ms per AVIF file and 0.037 ms per
+  HEIF file at clip creation, and nothing per frame
 
 ### build
 - improvement to linux wheel distribution, manylinux now has dropped down to glibc 2.28

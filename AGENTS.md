@@ -17,9 +17,11 @@ file. `Read` returns the color clip, `ReadAlpha` returns the color clip and a
 separate gray alpha clip that is opaque for files without an alpha channel.
 `fpsnum` and `fpsden` default to `24/1`. `mismatch` defaults to false;
 when true, variable dimensions and formats are allowed. `apply_rotation`
-defaults to true and hands out the picture the file's exif orientation
-describes, including the width and height swap of orientations 5 to 8; when
-false the stored picture is handed out at the stored size and
+defaults to true and hands out the picture the file's orientation describes,
+including the width and height swap of orientations 5 to 8; a file states it as
+an exif tag, as a jxl codestream header, or as the `irot` and `imir` item
+properties of an avif or heif, which is the normative statement for those two
+containers. when false the stored picture is handed out at the stored size and
 `ImgSeqOrientation` still reports the file's code. `debug` defaults to
 false and emits VapourSynth log timings when enabled. `prefetch` selects the
 number of background decode workers used for sequential reads; it defaults to
@@ -93,7 +95,10 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   a path-qualified error instead of a decode loop that never returns; do not put
   that loop's exit behind an iteration count or a sleep, and do not call
   `dav1d_flush` to drain it, because it discards the delayed frame rather than
-  handing it over.
+  handing it over. `avif.rs` also holds the ISO base media file format item
+  metadata walker both containers share, which `heif.rs` reads the container's
+  `irot`/`imir` orientation through because the `libheif-rs` wrapper exposes no
+  getter for it; a second parser is what that avoids, not what it adds.
 - `src/pixel.rs`: supported pixel formats, the format a nominal depth names, and
   planar frame writes, which move a wider word down to the frame's own depth.
 - `src/color.rs`: frame properties, the optional raw `ICCProfile`, and the

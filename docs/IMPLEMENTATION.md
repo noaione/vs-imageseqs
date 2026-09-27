@@ -419,14 +419,29 @@ for the monochrome path, and its `color_profile_nclx()`,
 `luma_bits_per_pixel()` and `has_alpha_channel()` answer the rest of the probe.
 
 Two things did not move with it. libheif applies the container's `irot`/`imir`
-itself, so a rotated heic is still handed out display-oriented with
+itself, so a rotated heic used to be handed out display-oriented with
 `ImgSeqOrientation` reporting 1, the one promise of
-[12](improvements/12-heif-avif-yuv-output.md) that is not kept: reporting the
-code means reading the transform boxes, each of which also states a size the
-module has to keep straight. And the alpha item is decoded whenever the probe
-found one, for `Read` as well as `ReadAlpha`, because the colour type a probe
-reports is decided before either clip is asked for a frame. libheif decodes the
-whole handle at once, so asking for the alpha separately would open it twice.
+[12](improvements/12-heif-avif-yuv-output.md) that is not kept; and the alpha
+item is decoded whenever the probe found one, for `Read` as well as `ReadAlpha`,
+because the colour type a probe reports is decided before either clip is asked
+for a frame. libheif decodes the whole handle at once, so asking for the alpha
+separately would open it twice.
+
+The orientation half of that is [16](improvements/16-container-orientation.md)
+now, and the shape it took is worth keeping: `libheif-rs` exposes no getter for
+`irot` or `imir` and will not hand out its context, so the container's transform
+is read with the ISO base media file format item metadata walker `avif.rs`
+already had, through `avif::container_orientation`, and mapped onto the exif code
+that describes the same picture. Who applies it differs by container and that is
+the point: `dav1d` returns the coded item, so an avif is handed out at its stored
+size with the transform left to the writer, exactly like the exif path; `libheif`
+has already applied it, so a heif keeps its displayed size and identity for
+`apply_rotation=True` and hands the displayed picture back through the *inverse*
+transform when rotation is off. That is the shape [`formats/jxl`] has, the other
+decoder here that applies a file's transform itself, and it is why the two
+containers can now answer both settings with one `Transform` between them. The
+one thing the inverse does not undo is a clean aperture, which `libheif` applies
+alongside the rotation and which is a crop rather than an orientation.
 
 Monochrome HEIF/HEIC asks for `ColorSpace::Monochrome` and writes the single
 plane into a `Gray8`/`Gray10`/`Gray16` frame. `src/formats/` holds one module per
@@ -1042,9 +1057,9 @@ stage table.
 
 ---
 
-# Applying the exif orientation
+# Applying the file's orientation
 
-A file's exif orientation is applied by default, and `apply_rotation=0` is the
+A file's orientation is applied by default, and `apply_rotation=0` is the
 argument that asks for the stored picture. Three facts make this more than a
 write-time detail:
 
@@ -1073,6 +1088,20 @@ write-time detail:
   carries: a run-time sized move is a call into the copy routine per sample,
   which measured 3.3x worse on a transposed yuv plane than a constant one.
   [09](improvements/09-exif-orientation.md) has the numbers.
+
+Where the code comes from is per reader, and the reader decides who applies it.
+A png, webp or jpeg states it in an exif tag and a jpeg xl in its codestream
+header; both are read by the probe, and the `image` path leaves the samples
+stored for the writer to rearrange, while `formats/jxl` is handed the picture the
+code describes and so writes the *inverse* for `apply_rotation=0`. An avif or
+heif states it as the `irot` and `imir` item properties instead — the normative
+statement for those two containers, where an exif tag beside one is informational
+— which the plugin reads itself because `libheif-rs` exposes no getter for them,
+and maps onto the exif code describing the same picture
+([16](improvements/16-container-orientation.md)); `dav1d` leaves an avif stored
+like the `image` path, and `libheif` applies a heif's transform itself like
+`formats/jxl`. One `Transform` is the whole interface between the two, which is
+what keeps the two containers answering both settings the same way.
 
 On an odd sized `4:2:0` page a subsampled plane is rounded up by the decoder and
 down by the frame, so a transformed write there is approximate in the same way

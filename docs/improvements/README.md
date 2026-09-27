@@ -145,20 +145,20 @@ open plus frames to 4.99 s.
 
 ### proposed for review — 2026-09-27
 
-Plans 16–20 are documentation only. None of their proposed implementation is
+Plans 17–20 are documentation only. None of their proposed implementation is
 included. Each records the evidence, intended scope and acceptance checks;
 performance ideas explicitly require measurement before choosing a change.
 
-[15](15-avif-decoder-progress.md) has landed. Address
-[17](17-avif-container-robustness.md)'s bounds handling and
-[16](16-container-orientation.md)'s orientation correctness next.
-[20](20-distribution-followups.md)'s source-build consistency is an independent
-distribution follow-up. Measure [18](18-demand-aware-decoding.md) and
+[15](15-avif-decoder-progress.md) and
+[16](16-container-orientation.md) have landed. Address
+[17](17-avif-container-robustness.md)'s bounds handling next, then
+[20](20-distribution-followups.md)'s source-build consistency, which is an
+independent distribution follow-up. Measure
+[18](18-demand-aware-decoding.md) and
 [19](19-avif-thread-budget.md) after those correctness fixes.
 
 | plan | evidence | priority | status |
 | --- | --- | --- | --- |
-| [16 container orientation](16-container-orientation.md) | native probes bypass rotation policy; AVIF rotation symptom reproduced | high | proposed |
 | [17 AVIF container robustness](17-avif-container-robustness.md) | extended-header indexing, extent bounds and native/fallback eligibility gaps | high for bounds | proposed |
 | [18 demand-aware decoding](18-demand-aware-decoding.md) | color-only paths process alpha; disabled ICC export still retains profiles | medium | measurement/design proposed |
 | [19 AVIF thread budget](19-avif-thread-budget.md) | default native decoder threading runs inside the prefetch pool | medium | experiment proposed |
@@ -173,6 +173,7 @@ that page records the completed checks and remaining CI validation.
 
 | plan | touches | expected | risk | status |
 | --- | --- | --- | --- | --- |
+| [16 container orientation](16-container-orientation.md) | `src/formats/avif.rs`, `src/formats/heif.rs`, `src/decoder.rs`, fixtures, `tests/readalpha.vpy` | an avif or heif that states `irot`/`imir` is handed out the way the file describes it, `apply_rotation=False` gives the stored picture back, and `ImgSeqOrientation` reports the code | medium, it moves the size of every file whose container states a transform | implemented |
 | [15 AVIF decoder progress](15-avif-decoder-progress.md) | `src/formats/avif.rs`, fixtures, `tests/readalpha.vpy` | a frame request on an item that holds no picture errors instead of hanging, and the item decoder runs at low latency | low, an error path and decoder settings | implemented |
 | [14 Linux distribution and manifests](14-linux-wheel-distribution.md) | Hatch, CI, packaging tools, notices | manylinux 2.28 wheel and matching ZIP with bundled codecs and manifest | medium, distribution layout | implemented; Linux/Windows checked locally, CI pending |
 | [01 lookahead scheduling](01-lookahead-scheduling.md) | `src/prefetch.rs`, `src/source.rs` | webp 88.8 → ~70 ms at `prefetch=4`, and `prefetch` above 4 stops being a pessimisation | low, internal only | implemented |
@@ -244,9 +245,19 @@ setting — the item is decoded at low latency, because a still image is one fra
 and a frame delay is a pipeline nothing can use — and that setting turned out to
 be worth 15.6% of the avif decode pass and 43% of `sandbox/hitokage-sample`
 rather than a cost, so the plan that asked only for termination made the format
-faster as well. the rest of the review is still open: 16 and 17 are the
-correctness work, 20 the distribution follow-up, and 18 and 19 are measurements
-before any change.
+faster as well.
+
+[16](16-container-orientation.md) is the second, and it is the other half of what
+[09](09-exif-orientation.md) started: a file states its orientation in three
+places, and the two containers that state it as `irot` and `imir` item
+properties had never been read. the plugin now maps every combination of the two
+onto the exif code that describes the same picture, applies it to the avif it
+decodes itself and accounts for the one `libheif` has already applied, so
+`apply_rotation=False` reaches the stored picture for both. it is the widest
+output change of the two — a rotated file's width and height move — and no file
+in the sandbox states a transform, so the parity check is what says nothing else
+did. the rest of the review is still open: 17 is the correctness work, 20 the
+distribution follow-up, and 18 and 19 are measurements before any change.
 
 ## deferred
 

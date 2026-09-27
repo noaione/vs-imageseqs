@@ -1201,6 +1201,112 @@ def test_icc_profile_properties() -> None:
     )
 
 
+# The container-transform fixtures state their orientation as the `irot` and
+# `imir` item properties of the image item rather than as an exif tag, so the
+# code beside each one is the exif code those two describe. The source they are
+# encoded from is the same four by three grid of twelve distinct samples as the
+# exif fixtures, so the picture each code produces is the one `shown` states.
+CONTAINER_STORED = [
+    [row * ORIENTATION_WIDTH + column + 7 for column in range(ORIENTATION_WIDTH)]
+    for row in range(ORIENTATION_HEIGHT)
+]
+
+# (fixture, the exif code its container transform is, the format it is handed
+# out as, the stored picture). The monochrome one is encoded from the three by
+# two gray fixture, whose samples are 7 to 12.
+CONTAINER_CASES = (
+    ("orientation-avif-none.avif", 1, "YUV444P8", CONTAINER_STORED),
+    ("orientation-avif-irot-1.avif", 8, "YUV444P8", CONTAINER_STORED),
+    ("orientation-avif-irot-2.avif", 3, "YUV444P8", CONTAINER_STORED),
+    ("orientation-avif-irot-3.avif", 6, "YUV444P8", CONTAINER_STORED),
+    ("orientation-avif-imir-0.avif", 4, "YUV444P8", CONTAINER_STORED),
+    ("orientation-avif-imir-1.avif", 2, "YUV444P8", CONTAINER_STORED),
+    ("orientation-avif-irot-1-imir-0.avif", 5, "YUV444P8", CONTAINER_STORED),
+    ("orientation-avif-irot-1-imir-1.avif", 7, "YUV444P8", CONTAINER_STORED),
+    # The identity matrix the frame properties cannot name keeps the rgb path.
+    ("orientation-avif-rgb-irot-1.avif", 8, "RGB24", CONTAINER_STORED),
+    ("orientation-avif-mono-irot-1.avif", 8, "Gray8", [[7, 8, 9], [10, 11, 12]]),
+    ("orientation-heic-rot-90.heic", 6, "YUV420P8", CONTAINER_STORED),
+    ("orientation-heic-rot-180.heic", 3, "YUV420P8", CONTAINER_STORED),
+    ("orientation-heic-rot-270.heic", 8, "YUV420P8", CONTAINER_STORED),
+)
+
+
+def test_orientation_container() -> None:
+    """The orientation a container states as `irot` and `imir` is applied.
+
+    An avif or heic states its orientation as two transformative item properties
+    rather than as an exif tag, which is what the plugin had never read: it handed
+    a rotated heic out the way `libheif` drew it while reporting orientation 1,
+    and it handed a rotated avif out as the stored picture. Both are the same
+    question the exif fixtures ask, so each fixture is checked the same way, with
+    the expected picture built from the code its container states rather than
+    from the plugin's own idea of it. `apply_rotation=False` has to hand the
+    stored picture back for all of them, which is the half a decoder that applies
+    the transform itself - `libheif` here - cannot do on its own.
+    """
+    for name, code, format_name, stored in CONTAINER_CASES:
+        picture = shown(stored, code)
+        width, height = len(picture[0]), len(picture)
+        clip = core.imgseqs.Read(files=[fixture(name)], prefetch=0)
+        check(
+            clip.format.name == format_name,
+            f"container {name}: {format_name} (got {clip.format.name})",
+        )
+        check(
+            (clip.width, clip.height) == (width, height),
+            f"container {name}: the clip is {width}x{height} "
+            f"(got {clip.width}x{clip.height})",
+        )
+        frame = clip.get_frame(0)
+        check(
+            samples(frame) == [sample for row in picture for sample in row],
+            f"container {name}: the picture the container states",
+        )
+        check(
+            frame.props["ImgSeqOrientation"] == code,
+            f"container {name}: ImgSeqOrientation is the code it describes "
+            f"(got {frame.props['ImgSeqOrientation']})",
+        )
+
+        unrotated = core.imgseqs.Read(files=[fixture(name)], prefetch=0, apply_rotation=False)
+        check(
+            (unrotated.width, unrotated.height) == (len(stored[0]), len(stored)),
+            f"container {name}: apply_rotation=False keeps the stored size "
+            f"(got {unrotated.width}x{unrotated.height})",
+        )
+        stored_frame = unrotated.get_frame(0)
+        check(
+            samples(stored_frame) == [sample for row in stored for sample in row],
+            f"container {name}: apply_rotation=False hands out the stored picture",
+        )
+        check(
+            stored_frame.props["ImgSeqOrientation"] == code,
+            f"container {name}: apply_rotation=False still reports the code",
+        )
+
+    # A rotated page beside an upright one is one stored size and two shown ones,
+    # so the clip cannot have a constant size: the size the orientation produces
+    # is the size `mismatch` compares.
+    mixed = [fixture("orientation-avif-irot-1.avif"), fixture("orientation-avif-none.avif")]
+    try:
+        core.imgseqs.Read(files=mixed)
+    except Exception as error:
+        check(
+            "3x4" in str(error) and "4x3" in str(error),
+            f"container: a rotated page beside an upright one is rejected "
+            f"({str(error).strip()})",
+        )
+    else:
+        check(False, "container: a rotated page beside an upright one is rejected")
+
+    together = core.imgseqs.Read(files=mixed, apply_rotation=False)
+    check(
+        (together.width, together.height) == (ORIENTATION_WIDTH, ORIENTATION_HEIGHT),
+        "container: the same two files agree when rotation is off",
+    )
+
+
 def main() -> None:
     for test in (
         test_rgba8,
@@ -1223,6 +1329,7 @@ def main() -> None:
         test_orientation,
         test_orientation_yuv,
         test_orientation_jxl,
+        test_orientation_container,
         test_prefetch_variants,
         test_interleaved_consumers,
         test_errors,

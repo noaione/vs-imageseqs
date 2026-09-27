@@ -112,7 +112,7 @@ clip, alpha = result["clip"], result["alpha"]
 | `files` | required | ordered image paths |
 | `fpsnum`, `fpsden` | `24/1` | output frame rate |
 | `mismatch` | `False` | allow variable sizes and pixel formats |
-| `apply_rotation` | `True` | apply the file's exif/codestream orientation |
+| `apply_rotation` | `True` | apply the file's exif/codestream/container orientation |
 | `icc_profile` | `False` | expose embedded ICC bytes as `ICCProfile` |
 | `debug` | `False` | log create and per-frame timings |
 | `prefetch` | half the logical cores, capped at 4 | background decode workers; `0` disables lookahead |
@@ -125,6 +125,13 @@ rotation applies the displayed orientation by default. orientations 5–8 swap
 width and height, and `ImgSeqOrientation` still reports the original code.
 `apply_rotation=False` keeps the stored picture and stored size. a rotated and
 an upright file therefore need `mismatch=True` when rotation is enabled.
+
+a file states its orientation in one of three ways, and `ImgSeqOrientation`
+carries whichever one it used: the exif tag of a png, webp or jpeg, the
+codestream header of a jpeg xl, or the `irot` and `imir` item properties of an
+avif or heif/heic, whose every combination is one of the eight exif codes.
+a container transform is normative for those two formats, so an exif tag beside
+one is informational and is not applied on top of it.
 
 `debug=True` logs probing, decoding, allocation, pixel conversion, properties,
 and total frame time to the vapoursynth log.
@@ -238,7 +245,7 @@ frames.
 | `ImgSeqOriginalColorType` | decoder's original color type |
 | `ImgSeqHasICC` | whether the source has an ICC profile |
 | `ICCProfile` | raw embedded ICC bytes when `icc_profile=True` |
-| `ImgSeqOrientation` | orientation code carried by the source |
+| `ImgSeqOrientation` | the exif code of the orientation the source states |
 | `ImgSeqAlpha` | `1` on frames from the alpha clip |
 
 container color metadata is mapped to `_Primaries`, `_Transfer`, `_Matrix`,

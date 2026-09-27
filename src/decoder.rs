@@ -187,10 +187,10 @@ pub fn probe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
     // A file a format module can describe from its container skips the decoder,
     // which for an avif means skipping a decode of the whole picture; see
     // [`crate::formats::avif::image_info`] and [`crate::formats::heif::image_info`].
-    if let Some(info) = formats::heif::image_info(path) {
+    if let Some(info) = formats::heif::image_info(path, apply_rotation) {
         return Ok(info);
     }
-    if let Some(info) = formats::avif::image_info(path) {
+    if let Some(info) = formats::avif::image_info(path, apply_rotation) {
         return Ok(info);
     }
     // A jpeg xl is read here whether or not the `image` crate could reach a

@@ -45,7 +45,7 @@ use crate::{
     color::{Cicp, UNSPECIFIED},
     decoder::{DecodeTimings, DecodedImage, ImageInfo, Pixels, image_error},
     error::{ImgSeqError, Result},
-    pixel::{PixelFormat, Transform},
+    pixel::{PixelFormat, Transform, inverse_orientation},
 };
 
 /// File extensions that hold a heif container.
@@ -67,12 +67,20 @@ pub fn handles(info: &ImageInfo) -> bool {
 /// or one whose image libheif reports in a shape this probe will not state a
 /// format for. Those files keep the hook, and the properties they are probed
 /// with are the ones the hook reports.
-pub fn image_info(path: &Path) -> Option<ImageInfo> {
+pub fn image_info(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
     if !has_heif_extension(path) {
         return None;
     }
     let handle = heif_handle(path)?;
     let header = HeifHeader::read(&handle)?;
+    // The container's own `irot` and `imir`, which `libheif` applies as it
+    // decodes and whose getters the wrapper does not expose; see
+    // [`crate::formats::avif::container_orientation`]. A file whose boxes cannot
+    // be walked is reported as stating no orientation rather than as one whose
+    // orientation is unknown, which is what the property has always said for a
+    // container-only transform.
+    let orientation =
+        crate::formats::avif::container_orientation(path).unwrap_or(Orientation::NoTransforms);
     Some(ImageInfo {
         path: path.to_path_buf(),
         width: header.width,
@@ -90,12 +98,17 @@ pub fn image_info(path: &Path) -> Option<ImageInfo> {
         chroma_location: None,
         // libheif applies the container's own transformations as it decodes, so
         // the width and height read here are the size after them, which is the
-        // size the frames are built with. The bare probe reports no exif
-        // orientation for such a file and hands the picture out as libheif drew
-        // it, which is what this plugin has always done; see
-        // `docs/improvements/09-exif-orientation.md`.
-        orientation: Orientation::NoTransforms,
-        transform: Transform::IDENTITY,
+        // size the frames are built with. Rotation on is therefore the identity
+        // - the decoder already drew the picture the file describes - and
+        // rotation off is what undoes it, which is the same shape
+        // [`crate::formats::jxl`] has for the other decoder that applies a
+        // file's orientation itself.
+        orientation,
+        transform: if apply_rotation {
+            Transform::IDENTITY
+        } else {
+            Transform::from_orientation(inverse_orientation(orientation))
+        },
         format: header.format()?,
     })
 }
@@ -739,7 +752,7 @@ mod tests {
         if !path.is_file() {
             return;
         }
-        let info = image_info(&path).expect("a colour heic");
+        let info = image_info(&path, true).expect("a colour heic");
         assert_eq!((info.width, info.height), (3, 2));
         assert_eq!(info.format, PixelFormat::Yuv420P8);
         assert_eq!(info.color_type, ColorType::Rgba8);
@@ -756,13 +769,89 @@ mod tests {
         );
     }
 
+    /// A heic whose container rotates it: `libheif` applies the rotation as it
+    /// decodes, so rotation on is the identity at the displayed size and
+    /// rotation off is what undoes it, at the stored size.
+    #[test]
+    fn a_rotated_heic_reports_its_code_and_hands_the_stored_picture_back() {
+        for (name, code, stored, shown) in [
+            (
+                "orientation-heic-rot-90.heic",
+                Orientation::Rotate90,
+                (4, 3),
+                (3, 4),
+            ),
+            (
+                "orientation-heic-rot-180.heic",
+                Orientation::Rotate180,
+                (4, 3),
+                (4, 3),
+            ),
+            (
+                "orientation-heic-rot-270.heic",
+                Orientation::Rotate270,
+                (4, 3),
+                (3, 4),
+            ),
+        ] {
+            let path = PathBuf::from("tests/fixtures").join(name);
+            if !path.is_file() {
+                return;
+            }
+            let rotated = image_info(&path, true).expect("a rotated heic");
+            assert_eq!(rotated.orientation, code, "{name}");
+            // `libheif` hands the displayed picture over, so the size the decoder
+            // produced is the displayed one and there is nothing left to apply.
+            assert_eq!((rotated.width, rotated.height), shown, "{name}");
+            assert_eq!(rotated.transform, Transform::IDENTITY, "{name}");
+
+            let stored_info = image_info(&path, false).expect("a rotated heic");
+            assert_eq!(stored_info.orientation, code, "{name}");
+            assert_eq!((stored_info.width, stored_info.height), shown, "{name}");
+            assert_eq!(
+                (stored_info.output_width(), stored_info.output_height()),
+                stored,
+                "{name}"
+            );
+            assert_eq!(
+                stored_info.transform,
+                Transform::from_orientation(inverse_orientation(code)),
+                "{name}"
+            );
+        }
+    }
+
+    /// Rotation off hands `libheif`'s displayed picture back with the transform
+    /// that undoes it, which is what the frame writer applies: this module never
+    /// rearranges a sample itself.
+    #[test]
+    fn rotation_off_undoes_a_rotated_heic_through_the_transform() {
+        let path = PathBuf::from("tests/fixtures/orientation-heic-rot-90.heic");
+        if !path.is_file() {
+            return;
+        }
+        let info = image_info(&path, false).expect("a rotated heic");
+        assert_eq!((info.output_width(), info.output_height()), (4, 3));
+        assert_eq!(
+            info.transform,
+            Transform::from_orientation(inverse_orientation(Orientation::Rotate90))
+        );
+        let decoded = decode(&info).expect("the image is decoded");
+        let Pixels::Planar { planes, .. } = decoded.pixels else {
+            panic!("a yuv page is handed out as planes");
+        };
+        // The decoder's own picture, which the transform above turns back into
+        // the stored one: the source grid read down the columns.
+        assert_eq!(planes[0], [15, 11, 7, 16, 12, 8, 17, 13, 9, 18, 14, 10]);
+    }
+
     #[test]
     fn a_monochrome_fixture_keeps_its_gray_format() {
         let path = PathBuf::from("tests/fixtures/mono-alpha.heic");
         if !path.is_file() {
             return;
         }
-        let info = image_info(&path).expect("a monochrome heic");
+        let info = image_info(&path, true).expect("a monochrome heic");
         assert_eq!((info.width, info.height), (7, 5));
         assert_eq!(info.format, PixelFormat::Gray8);
         // The alpha item is a channel of the file, not of the gray frame it is
@@ -777,7 +866,7 @@ mod tests {
             "tests/fixtures/mono-alpha.png",
             "tests/fixtures/alpha-rgba8.jxl",
         ] {
-            assert!(image_info(Path::new(path)).is_none(), "{path}");
+            assert!(image_info(Path::new(path), true).is_none(), "{path}");
         }
     }
 

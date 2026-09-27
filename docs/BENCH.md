@@ -610,6 +610,22 @@ same eight page run, alternating the two builds inside one batch, measures 61.50
 against 61.88 ms/frame for png and 682.75 against 683.11 ms/frame for heic at
 each build's best, which is inside the spread of the same binary run twice.
 
+the orientation read [16](improvements/16-container-orientation.md) added is the
+same shape and smaller: `irot` and `imir` are two more properties of the item
+metadata walk an avif probe already runs, and a heif needs the walk and so a
+second open of its own. best of five rounds per build, per 35-file clip:
+
+| set | before | after |
+| --- | --- | --- |
+| avif | 1.7–1.9 ms | 2.0–2.1 ms |
+| heic | 6.2–6.7 ms | 7.5–8.0 ms |
+
+so 0.006 ms per avif file and 0.037 ms per heic file, which is a quarter of what
+08's second open costs for the same reason. no file in the sandbox states a
+container transform, so nothing here decodes differently: the heic decode pass
+measured 6175.0 → 6197.4 ms (1.004) and all 120 `frame-parity.py` lines are byte
+identical.
+
 ## frame write path
 
 [02](improvements/02-frame-write-path.md) moved the frame build out of the
