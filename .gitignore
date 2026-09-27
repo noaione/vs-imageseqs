@@ -18,3 +18,5 @@ build/
 sandbox/
 
 docs/HANDOFF*
+
+CHANGELOG-GENERATED.md

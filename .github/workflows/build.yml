@@ -338,8 +338,20 @@ jobs:
 
       - name: attest release assets
         uses: actions/attest@v4
+        id: attest
         with:
           subject-path: 'release-assets/*'
+
+      - name: create changelog
+        id: prepare-change
+        run: |
+          python3 tools/create-changelog.py
+          # Fetch git tag contents subject
+          VERSION_SUBJ=$(git tag -l --format='%(contents:subject)' ${{ github.ref }})
+          echo "version_subject=$VERSION_SUBJ" >> "$GITHUB_OUTPUT"
+        env:
+          VERSION: ${{ github.ref }}
+          ATTEST_URL: ${{ steps.attest.outputs.attestation-url }}
 
       - name: create GitHub release
         env:
@@ -349,4 +361,4 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "$GITHUB_REF_NAME" \
-            --generate-notes
+            -F CHANGELOG-GENERATED.md
