@@ -509,7 +509,7 @@ mod tests {
             .encode(pixels, width, height, color_type)
             .expect("a lossless webp stream");
         let path = write_temp(&format!("{name}.webp"), &encoded);
-        let probed = probe(&path, true).expect("the image to probe");
+        let probed = probe(&path, true, false).expect("the image to probe");
         (path, probed)
     }
 
@@ -551,7 +551,7 @@ mod tests {
             .join("tests")
             .join("fixtures")
             .join("lossy.webp");
-        let probed = probe(&path, true).expect("the fixture to probe");
+        let probed = probe(&path, true, false).expect("the fixture to probe");
         (path, probed)
     }
 

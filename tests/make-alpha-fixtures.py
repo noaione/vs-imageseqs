@@ -328,6 +328,75 @@ def avif_split_extents(source: str, path: str) -> None:
         handle.write(ftyp + meta(offset) + avif_box(b"mdat", coded))
 
 
+def avif_broken_alpha(source: str, path: str) -> None:
+    """Writes the container of `source` with an alpha item that holds no frame.
+
+    The primary item is the coded picture of `source`, so the file is a valid
+    avif; the auxiliary item beside it is located, referenced by an ``auxl`` and
+    named alpha by its ``auxC``, and then holds fifteen AV1 temporal delimiters
+    instead of a coded frame. A read that hands out the alpha clip therefore fails
+    on it, which is the file the decision in
+    ``docs/improvements/18-demand-aware-decoding.md`` is checked against: a
+    colour-only read never asks for that item, so it reads this file.
+    """
+    with open(source, "rb") as handle:
+        data = handle.read()
+    coded = next(payload for kind, payload in avif_boxes(data) if kind == b"mdat")
+    empty = b"\x12\x00" * 15
+
+    def infe(item: int, name: bytes) -> bytes:
+        return avif_box(
+            b"infe",
+            bytes((2, 0, 0, 0)) + struct.pack(">HH", item, 0) + b"av01" + name + b"\0",
+        )
+
+    def meta(offset: int) -> bytes:
+        iloc = avif_box(
+            b"iloc",
+            bytes((0, 0, 0, 0, 0x44, 0x00))
+            + struct.pack(">H", 2)
+            + struct.pack(">HHHII", 1, 0, 1, offset, len(coded))
+            + struct.pack(">HHHII", 2, 0, 1, offset + len(coded), len(empty)),
+        )
+        ipco = (
+            avif_box(b"ispe", bytes(4) + struct.pack(">II", 64, 48))
+            + avif_box(b"pixi", bytes(4) + bytes((3, 8, 8, 8)))
+            + avif_box(b"av1C", bytes((0x81, 0x10, 0x0C, 0, 0, 0, 0)))
+            + avif_box(b"colr", b"nclx" + struct.pack(">3H", 1, 13, 6) + bytes((0x80,)))
+            + avif_box(b"auxC", b"urn:mpeg:mpegB:cicp:systems:auxiliary:alpha\0")
+        )
+        # The colour item takes the first four properties and the alpha item the
+        # fifth, which is the ``auxC`` that names it alpha.
+        ipma = (
+            bytes(4)
+            + struct.pack(">I", 2)
+            + struct.pack(">H", 1)
+            + bytes((4, 0x81, 0x82, 0x83, 0x84))
+            + struct.pack(">H", 2)
+            + bytes((1, 0x85))
+        )
+        # An ``auxl`` reference from item 2 to item 1, which is what makes item 2
+        # the primary item's auxiliary item.
+        iref = avif_box(b"iref", bytes(4) + avif_box(b"auxl", struct.pack(">HHH", 2, 1, 1)))
+        return avif_box(
+            b"meta",
+            bytes(4)
+            + avif_box(b"hdlr", bytes(4) + bytes(4) + b"pict" + bytes(12) + b"\0")
+            + avif_box(b"pitm", bytes(4) + struct.pack(">H", 1))
+            + iloc
+            + avif_box(
+                b"iinf", bytes(4) + struct.pack(">H", 2) + infe(1, b"Color") + infe(2, b"Alpha")
+            )
+            + iref
+            + avif_box(b"iprp", avif_box(b"ipco", ipco) + avif_box(b"ipma", ipma)),
+        )
+
+    ftyp = avif_box(b"ftyp", b"avif" + bytes(4) + b"avifmif1miafMA1A")
+    offset = len(ftyp) + len(meta(0)) + 8
+    with open(path, "wb") as handle:
+        handle.write(ftyp + meta(offset) + avif_box(b"mdat", coded + empty))
+
+
 def avif_no_picture(path: str) -> None:
     """Writes an avif whose primary item holds no coded frame.
 
@@ -510,6 +579,13 @@ def main() -> None:
     avif_split_extents(
         write("avif-yuv420p.avif"),
         write("avif-split-extents.avif"),
+    )
+    # The same coded item again, with an alpha item beside it that holds no
+    # frame: a colour-only read never asks for that item, so this is the file the
+    # demand decision is checked against.
+    avif_broken_alpha(
+        write("avif-yuv420p.avif"),
+        write("avif-broken-alpha.avif"),
     )
     png(
         write("alpha-rgb8.png"),

@@ -43,7 +43,7 @@ use vapoursynth4_rs::ColorFamily;
 
 use crate::{
     color::{Cicp, UNSPECIFIED},
-    decoder::{DecodeTimings, DecodedImage, ImageInfo, Pixels, image_error},
+    decoder::{DecodeTimings, DecodedImage, Demand, ImageInfo, Pixels, image_error},
     error::{ImgSeqError, Result},
     pixel::{PixelFormat, Transform, inverse_orientation},
 };
@@ -371,7 +371,12 @@ impl H273Code for MatrixCoefficients {
 }
 
 /// Decodes one heif image into the planes of its own format.
-pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
+///
+/// `libheif` decodes a page's alpha plane whether or not anything asks for it —
+/// the wrapper has no way to suppress it — so what a colour-only call saves here
+/// is the buffer and the copy that would carry the plane into a frame: see
+/// [`crate::decoder::Demand`].
+pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
     let open_started = Instant::now();
     let path = info.path.to_str().ok_or_else(|| {
         ImgSeqError::new(format!(
@@ -410,7 +415,7 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
             info.format.name(),
         ))
     })?;
-    let expects_alpha = crate::pixel::alpha_channel(info.color_type).is_some();
+    let expects_alpha = crate::pixel::alpha_channel(info.color_type).is_some() && demand.alpha;
     let sizes = plane_sizes(info)?;
     let alpha_size = alpha_plane_size(info)?;
     let metadata = metadata_started.elapsed();
@@ -836,7 +841,7 @@ mod tests {
             info.transform,
             Transform::from_orientation(inverse_orientation(Orientation::Rotate90))
         );
-        let decoded = decode(&info).expect("the image is decoded");
+        let decoded = decode(&info, Demand::ALL).expect("the image is decoded");
         let Pixels::Planar { planes, .. } = decoded.pixels else {
             panic!("a yuv page is handed out as planes");
         };

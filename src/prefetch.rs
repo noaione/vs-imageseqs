@@ -9,7 +9,7 @@ use std::{
 };
 
 use crate::{
-    decoder::{self, DecodedImage, ImageInfo},
+    decoder::{self, DecodedImage, Demand, ImageInfo},
     error::{ImgSeqError, Result},
 };
 
@@ -76,6 +76,15 @@ pub trait Payload: Clone + Send + 'static {
 pub trait Prepare: Send + Sync + 'static {
     /// What a request for one index hands out.
     type Payload: Payload;
+
+    /// What the decode that feeds this payload has to produce.
+    ///
+    /// The decode is told before it starts, so a payload that does not need the
+    /// alpha plane does not pay for it. The payload has to be buildable from a
+    /// decode made for exactly this demand: a decode told to skip the alpha
+    /// plane hands over an image with no alpha, which [`Self::build`] may write
+    /// as the opaque fill but cannot recover the file's own plane from.
+    fn demand(&self) -> Demand;
 
     /// Payload bytes one image is expected to hold.
     ///
@@ -276,7 +285,7 @@ impl<P: Prepare> Prefetcher<P> {
     /// Decodes one image and builds its payload, on the calling thread.
     fn build(&self, index: i32) -> Result<P::Payload> {
         let image = self.image(index)?;
-        let decoded = decoder::decode(image)?;
+        let decoded = decoder::decode(image, self.shared.prepare.demand())?;
         self.shared.prepare.build(image, index, decoded)
     }
 
@@ -457,7 +466,7 @@ fn worker<P: Prepare>(shared: &Shared<P>, images: &[ImageInfo]) {
         // The queue only ever holds indices of this sequence, so an image that
         // is missing here is a bug rather than a failed decode.
         let result = match images.get(usize::try_from(index).unwrap_or(usize::MAX)) {
-            Some(image) => match decoder::decode(image) {
+            Some(image) => match decoder::decode(image, shared.prepare.demand()) {
                 Ok(decoded) => shared
                     .prepare
                     .build(image, index, decoded)
@@ -566,7 +575,7 @@ mod tests {
         DEFAULT_BYTE_BUDGET, Payload, Prefetcher, Prepare, READY_ENTRY_MARGIN, State,
         automatic_budget, committed_bytes, plan_window,
     };
-    use crate::decoder::{self, DecodeTimings, DecodedImage, ImageInfo, Pixels};
+    use crate::decoder::{self, DecodeTimings, DecodedImage, Demand, ImageInfo, Pixels};
     use crate::error::Result;
     use crate::pixel::PixelFormat;
 
@@ -581,7 +590,8 @@ mod tests {
         names
             .iter()
             .map(|name| {
-                decoder::probe(&fixture(name), true).expect("the fixture is a supported image")
+                decoder::probe(&fixture(name), true, false)
+                    .expect("the fixture is a supported image")
             })
             .collect::<Vec<_>>()
             .into()
@@ -647,6 +657,10 @@ mod tests {
     impl Prepare for Decode {
         type Payload = Arc<DecodedImage>;
 
+        fn demand(&self) -> Demand {
+            Demand::ALL
+        }
+
         fn estimate(&self, image: &ImageInfo) -> usize {
             bytes(image)
         }
@@ -707,7 +721,7 @@ mod tests {
         let source = fixture("gray.pgm");
         let temp = std::env::temp_dir().join("imgseqs-prefetch-retry.pgm");
         let _ = std::fs::remove_file(&temp);
-        let mut info = decoder::probe(&source, true).expect("the fixture probes");
+        let mut info = decoder::probe(&source, true, false).expect("the fixture probes");
         info.path = temp.clone();
 
         let prefetcher = Prefetcher::new(vec![info].into(), Decode, 0, None);

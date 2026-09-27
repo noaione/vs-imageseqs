@@ -36,7 +36,7 @@ use vapoursynth4_rs::ColorFamily;
 
 use crate::{
     color::{Cicp, UNSPECIFIED},
-    decoder::{DecodeTimings, DecodedImage, ImageInfo, Pixels, image_error},
+    decoder::{DecodeTimings, DecodedImage, Demand, ImageInfo, Pixels, image_error},
     error::{ImgSeqError, Result},
     pixel::{PixelFormat, Transform},
 };
@@ -208,7 +208,14 @@ pub fn output_format(path: &Path, color_type: ColorType) -> Option<PixelFormat> 
 }
 
 /// Decodes one avif item into the planes of the format its probe recorded.
-pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
+///
+/// The alpha item is a coded item of its own, so a call that hands out no alpha
+/// clip does not read it and does not create the decoder that would decode it;
+/// see [`crate::decoder::Demand`]. That also means a colour-only read no longer
+/// refuses a file whose alpha item is broken, which is the point rather than an
+/// accident: the item is not part of what such a call hands out, and
+/// [`crate::formats::avif::decode`]'s own checks are about the picture.
+pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
     let open_started = Instant::now();
     let mut file =
         File::open(&info.path).map_err(|error| image_error("open", &info.path, error))?;
@@ -259,7 +266,7 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     }
     let coded = read_range(&mut file, meta.primary_data(usize::MAX)?)
         .map_err(|error| image_error("read", &info.path, error))?;
-    let expects_alpha = crate::pixel::alpha_channel(info.color_type).is_some();
+    let expects_alpha = crate::pixel::alpha_channel(info.color_type).is_some() && demand.alpha;
     let alpha_coded = if expects_alpha {
         Some(
             meta.alpha_data(usize::MAX)?
@@ -2416,11 +2423,12 @@ mod tests {
     #[test]
     fn a_split_item_fixture_is_left_to_the_decoder() {
         let path = Path::new("tests/fixtures/avif-split-extents.avif");
-        let info = crate::decoder::probe(path, true).expect("the container describes it");
+        let info = crate::decoder::probe(path, true, false).expect("the container describes it");
         assert_eq!((info.width, info.height), (64, 48));
         assert_eq!(info.format, PixelFormat::Rgb8);
         assert!(!handles(&info));
-        let decoded = crate::decoder::decode(&info).expect("the decoder joins the extents");
+        let decoded =
+            crate::decoder::decode(&info, Demand::ALL).expect("the decoder joins the extents");
         let Pixels::Interleaved { buffer, .. } = decoded.pixels else {
             panic!("the image decoder hands out one interleaved buffer");
         };
@@ -2544,7 +2552,7 @@ mod tests {
     fn a_probed_fixture_decodes_into_the_planes_its_format_describes() {
         let path = Path::new("tests/fixtures/avif-yuv420p.avif");
         let info = image_info(path, true).expect("the container describes it");
-        let decoded = decode(&info).expect("the item is decoded");
+        let decoded = decode(&info, Demand::ALL).expect("the item is decoded");
         let Pixels::Planar { planes, alpha } = decoded.pixels else {
             panic!("a yuv page is handed out as planes");
         };
@@ -2563,7 +2571,7 @@ mod tests {
     fn the_planes_of_an_alpha_fixture_are_the_ones_its_source_holds() {
         let path = Path::new("tests/fixtures/alpha-yuv420p.avif");
         let info = image_info(path, true).expect("the container describes it");
-        let decoded = decode(&info).expect("the item is decoded");
+        let decoded = decode(&info, Demand::ALL).expect("the item is decoded");
         let Pixels::Planar { planes, alpha } = decoded.pixels else {
             panic!("a yuv page is handed out as planes");
         };
@@ -2584,6 +2592,71 @@ mod tests {
             [
                 0, 85, 170, 255, 0, 85, 170, 255, 0, 85, 170, 255, 0, 85, 170, 255
             ]
+        );
+    }
+
+    /// A call that hands out no alpha clip does not read the alpha item, which is
+    /// a coded item of its own, and its colour planes are the ones the same file
+    /// gives a call that does want it.
+    #[test]
+    fn a_colour_only_decode_does_not_read_the_alpha_item() {
+        let path = Path::new("tests/fixtures/alpha-yuv420p.avif");
+        let info = image_info(path, true).expect("the container describes it");
+        let wanted = decode(&info, Demand::ALL).expect("the item is decoded");
+        let Pixels::Planar {
+            planes: wanted_planes,
+            alpha: Some(wanted_alpha),
+        } = wanted.pixels
+        else {
+            panic!("the container holds an alpha item");
+        };
+
+        let colour_only = decode(&info, Demand::COLOR).expect("the item is decoded");
+        let Pixels::Planar { planes, alpha } = colour_only.pixels else {
+            panic!("a yuv page is handed out as planes");
+        };
+        assert!(alpha.is_none(), "the alpha plane was not asked for");
+        assert_eq!(planes, wanted_planes, "the colour planes are the same");
+        // And the alpha it did not read is the one the other decode produced.
+        assert_eq!(wanted_alpha.len(), 16);
+    }
+
+    /// The decision the demand makes, on the committed fixture: a colour-only
+    /// read of a file whose alpha item holds no picture reads it, and a read that
+    /// hands out the alpha clip still fails on that item.
+    #[test]
+    fn a_colour_only_decode_reads_a_file_whose_alpha_item_is_broken() {
+        let path = Path::new("tests/fixtures/avif-broken-alpha.avif");
+        let info = image_info(path, true).expect("the container describes it");
+        assert_eq!((info.width, info.height), (64, 48));
+        assert_eq!(info.format, PixelFormat::Yuv420P8);
+        // The file states an alpha item, so the colour type says it has one.
+        assert_eq!(alpha_channel(info.color_type), Some(3));
+
+        let colour_only = decode(&info, Demand::COLOR).expect("the colour item is decoded");
+        let Pixels::Planar { planes, alpha } = colour_only.pixels else {
+            panic!("a yuv page is handed out as planes");
+        };
+        assert!(alpha.is_none());
+        // The same picture the file this one was cut from holds, which is the
+        // check that the colour item is the one that was copied in.
+        let source = Path::new("tests/fixtures/avif-yuv420p.avif");
+        let source_info = image_info(source, true).expect("the container describes it");
+        let Pixels::Planar {
+            planes: source_planes,
+            ..
+        } = decode(&source_info, Demand::COLOR)
+            .expect("the item is decoded")
+            .pixels
+        else {
+            panic!("a yuv page is handed out as planes");
+        };
+        assert_eq!(planes, source_planes);
+
+        let error = decode(&info, Demand::ALL).expect_err("the alpha item holds no picture");
+        assert!(
+            error.to_string().contains("the item holds no picture"),
+            "{error}"
         );
     }
 
@@ -3039,7 +3112,7 @@ mod tests {
             let path = Path::new("tests/fixtures").join(name);
             let info = image_info(&path, true).expect("the container describes it");
             assert_eq!(info.transform, Transform::from_orientation(code), "{name}");
-            let decoded = decode(&info).expect("the item is decoded");
+            let decoded = decode(&info, Demand::ALL).expect("the item is decoded");
             assert_eq!(decoded.transform, info.transform, "{name}");
             let Pixels::Planar { planes, .. } = decoded.pixels else {
                 panic!("a yuv page is handed out as planes");
@@ -3070,7 +3143,7 @@ mod tests {
         assert_eq!((info.width, info.height), (3, 2));
         assert_eq!(info.format, PixelFormat::Yuv444P8);
         assert!(handles(&info));
-        let error = decode(&info).expect_err("an item without a picture is an error");
+        let error = decode(&info, Demand::ALL).expect_err("an item without a picture is an error");
         assert!(
             error.to_string().contains("the item holds no picture"),
             "{error}"

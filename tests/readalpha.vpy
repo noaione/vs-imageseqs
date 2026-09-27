@@ -875,6 +875,55 @@ def test_avif_extents() -> None:
         check(False, "extents: the two formats need mismatch")
 
 
+def test_alpha_demand() -> None:
+    """A colour-only read does not decode an alpha item it never hands out.
+
+    ``avif-broken-alpha.avif`` is the coded item of ``avif-yuv420p.avif`` with an
+    alpha item beside it that holds no frame at all. The alpha item is a coded
+    item of its own, so `Read` reads this file — the item is not part of what it
+    hands out — while `ReadAlpha` still fails on it, which is the clip it exists
+    for. The colour planes are the ones the file it was cut from gives, so what
+    was skipped is the alpha and nothing else.
+    """
+    clip = core.imgseqs.Read(files=[fixture("avif-broken-alpha.avif")])
+    check(
+        clip.format.name == "YUV420P8",
+        f"demand: a colour-only read of a file with a broken alpha item is yuv "
+        f"(got {clip.format.name})",
+    )
+    check(
+        (clip.width, clip.height) == (64, 48),
+        f"demand: and is 64x48 (got {clip.width}x{clip.height})",
+    )
+    frame = clip.get_frame(0)
+    whole = core.imgseqs.Read(files=[fixture("avif-yuv420p.avif")]).get_frame(0)
+    check(
+        samples(frame) == samples(whole),
+        "demand: the colour planes are the ones the file it was cut from gives",
+    )
+    check(
+        samples(frame, 1) == samples(whole, 1) and samples(frame, 2) == samples(whole, 2),
+        "demand: and so are its chroma planes",
+    )
+
+    # The same file through ReadAlpha is what still has to fail, because that is
+    # the clip the item would have been decoded for.
+    _, alpha = read_alpha(files=[fixture("avif-broken-alpha.avif")])
+    try:
+        alpha.get_frame(0)
+    except Exception as error:
+        check(True, f"demand: an alpha read still fails on that item ({str(error).strip()})")
+    else:
+        check(False, "demand: an alpha read still fails on that item")
+
+    # A file whose alpha item is intact keeps handing it out.
+    _, intact = read_alpha(files=[fixture("alpha-yuv420p.avif")])
+    check(
+        samples(intact.get_frame(0)) == [0, 85, 170, 255] * 4,
+        "demand: a file with an intact alpha item still hands it out",
+    )
+
+
 def test_orientation() -> None:
     """The exif orientation is applied, and only when it is asked for.
 
@@ -1398,6 +1447,7 @@ def main() -> None:
         test_errors,
         test_no_picture,
         test_avif_extents,
+        test_alpha_demand,
     ):
         print(f"--- {test.__name__}")
         test()

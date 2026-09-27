@@ -77,8 +77,14 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
 - `src/source.rs`: `Read` and `ReadAlpha` filter creation, validation, and frame requests.
 - `src/prefetch.rs`: the lookahead pool, its window, and its byte budget.
 - `src/clip.rs`: the clips a sequence hands out and the frames they cache, which
-  the lookahead workers build.
-- `src/decoder.rs`: image probing and lazy decoding.
+  the lookahead workers build. the demand one decode is asked for comes from the
+  same clip list the frames are built from (`demand_of`), so a decode and the
+  payload built from it cannot disagree about whether the alpha plane is there.
+- `src/decoder.rs`: image probing and lazy decoding. `Demand` is what a decode has
+  to produce, and `probe` reads an embedded ICC profile either way — whether a
+  file has one is the `ImgSeqHasICC` fact — but keeps its bytes only when the
+  caller asked to export them, because a sequence whose files each carry a large
+  profile would otherwise hold one copy per file for the life of the clip.
 - `src/formats/`: per-format paths for what the `image` crate cannot express or
   reports wrongly, one module per container and picked by extension (`heif.rs`
   for monochrome heif/heic and for the colour pages of both containers, which are
@@ -90,7 +96,12 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   for JPEG 2000 header probing and OpenJPEG decoding, `png.rs` for the `cICP`
   chunk, which `image` has no accessor for, and `webp.rs` for the libwebp decode
   and the lossy yuv format). a monochrome avif still goes through `image` and is
-  corrected to `Gray8` here. an avif item is decoded at low latency, because one
+  corrected to `Gray8` here. an avif alpha item is a coded item of its own and a
+  heif alpha plane is a buffer this module packs, so both readers take the
+  `decoder::Demand` of the call and read only what a clip actually hands out: a
+  call that hands out no alpha clip must not decode one, and a webp or a jxl is
+  not told because its alpha arrives inside the buffer its decoder wrote. an avif
+  item is decoded at low latency, because one
   item is one frame, so an item that holds no picture ends the frame request with
   a path-qualified error instead of a decode loop that never returns; do not put
   that loop's exit behind an iteration count or a sleep, and do not call

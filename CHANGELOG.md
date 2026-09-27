@@ -25,6 +25,10 @@
     fails on it, an `iloc` field wider than an address no longer shifts a value
     out of its type, and a box with an extended size header is read with the whole
     header rather than the last eight bytes of it being dropped
+- a colour-only read of an AVIF no longer fails on a file whose alpha item is
+  broken
+  - the alpha item is a coded item of its own and is not part of what `Read` hands
+    out, so it is not read; `ReadAlpha` still reports the problem on the same file
 
 ### performance
 - AVIF decoding is 15.6% faster on the 35-page sandbox set, and 43% faster on
@@ -34,6 +38,12 @@
   HEIF file at clip creation, and nothing per frame
 - bounding an AVIF item's extent costs one file metadata call per file at clip
   creation, 0.005 ms per file, and nothing per frame
+- a read that hands out no alpha clip no longer decodes an AVIF's alpha item,
+  which is a coded item of its own: 11–20% off a colour-only read of an
+  alpha-bearing page, with the colour planes byte identical
+- a probe no longer keeps a file's embedded ICC profile unless `icc_profile=True`
+  asks for it, which is 36 MiB off a 35-file clip whose files each carry a 1 MiB
+  profile; `ImgSeqHasICC` is unchanged
 
 ### build
 - improvement to linux wheel distribution, manylinux now has dropped down to glibc 2.28

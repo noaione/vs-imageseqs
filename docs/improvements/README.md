@@ -150,18 +150,16 @@ evidence, intended scope and acceptance checks; performance ideas explicitly
 require measurement before choosing a change.
 
 [15](15-avif-decoder-progress.md),
-[16](16-container-orientation.md) and
-[17](17-avif-container-robustness.md) have landed, and so has
+[16](16-container-orientation.md),
+[17](17-avif-container-robustness.md) and
+[18](18-demand-aware-decoding.md) have landed, and so has
 [20](20-distribution-followups.md)'s release-metadata slice. Address that plan's
 **source-build consistency** next, which needs a container and a network the
 machine this was written on does not have, then its macOS portability and source
-provenance. Measure
-[18](18-demand-aware-decoding.md) and
-[19](19-avif-thread-budget.md) after those.
+provenance. Measure [19](19-avif-thread-budget.md) after those.
 
 | plan | evidence | priority | status |
 | --- | --- | --- | --- |
-| [18 demand-aware decoding](18-demand-aware-decoding.md) | color-only paths process alpha; disabled ICC export still retains profiles | medium | measurement/design proposed |
 | [19 AVIF thread budget](19-avif-thread-budget.md) | default native decoder threading runs inside the prefetch pool | medium | experiment proposed |
 | [20 distribution follow-ups](20-distribution-followups.md) | sdist input mismatch, untested archive rebuilds, macOS dependencies and release metadata | high for source builds | release metadata and repeatable staging implemented; source rebuilds, macOS portability and provenance proposed |
 
@@ -174,6 +172,7 @@ that page records the completed checks and remaining CI validation.
 
 | plan | touches | expected | risk | status |
 | --- | --- | --- | --- | --- |
+| [18 demand-aware decoding](18-demand-aware-decoding.md) | `src/decoder.rs`, `src/clip.rs`, `src/prefetch.rs`, `src/formats/avif.rs`, `src/formats/heif.rs`, fixtures, `tests/readalpha.vpy` | a call that hands out no alpha clip does not decode an avif alpha item, and a call that does not export an ICC profile does not keep its bytes | low to medium, a colour-only read stops failing on a broken alpha item | implemented |
 | [20 distribution follow-ups](20-distribution-followups.md) | `tools/`, `tests/check-packaging-tools.py`, CI, `.gitignore`, `pyproject.toml` | a release cannot be published from a tag whose version, `pyproject.toml`, `Cargo.toml` and changelog do not agree, and a second build in one checkout starts from what it built | low, release tooling and CI only | release metadata and repeatable staging implemented; source rebuilds, macOS portability and provenance proposed |
 | [17 AVIF container robustness](17-avif-container-robustness.md) | `src/formats/avif.rs`, `tests/make-alpha-fixtures.py`, fixtures, `tests/readalpha.vpy` | a malformed avif container is refused instead of panicking, allocating gigabytes or answering wrongly, and a container this reader will not decode is described as the format the fallback decoder produces | low to medium, it changes what an unsupported container is described as | implemented |
 | [16 container orientation](16-container-orientation.md) | `src/formats/avif.rs`, `src/formats/heif.rs`, `src/decoder.rs`, fixtures, `tests/readalpha.vpy` | an avif or heif that states `irot`/`imir` is handed out the way the file describes it, `apply_rotation=False` gives the stored picture back, and `ImgSeqOrientation` reports the code | medium, it moves the size of every file whose container states a transform | implemented |
@@ -271,6 +270,17 @@ it. the first three are bounds; the fourth is what makes a file whose item is
 split over several extents decode through the fallback decoder instead of failing
 a frame request, which is the one of the four a reader can see.
 
+[18](18-demand-aware-decoding.md) is the first plan here about work nothing asks
+for, and both halves of it were measured before they were changed. `Read` was
+decoding an avif alpha item it never hands out — the item is a coded item of its
+own, so that is a whole decoder — and the probe was keeping a copy of every
+file's embedded ICC profile although export is off by default. the first is
+2.7–3.4 ms of a 1536x2304 page and 11–20% of a colour-only read; the second is
+36 MiB on a 35-file clip whose files each carry a 1 MiB profile. it is also the
+only plan here that changed what a file the plugin *can* read does: a colour-only
+read no longer fails on a broken alpha item, which is tested rather than
+discovered.
+
 [20](20-distribution-followups.md) is the distribution follow-up, and its
 release-metadata slice has landed: `tools/create-changelog.py` is strict by
 default, so a tag whose version, `pyproject.toml`, `Cargo.toml` and changelog do
@@ -280,8 +290,8 @@ directories, the staged bundle — are emptied of what a build writes before it
 writes. it is the only plan here whose subject is the release rather than the
 reader, and it is the one that came last in the plan's own order because its
 first slice needs a container and a network. the rest of the review is still
-open: 20's source rebuilds, macOS portability and provenance, and 18 and 19 are
-measurements before any change.
+open: 20's source rebuilds, macOS portability and provenance, and 19 is an
+experiment before any change.
 
 ## deferred
 

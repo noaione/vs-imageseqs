@@ -19,7 +19,7 @@ use vapoursynth4_rs::{
 
 use crate::{
     color::set_frame_properties,
-    decoder::{DecodeTimings, DecodedImage, ImageInfo, Pixels},
+    decoder::{DecodeTimings, DecodedImage, Demand, ImageInfo, Pixels},
     error::{ImgSeqError, Result},
     pixel::{
         PixelFormat, WriteTimings, write_alpha, write_decoded_planes, write_opaque_alpha,
@@ -70,6 +70,21 @@ impl Clip {
 pub const READ_CLIPS: &[Clip] = &[Clip::Color];
 /// Clips `ReadAlpha` hands out.
 pub const READ_ALPHA_CLIPS: &[Clip] = &[Clip::Color, Clip::Alpha];
+
+/// What a call that hands out `clips` has to decode.
+///
+/// The alpha plane is asked for exactly when one of the clips is the alpha clip,
+/// and this reads the same list the frames are built from, so a decode and the
+/// payload built from it cannot disagree about whether the alpha plane is there;
+/// see [`crate::decoder::Demand`].
+#[must_use]
+pub fn demand_of(clips: &[Clip]) -> Demand {
+    if clips.contains(&Clip::Alpha) {
+        Demand::ALL
+    } else {
+        Demand::COLOR
+    }
+}
 
 /// Output format of one clip of a sequence of `format` images.
 #[must_use]
@@ -276,6 +291,10 @@ impl FrameBuilder {
 impl Prepare for FrameBuilder {
     type Payload = ClipFrames;
 
+    fn demand(&self) -> Demand {
+        demand_of(&self.clips)
+    }
+
     fn estimate(&self, image: &ImageInfo) -> usize {
         expected_bytes(&self.clips, image)
     }
@@ -373,4 +392,19 @@ fn frame_bytes(frame: &VideoFrame) -> usize {
             stride.saturating_mul(height)
         })
         .sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Clip, Demand, READ_ALPHA_CLIPS, READ_CLIPS, demand_of};
+
+    #[test]
+    fn only_a_call_that_hands_out_alpha_asks_for_it() {
+        assert_eq!(demand_of(READ_CLIPS), Demand::COLOR);
+        assert_eq!(demand_of(READ_ALPHA_CLIPS), Demand::ALL);
+        // A call that hands out both clips asks for everything, whatever order
+        // the clips are in.
+        assert_eq!(demand_of(&[Clip::Alpha, Clip::Color]), Demand::ALL);
+        assert_eq!(demand_of(&[]), Demand::COLOR);
+    }
 }

@@ -514,9 +514,14 @@ The module is in the shape of `formats/heif.rs` and `formats/jxl.rs`:
   down, which is the sample the file holds. A monochrome item is a single plane
   dav1d hands over directly, which is the obvious next step for that plan rather
   than a gap here.
-- **the alpha item** is decoded only when the colour type says the file has one,
-  into the gray format of the same depth (`YUV420P10` gives a `Gray10` alpha),
-  and its own bit depth is checked against that format before it is copied.
+- **the alpha item** is a coded item of its own and is decoded only when the call
+  hands out the alpha clip and the colour type says the file has one, into the
+  gray format of the same depth (`YUV420P10` gives a `Gray10` alpha); its own bit
+  depth is checked against that format before it is copied. The clip list decides
+  that, not the file: a colour-only `Read` creates no decoder for it at all, which
+  is [18](improvements/18-demand-aware-decoding.md)'s measurement. What follows
+  from that is that a colour-only read does not fail on a file whose alpha item is
+  broken, which is tested rather than incidental.
 
 A frame can then have fewer planes than the buffer behind it, which is why
 `pixel::write_planar` asks `planes_to_write` for the smaller of the two counts
@@ -1296,7 +1301,12 @@ resize. The rule
 this doc already had stands and is implemented: a file that supplies only an icc
 profile is never turned into sRGB or BT.709 metadata. `ImgSeqHasICC` says it is
 there, and `icc_profile=True` additionally exposes the exact raw bytes as
-`ICCProfile`; full icc conversion stays in the defer list below.
+`ICCProfile`; full icc conversion stays in the defer list below. The bytes are
+read either way, because whether a file carries one is the fact the first property
+reports, but they are *kept* only when `icc_profile=True`:
+[18](improvements/18-demand-aware-decoding.md) measured a 35-file clip whose files
+each carry a 1 MiB profile holding 36 MiB of copies that nothing would have used,
+and dropping them where the decode is asked for them covers every reader at once.
 
 An exif orientation is metadata of the same kind, and [09](improvements/09-exif-orientation.md)
 is implemented: the code reaches every frame as `ImgSeqOrientation` either way,

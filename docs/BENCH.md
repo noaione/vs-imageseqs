@@ -664,6 +664,67 @@ file in those sets states a layout this change can move. the one file that does
 is the new `avif-split-extents.avif`, which is outside them and is checked in
 `tests/readalpha.vpy` against the file it was cut from.
 
+## work nothing asks for
+
+[18](improvements/18-demand-aware-decoding.md) stopped two kinds of work a call
+had not asked for, and both were measured before and after. neither is a decode
+setting or a format change: `Read` was decoding an avif alpha item it never hands
+out, and a probe was keeping a copy of every file's embedded ICC profile although
+export is off by default.
+
+**the alpha item.** an avif alpha plane is a coded item of its own, so a
+colour-only read that skips it skips a whole `dav1d` decoder. the corpus is
+twelve colour pages of `sandbox/avif` cropped to 1536x2304 and encoded three
+ways — the page's own grey content as alpha, a smooth ramp, and no alpha at all —
+built by `target/bench/make-alpha-corpus.py`; the third is the control, because a
+file with no alpha item has nothing to skip. best of five rounds per build, `Read`
+over all twelve files, `prefetch=0`, measured with
+`target/bench/alpha-demand.py`:
+
+| corpus | before | after | change |
+| --- | --- | --- | --- |
+| no alpha item (control) | 193.4 ms, decode 12.02 | 195.3 ms, decode 12.27 | unchanged |
+| alpha = the page's own grey | 284.1 ms, decode 19.83 | 254.1 ms, decode 17.14 | −10.6% wall, −2.69 ms |
+| alpha = a smooth ramp | 258.0 ms, decode 16.98 | 206.9 ms, decode 13.55 | −19.8% wall, −3.43 ms |
+
+the decode stage on its own is 11.95 → 9.14 ms (mask) and 11.95 → 8.51 ms (ramp),
+against 8.29 → 8.44 ms for the control, so what left is the item and not the file
+open, the buffer or the frame write. the ramp — the cheaper alpha to *code* — is
+the larger saving to skip, because a smooth gradient costs fewer bits and the same
+plane to decode and copy. in the lookahead pool the same work is contended, so
+the same twelve files at `prefetch=4`, best of three, move 177.2 → 143.1 ms
+(mask) and 149.9 → 127.3 ms (ramp), with the control at 128.0 → 114.0 ms.
+
+the heif half of the change is the packing and the allocation only: `libheif`
+decodes a page's alpha plane whether or not anything asks for it, and
+`libheif-rs` 3.0.0 exposes no way to suppress it. no heif corpus here has an alpha
+channel to measure it on.
+
+**the retained profiles.** a 35-file png sequence whose every file carries a
+1 MiB profile (`target/bench/make-icc-corpus.py`), measured with
+`target/bench/icc-retention.py`, which asks a PowerShell process for this
+process's working set because the sandbox refuses the in-process query. `Read`
+with `prefetch=0` decodes nothing, so the working set right after the call is the
+clip's own:
+
+| corpus | `icc_profile` | before | after |
+| --- | --- | --- | --- |
+| 35 files, 1 MiB profile each | 0 (default) | **+36.4 MiB** | +0.5 MiB |
+| 35 files, 1 MiB profile each | 1 | +36.2 MiB | +35.7 MiB |
+| 35 files, 588-byte profile each | 0 | +0.6 MiB | +0.5 MiB |
+| 35 files, no profile | 0 | +0.5 MiB | +0.5 MiB |
+
+so the default kept one copy of every profile for the life of the clip — 36 MiB
+against the 176 MiB those 35 pages then take as frames — and the option that
+exists to hand those bytes out changed nothing about whether they were kept. the
+bytes are still read, because whether a file carries a profile is the
+`ImgSeqHasICC` fact and that is reported whatever the option says; what is gone is
+the copy nothing would have used.
+
+pixels: 192 of the 192 `frame-parity.py` lines are byte identical, including a
+`demand` set over the whole 36-file alpha corpus, so no colour plane and no alpha
+plane moved.
+
 ## frame write path
 
 [02](improvements/02-frame-write-path.md) moved the frame build out of the

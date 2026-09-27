@@ -110,7 +110,7 @@ impl SequenceArgs {
         let probe_started = Instant::now();
         let images = files
             .iter()
-            .map(|path| decoder::probe(path, apply_rotation))
+            .map(|path| decoder::probe(path, apply_rotation, export_icc_profile))
             .collect::<Result<Vec<_>>>()?;
         let probe = probe_started.elapsed();
 

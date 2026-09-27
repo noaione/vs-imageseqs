@@ -261,7 +261,10 @@ and heif/heic `nclx`, png `cICP`, jxl codestream headers, and av1 sequence
 headers. unknown or unspecified codes are left unset. RGB frames always keep
 `_Matrix=0` and `_Range=1`. `ImgSeqHasICC` reports an embedded profile;
 `icc_profile=True` also exposes its raw bytes as `ICCProfile` without changing
-pixels or applying a color transform.
+pixels or applying a color transform. The bytes are read either way, because
+whether a file carries a profile is what `ImgSeqHasICC` reports, but they are kept
+only when `icc_profile=True`: a sequence whose files each carry a large profile
+would otherwise hold one copy of it per file for as long as the clip lives.
 
 ## performance
 

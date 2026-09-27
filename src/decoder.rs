@@ -24,14 +24,40 @@ fn register_decoder_hooks() {
     });
 }
 
+/// What one decode has to produce.
+///
+/// A call that hands out only the colour clip never asks for the alpha plane,
+/// and an avif alpha item is a coded item of its own: skipping it is a whole
+/// decoder that is not created. The demand belongs to the call rather than to
+/// whichever clip asks for a frame first, because one decode serves every clip
+/// of it; see [`crate::prefetch::Prepare`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Demand {
+    /// Whether the alpha plane is needed.
+    pub alpha: bool,
+}
+
+impl Demand {
+    /// Everything a decode can produce, which is what a call that hands out the
+    /// alpha clip needs.
+    pub const ALL: Self = Self { alpha: true };
+    /// The colour planes alone, for a call that hands out no alpha clip.
+    pub const COLOR: Self = Self { alpha: false };
+}
+
 /// Format modules that decode what the registered hooks cannot; see
 /// [`crate::formats`].
-fn format_decoder(info: &ImageInfo) -> Option<Result<DecodedImage>> {
+///
+/// Only the two whose alpha plane is work of its own are told what the call
+/// needs: an avif alpha item is a second coded item, and a heif alpha plane is
+/// allocated and packed here. A webp or a jxl arrives with its alpha channel
+/// already in the buffer the decoder wrote, so there is nothing to skip.
+fn format_decoder(info: &ImageInfo, demand: Demand) -> Option<Result<DecodedImage>> {
     if formats::avif::handles(info) {
-        return Some(formats::avif::decode(info));
+        return Some(formats::avif::decode(info, demand));
     }
     if formats::heif::handles(info) {
-        return Some(formats::heif::decode(info));
+        return Some(formats::heif::decode(info, demand));
     }
     if formats::webp::handles(info) {
         return Some(formats::webp::decode(info));
@@ -183,7 +209,24 @@ pub(crate) fn image_error(action: &str, path: &Path, error: impl std::fmt::Displ
     ))
 }
 
-pub fn probe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
+/// Describes one file without decoding it, for a call that may or may not want
+/// its embedded ICC bytes.
+///
+/// A profile is read either way, because whether the file has one is a fact
+/// `ImgSeqHasICC` reports whatever the caller asked for. What the flag decides is
+/// whether the bytes are *kept*: every reader here hands over a profile it has
+/// already copied out of the file, so a sequence whose files each carry a large
+/// one retains a copy per file for the life of the clip if nothing drops them.
+/// The measurement is in `docs/improvements/18-demand-aware-decoding.md`.
+pub fn probe(path: &Path, apply_rotation: bool, export_icc_profile: bool) -> Result<ImageInfo> {
+    let mut info = describe(path, apply_rotation)?;
+    if !export_icc_profile {
+        info.icc_profile = None;
+    }
+    Ok(info)
+}
+
+fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
     // A file a format module can describe from its container skips the decoder,
     // which for an avif means skipping a decode of the whole picture; see
     // [`crate::formats::avif::image_info`] and [`crate::formats::heif::image_info`].
@@ -252,8 +295,8 @@ pub fn probe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
     })
 }
 
-pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
-    if let Some(decoded) = format_decoder(info) {
+pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
+    if let Some(decoded) = format_decoder(info, demand) {
         return decoded;
     }
 
@@ -309,4 +352,35 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
             read,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::probe;
+    use std::path::Path;
+
+    /// A profile's bytes are kept only when the caller asked for them, and
+    /// whether the file has one is reported either way.
+    #[test]
+    fn an_icc_profile_is_kept_only_when_it_is_exported() {
+        let path = Path::new("tests/fixtures/icc-rgb8.png");
+        let kept = probe(path, true, true).expect("the fixture probes");
+        assert!(kept.has_icc_profile);
+        assert!(kept.icc_profile.is_some());
+
+        let dropped = probe(path, true, false).expect("the fixture probes");
+        assert!(
+            dropped.has_icc_profile,
+            "the file still states that it carries a profile"
+        );
+        assert!(dropped.icc_profile.is_none(), "but its bytes are not kept");
+
+        // A file without a profile states that too, whatever was asked for.
+        let plain = Path::new("tests/fixtures/alpha-rgb8.png");
+        for export in [true, false] {
+            let info = probe(plain, true, export).expect("the fixture probes");
+            assert!(!info.has_icc_profile, "export={export}");
+            assert!(info.icc_profile.is_none(), "export={export}");
+        }
+    }
 }
