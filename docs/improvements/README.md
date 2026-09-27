@@ -145,23 +145,25 @@ open plus frames to 4.99 s.
 
 ### proposed for review — 2026-09-27
 
-Plans 17–20 are documentation only. None of their proposed implementation is
-included. Each records the evidence, intended scope and acceptance checks;
-performance ideas explicitly require measurement before choosing a change.
+Plans 17–20 were documentation only when they were written. Each records the
+evidence, intended scope and acceptance checks; performance ideas explicitly
+require measurement before choosing a change.
 
 [15](15-avif-decoder-progress.md),
 [16](16-container-orientation.md) and
-[17](17-avif-container-robustness.md) have landed. Address
-[20](20-distribution-followups.md)'s source-build consistency next, which is an
-independent distribution follow-up. Measure
+[17](17-avif-container-robustness.md) have landed, and so has
+[20](20-distribution-followups.md)'s release-metadata slice. Address that plan's
+**source-build consistency** next, which needs a container and a network the
+machine this was written on does not have, then its macOS portability and source
+provenance. Measure
 [18](18-demand-aware-decoding.md) and
-[19](19-avif-thread-budget.md) after it.
+[19](19-avif-thread-budget.md) after those.
 
 | plan | evidence | priority | status |
 | --- | --- | --- | --- |
 | [18 demand-aware decoding](18-demand-aware-decoding.md) | color-only paths process alpha; disabled ICC export still retains profiles | medium | measurement/design proposed |
 | [19 AVIF thread budget](19-avif-thread-budget.md) | default native decoder threading runs inside the prefetch pool | medium | experiment proposed |
-| [20 distribution follow-ups](20-distribution-followups.md) | sdist input mismatch, untested archive rebuilds, macOS dependencies and release metadata | high for source builds | proposed |
+| [20 distribution follow-ups](20-distribution-followups.md) | sdist input mismatch, untested archive rebuilds, macOS dependencies and release metadata | high for source builds | release metadata and repeatable staging implemented; source rebuilds, macOS portability and provenance proposed |
 
 ### implemented plans
 
@@ -172,6 +174,7 @@ that page records the completed checks and remaining CI validation.
 
 | plan | touches | expected | risk | status |
 | --- | --- | --- | --- | --- |
+| [20 distribution follow-ups](20-distribution-followups.md) | `tools/`, `tests/check-packaging-tools.py`, CI, `.gitignore`, `pyproject.toml` | a release cannot be published from a tag whose version, `pyproject.toml`, `Cargo.toml` and changelog do not agree, and a second build in one checkout starts from what it built | low, release tooling and CI only | release metadata and repeatable staging implemented; source rebuilds, macOS portability and provenance proposed |
 | [17 AVIF container robustness](17-avif-container-robustness.md) | `src/formats/avif.rs`, `tests/make-alpha-fixtures.py`, fixtures, `tests/readalpha.vpy` | a malformed avif container is refused instead of panicking, allocating gigabytes or answering wrongly, and a container this reader will not decode is described as the format the fallback decoder produces | low to medium, it changes what an unsupported container is described as | implemented |
 | [16 container orientation](16-container-orientation.md) | `src/formats/avif.rs`, `src/formats/heif.rs`, `src/decoder.rs`, fixtures, `tests/readalpha.vpy` | an avif or heif that states `irot`/`imir` is handed out the way the file describes it, `apply_rotation=False` gives the stored picture back, and `ImgSeqOrientation` reports the code | medium, it moves the size of every file whose container states a transform | implemented |
 | [15 AVIF decoder progress](15-avif-decoder-progress.md) | `src/formats/avif.rs`, fixtures, `tests/readalpha.vpy` | a frame request on an item that holds no picture errors instead of hanging, and the item decoder runs at low latency | low, an error path and decoder settings | implemented |
@@ -266,8 +269,18 @@ the read that fails on it, field widths and bit reads that shifted a value out o
 its type, and a probe that described a container as yuv before `decode` refused
 it. the first three are bounds; the fourth is what makes a file whose item is
 split over several extents decode through the fallback decoder instead of failing
-a frame request, which is the one of the four a reader can see. the rest of the
-review is still open: 20 is the distribution follow-up, and 18 and 19 are
+a frame request, which is the one of the four a reader can see.
+
+[20](20-distribution-followups.md) is the distribution follow-up, and its
+release-metadata slice has landed: `tools/create-changelog.py` is strict by
+default, so a tag whose version, `pyproject.toml`, `Cargo.toml` and changelog do
+not agree fails the release job instead of publishing placeholder notes, and the
+build outputs that accumulate wheels — `dist/`, the two manylinux wheel
+directories, the staged bundle — are emptied of what a build writes before it
+writes. it is the only plan here whose subject is the release rather than the
+reader, and it is the one that came last in the plan's own order because its
+first slice needs a container and a network. the rest of the review is still
+open: 20's source rebuilds, macOS portability and provenance, and 18 and 19 are
 measurements before any change.
 
 ## deferred

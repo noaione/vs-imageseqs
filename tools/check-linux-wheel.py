@@ -11,6 +11,8 @@ import zipfile
 from email.parser import Parser
 from pathlib import Path, PurePosixPath
 
+import build_output
+
 PLUGIN = "vapoursynth/plugins/imageseqs/libvs_imageseqs.so"
 MANIFEST = "vapoursynth/plugins/imageseqs/manifest.vs"
 LIBRARIES = "vapoursynth/plugins/imageseqs/lib"
@@ -70,10 +72,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
     args = parser.parse_args()
-    wheels = list(args.directory.glob("*.whl"))
-    if len(wheels) != 1:
-        parser.error(f"expected exactly one repaired wheel, found {len(wheels)}")
-    check_wheel(wheels[0])
+    check_wheel(build_output.single(args.directory, "*.whl", "repaired wheel"))
 
 
 if __name__ == "__main__":

@@ -223,6 +223,9 @@ jobs:
       - name: install build tools
         run: python -m pip install --upgrade pip build
 
+      - name: clear the previous build output
+        run: python tools/build_output.py clear dist
+
       - name: build wheel
         run: python -m build --wheel --outdir dist
 
@@ -274,7 +277,7 @@ jobs:
           if-no-files-found: error
 
   source:
-    name: source distribution
+    name: source distribution and packaging tools
     runs-on: ubuntu-26.04
     steps:
       - name: check out source
@@ -287,6 +290,12 @@ jobs:
 
       - name: install build tools
         run: python -m pip install --upgrade pip build
+
+      - name: check the packaging tools
+        run: python tests/check-packaging-tools.py
+
+      - name: clear the previous build output
+        run: python tools/build_output.py clear dist
 
       - name: build source distribution
         run: python -m build --sdist --outdir dist
@@ -368,6 +377,11 @@ jobs:
       - name: check out source
         uses: actions/checkout@v7
 
+      - name: set up python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
       - name: download build artifacts
         uses: actions/download-artifact@v7
         with:
@@ -407,7 +421,10 @@ jobs:
       - name: create changelog
         id: prepare-change
         run: |
-          python3 tools/create-changelog.py
+          # Strict by default: the tag, pyproject.toml, Cargo.toml and the
+          # changelog have to agree, so a release cannot be published with
+          # placeholder notes or a version the tree does not state.
+          python tools/create-changelog.py
           # Fetch git tag contents subject
           VERSION_SUBJ=$(git tag -l --format='%(contents:subject)' ${{ github.ref }})
           echo "version_subject=$VERSION_SUBJ" >> "$GITHUB_OUTPUT"

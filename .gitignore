@@ -16,6 +16,10 @@ out/
 build/
 .venv/
 sandbox/
+# The standalone plugin bundle and the Linux relinking sources, both staged by
+# the build scripts and uploaded as release artifacts.
+native/
+source-bundle/
 
 docs/HANDOFF*
 

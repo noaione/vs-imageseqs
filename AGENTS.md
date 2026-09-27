@@ -142,6 +142,21 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   same picture and states nothing. its ICC section reads `icc-rgb8.png` and
   `icc-rgba8.png`, generated with the embedded `icc-srgb.icc` profile, and
   checks the opt-in `ICCProfile` property.
+- `tests/check-packaging-tools.py`: the checks for `tools/`, run with any Python
+  3.12 or later. it builds its own tree under `target/check-packaging-tools`, so
+  it needs no wheel and no network; `IMGSEQS_CHECK_TMP` moves that tree, and a
+  tree named that way is only cleared when it is empty, so the check cannot
+  delete a directory it did not make.
+- `tools/`: the release and packaging scripts, which are also what the CI
+  workflows call. `create-changelog.py` generates the GitHub release notes and is
+  strict by default (the tag, both version files and a non-empty changelog
+  section have to agree; `--preview` is the permissive mode).
+  `build_output.py` is the one place that empties a build output of the artifacts
+  a build writes, and it is the only tool whose name has an underscore, because
+  the others import it. `stage-native.py` stages the standalone bundle from the
+  final wheel, `package-linux-wheel.py` moves auditwheel's libraries into
+  `imageseqs/lib/`, `check-linux-wheel.py` checks the repaired wheel, and
+  `build-manylinux.sh` builds and repairs it in the pinned container.
 - `docs/IMPLEMENTATION.md`: design notes and deferred ideas.
 - `docs/improvements/`: one plan per change, with its status; its `README.md` is
   the index of what is open, what the landed work left over and what was decided
@@ -209,9 +224,15 @@ after changes, run the narrowest relevant checks:
 ```powershell
 cargo test --locked
 .\.venv\Scripts\python.exe tests\readalpha.vpy
+C:\Python314\python.exe tests\check-packaging-tools.py
 C:\Python314\python.exe -c "import pathlib, tomllib; tomllib.loads(pathlib.Path('pyproject.toml').read_text())"
 C:\Python314\python.exe -m build
 ```
+
+the packaging check is the one to run for anything under `tools/`, the CI
+workflows or `pyproject.toml`; it needs no wheel and no network, and it runs on
+every push in the `source` job. `python -m build` is not required for a change
+that touches neither the wheel contents nor the legal files.
 
 inspect the wheel as a zip archive. confirm the native file is under
 `vapoursynth/plugins/imageseqs/`, its manifest and legal files are present, and no python package is

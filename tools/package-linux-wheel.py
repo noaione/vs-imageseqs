@@ -1,4 +1,10 @@
-"""Move auditwheel's bundled codecs into the manifest-controlled plugin folder."""
+"""Move auditwheel's bundled codecs into the manifest-controlled plugin folder.
+
+The destination is a build output of the Linux build, so the wheel it already
+holds is removed first: the checker beside this script requires exactly one, and
+a second run that kept the previous version's wheel would fail there rather than
+here.
+"""
 
 import argparse
 import shutil
@@ -7,17 +13,17 @@ import sys
 import tempfile
 from pathlib import Path
 
+import build_output
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
     parser.add_argument("destination", type=Path)
     args = parser.parse_args()
-    wheels = list(args.directory.glob("*.whl"))
-    if len(wheels) != 1:
-        parser.error("expected exactly one auditwheel-repaired wheel")
+    wheel = build_output.single(args.directory, "*.whl", "auditwheel-repaired wheel")
     with tempfile.TemporaryDirectory() as temporary:
-        subprocess.run([sys.executable, "-m", "wheel", "unpack", str(wheels[0]), "-d", temporary], check=True)
+        subprocess.run([sys.executable, "-m", "wheel", "unpack", str(wheel), "-d", temporary], check=True)
         root, = Path(temporary).iterdir()
         plugin_directory = root / "vapoursynth/plugins/imageseqs"
         shutil.move(str(root / "vapoursynth_imageseqs.libs"), str(plugin_directory / "lib"))
@@ -27,6 +33,7 @@ def main() -> None:
         ], check=True)
         # wheel pack regenerates RECORD after both the move and ELF modification.
         args.destination.mkdir(parents=True, exist_ok=True)
+        build_output.clear(args.destination, ("*.whl",))
         subprocess.run([sys.executable, "-m", "wheel", "pack", str(root), "-d", str(args.destination)], check=True)
 
 

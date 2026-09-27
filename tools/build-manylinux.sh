@@ -9,6 +9,11 @@ prefix="$work/prefix"
 archives="${IMGSEQS_NATIVE_ARCHIVES:-$work/archives}"
 mkdir -p "$archives" "$work/sources" "$prefix" dist
 
+# This script owns the wheels in these three directories, and the checkers below
+# require exactly one of them: a second run in the same checkout has to start
+# from what this run built rather than from what the last one left behind.
+python tools/build_output.py clear --pattern '*.whl' "$work/unrepaired" "$work/repaired" dist
+
 python -m pip install build wheel 'cmake>=3.28,<4' meson ninja
 export PKG_CONFIG_PATH="$prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 export CMAKE_PREFIX_PATH="$prefix${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
