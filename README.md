@@ -1,5 +1,9 @@
 # vapoursynth-imageseqs
 
+[![uv powered](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
+[![License](https://img.shields.io/github/license/noaione/vs-imageseqs)](https://github.com/noaione/vs-imageseqs/blob/master/LICENSE)
+![VapourSynth Version](https://img.shields.io/badge/vapoursynth-%3E%3DR79-blue) [![build](https://github.com/noaione/vs-imageseqs/actions/workflows/build.yml/badge.svg)](https://github.com/noaione/vs-imageseqs/actions/workflows/build.yml) [![rust tests](https://github.com/noaione/vs-imageseqs/actions/workflows/rust-tests.yml/badge.svg)](https://github.com/noaione/vs-imageseqs/actions/workflows/rust-tests.yml)
+
 a rust vapoursynth source plugin for reading an ordered list of images as a
 clip.
 
@@ -49,7 +53,7 @@ the python wheel is plugin-only. it installs the native library at
 python -m pip install vapoursynth-imageseqs
 ```
 
-until the package is published, download the matching `*-plugin` ci artifact
+You can also download the matching DLL/so/dylib from ci artifact/release
 and copy its native file into your vapoursynth plugin directory:
 
 | platform | file |
@@ -244,7 +248,7 @@ with:
 .venv/Scripts/python.exe tests/bench-imgseqs-vs-bestsource.vpy --reps 3 --extra --prefetch 16 --dir sandbox/webp --pattern "snek - p%03d.webp"
 ```
 
-see [docs/BENCH.md](docs/BENCH.md) for the measurements. on the same 35 pages
+see [docs/BENCH.md][BENCH-LINK] for the measurements. on the same 35 pages
 stored in six containers, imgseqs is 2.73x faster than bestsource on jpeg
 (4.98x including open), 1.37x faster on png, and 1.80x slower on webp because
 ffmpeg slice-threads each vp8 frame while libwebp decodes one frame at a time.
@@ -281,7 +285,7 @@ dav1d and libde265 remain shared on unix; windows uses the static vcpkg triplet.
 ## license
 
 `vs-imageseqs` is licensed under the Mozilla Public License 2.0. see
-[LICENSE](LICENSE).
+[LICENSE][LICENSE-LINK].
 
 the plugin also contains native code under these licenses:
 
@@ -289,8 +293,13 @@ the plugin also contains native code under these licenses:
 - libwebp: BSD-3-Clause with its accompanying patent grant;
 - libheif and libde265: LGPL-3.0.
 
-see [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) and [LICENSES/](LICENSES/) for
+see [THIRD_PARTY_NOTICES][THIRD-PARTY-LINK] and [LICENSES/][LICENSES-LINK] for
 the dependency versions, notices, and complete license texts. when a binary
 uses static LGPL linkage, these files are not the entire obligation: the
 release must also provide the applicable corresponding source and a practical
 way to relink the plugin with modified LGPL libraries.
+
+[BENCH-LINK]: https://github.com/noaione/vs-imageseqs/blob/master/docs/BENCH.md
+[LICENSE-LINK]: https://github.com/noaione/vs-imageseqs/blob/master/LICENSE
+[THIRD-PARTY-LINK]: https://github.com/noaione/vs-imageseqs/blob/master/THIRD_PARTY_NOTICES
+[LICENSES-LINK]: https://github.com/noaione/vs-imageseqs/tree/master/LICENSES

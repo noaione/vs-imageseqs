@@ -41,7 +41,11 @@ dev = [
     "build>=1.2",
     "hatchling>=1.27",
     "packaging>=26.3",
-    "VapourSynth>=79,<81",
+    "VapourSynth>=79",
+    "vsrepo>=2.0"
+]
+dev-bench = [
+    "vapoursynth-bestsource>=22",
 ]
 
 [build-system]
