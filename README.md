@@ -28,9 +28,16 @@ for normal use:
 - Python 3.12 or newer when installing the wheel;
 - the plugin binary for the current operating system and architecture.
 
-the wheel does not install VapourSynth or a Python helper module. Unix builds
-also need the `dav1d` and `libde265` shared libraries at runtime. Windows
-artifacts use the static `x64-windows-static-md` vcpkg triplet.
+the wheel does not install VapourSynth or a Python helper module. Linux release
+wheels target x86-64 with glibc 2.28 or newer and bundle the `dav1d` and
+`libde265` shared libraries. macOS builds still need those libraries at runtime.
+Windows artifacts use the static `x64-windows-static-md` vcpkg triplet.
+
+Plugin ZIPs include an `imageseqs/` directory with `manifest.vs`. Copy that
+whole directory into VapourSynth's plugins directory; Linux also includes
+the required codec libraries in `imageseqs/lib/`. See
+[Linux build and validation](docs/LINUX-BUILD.md) for the auditwheel pipeline
+and the release's relinking source bundle.
 
 for source builds:
 
@@ -47,7 +54,7 @@ native dependency obligations.
 ## install
 
 the python wheel is plugin-only. it installs the native library at
-`vapoursynth/plugins/` and does not add a python module.
+`vapoursynth/plugins/imageseqs/` with `manifest.vs` and does not add a python module.
 
 ```console
 python -m pip install vapoursynth-imageseqs
@@ -280,7 +287,8 @@ brew install cmake ninja pkg-config dav1d libde265 webp
 
 libwebp is linked from its static archive when available, so it is not needed
 at runtime. JPEG 2000 uses the OpenJPEG sources bundled by `openjpeg-sys`.
-dav1d and libde265 remain shared on unix; windows uses the static vcpkg triplet.
+dav1d and libde265 remain shared on unix; Linux release artifacts bundle them
+with relative loader paths. windows uses the static vcpkg triplet.
 
 ## license
 

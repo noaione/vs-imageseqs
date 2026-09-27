@@ -23,6 +23,91 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  tests:
+    uses: ./.github/workflows/rust-tests.yml
+
+  linux-wheel:
+    name: linux-x86_64 (manylinux)
+    runs-on: ubuntu-26.04
+    container: quay.io/pypa/manylinux_2_28_x86_64@sha256:407f771c51a2c3e83ebe5a7970b4289ead3a6db21d9b9c089168775cad11d328
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: check out source
+        uses: actions/checkout@v7
+
+      - name: set up rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: install assembler
+        run: dnf install --assumeyes nasm
+
+      - name: build and repair Linux wheel
+        run: bash tools/build-manylinux.sh
+
+      - name: upload repaired wheel
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-x86_64-wheels
+          path: dist/*.whl
+          if-no-files-found: error
+
+      - name: upload standalone plugin and bundled libraries
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-x86_64-plugins
+          path: native/**
+          if-no-files-found: error
+
+      - name: upload Linux relinking sources
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-relink-source
+          path: source-bundle/*.tar.gz
+          if-no-files-found: error
+
+  linux-validation:
+    name: validate Linux distribution without build dependencies
+    needs: linux-wheel
+    runs-on: ubuntu-26.04
+    # A fresh baseline container has neither our native prefix nor its loader
+    # paths. Test the published layouts, not target/release from the builder.
+    container: quay.io/pypa/manylinux_2_28_x86_64@sha256:407f771c51a2c3e83ebe5a7970b4289ead3a6db21d9b9c089168775cad11d328
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: check out source
+        uses: actions/checkout@v7
+
+      - name: download repaired wheel
+        uses: actions/download-artifact@v7
+        with:
+          name: linux-x86_64-wheels
+          path: dist
+
+      - name: download standalone plugin
+        uses: actions/download-artifact@v7
+        with:
+          name: linux-x86_64-plugins
+          path: native
+
+      - name: validate wheel and standalone plugin
+        run: |
+          set -euo pipefail
+          export PATH="/opt/python/cp312-cp312/bin:$PATH"
+          python -m pip install --only-binary=:all: "VapourSynth==79"
+          python tools/check-linux-wheel.py dist
+          auditwheel show dist/*.whl
+          python -m pip install --no-deps dist/*.whl
+          env -u LD_LIBRARY_PATH python tests/check-autoload.py
+          installed_plugin=$(python -c 'import vapoursynth as vs; print(vs.get_plugin_dir() + "/imageseqs/libvs_imageseqs.so")')
+          for plugin in "$installed_plugin" "$PWD/native/imageseqs/libvs_imageseqs.so"; do
+            env -u LD_LIBRARY_PATH python -c 'import ctypes, sys; ctypes.CDLL(sys.argv[1])' "$plugin"
+            env -u LD_LIBRARY_PATH IMGSEQS_PLUGIN="$plugin" python tests/readalpha.vpy
+          done
+
   wheels:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -30,8 +115,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: linux-x86_64
-            os: ubuntu-26.04
           - name: macos-arm64
             os: macos-26
           - name: windows-x86_64
@@ -57,12 +140,6 @@ jobs:
         uses: TheMrMilchmann/setup-msvc-dev@v4
         with:
           arch: x64
-
-      - name: install linux dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes cmake ninja-build pkg-config libdav1d-dev libde265-dev libwebp-dev
 
       - name: install macos dependencies
         if: runner.os == 'macOS'
@@ -173,33 +250,14 @@ jobs:
           fi
           echo "libwebp is linked into the plugin"
 
-      - name: stage native plugin on unix
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          mkdir -p native
-          case "$RUNNER_OS" in
-            Linux) plugin="target/release/libvs_imageseqs.so" ;;
-            macOS) plugin="target/release/libvs_imageseqs.dylib" ;;
-            *) echo "unsupported runner: $RUNNER_OS" >&2; exit 1 ;;
-          esac
-          test -f "$plugin"
-          cp "$plugin" native/
-          cp LICENSE THIRD_PARTY_NOTICES native/
-          cp -R LICENSES native/
+      - name: stage native plugin from wheel
+        run: python tools/stage-native.py dist native
 
-      - name: stage native plugin on windows
-        if: runner.os == 'Windows'
-        shell: pwsh
+      - name: validate installed plugin manifest
         run: |
-          $source = Join-Path $env:GITHUB_WORKSPACE 'target\release\vs_imageseqs.dll'
-          if (-not (Test-Path -LiteralPath $source)) {
-            throw "native plugin was not found at $source"
-          }
-          New-Item -ItemType Directory -Force -Path native | Out-Null
-          Copy-Item -LiteralPath $source -Destination native
-          Copy-Item -LiteralPath LICENSE, THIRD_PARTY_NOTICES -Destination native
-          Copy-Item -LiteralPath LICENSES -Destination native -Recurse
+          python -m pip install --only-binary=:all: "VapourSynth==79"
+          python -c "import pathlib, subprocess, sys; wheel, = pathlib.Path('dist').glob('*.whl'); subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-deps', str(wheel)], check=True)"
+          python tests/check-autoload.py
 
       - name: upload wheel
         uses: actions/upload-artifact@v7
@@ -259,6 +317,8 @@ jobs:
     name: publish to PyPI
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     needs:
+      - tests
+      - linux-validation
       - wheels
       - source
     runs-on: ubuntu-26.04
@@ -293,6 +353,8 @@ jobs:
     name: create GitHub release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     needs:
+      - tests
+      - linux-validation
       - wheels
       - source
     runs-on: ubuntu-26.04
@@ -321,15 +383,12 @@ jobs:
           find artifacts -type f \( -name '*.whl' -o -name '*.tar.gz' \) -exec cp {} release-assets/ \;
 
           for platform in linux-x86_64 macos-arm64 windows-x86_64; do
-            plugin=$(find "artifacts/${platform}-plugins" -type f \( -name '*.dll' -o -name '*.so' -o -name '*.dylib' \) -print -quit)
-            test -n "$plugin"
-            plugin_dir=$(dirname "$plugin")
-
+            plugin_dir="artifacts/${platform}-plugins"
+            test -f "$plugin_dir/LICENSE"
             bundle="release-assets/${platform}-plugin"
             mkdir -p "$bundle"
-            cp "$plugin" "$bundle/"
-            cp "$plugin_dir/LICENSE" "$plugin_dir/THIRD_PARTY_NOTICES" "$bundle/"
-            cp -R "$plugin_dir/LICENSES" "$bundle/"
+            # Preserve the manifest and bundled codecs inside imageseqs/.
+            cp -a "$plugin_dir/." "$bundle/"
             (
               cd release-assets
               zip -qr "${platform}-plugin.zip" "${platform}-plugin"

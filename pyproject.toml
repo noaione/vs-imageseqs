@@ -55,9 +55,7 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 include = ["vapoursynth/plugins"]
 artifacts = [
-    "vapoursynth/plugins/*.dll",
-    "vapoursynth/plugins/*.so",
-    "vapoursynth/plugins/*.dylib",
+    "vapoursynth/plugins/imageseqs/**",
 ]
 
 [tool.hatch.build.targets.wheel.hooks.custom]
@@ -75,6 +73,11 @@ include = [
     "README.md",
     "CHANGELOG.md",
     "docs/**/*.md",
+    "tools/build-manylinux.sh",
+    "tools/check-linux-wheel.py",
+    "tools/package-linux-wheel.py",
+    "tools/stage-native.py",
+    "tools/manylinux-toolchain.cmake",
     "LICENSE",
     "THIRD_PARTY_NOTICES",
     "LICENSES/**",

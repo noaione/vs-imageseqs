@@ -1,0 +1,73 @@
+# Linux distribution builds
+
+Linux release wheels are built in `quay.io/pypa/manylinux_2_28_x86_64`
+and repaired by auditwheel for `manylinux_2_28_x86_64` (glibc 2.28+).
+The runner's Ubuntu version does not set the binary's compatibility baseline.
+The ordinary Hatch build produces an intermediate `linux_x86_64` wheel;
+only the repaired wheel is uploaded to PyPI or GitHub Releases.
+
+`tools/build-manylinux.sh` builds dav1d 1.5.3 and libde265 1.1.1 as shared
+libraries and libwebp 1.6.0 as a position-independent static library inside
+that same container. Their archive versions and SHA-512 hashes are pinned.
+Cargo.lock selects the embedded libheif and OpenJPEG sources. The CMake
+toolchain file disables discovery of extra libheif codecs, including x265.
+
+Auditwheel checks the requested ABI baseline and bundles the non-system shared
+libraries with rewritten names. `tools/package-linux-wheel.py` moves them into
+`vapoursynth/plugins/imageseqs/lib/`, sets the plugin loader path to
+`$ORIGIN/lib`, and repacks with regenerated RECORD hashes. The final wheel is
+audited again. `tools/check-linux-wheel.py` verifies the tag, manifest, layout,
+codec libraries, legal files, and hashes. Unexpected libraries fail validation.
+
+All platforms put the plugin and `manifest.vs` under
+`vapoursynth/plugins/imageseqs/`. The manifest lists `libvs_imageseqs` on
+Linux/macOS or `vs_imageseqs` on Windows; VapourSynth appends the extension.
+The standalone ZIP is extracted from the final wheel, preserving the
+`imageseqs/` subtree and root legal files. Copy the whole `imageseqs/` directory
+into VapourSynth's plugins directory, including its manifest and Linux `lib/`
+subdirectory. Installing the wheel handles this automatically.
+
+## Validation and publication
+
+The build workflow runs both published layouts in a **fresh** manylinux
+container. It installs VapourSynth R79, loads each plugin without
+`LD_LIBRARY_PATH`, and runs `tests/readalpha.vpy` against it. No codec
+development packages or native build prefix are present in that container.
+`tests/check-autoload.py` exercises the installed manifest with autoloading
+enabled. The full fixture validator disables autoloading to ensure it loads
+each specified binary.
+Both publishing jobs depend on this validation and the reusable Rust test
+workflow. A container build or validation failure prevents publication.
+
+## Rebuilding and relinking
+
+Each Linux release also includes `linux-relink-source.tar.gz`, containing the
+application source and build scripts, the three checked native source archives,
+all Cargo dependencies (including vendored libheif and OpenJPEG), Cargo.lock,
+and the build tool versions. The source tree's `.cargo/config.toml` selects
+the included Rust dependencies instead of downloading them from crates.io.
+
+To rebuild, unpack the source bundle and use the same manylinux container.
+Install Rust (see `BUILD-ENVIRONMENT.txt` for the recorded compiler version)
+and NASM, then run from the unpacked directory:
+
+```sh
+export IMGSEQS_NATIVE_ARCHIVES="$PWD/native-archives"
+bash tools/build-manylinux.sh
+```
+
+The script installs its Python build tools and produces `dist/*.whl` and
+`native/`. To relink with a modified libheif, edit its sources under the
+vendored `libheif-sys` directory and update Cargo's vendor checksum metadata
+for the changed files, or use a local path override. To rebuild a modified
+libde265, update its input archive and the corresponding checksum in the
+build script. The same commands then rebuild and repair the plugin with that
+library. The standalone bundle's shared libde265 can also be replaced by an
+ABI-compatible build retaining the bundled filename and SONAME.
+
+The container image is pinned by digest. Python build-tool versions may advance;
+the recorded build environment identifies the versions used for each release.
+This workflow targets binary compatibility, not byte-for-byte reproducibility.
+
+References: [manylinux](https://github.com/pypa/manylinux),
+[auditwheel](https://github.com/pypa/auditwheel).

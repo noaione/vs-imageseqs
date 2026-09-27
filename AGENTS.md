@@ -60,7 +60,7 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
 - use `pyproject.toml` and hatchling. do not add `setup.py`.
 - keep the wheel plugin-only. do not add a python stub package or helper
   package unless explicitly requested.
-- install the native library under `vapoursynth/plugins/`.
+- install the native library under `vapoursynth/plugins/imageseqs/` with `manifest.vs`.
 - preserve user changes and untracked files.
 - keep `vcpkg.json`'s disabled libheif default features unless the dependency
   policy changes. this avoids selecting x265.
@@ -167,7 +167,8 @@ C:\Python314\python.exe -m build
 the wheel should contain:
 
 ```text
-vapoursynth/plugins/vs_imageseqs.dll
+vapoursynth/plugins/imageseqs/vs_imageseqs.dll
+vapoursynth/plugins/imageseqs/manifest.vs
 LICENSE
 THIRD_PARTY_NOTICES
 LICENSES/
@@ -189,10 +190,17 @@ C:\Python314\python.exe -m build
 ```
 
 inspect the wheel as a zip archive. confirm the native file is under
-`vapoursynth/plugins/`, the legal files are present, and no python package is
+`vapoursynth/plugins/imageseqs/`, its manifest and legal files are present, and no python package is
 included.
 
 ## native licenses
+
+Linux release wheels are built in manylinux_2_28 and repaired with auditwheel;
+`tools/build-manylinux.sh` builds the native inputs, and
+`tools/check-linux-wheel.py` checks the repaired wheel and stages the standalone
+bundle. Both Linux layouts include shared dav1d/libde265 with relative loader
+paths, and a fresh container validates them before publishing. The Linux
+release includes a relinking source archive; see `docs/LINUX-BUILD.md`.
 
 the current native set is dav1d, libheif, libde265, libwebp, and the OpenJPEG
 sources vendored by `openjpeg-sys`. dav1d and OpenJPEG use the bsd-2-clause

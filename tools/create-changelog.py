@@ -48,9 +48,7 @@ if not GIT_TAGS.startswith("refs/tags/"):
     raise ValueError("Invalid git tag format")
 
 VERSION = GIT_TAGS.split("/")[-1]
-
-if VERSION.startswith("v"):
-    VERSION = VERSION[1:]
+VERSION = VERSION.removeprefix("v")
 
 EXTRACTED_CHANGELOG = ""
 START = False

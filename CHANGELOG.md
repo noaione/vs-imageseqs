@@ -2,7 +2,10 @@
 
 ## unreleased
 
-nothing yet!
+### build
+- improvement to linux wheel distribution, manylinux now has dropped down to glibc 2.28
+  - linux build now bundles `libdav1d.so.7` and `libde265.so.0` to avoid runtime dependency issues
+- change the plugin layout to become `plugins/imageseqs/` with a `manifest.vs` file, and the plugin loader path to `$ORIGIN/lib`
 
 ## [0.1.0] - 2026-09-20
 

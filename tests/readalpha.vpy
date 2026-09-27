@@ -29,6 +29,27 @@ PLUGIN = Path(
 )
 FIXTURES = HERE / "fixtures"
 
+
+class ValidationPolicy(vs.EnvironmentPolicy):
+    """Keep an installed plugin from shadowing the binary under test."""
+
+    def on_policy_registered(self, api):
+        self.api = api
+        self.environment = api.create_environment(vs.CoreCreationFlags.DISABLE_AUTO_LOADING)
+
+    def on_policy_cleared(self):
+        self.api.destroy_environment(self.environment)
+
+    def get_current_environment(self):
+        return self.environment
+
+    def set_environment(self, environment):
+        return self.environment
+
+
+if not vs.has_policy():
+    vs.register_policy(ValidationPolicy())
+
 core = vs.core
 core.std.LoadPlugin(str(PLUGIN))
 

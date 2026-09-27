@@ -1,18 +1,8 @@
 name: rust tests
 
 on:
-  push:
-    paths-ignore:
-      - 'README.md'
-      - 'LICENSE'
-      - '.gitignore'
-      - '.vscode/**'
-  pull_request:
-    paths-ignore:
-      - 'README.md'
-      - 'LICENSE'
-      - '.gitignore'
-      - '.vscode/**'
+  workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -21,7 +11,7 @@ env:
   CARGO_TERM_COLOR: always
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: rust-tests-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

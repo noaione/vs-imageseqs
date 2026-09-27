@@ -1,7 +1,11 @@
 # License bundle
 
 This directory contains the license texts and notices that accompany the
-statically linked native components used by the plugin.
+native components used by the plugin, whether linked statically or bundled as
+shared libraries. Linux release wheels and plugin ZIPs bundle dav1d 1.5.3 and
+libde265 1.1.1 as shared libraries; their upstream license texts below are the
+same as the Windows inputs. The accompanying `linux-relink-source.tar.gz`
+provides the exact source inputs and rebuild instructions for Linux artifacts.
 
 ## Native components
 

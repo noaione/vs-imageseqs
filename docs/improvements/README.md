@@ -142,8 +142,14 @@ open plus frames to 4.99 s.
 
 ## plans
 
+The current distribution work is [14 — Linux wheel distribution and plugin manifests](14-linux-wheel-distribution.md): manylinux/auditwheel builds,
+bundled Linux dependencies, an `imageseqs/manifest.vs` installation layout,
+and release validation. Implemented and validated locally on Linux and Windows;
+that page records the completed checks and remaining CI validation.
+
 | plan | touches | expected | risk | status |
 | --- | --- | --- | --- | --- |
+| [14 Linux distribution and manifests](14-linux-wheel-distribution.md) | Hatch, CI, packaging tools, notices | manylinux 2.28 wheel and matching ZIP with bundled codecs and manifest | medium, distribution layout | implemented; Linux/Windows checked locally, CI pending |
 | [01 lookahead scheduling](01-lookahead-scheduling.md) | `src/prefetch.rs`, `src/source.rs` | webp 88.8 → ~70 ms at `prefetch=4`, and `prefetch` above 4 stops being a pessimisation | low, internal only | implemented |
 | [02 frame write path](02-frame-write-path.md) | `src/clip.rs` (new), `src/prefetch.rs`, `src/source.rs`, `src/decoder.rs`, `src/pixel.rs` | a few ms per frame from the buffer, and up to 1.6x on webp if the copy leaves the requesting thread | medium, frame lifetime | implemented, 2b only |
 | [03 yuv output for lossy webp](03-webp-yuv-output.md) | `src/formats/webp.rs`, `src/decoder.rs`, `src/pixel.rs`, `src/source.rs`, `src/color.rs` | webp 4.24 → 3.39 s, half the bytes per frame | medium, changes the output | implemented, with 04 |
