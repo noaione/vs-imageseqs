@@ -43,8 +43,9 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-import vapoursynth as vs
 from natsort import natsorted
+
+import vapoursynth as vs
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PLUGIN = ROOT / "target" / "release" / "vs_imageseqs.dll"
@@ -66,6 +67,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--prefetch", type=int, default=None, help="also run imgseqs with this many lookahead workers")
     parser.add_argument("--icc-profile", action="store_true", help="export embedded ICC profiles as frame properties")
+    parser.add_argument(
+        "--imgseqs-only", action="store_true", help="skip bestsource when it is not installed or not needed"
+    )
+    parser.add_argument("--bestsource-plugin", type=Path, help="load this BestSource plugin explicitly")
     return parser.parse_args()
 
 
@@ -205,7 +210,26 @@ def check_alignment(configs: list[Config]) -> None:
 
 def main() -> None:
     args = parse_args()
+    if (args.imgseqs_only or args.bestsource_plugin) and not vs.has_policy():
+        # Keep the benchmark explicit about which release build it loads.
+        class NoAutoLoad(vs.EnvironmentPolicy):
+            def on_policy_registered(self, special_api):
+                self.api = special_api
+                self.environment = special_api.create_environment(vs.CoreCreationFlags.DISABLE_AUTO_LOADING)
+
+            def on_policy_cleared(self):
+                self.api.destroy_environment(self.environment)
+
+            def get_current_environment(self):
+                return self.environment
+
+            def set_environment(self, environment):
+                return environment
+
+        vs.register_policy(NoAutoLoad())
     core.std.LoadPlugin(str(args.plugin.resolve()))
+    if args.bestsource_plugin:
+        core.std.LoadPlugin(str(args.bestsource_plugin.resolve()))
 
     selection = args.select or glob_for(args.pattern)
     images = matching_files(args.dir, selection)
@@ -218,23 +242,26 @@ def main() -> None:
     directory = files[0].parent
 
     configs = [Config("imgseqs", lambda: open_imgseqs(files, None, args.icc_profile))]
-    if first is None:
+    if args.imgseqs_only:
+        pass
+    elif first is None:
         print(f"{args.pattern!r} does not describe {files[0].name}, so bestsource is left out")
     else:
         configs.append(Config("bestsource", lambda: open_bestsource(directory, args.pattern, first, None)))
     if args.extra:
         configs.append(Config("imgseqs p=0", lambda: open_imgseqs(files, 0, args.icc_profile)))
-        if first is not None:
+        if first is not None and not args.imgseqs_only:
             configs.append(Config("bestsource t=1", lambda: open_bestsource(directory, args.pattern, first, 1)))
     if args.prefetch is not None:
         workers = args.prefetch
         configs.append(Config(f"imgseqs p={workers}", lambda: open_imgseqs(files, workers, args.icc_profile)))
 
-    bestsource = core.bs.VideoSource.plugin
     start = "" if first is None else f", first number {first}"
     print(f"sequence: {directory / selection} ({len(files)} files{start})")
     print(f"imgseqs: {args.plugin.resolve()}")
-    print(f"bestsource: {bestsource.identifier} {bestsource.name} r{bestsource.version.major}")
+    if not args.imgseqs_only:
+        bestsource = core.bs.VideoSource.plugin
+        print(f"bestsource: {bestsource.identifier} {bestsource.name} r{bestsource.version.major}")
     print()
 
     for repetition in range(args.reps):

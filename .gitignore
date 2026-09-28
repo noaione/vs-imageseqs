@@ -4,6 +4,7 @@
 *.egg-info/
 __pycache__/
 *.py[cod]
+.DS_Store
 # vcpkg generated files
 vcpkg_installed/
 buildtrees/
