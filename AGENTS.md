@@ -14,7 +14,10 @@ identity unchanged:
 
 the plugin accepts an ordered `files:data[]` list and returns one frame per
 file. `Read` returns the color clip, `ReadAlpha` returns the color clip and a
-separate gray alpha clip that is opaque for files without an alpha channel.
+separate gray alpha clip that is opaque for files without an alpha channel. a
+still file contributes exactly one frame; an animated gif, apng, webp, jpeg xl,
+avif or heif/heic sequence contributes its displayed timeline sampled onto the
+clip's constant frame rate, and plays once whatever its loop count says.
 `fpsnum` and `fpsden` default to `24/1`. `mismatch` defaults to false;
 when true, variable dimensions and formats are allowed. `apply_rotation`
 defaults to true and hands out the picture the file's orientation describes,
@@ -82,6 +85,27 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
 
 - `src/lib.rs`: plugin declaration and registration.
 - `src/source.rs`: `Read` and `ReadAlpha` filter creation, validation, and frame requests.
+- `src/animation.rs`: the output timeline and the animation decoders. `Segment`
+  is one input path's contribution and `SegmentTable` resolves an output frame
+  to a path and a presentation, with checked `i128` rational arithmetic and no
+  decoding of its own: a still is one frame at any rate, a segment covers the
+  ticks that start before it ends, a picture is first shown at the first tick at
+  or after it, and a zero or absent delay is held for one output tick.
+  `AnimationSource` wraps one file's decoder and keeps a bounded window of
+  decoded presentations, which is both the memory bound and what stops a
+  lookahead worker that has moved ahead of a consumer from making that
+  consumer's next request replay the wrong picture.
+- `src/animation/`: one module per animated format. `apng.rs` composes APNG
+  frames at the file's own depth, because the `image` compositor's 16-bit arm is
+  `unreachable!` and it refuses every 16-bit colour type. `frames.rs` replays the
+  two formats `image` already composites over the full logical canvas. `jxl.rs`
+  scans frame headers without rendering and decodes each presentation from its
+  own seek checkpoint. `sequence.rs` reads an avif or heif sequence's sample
+  table and clean aperture from the container, because the embedded libheif
+  1.23.1 build reports the wrong per-sample duration and `libheif-rs 3.0.0`
+  exposes no sample count. `heif.rs` replays a visual track and applies the
+  aperture per plane; a colour-only read of one still decodes its linked alpha
+  track, which that wrapper exposes no way to skip.
 - `src/prefetch.rs`: the lookahead pool, its window, and its byte budget.
 - `src/clip.rs`: the clips a sequence hands out and the frames they cache, which
   the lookahead workers build. the demand one decode is asked for comes from the
@@ -159,7 +183,13 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   full`, which that script documents, beside the `alpha-rgb8.png` that holds the
   same picture and states nothing. its ICC section reads `icc-rgb8.png` and
   `icc-rgba8.png`, generated with the embedded `icc-srgb.icc` profile, and
-  checks the opt-in `ICCProfile` property.
+  checks the opt-in `ICCProfile` property. its animation section reads the
+  `animation.{png,gif,webp,jxl,avif,heic}` and `animation-rgba16.png` fixtures
+  written by `tests/make-animation-fixtures.py`, which needs Pillow, `cjxl`,
+  `avifenc` and `heif-enc` on `PATH`; the gif, apng, webp, jpeg xl and avif
+  fixtures all state the same four 80/170/110/240 ms pictures over a 16x12
+  canvas, and the heic fixture holds four equal 150 ms samples because `heif-enc`
+  accepts one duration for a whole sequence.
 - `tests/check-packaging-tools.py`: the checks for `tools/`, run with any Python
   3.12 or later. it builds its own tree under `target/check-packaging-tools`, so
   it needs no wheel and no network; `IMGSEQS_CHECK_TMP` moves that tree, and a

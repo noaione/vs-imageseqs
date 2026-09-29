@@ -149,11 +149,13 @@ Plans 17–20 were documentation only when they were written. Each records the
 evidence, intended scope and acceptance checks; performance ideas explicitly
 require measurement before choosing a change.
 
-[21](21-animated-images.md) plans one coordinated implementation for GIF,
-APNG, animated WebP and JPEG XL, plus AVIF/HEIF sequence tracks. The decoder/API
-survey is complete. The plan keeps the existing `Read`/`ReadAlpha` API and
-still-image behavior, and accounts for timeline sampling, APNG's 16-bit path,
-stateful decoders and bounded memory.
+[21](21-animated-images.md) planned one coordinated implementation for GIF,
+APNG, animated WebP and JPEG XL, plus AVIF/HEIF sequence tracks, and has landed
+for all of them. It keeps the existing `Read`/`ReadAlpha` API and still-image
+behavior, and accounts for timeline sampling, APNG's 16-bit path, stateful
+decoders and bounded memory. The benchmark the plan asks for is recorded in
+[BENCH.md](../BENCH.md): a still image pays nothing for the new pool indexing,
+and a backward walk of a long animation costs 1.3x to 2.4x a forward one.
 
 [15](15-avif-decoder-progress.md),
 [16](16-container-orientation.md),
@@ -168,7 +170,7 @@ provenance. Measure [19](19-avif-thread-budget.md) after those.
 | --- | --- | --- | --- |
 | [19 AVIF thread budget](19-avif-thread-budget.md) | default native decoder threading runs inside the prefetch pool | medium | experiment proposed |
 | [20 distribution follow-ups](20-distribution-followups.md) | sdist input mismatch, untested archive rebuilds, macOS dependencies and release metadata | high for source builds | release metadata and repeatable staging implemented; source rebuilds, macOS portability and provenance proposed |
-| [21 animated images](21-animated-images.md) | GIF, APNG, WebP, JXL and AVIF/HEIF sequence tracks need timeline expansion, composition, delay sampling and bounded random access | medium to high | all-format implementation proposed; AVIF/HEIF metadata and decoder checks remain |
+| [21 animated images](21-animated-images.md) | GIF, APNG, WebP, JXL and AVIF/HEIF sequence tracks need timeline expansion, composition, delay sampling and bounded random access | medium to high | implemented for every format it names, with the regression and playback benchmarks recorded |
 
 ### implemented plans
 

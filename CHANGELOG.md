@@ -2,7 +2,24 @@
 
 ## unreleased
 
+### added
+
+- animated GIF, APNG, WebP, JPEG XL, AVIF and HEIF/HEIC inputs now play their
+  displayed timeline instead of contributing one frame
+  - each output frame shows the picture the file displays at that instant, sampled
+    onto the clip's own `fpsnum`/`fpsden`, so a fractional rate and a delay that
+    does not divide it both land where the file says
+  - a picture with no delay is held for one output tick rather than dropped, and a
+    file's loop count is ignored: each listed path plays once
+  - a 16-bit APNG stays 16-bit, and a HEIF or AVIF sequence is cropped to the
+    picture it presents rather than handed out as coded
+  - still images keep their frame count, format, pixels and metadata whether or
+    not they share a list with animations
+  - a colour-only read of a HEIF sequence still decodes its alpha track, because
+    the library gives no way to skip it
+
 ### fixed
+
 - a frame request on an AVIF whose item holds no coded frame no longer hangs
   forever; it fails with a decode error naming the file
   - the item decoder now runs at low latency, which is what lets "the decoder has
@@ -31,6 +48,7 @@
     out, so it is not read; `ReadAlpha` still reports the problem on the same file
 
 ### performance
+
 - AVIF decoding is 15.6% faster on the 35-page sandbox set, and 43% faster on
   `sandbox/hitokage-sample`: a still image is one frame, so the item is decoded
   directly instead of through a frame-delay pipeline it cannot use
@@ -44,8 +62,11 @@
 - a probe no longer keeps a file's embedded ICC profile unless `icc_profile=True`
   asks for it, which is 36 MiB off a 35-file clip whose files each carry a 1 MiB
   profile; `ImgSeqHasICC` is unchanged
+- a still image reads as fast as it did before, on every sandbox set and at every
+  lookahead depth, so animations cost the still path nothing
 
 ### build
+
 - improvement to linux wheel distribution, manylinux now has dropped down to glibc 2.28
   - linux build now bundles `libdav1d.so.7` and `libde265.so.0` to avoid runtime dependency issues
 - change the plugin layout to become `plugins/imageseqs/` with a `manifest.vs` file, and the plugin loader path to `$ORIGIN/lib`

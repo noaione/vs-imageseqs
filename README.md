@@ -104,13 +104,13 @@ size and pixel order.
 
 | formats | notes |
 | --- | --- |
-| PNG, JPEG, BMP, GIF, ICO, TIFF | Standard image formats. |
+| PNG, JPEG, BMP, GIF, ICO, TIFF | Standard image formats. PNG and GIF can be animated. |
 | DDS | DXT1, DXT3, and DXT5 images. |
 | Farbfeld | 16-bit RGBA images. |
-| WebP | Lossy opaque images can be returned as YUV. |
-| AVIF | Monochrome images can be gray; color images may keep their YUV planes. |
-| HEIF, HEIC | Monochrome images can be gray; color images may keep their YUV planes. |
-| JPEG XL | Decoded by the JPEG XL library. |
+| WebP | Lossy opaque images can be returned as YUV. Can be animated. |
+| AVIF | Monochrome images can be gray; color images may keep their YUV planes. Can be an image sequence. |
+| HEIF, HEIC | Monochrome images can be gray; color images may keep their YUV planes. Can be an image sequence. |
+| JPEG XL | Decoded by the JPEG XL library. Can be animated. |
 | JPEG 2000 | JP2, J2K, JPF, JPX, and J2C files. Some files can be returned as YUV. |
 | EXR, HDR, PNM, QOI, TGA | Standard image formats. |
 
@@ -118,6 +118,48 @@ The plugin supports gray and RGB images from 8 to 16 bits, 32-bit float RGB,
 and several YUV formats. For image formats that state a 9–15-bit depth, the
 plugin uses the matching VapourSynth format, such as `Gray12` or `RGB30` for a
 10-bit RGB image.
+
+## animated images
+
+An animated file in `files` contributes its displayed pictures to the same clip
+rather than one frame. A still file still contributes exactly one frame.
+
+Animated GIF, APNG, animated WebP, animated JPEG XL, and AVIF and HEIF/HEIC
+image sequences are supported. Multi-page TIFF and ICO are not part of this:
+their pages are documents and alternatives rather than a timeline.
+
+The clip stays constant rate at the `fpsnum`/`fpsden` you ask for, and each
+output frame shows the picture the file displays at that instant:
+
+- a picture held for longer than one output tick is repeated across the ticks
+  it covers.
+- a picture that falls entirely between two ticks is not shown.
+- a picture whose delay is zero or absent is held for one output tick rather
+  than dropped.
+- a picture that becomes visible part way through a tick is shown from that
+  tick.
+
+The timing is exact rational arithmetic, so a fractional `fpsnum`/`fpsden` and a
+delay that does not divide it both land where the file says they should. A
+file's loop count is ignored: each listed path plays once, and the next file
+starts where the previous one ends.
+
+Every frame a path contributes carries that file's own metadata. `ImgSeqIndex`
+is the picture's position within its file, so an animation's frames are numbered
+from zero within that animation. Frame size, format and `mismatch` behave as
+they do for stills, so a list that mixes an animation with a still of another
+size needs `mismatch=1`.
+
+Alpha is composited the same way the format defines it: `ReadAlpha` returns the
+logical canvas a viewer would show, including cleared pixels after a frame's
+disposal. One exception is worth knowing: a colour-only read of a HEIF or HEIC
+sequence still decodes that sequence's linked alpha track, because the library
+used for it exposes no way to skip that work.
+
+A backward seek re-reads from the file's own checkpoints where the format has
+them, and otherwise replays from the start of that file. Only a bounded window
+of decoded pictures is held, so memory does not grow with the length of an
+animation.
 
 ## alpha and color
 

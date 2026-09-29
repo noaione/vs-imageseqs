@@ -9,6 +9,7 @@ use image::{ColorType, ExtendedColorType, ImageDecoder, ImageReader};
 use vapoursynth4_rs::ffi;
 
 use crate::{
+    animation::{Rate, Segment, SegmentTable},
     color::Cicp,
     error::{ImgSeqError, Result},
     formats,
@@ -129,7 +130,7 @@ pub struct DecodeTimings {
 }
 
 /// Pixels of one decoded image, in whichever layout its format decodes to.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Pixels {
     /// One buffer holding every channel of `color_type`, interleaved.
     Interleaved {
@@ -148,7 +149,7 @@ pub enum Pixels {
     },
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DecodedImage {
     pub width: u32,
     pub height: u32,
@@ -218,6 +219,81 @@ pub(crate) fn image_error(action: &str, path: &Path, error: impl std::fmt::Displ
 /// already copied out of the file, so a sequence whose files each carry a large
 /// one retains a copy per file for the life of the clip if nothing drops them.
 /// The measurement is in `docs/improvements/18-demand-aware-decoding.md`.
+/// Describes what every listed path contributes to the output timeline.
+///
+/// A still file contributes one frame; an animated one contributes its
+/// displayed timeline sampled onto `fps`. The dispatch lives in
+/// [`crate::animation`], which is where the per-format adapters are, so this
+/// stays a thin wrapper over [`probe`] for the files no adapter claims.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when a file cannot be probed or its timeline cannot
+/// be represented.
+pub fn probe_segments(
+    files: &[PathBuf],
+    fps: Rate,
+    apply_rotation: bool,
+    export_icc_profile: bool,
+) -> Result<SegmentTable> {
+    let mut segments = Vec::with_capacity(files.len());
+    for path in files {
+        segments.push(probe_segment(path, fps, apply_rotation, export_icc_profile)?);
+    }
+    SegmentTable::new(segments)
+}
+
+/// Describes what one listed path contributes.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the file cannot be probed or its timeline
+/// cannot be represented.
+pub fn probe_segment(
+    path: &Path,
+    fps: Rate,
+    apply_rotation: bool,
+    export_icc_profile: bool,
+) -> Result<Segment> {
+    let info = probe(path, apply_rotation, export_icc_profile)?;
+    // An animated file is described by its own container: the delay of every
+    // picture and how to replay it. A file no adapter claims is a still, which
+    // is one frame and no decoder at all, and that is also what an adapter
+    // answers for a file of its format that turns out not to be animated.
+    let animated = if crate::animation::apng::owns(path) {
+        crate::animation::apng::segment_info(path, info.clone(), fps)?
+    } else if crate::animation::frames::owns(path, crate::animation::frames::Kind::Gif) {
+        crate::animation::frames::segment_info(
+            path,
+            crate::animation::frames::Kind::Gif,
+            info.clone(),
+            fps,
+        )?
+    } else if crate::animation::heif::owns_avif(path) {
+        crate::animation::heif::segment_info(path, info.clone(), fps)?
+    } else if crate::animation::heif::owns_heif(path) {
+        crate::animation::heif::segment_info(path, info.clone(), fps)?
+    } else if crate::animation::jxl::owns(path) {
+        crate::animation::jxl::segment_info(path, info.clone(), fps)?
+    } else if crate::animation::frames::owns(path, crate::animation::frames::Kind::Webp) {
+        // A webp whose bitstream is a still image stays on the libwebp path,
+        // which is what hands a lossy file out as its own yuv planes. Only an
+        // animated one is claimed here.
+        crate::animation::frames::segment_info(
+            path,
+            crate::animation::frames::Kind::Webp,
+            info.clone(),
+            fps,
+        )?
+    } else {
+        None
+    };
+    match animated {
+        Some(segment) => segment.into_segment(),
+        None => Ok(Segment::still(info)),
+    }
+}
+
 pub fn probe(path: &Path, apply_rotation: bool, export_icc_profile: bool) -> Result<ImageInfo> {
     let mut info = describe(path, apply_rotation)?;
     if !export_icc_profile {
@@ -358,6 +434,173 @@ pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
 mod tests {
     use super::probe;
     use std::path::Path;
+
+    use super::probe_segment;
+    use crate::animation::Rate;
+    use image::ColorType;
+    use std::path::PathBuf;
+
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join(name)
+    }
+
+    /// The fixture animations all state the same 600 ms of four pictures, so
+    /// they sample onto the same output timeline whatever their container is.
+    #[test]
+    fn every_animation_format_samples_onto_the_same_timeline() {
+        for name in ["animation.png", "animation.gif", "animation.webp"] {
+            let segment = probe_segment(&fixture(name), Rate::from_fps(24, 1), true, false)
+                .expect("the fixture probes");
+            assert!(segment.animated, "{name}");
+            assert_eq!(segment.frame_count(), 14, "{name}");
+            assert_eq!(segment.output_size(), (16, 12), "{name}");
+            assert_eq!(segment.info.format, crate::pixel::PixelFormat::Rgb8, "{name}");
+            // Every output frame shows the picture the file displays at that
+            // instant, which is the documented sampling rule.
+            let starts = [0i64, 80, 250, 360];
+            let durations = [80i64, 170, 110, 240];
+            for frame in 0..segment.frame_count() {
+                // Output frame `frame` is at `frame * 1000 / 24` ms.
+                let instant = frame as i64 * 1000 / 24;
+                let expected = starts
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, start)| {
+                        **start <= instant
+                            && instant < starts.get(index + 1).copied().unwrap_or(i64::MAX)
+                    })
+                    .map(|(index, _)| index)
+                    .next()
+                    .unwrap_or_else(|| {
+                        starts
+                            .iter()
+                            .rposition(|start| *start <= instant)
+                            .unwrap_or(0)
+                    });
+                let _ = durations;
+                assert_eq!(
+                    segment.presentation(frame).unwrap(),
+                    expected,
+                    "{name} at frame {frame} ({instant} ms)"
+                );
+            }
+        }
+    }
+
+    /// An avif and a heif sequence both state their timing in the container's
+    /// sample tables, which is what the frames are placed by.
+    #[test]
+    fn a_sequence_is_placed_by_its_own_sample_tables() {
+        for name in ["animation.avif", "animation.heic"] {
+            let segment =
+                probe_segment(&fixture(name), Rate::from_fps(24, 1), true, false)
+                    .expect("the fixture probes");
+            assert!(segment.animated, "{name}");
+            assert_eq!(segment.output_size(), (16, 12), "{name}");
+            // The avif states 80/170/110/240 ms and the heic four 150 ms
+            // samples; both are 600 ms, which is 14.4 ticks at 24 fps.
+            assert_eq!(segment.frame_count(), 14, "{name}");
+            assert_eq!(segment.info.format, crate::pixel::PixelFormat::Rgb8, "{name}");
+        }
+    }
+
+    /// An animated jpeg xl is scanned for its timing rather than replayed, and
+    /// its frames keep the depth the codestream states.
+    #[test]
+    fn an_animated_jpeg_xl_is_scanned_for_its_timeline() {
+        let segment = probe_segment(&fixture("animation.jxl"), Rate::from_fps(24, 1), true, false)
+            .expect("the fixture probes");
+        assert!(segment.animated);
+        assert_eq!(segment.frame_count(), 14);
+        assert_eq!(segment.output_size(), (16, 12));
+        assert_eq!(segment.info.format, crate::pixel::PixelFormat::Rgb8);
+        // The codestream states its timeline as ticks of a 1000 Hz timescale,
+        // which is the rate the segment keeps.
+        assert_eq!(segment.rate, Rate::new(1000, 1));
+    }
+
+    /// A still jpeg xl stays one frame.
+    #[test]
+    fn a_still_jpeg_xl_is_one_frame() {
+        for name in ["alpha-rgba8.jxl", "jxl-gray10.jxl"] {
+            let segment = probe_segment(&fixture(name), Rate::from_fps(24, 1), true, false)
+                .expect("the fixture probes");
+            assert!(!segment.animated, "{name}");
+            assert_eq!(segment.frame_count(), 1, "{name}");
+        }
+    }
+
+    /// A 16-bit APNG keeps its depth, which the `image` compositor cannot do.
+    #[test]
+    fn a_sixteen_bit_apng_keeps_its_depth() {
+        let segment = probe_segment(
+            &fixture("animation-rgba16.png"),
+            Rate::from_fps(24, 1),
+            true,
+            false,
+        )
+        .expect("the fixture probes");
+        assert!(segment.animated);
+        assert_eq!(segment.info.format, crate::pixel::PixelFormat::Rgb16);
+        assert_eq!(segment.info.original_color_type, image::ExtendedColorType::Rgba16);
+        assert_eq!(segment.output_size(), (4, 3));
+        // The fixture's two pictures hold for 100 ms and 200 ms, which is
+        // 7.2 output ticks at 24 fps, so seven ticks start before it ends.
+        assert_eq!(segment.frame_count(), 7);
+        // The first picture is shown at tick 0 and the second at `ceil(2.4)`,
+        // which is tick 3.
+        assert_eq!(segment.presentation(0).unwrap(), 0);
+        assert_eq!(segment.presentation(2).unwrap(), 0);
+        assert_eq!(segment.presentation(3).unwrap(), 1);
+        assert_eq!(segment.presentation(6).unwrap(), 1);
+    }
+
+    /// A still of a format that has an animation path stays one frame.
+    #[test]
+    fn a_still_file_is_one_frame_however_it_is_stored() {
+        for name in ["alpha-rgba8.png", "alpha-rgb8.png"] {
+            let segment = probe_segment(&fixture(name), Rate::from_fps(24, 1), true, false)
+                .expect("the fixture probes");
+            assert!(!segment.animated, "{name}");
+            assert_eq!(segment.frame_count(), 1, "{name}");
+        }
+    }
+
+    /// An animated file whose pictures are all smaller than one output tick is
+    /// still shown once rather than dropped.
+    #[test]
+    fn slides_that_fall_between_ticks_are_omitted() {
+        let segment = probe_segment(
+            &fixture("animation.gif"),
+            Rate::from_fps(1000, 1),
+            true,
+            false,
+        )
+        .expect("the fixture probes");
+        // One tick is a millisecond at 1000 fps, so every one of the 600 ms of
+        // pictures gets its own output frame.
+        assert_eq!(segment.frame_count(), 600);
+    }
+
+    /// The orientation a file states is applied to animated frames too.
+    #[test]
+    fn an_animation_reports_its_own_format_and_transform() {
+        let segment = probe_segment(
+            &fixture("animation-rgba16.png"),
+            Rate::from_fps(24, 1),
+            false,
+            false,
+        )
+        .expect("the fixture probes");
+        assert_eq!(segment.info.color_type, ColorType::Rgba16);
+        assert_eq!(
+            segment.output_size(),
+            (segment.info.output_width(), segment.info.output_height())
+        );
+    }
 
     /// A profile's bytes are kept only when the caller asked for them, and
     /// whether the file has one is reported either way.

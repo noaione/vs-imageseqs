@@ -18,8 +18,9 @@ use vapoursynth4_rs::{
 };
 
 use crate::{
+    animation::{AnimationSource, SegmentTable},
     color::set_frame_properties,
-    decoder::{DecodeTimings, DecodedImage, Demand, ImageInfo, Pixels},
+    decoder::{self, DecodeTimings, DecodedImage, Demand, ImageInfo, Pixels},
     error::{ImgSeqError, Result},
     pixel::{
         PixelFormat, WriteTimings, write_alpha, write_decoded_planes, write_opaque_alpha,
@@ -180,17 +181,15 @@ impl ClipFrames {
             })
     }
 
-    /// Builds every frame of `clips` from one decoded image.
+    /// Builds every frame of `clips` from one decoded presentation.
     fn build(
         core: &Core,
         clips: &Arc<[Clip]>,
         image: &ImageInfo,
-        index: i32,
+        index: usize,
         decoded: DecodedImage,
         export_icc_profile: bool,
     ) -> Result<Self> {
-        let index = usize::try_from(index)
-            .map_err(|_| ImgSeqError::new(format!("requested invalid frame {index}")))?;
         let mut frames = Vec::with_capacity(clips.len());
         let mut timings = Vec::with_capacity(clips.len());
         let mut bytes: usize = 0;
@@ -259,11 +258,17 @@ impl SharedCore {
     }
 }
 
-/// Builds the frames of every clip of one call, on the worker that decoded the
+/// Builds the frames of every clip of one call, on the worker that produced the
 /// image.
+///
+/// One output frame is not always one file, so the builder holds the segment
+/// table that says which file a frame index names, and which presentation of
+/// it. A still decodes through the same path it always did; an animated source
+/// is asked for one composited presentation.
 pub struct FrameBuilder {
     core: SharedCore,
     clips: Arc<[Clip]>,
+    segments: Arc<SegmentTable>,
     export_icc_profile: bool,
 }
 
@@ -274,7 +279,12 @@ impl FrameBuilder {
     /// a filter is freed before its core, so a handle kept by a filter cannot
     /// outlive what it points at.
     #[must_use]
-    pub fn new(core: CoreRef<'_>, clips: &[Clip], export_icc_profile: bool) -> Self {
+    pub fn new(
+        core: CoreRef<'_>,
+        clips: &[Clip],
+        segments: Arc<SegmentTable>,
+        export_icc_profile: bool,
+    ) -> Self {
         // SAFETY: the filter built from this core owns the builder, so the
         // handle cannot outlive the core. `SharedCore` records why the workers
         // that use it may do so.
@@ -283,6 +293,7 @@ impl FrameBuilder {
         Self {
             core,
             clips: Arc::from(clips),
+            segments,
             export_icc_profile,
         }
     }
@@ -291,15 +302,29 @@ impl FrameBuilder {
 impl Prepare for FrameBuilder {
     type Payload = ClipFrames;
 
+    fn frames(&self) -> usize {
+        self.segments.len()
+    }
+
     fn demand(&self) -> Demand {
         demand_of(&self.clips)
     }
 
-    fn estimate(&self, image: &ImageInfo) -> usize {
-        expected_bytes(&self.clips, image)
+    fn estimate(&self, index: usize) -> usize {
+        self.segments
+            .segment_of(index)
+            .map_or(0, |segment| expected_bytes(&self.clips, &segment.info))
     }
 
-    fn build(&self, image: &ImageInfo, index: i32, decoded: DecodedImage) -> Result<Self::Payload> {
+    fn produce(&self, index: usize) -> Result<Self::Payload> {
+        let frame = self.segments.resolve(index)?;
+        let image = &frame.segment.info;
+        let decoded = decode_frame(
+            image,
+            frame.segment.decoder(),
+            frame.presentation,
+            self.demand(),
+        )?;
         ClipFrames::build(
             self.core.core(),
             &self.clips,
@@ -308,6 +333,23 @@ impl Prepare for FrameBuilder {
             decoded,
             self.export_icc_profile,
         )
+    }
+}
+
+/// Decodes one presentation of one segment.
+///
+/// A still goes through the file's own decoder exactly as it did before
+/// animations existed, and an animated file through the decoder that owns its
+/// timeline, which hands back a fully composited logical canvas either way.
+fn decode_frame(
+    image: &ImageInfo,
+    decoder: Option<&Arc<AnimationSource>>,
+    presentation: usize,
+    demand: Demand,
+) -> Result<DecodedImage> {
+    match decoder {
+        Some(source) => source.presentation(presentation),
+        None => decoder::decode(image, demand),
     }
 }
 

@@ -8,7 +8,9 @@ repository's virtual environment active:
 
 from __future__ import annotations
 
+import hashlib
 import os
+import random
 import struct
 import subprocess
 import sys
@@ -1419,6 +1421,140 @@ def test_orientation_container() -> None:
     )
 
 
+def frame_hash(frame) -> str:
+    """Content hash of every plane of a frame, padding excluded."""
+    digest = hashlib.sha256()
+    for plane in range(frame.format.num_planes):
+        digest.update(frame[plane].tobytes())
+    return digest.hexdigest()
+
+
+def test_animation() -> None:
+    """Checks that animated inputs expand to their displayed timeline.
+
+    The four fixture animations all state the same four pictures over 600 ms,
+    so they sample onto the same output timeline whatever their container is:
+    14 frames at 24 fps, and 6 at 10 fps. A still file keeps its one frame, and
+    a list that mixes the two adds up.
+    """
+    # The avif, and every format below it that re-encodes the same source
+    # frames, states four pictures of 80, 170, 110 and 240 ms. The heic fixture
+    # holds four equal 150 ms samples, because the encoder that made it accepts
+    # one duration for the whole sequence, so its pictures land on different
+    # output ticks even though its timeline is the same 600 ms long.
+    animations = [
+        ("animation.png", [0, 2, 6, 9]),
+        ("animation.gif", [0, 2, 6, 9]),
+        ("animation.webp", [0, 2, 6, 9]),
+        ("animation.jxl", [0, 2, 6, 9]),
+        ("animation.avif", [0, 2, 6, 9]),
+        ("animation.heic", [0, 4, 8, 11]),
+    ]
+
+    for name, starts in animations:
+        clip = core.imgseqs.Read(files=[fixture(name)])
+        check(clip.num_frames == 14, f"animation: {name} is 14 frames at 24 fps (got {clip.num_frames})")
+        check(
+            (clip.width, clip.height) == (16, 12),
+            f"animation: {name} is 16x12 (got {clip.width}x{clip.height})",
+        )
+
+        # The pictures start at 0, 80, 250 and 360 ms, so at 24 fps output
+        # frames 0, 2, 6 and 9 are the four distinct presentations.
+        hashes = [frame_hash(clip.get_frame(index)) for index in range(clip.num_frames)]
+        # Each picture is held until the next one starts, and a picture that
+        # becomes visible part way through an output tick is shown from the
+        # first tick at or after it.
+        ends = [*starts[1:], clip.num_frames]
+        for index, (start, end) in enumerate(zip(starts, ends)):
+            check(
+                len({hashes[frame] for frame in range(start, end)}) == 1,
+                f"animation: {name} holds presentation {index} across frames {start}..{end}",
+            )
+        check(
+            len({hashes[start] for start in starts}) == 4,
+            f"animation: {name} shows four distinct pictures",
+        )
+
+        # Random access: a shuffled order has to agree with the sequential one.
+        order = list(range(clip.num_frames))
+        random.Random(7).shuffle(order)
+        for index in order:
+            check(
+                frame_hash(clip.get_frame(index)) == hashes[index],
+                f"animation: {name} frame {index} is the same however it is asked for",
+            )
+
+        # A different output rate maps the same timeline onto different ticks.
+        slower = core.imgseqs.Read(files=[fixture(name)], fpsnum=10, fpsden=1)
+        check(
+            slower.num_frames == 6,
+            f"animation: {name} is 6 frames at 10 fps (got {slower.num_frames})",
+        )
+
+    # A still of a format that has an animation path stays one frame.
+    for name in ["alpha-rgb8.png", "alpha-rgba8.png", "alpha-rgba8.jxl"]:
+        clip = core.imgseqs.Read(files=[fixture(name)])
+        check(
+            clip.num_frames == 1,
+            f"animation: {name} is still one frame (got {clip.num_frames})",
+        )
+
+    # A 16-bit APNG keeps its depth, which is why it is composed here. Its two
+    # pictures hold for 100 ms and 200 ms, so the 300 ms timeline is seven ticks
+    # at 24 fps and the second picture starts at the third.
+    rgba16 = core.imgseqs.ReadAlpha(files=[fixture("animation-rgba16.png")])
+    check(
+        rgba16["clip"].format.name == "RGB48",
+        f"animation: a 16-bit APNG stays 16-bit (got {rgba16['clip'].format.name})",
+    )
+    check(
+        rgba16["clip"].num_frames == 7,
+        f"animation: a 16-bit APNG is 7 frames (got {rgba16['clip'].num_frames})",
+    )
+    sixteen = [frame_hash(rgba16["clip"].get_frame(index)) for index in range(7)]
+    check(
+        len(set(sixteen[:3])) == 1 and len(set(sixteen[3:])) == 1 and sixteen[0] != sixteen[3],
+        "animation: a 16-bit APNG switches picture at the third frame",
+    )
+
+    # Alpha varies between the presentations of an animation.
+    animated = core.imgseqs.ReadAlpha(files=[fixture("animation.png")])
+    colour, alpha = animated["clip"], animated["alpha"]
+    check(colour.num_frames == alpha.num_frames, "animation: both clips have the same length")
+    alpha_hashes = {
+        frame_hash(alpha.get_frame(index))
+        for index in range(alpha.num_frames)
+    }
+    check(len(alpha_hashes) > 1, "animation: the alpha clip varies between presentations")
+
+    # A list that mixes a still with an animation adds up, and the still keeps
+    # its one frame at the front.
+    mixed = core.imgseqs.Read(files=[fixture("animation.gif"), fixture("animation.gif")])
+    check(
+        mixed.num_frames == 28,
+        f"animation: two animations play back to back (got {mixed.num_frames})",
+    )
+
+    # A sequence and a still of another size need mismatch, exactly as two
+    # stills of different sizes do.
+    try:
+        core.imgseqs.Read(files=[fixture("animation.gif"), fixture("alpha-rgb8.png")])
+        check(False, "animation: a mixed-size list is refused without mismatch")
+    except vs.Error as error:
+        check(
+            "expected frame 0" in str(error),
+            "animation: a mixed-size list is refused without mismatch",
+        )
+    variable = core.imgseqs.Read(
+        files=[fixture("animation.gif"), fixture("alpha-rgb8.png")], mismatch=1
+    )
+    check(
+        variable.num_frames == 15,
+        f"animation: mismatch allows a still after an animation (got {variable.num_frames})",
+    )
+
+
 def main() -> None:
     for test in (
         test_rgba8,
@@ -1448,6 +1584,7 @@ def main() -> None:
         test_no_picture,
         test_avif_extents,
         test_alpha_demand,
+        test_animation,
     ):
         print(f"--- {test.__name__}")
         test()

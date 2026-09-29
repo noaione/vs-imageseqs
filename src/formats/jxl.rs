@@ -87,20 +87,24 @@ fn has_jxl_extension(path: &Path) -> bool {
 }
 
 /// What the codestream of a jpeg xl file states about its image.
-struct Header {
+///
+/// Shared with the animation adapter, which reads the same header from its own
+/// scan so that an animated file's frames are built at the depth and colour type
+/// a still one is.
+pub struct Header {
     /// Size the decoder hands the picture out as, which is the size the file
     /// stores with its own orientation already applied.
-    width: u32,
-    height: u32,
+    pub width: u32,
+    pub height: u32,
     /// The orientation the file states, as the code an exif tag carries.
-    orientation: Orientation,
+    pub orientation: Orientation,
     /// Color type the decoded buffer is handed to the frame writer as.
-    color_type: ColorType,
+    pub color_type: ColorType,
     /// The same layout as the `jxl` crate names it, which is what the decoder is
     /// asked for.
-    jxl_color_type: JxlColorType,
+    pub jxl_color_type: JxlColorType,
     /// Sample format the decoder is asked for.
-    data_format: JxlDataFormat,
+    pub data_format: JxlDataFormat,
     /// Bits per sample the codestream states, which is the depth the frame is
     /// built at: a ten bit file is handed out as `Gray10` or `Rgb10` holding the
     /// sample itself rather than as the word it arrives in. A float file states
@@ -125,7 +129,7 @@ struct Header {
 impl Header {
     /// Reads everything the codestream states, from a decoder that has read the
     /// file header and nothing else.
-    fn read(decoder: &JxlDecoder<states::WithImageInfo>, path: &Path) -> Result<Self> {
+    pub fn read(decoder: &JxlDecoder<states::WithImageInfo>, path: &Path) -> Result<Self> {
         let info = decoder.basic_info();
         let (width, height) = size_of(info.size, path)?;
         let extra_channels = info.extra_channels.len();
@@ -168,12 +172,12 @@ impl Header {
     /// bits, sixteen bits and float; the codestream's own depth is what the
     /// frame is built at, so a ten bit file is a ten bit frame whose samples the
     /// writer moves down out of the word. See [`PixelFormat::at_depth`].
-    fn format(&self) -> Option<PixelFormat> {
+    pub fn format(&self) -> Option<PixelFormat> {
         Some(PixelFormat::from_color_type(self.color_type)?.at_depth(self.depth))
     }
 
     /// Pixel format to ask the decoder for.
-    fn pixel_format(&self) -> JxlPixelFormat {
+    pub fn pixel_format(&self) -> JxlPixelFormat {
         JxlPixelFormat {
             color_type: self.jxl_color_type,
             color_data_format: Some(self.data_format),
@@ -632,14 +636,14 @@ fn more_input(input: &mut BufReader<File>, path: &Path) -> Result<()> {
 /// written. A byte vector is aligned for whatever the allocator chose, so the
 /// rare one that is not gets a buffer with room to spare and the front of it
 /// trimmed to the first sample boundary.
-struct Aligned {
+pub struct Aligned {
     storage: Vec<u8>,
     start: usize,
     len: usize,
 }
 
 impl Aligned {
-    fn new(len: usize, alignment: usize) -> Self {
+    pub fn new(len: usize, alignment: usize) -> Self {
         let storage = vec![0; len + alignment];
         let start = (alignment - storage.as_ptr() as usize % alignment) % alignment;
         Self {
@@ -649,7 +653,7 @@ impl Aligned {
         }
     }
 
-    fn bytes(&mut self) -> &mut [u8] {
+    pub fn bytes(&mut self) -> &mut [u8] {
         let start = self.start;
         &mut self.storage[start..start + self.len]
     }

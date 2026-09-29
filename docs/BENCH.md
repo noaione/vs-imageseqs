@@ -800,6 +800,122 @@ check rather than an export-cost measurement. the historical png rows remain
 0.62 s, 1.43 s, and 0.60 s; those absolute values are not compared directly
 with the ICC-bearing copies because ImageMagick regenerated their PNG streams.
 
+## animated sources
+
+[21](improvements/21-animated-images.md) made an animated input contribute its
+displayed timeline instead of one frame, and left two measurements outstanding:
+that a still image pays nothing for it, and what sequential and backward
+playback cost per decoder. Both are below. They were taken on the machine named
+at the end of this section, which is not the windows machine the rest of this
+page was measured on, so their absolute values are not comparable with the
+tables above; every comparison here is between two builds or two orders of the
+same build, measured in one batch.
+
+**a still image pays nothing.** the prefetch pool is now indexed by output frame
+instead of by file, so every still read takes the new path. two builds measured
+in one batch, alternating the order every round, three rounds per configuration,
+best of three, `mismatch=True`, which is what every sandbox set needs. each
+measurement is its own process with its own VapourSynth environment, so the two
+plugins never share a core:
+
+| set | prefetch | before | after | after/before |
+| --- | --- | ---: | ---: | ---: |
+| png 35 | default | 202.8 ms | 201.4 ms | 0.993 |
+| png 35 | 16 | 166.6 ms | 168.1 ms | 1.009 |
+| png 35 | 0 | 556.5 ms | 556.0 ms | 0.999 |
+| webp 35 | default | 2002.1 ms | 1988.0 ms | 0.993 |
+| webp 35 | 16 | 1131.2 ms | 1142.4 ms | 1.010 |
+| webp 35 | 0 | 7019.5 ms | 7002.9 ms | 0.998 |
+| jpeg 35 | default | 1314.2 ms | 1332.6 ms | 1.014 |
+| jpeg 35 | 16 | 895.5 ms | 886.9 ms | 0.990 |
+| jxl 35 | default | 4170.6 ms | 4110.5 ms | 0.986 |
+| jxl 35 | 16 | 2727.0 ms | 2789.0 ms | 1.023 |
+| avif 35 | default | 1568.6 ms | 1551.6 ms | 0.989 |
+| avif 35 | 16 | 1551.7 ms | 1521.5 ms | 0.981 |
+| heic 35 | default | 4040.6 ms | 4052.6 ms | 1.003 |
+| heic 35 | 16 | 2758.7 ms | 2762.6 ms | 1.001 |
+| jp2 35 | default | 9312.8 ms | 9312.0 ms | 1.000 |
+| jp2 35 | 16 | 6215.8 ms | 6132.6 ms | 0.987 |
+| mixed 35 | default | 2334.8 ms | 2321.6 ms | 0.994 |
+| mixed 35 | 16 | 1607.1 ms | 1624.2 ms | 1.011 |
+| mixed 35 | 0 | 7220.3 ms | 7270.1 ms | 1.007 |
+| hitokage 16 | default | 10094.1 ms | 10045.6 ms | 0.995 |
+| hitokage 16 | 16 | 8917.9 ms | 8899.0 ms | 0.998 |
+| hitokage 16 | 0 | 24006.6 ms | 24287.0 ms | 1.012 |
+
+every row is within 2.3% of unchanged, in both directions, which is this
+machine's run-to-run spread rather than a cost: the serial rows, where the
+lookahead cannot hide anything, are the tightest of the set (0.998 to 1.012).
+`hitokage` is 16 files because the set's `png-rgb48be.png` is a zero-byte
+placeholder in this checkout.
+
+the same build through the repository's own harness, `--reps 2 --extra
+--prefetch 16`, which is the table the rest of this page uses:
+
+| set | imgseqs | imgseqs `p=16` | imgseqs `p=0` | bestsource | verdict |
+| --- | ---: | ---: | ---: | ---: | --- |
+| png | 0.21 s | 0.16 s | 0.52 s | 0.24 s | imgseqs 1.21x faster, 3.09x with the open |
+| webp | 2.15 s | 1.13 s | 6.98 s | 1.44 s | bestsource 1.39x faster, imgseqs 1.49x with the open |
+| jpeg | 1.31 s | 0.92 s | 4.56 s | 3.37 s | imgseqs 2.60x faster, 5.11x with the open |
+| jxl | 4.28 s | 2.79 s | 13.32 s | 2.57 s | bestsource 1.64x faster, imgseqs 1.30x with the open |
+| avif | 1.63 s | 1.59 s | 3.59 s | cannot open | 2.30x over its own serial row |
+| heic | 4.06 s | 2.76 s | 13.95 s | cannot open | 3.45x over its own serial row |
+
+the shape is the one this page records on windows — `prefetch=16` is the best
+row on every set, the lookahead is worth 2.3x to 3.5x over the serial row, and
+png and jpeg are where imgseqs wins outright. the one difference is jxl: the
+ffmpeg build on this machine has a jpeg xl decoder, so bestsource reads that set
+here instead of failing with `Video codec not found`.
+
+**sequential and backward playback.** each pass walks the whole clip in a given
+order at `prefetch=0`, so the decode path is what is timed, and the clip is
+rebuilt for every pass because VapourSynth caches the frames of a node and would
+otherwise answer the second walk from its own cache. median of eight passes over
+the committed fixtures, which hold four presentations and so fit the window
+entirely:
+
+| format | frames | forward | reverse | shuffled | reverse/forward |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| APNG | 14 | 0.146 ms | 0.149 ms | 0.152 ms | 1.02x |
+| GIF | 14 | 0.157 ms | 0.168 ms | 0.172 ms | 1.07x |
+| WebP | 14 | 0.167 ms | 0.173 ms | 0.171 ms | 1.03x |
+| JPEG XL | 14 | 0.498 ms | 0.484 ms | 0.464 ms | 0.97x |
+| AVIF | 14 | 1.354 ms | 1.349 ms | 1.369 ms | 1.00x |
+| HEIC | 14 | 1.330 ms | 1.270 ms | 1.280 ms | 0.95x |
+
+an animation shorter than the window is order-independent, which is the window
+doing its job. to see the replay path itself, a 150-presentation corpus (`long.*`
+in /tmp, four times the window; 144 output frames at 24 fps), median of four
+passes, same fresh-clip rule:
+
+| format | presentations | forward | reverse | reverse/forward |
+| --- | ---: | ---: | ---: | ---: |
+| APNG | 150 | 1.57 ms | 2.05 ms | 1.31x |
+| GIF | 150 | 1.58 ms | 2.10 ms | 1.33x |
+| WebP | 150 | 1.77 ms | 2.42 ms | 1.37x |
+| JPEG XL | 150 | 364.31 ms | 531.78 ms | 1.46x |
+| AVIF | 150 | 11.76 ms | 27.94 ms | 2.38x |
+
+the replay cost is what the window buys: a walk that goes backwards past the
+window restarts from the file's beginning, and the 48 presentations the window
+still holds are answered without decoding, so the work is bounded by
+`presentations + window` rather than by their product. the AVIF row is the
+dearest because reopening the track is the expensive part of an AVIF frame,
+which is also why [15](improvements/15-avif-decoder-progress.md) matters there.
+
+**one measured piece of headroom, left in place.** the JPEG XL adapter builds a
+decoder for every presentation, so its forward row above is 2.5 ms per published
+frame on a 32x24 image — the decoder's own setup, not pixels. keeping one
+decoder and walking it forward is 1.6x faster on the committed fixture, but it
+fails on a codestream whose frames are not uniform, with `Invalid channel range:
+3..6, 4 total channels`, so the per-presentation decoder is what shipped. the
+next step there is a decoder that can be continued safely, not one that is
+continued optimistically.
+
+**machine**: macOS on apple silicon, rust release build, plugins at their own
+defaults unless a row says otherwise. these rows were not taken on the windows
+machine the rest of this page describes.
+
 ## known headroom
 
 the numbers point at one thing: a decoder that cannot use more than one core.

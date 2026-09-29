@@ -1489,6 +1489,7 @@ dependencies = [
  "jxl",
  "libheif-rs",
  "pkg-config",
+ "png",
  "vapoursynth4-rs",
  "vcpkg",
 ]

@@ -271,7 +271,7 @@ const fn usable_matrix(matrix: u8) -> bool {
 }
 
 /// The colours libheif is asked for, so that it hands the planes over unconverted.
-fn color_space_of(format: PixelFormat) -> Option<ColorSpace> {
+pub fn color_space_of(format: PixelFormat) -> Option<ColorSpace> {
     match format {
         PixelFormat::Gray8
         | PixelFormat::Gray9
@@ -287,6 +287,17 @@ fn color_space_of(format: PixelFormat) -> Option<ColorSpace> {
         PixelFormat::Yuv444P8 | PixelFormat::Yuv444P10 | PixelFormat::Yuv444P12 => {
             Some(ColorSpace::YCbCr(Chroma::C444))
         }
+        // A colour picture can be coded as full resolution rgb rather than as
+        // yuv, which is what this plugin hands out for one: the still path
+        // reaches it through the `image` decoder, and a sequence track asks
+        // `libheif` for it directly. `C444` is the planar spelling, one plane
+        // per channel, which is the layout a frame is written from; the
+        // interleaved `Rgb` variant would have to be split again here. The
+        // word, not the depth, is what the request names, so a deeper rgb frame
+        // is written from the same planes.
+        PixelFormat::Rgb8 | PixelFormat::Rgb9 | PixelFormat::Rgb10 | PixelFormat::Rgb11
+        | PixelFormat::Rgb12 | PixelFormat::Rgb13 | PixelFormat::Rgb14 | PixelFormat::Rgb15
+        | PixelFormat::Rgb16 => Some(ColorSpace::Rgb(RgbChroma::C444)),
         _ => None,
     }
 }
@@ -587,6 +598,11 @@ fn pack_plane(
     Ok(())
 }
 
+/// Whether `path` names a heif or heic, which is how this module is selected.
+pub fn owns_extension(path: &Path) -> bool {
+    has_heif_extension(path)
+}
+
 fn has_heif_extension(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -709,9 +725,22 @@ mod tests {
         ] {
             assert_eq!(color_space_of(format), Some(colorspace), "{format:?}");
         }
-        for format in [PixelFormat::Rgb8, PixelFormat::Rgb16, PixelFormat::Rgb32F] {
-            assert_eq!(color_space_of(format), None, "{format:?}");
+        // A colour picture coded as full resolution rgb is asked for as planar
+        // rgb, which is the layout a frame is written from.
+        for format in [
+            PixelFormat::Rgb8,
+            PixelFormat::Rgb16,
+            PixelFormat::Rgb10,
+        ] {
+            assert_eq!(
+                color_space_of(format),
+                Some(ColorSpace::Rgb(RgbChroma::C444)),
+                "{format:?}"
+            );
         }
+        // A float frame is not a layout libheif has, and neither is a format
+        // whose planes are not one of the ones above.
+        assert_eq!(color_space_of(PixelFormat::Rgb32F), None);
     }
 
     #[test]

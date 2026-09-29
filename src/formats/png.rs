@@ -26,6 +26,16 @@ const CRC_LENGTH: usize = 4;
 /// past the metadata any real file holds.
 const CHUNK_LIMIT: usize = 1024 * 1024;
 
+/// Whether `path` names a png.
+///
+/// The extension is what selects this module, the same way it selects the
+/// still-image `cICp` reader and the animation adapter above it.
+#[must_use]
+pub fn owns(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+}
+
 /// The colour description a png states with a `cICP` chunk, or `None` when it
 /// has none and when it is not a png at all.
 pub fn cicp(path: &Path) -> Option<Cicp> {

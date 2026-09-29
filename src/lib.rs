@@ -1,3 +1,4 @@
+mod animation;
 mod clip;
 mod color;
 mod decoder;

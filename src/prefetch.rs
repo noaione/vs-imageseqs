@@ -9,7 +9,7 @@ use std::{
 };
 
 use crate::{
-    decoder::{self, DecodedImage, Demand, ImageInfo},
+    decoder::Demand,
     error::{ImgSeqError, Result},
 };
 
@@ -68,14 +68,22 @@ pub trait Payload: Clone + Send + 'static {
     fn bytes(&self) -> usize;
 }
 
-/// Turns one decoded image into the payload the clips of a call ask for.
+/// Turns one output frame into the payload the clips of a call ask for.
 ///
-/// Decoding and payload building both happen on the worker that read the file,
-/// so the thread that answers a request only hands out what is already
+/// Decoding and payload building both happen on the worker that produced the
+/// frame, so the thread that answers a request only hands out what is already
 /// finished.
+///
+/// One output frame is not always one file: an animated source expands a single
+/// path into several frames, and the implementor is what knows which
+/// presentation of which file an index names. The pool only ever counts frames,
+/// which is why it can stay unaware of that.
 pub trait Prepare: Send + Sync + 'static {
     /// What a request for one index hands out.
     type Payload: Payload;
+
+    /// Number of output frames the sequence has.
+    fn frames(&self) -> usize;
 
     /// What the decode that feeds this payload has to produce.
     ///
@@ -86,18 +94,18 @@ pub trait Prepare: Send + Sync + 'static {
     /// as the opaque fill but cannot recover the file's own plane from.
     fn demand(&self) -> Demand;
 
-    /// Payload bytes one image is expected to hold.
+    /// Payload bytes one output frame is expected to hold.
     ///
     /// This is what the lookahead budget is sized from, before anything is
     /// decoded; [`Payload::bytes`] reports what a payload really holds.
-    fn estimate(&self, image: &ImageInfo) -> usize;
+    fn estimate(&self, index: usize) -> usize;
 
-    /// Builds the payload of one decoded image.
+    /// Decodes one output frame and builds its payload, on the calling thread.
     ///
     /// # Errors
     ///
-    /// Returns [`ImgSeqError`] when the image cannot be turned into a payload.
-    fn build(&self, image: &ImageInfo, index: i32, decoded: DecodedImage) -> Result<Self::Payload>;
+    /// Returns [`ImgSeqError`] when the frame cannot be decoded or written.
+    fn produce(&self, index: usize) -> Result<Self::Payload>;
 }
 
 struct Shared<P: Prepare> {
@@ -142,8 +150,7 @@ struct State<P: Prepare> {
 /// decodes stay cached until they are evicted, so a filter that returns several
 /// clips shares one decode per frame.
 pub struct Prefetcher<P: Prepare> {
-    images: Arc<[ImageInfo]>,
-    /// Payload bytes of every image, in the same order as `images`.
+    /// Payload bytes of every output frame, in frame order.
     sizes: Arc<[usize]>,
     shared: Arc<Shared<P>>,
     workers: Vec<JoinHandle<()>>,
@@ -157,21 +164,15 @@ impl<P: Prepare> Prefetcher<P> {
     /// is the amount of payload data the pool may hold or have in flight;
     /// `None` derives it from the window and the largest payload of the
     /// sequence, see [`automatic_budget`].
-    pub fn new(
-        images: Arc<[ImageInfo]>,
-        prepare: P,
-        workers: usize,
-        budget: Option<usize>,
-    ) -> Self {
+    pub fn new(prepare: P, workers: usize, budget: Option<usize>) -> Self {
         let workers = workers.min(MAX_WORKERS);
         let window = if workers == 0 {
             0
         } else {
             (workers + 2).min(MAX_WINDOW)
         };
-        let sizes: Arc<[usize]> = images
-            .iter()
-            .map(|image| prepare.estimate(image))
+        let sizes: Arc<[usize]> = (0..prepare.frames())
+            .map(|index| prepare.estimate(index))
             .collect::<Vec<_>>()
             .into();
         let budget = budget.unwrap_or_else(|| automatic_budget(&sizes, window));
@@ -196,16 +197,14 @@ impl<P: Prepare> Prefetcher<P> {
         let workers = (0..workers)
             .map(|_| {
                 let shared = Arc::clone(&shared);
-                let images = Arc::clone(&images);
                 thread::Builder::new()
                     .name(String::from("imgseqs-prefetch"))
-                    .spawn(move || worker(&shared, &images))
+                    .spawn(move || worker(&shared))
                     .expect("spawning a prefetch worker should succeed")
             })
             .collect();
 
         Self {
-            images,
             sizes,
             shared,
             workers,
@@ -282,19 +281,15 @@ impl<P: Prepare> Prefetcher<P> {
         }
     }
 
-    /// Decodes one image and builds its payload, on the calling thread.
+    /// Decodes one output frame and builds its payload, on the calling thread.
     fn build(&self, index: i32) -> Result<P::Payload> {
-        let image = self.image(index)?;
-        let decoded = decoder::decode(image, self.shared.prepare.demand())?;
-        self.shared.prepare.build(image, index, decoded)
-    }
-
-    /// Image of one frame index.
-    fn image(&self, index: i32) -> Result<&ImageInfo> {
-        usize::try_from(index)
+        let Some(index) = usize::try_from(index)
             .ok()
-            .and_then(|index| self.images.get(index))
-            .ok_or_else(|| out_of_range(index, self.images.len()))
+            .filter(|&index| index < self.shared.prepare.frames())
+        else {
+            return Err(out_of_range(index, self.shared.prepare.frames()));
+        };
+        self.shared.prepare.produce(index)
     }
 
     /// Records the request and queues the following frames when the access
@@ -437,7 +432,7 @@ fn out_of_range(index: i32, frames: usize) -> ImgSeqError {
     ))
 }
 
-fn worker<P: Prepare>(shared: &Shared<P>, images: &[ImageInfo]) {
+fn worker<P: Prepare>(shared: &Shared<P>) {
     loop {
         let (generation, index) = {
             let mut state = shared
@@ -463,17 +458,15 @@ fn worker<P: Prepare>(shared: &Shared<P>, images: &[ImageInfo]) {
             (generation, index)
         };
 
-        // The queue only ever holds indices of this sequence, so an image that
-        // is missing here is a bug rather than a failed decode.
-        let result = match images.get(usize::try_from(index).unwrap_or(usize::MAX)) {
-            Some(image) => match decoder::decode(image, shared.prepare.demand()) {
-                Ok(decoded) => shared
-                    .prepare
-                    .build(image, index, decoded)
-                    .map_err(|error| error.to_string()),
-                Err(error) => Err(error.to_string()),
-            },
-            None => Err(out_of_range(index, images.len()).to_string()),
+        let result = match usize::try_from(index)
+            .ok()
+            .filter(|&index| index < shared.prepare.frames())
+        {
+            Some(index) => shared
+                .prepare
+                .produce(index)
+                .map_err(|error| error.to_string()),
+            None => Err(out_of_range(index, shared.prepare.frames()).to_string()),
         };
 
         let mut state = shared
@@ -634,8 +627,21 @@ mod tests {
     ///
     /// The scheduler only cares about how many bytes a payload holds and when
     /// it is ready, so the real payload, which builds VapourSynth frames, is
-    /// only exercised from a graph.
-    struct Decode;
+    /// only exercised from a graph. One file is one output frame here, which is
+    /// what a sequence of stills is.
+    struct Decode {
+        images: Arc<[ImageInfo]>,
+    }
+
+    impl Decode {
+        fn of(images: Arc<[ImageInfo]>) -> Self {
+            Self { images }
+        }
+
+        fn named(names: &[&str]) -> Self {
+            Self::of(images(names))
+        }
+    }
 
     impl Payload for Arc<DecodedImage> {
         fn bytes(&self) -> usize {
@@ -657,20 +663,23 @@ mod tests {
     impl Prepare for Decode {
         type Payload = Arc<DecodedImage>;
 
+        fn frames(&self) -> usize {
+            self.images.len()
+        }
+
         fn demand(&self) -> Demand {
             Demand::ALL
         }
 
-        fn estimate(&self, image: &ImageInfo) -> usize {
-            bytes(image)
+        fn estimate(&self, index: usize) -> usize {
+            self.images.get(index).map_or(0, |image| bytes(image))
         }
 
-        fn build(
-            &self,
-            _image: &ImageInfo,
-            _index: i32,
-            decoded: DecodedImage,
-        ) -> Result<Arc<DecodedImage>> {
+        fn produce(&self, index: usize) -> Result<Arc<DecodedImage>> {
+            let image = self.images.get(index).ok_or_else(|| {
+                super::out_of_range(i32::try_from(index).unwrap_or(i32::MAX), self.images.len())
+            })?;
+            let decoded = decoder::decode(image, Demand::ALL)?;
             Ok(Arc::new(decoded))
         }
     }
@@ -698,7 +707,7 @@ mod tests {
     #[test]
     fn shares_one_decode_between_consumers() {
         for workers in [0, 2] {
-            let prefetcher = Prefetcher::new(images(&["gray.pgm"]), Decode, workers, None);
+            let prefetcher = Prefetcher::new(Decode::named(&["gray.pgm"]), workers, None);
             let first = prefetcher.fetch(0).expect("the fixture decodes");
             // Another clip asking for the same frame must reuse the decode
             // instead of reading the file a second time.
@@ -709,7 +718,7 @@ mod tests {
 
     #[test]
     fn keeps_frames_of_a_variable_sequence_apart() {
-        let prefetcher = Prefetcher::new(images(&["gray.pgm", "rgb.ppm"]), Decode, 0, None);
+        let prefetcher = Prefetcher::new(Decode::named(&["gray.pgm", "rgb.ppm"]), 0, None);
         let gray = prefetcher.fetch(0).expect("the first fixture decodes");
         let rgb = prefetcher.fetch(1).expect("the second fixture decodes");
         assert_ne!(gray.format, rgb.format);
@@ -724,7 +733,7 @@ mod tests {
         let mut info = decoder::probe(&source, true, false).expect("the fixture probes");
         info.path = temp.clone();
 
-        let prefetcher = Prefetcher::new(vec![info].into(), Decode, 0, None);
+        let prefetcher = Prefetcher::new(Decode::of(vec![info].into()), 0, None);
         assert!(
             prefetcher.fetch(0).is_err(),
             "a missing file reports an error"
@@ -767,7 +776,7 @@ mod tests {
 
     #[test]
     fn a_budget_too_small_for_one_frame_still_delivers() {
-        let prefetcher = Prefetcher::new(images(&["gray.pgm", "rgb.ppm"]), Decode, 2, Some(1));
+        let prefetcher = Prefetcher::new(Decode::named(&["gray.pgm", "rgb.ppm"]), 2, Some(1));
         for index in 0..2 {
             assert!(
                 prefetcher.fetch(index).is_ok(),

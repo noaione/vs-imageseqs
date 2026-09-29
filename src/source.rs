@@ -17,8 +17,8 @@ use vapoursynth4_rs::{
 };
 
 use crate::{
+    animation::{Rate, SegmentTable},
     clip::{Clip, FrameBuilder, READ_ALPHA_CLIPS, READ_CLIPS, query_format},
-    decoder::{self, ImageInfo},
     error::{ImgSeqError, Result},
     pixel::PixelFormat,
     prefetch::{self, Prefetcher},
@@ -42,7 +42,10 @@ pub struct ReadAlpha {
 
 /// State shared by every clip of one `Read` or `ReadAlpha` call.
 struct Sequence {
-    images: Arc<[ImageInfo]>,
+    /// The output timeline: which file and which presentation every frame
+    /// index names. A still file contributes one frame; an animation
+    /// contributes its sampled timeline.
+    segments: Arc<SegmentTable>,
     /// Holds finished frames, so a request never decodes or writes pixels.
     prefetcher: Arc<Prefetcher<FrameBuilder>>,
     debug: bool,
@@ -57,7 +60,7 @@ struct SetupTimings {
 
 /// Validated arguments of one `Read` or `ReadAlpha` call.
 struct SequenceArgs {
-    images: Arc<[ImageInfo]>,
+    segments: Arc<SegmentTable>,
     prefetcher: Arc<Prefetcher<FrameBuilder>>,
     format: PixelFormat,
     width: i32,
@@ -108,18 +111,24 @@ impl SequenceArgs {
         let (fps_num, fps_den) = reduce_fps(fps_num, fps_den)?;
 
         let probe_started = Instant::now();
-        let images = files
-            .iter()
-            .map(|path| decoder::probe(path, apply_rotation, export_icc_profile))
-            .collect::<Result<Vec<_>>>()?;
+        let segments = crate::decoder::probe_segments(
+            &files,
+            Rate::from_fps(fps_num, fps_den),
+            apply_rotation,
+            export_icc_profile,
+        )?;
         let probe = probe_started.elapsed();
 
         let validate_started = Instant::now();
-        let images: Arc<[ImageInfo]> = validate_images(images, mismatch)?.into();
+        let segments = validate_segments(segments, mismatch)?;
         let validate = validate_started.elapsed();
-        let num_frames = i32::try_from(images.len())
+        let num_frames = i32::try_from(segments.len())
             .map_err(|_| ImgSeqError::new("the image sequence has too many frames"))?;
-        let variable = mismatch && has_format_mismatch(&images);
+        let variable = mismatch && has_format_mismatch(&segments);
+        let first = segments
+            .segments()
+            .first()
+            .ok_or_else(|| ImgSeqError::new("Read requires at least one file"))?;
         // The clip is the size the frames are written as, which a transposing
         // orientation swaps relative to the size the files hold. Deciding it
         // here is what lets `mismatch=0` reject a folder that mixes a rotated
@@ -127,23 +136,30 @@ impl SequenceArgs {
         let (width, height) = if variable {
             (0, 0)
         } else {
+            let (width, height) = first.output_size();
             (
-                i32::try_from(images[0].output_width())
+                i32::try_from(width)
                     .map_err(|_| ImgSeqError::new("image width does not fit VapourSynth"))?,
-                i32::try_from(images[0].output_height())
+                i32::try_from(height)
                     .map_err(|_| ImgSeqError::new("image height does not fit VapourSynth"))?,
             )
         };
+        let format = first.info.format;
+        let segments: Arc<SegmentTable> = Arc::new(segments);
 
         Ok(Self {
-            format: images[0].format,
+            format,
             prefetcher: Arc::new(Prefetcher::new(
-                Arc::clone(&images),
-                FrameBuilder::new(core, clips, export_icc_profile),
+                FrameBuilder::new(
+                    core,
+                    clips,
+                    Arc::clone(&segments),
+                    export_icc_profile,
+                ),
                 prefetch_workers,
                 prefetch_memory,
             )),
-            images,
+            segments,
             width,
             height,
             fps_num,
@@ -188,7 +204,7 @@ impl SequenceArgs {
     /// Keeps the state frame requests need and drops the setup-only fields.
     fn into_sequence(self) -> Arc<Sequence> {
         Arc::new(Sequence {
-            images: self.images,
+            segments: self.segments,
             prefetcher: self.prefetcher,
             debug: self.debug,
         })
@@ -328,12 +344,8 @@ fn clip_frame(
     let frame_started = Instant::now();
     let index =
         usize::try_from(n).map_err(|_| ImgSeqError::new(format!("requested invalid frame {n}")))?;
-    let image = sequence.images.get(index).ok_or_else(|| {
-        ImgSeqError::new(format!(
-            "requested frame {n}, but the clip has {} frames",
-            sequence.images.len()
-        ))
-    })?;
+    let resolved = sequence.segments.resolve(index)?;
+    let image = &resolved.segment.info;
     let fetch_started = Instant::now();
     let frames = sequence.prefetcher.fetch(n)?;
     let fetch = fetch_started.elapsed();
@@ -345,10 +357,14 @@ fn clip_frame(
         log_debug(
             &mut core,
             format_args!(
-                "frame {} '{}' ({}): fetch={} decode={} (open={} metadata={} buffer={} read={}) format={} allocate={} convert={} properties={} total={}",
+                "frame {} '{}' ({}): timeline={}/{} presentation={} frame_in_segment={} fetch={} decode={} (open={} metadata={} buffer={} read={}) format={} allocate={} convert={} properties={} total={}",
                 n,
                 image.path.display(),
                 clip.name(),
+                resolved.segment.rate.num,
+                resolved.segment.rate.den,
+                resolved.presentation,
+                resolved.local,
                 format_duration(fetch),
                 format_duration(decode.open + decode.metadata + decode.buffer + decode.read),
                 format_duration(decode.open),
@@ -379,9 +395,10 @@ fn log_create(core: &mut CoreRef<'_>, args: &SequenceArgs, clips: &[Clip]) {
     log_debug(
         core,
         format_args!(
-            "create: frames={} clips={} mismatch={} variable={} apply_rotation={} icc_profile={} probe={} validate={} prefetch={} prefetch_memory={} total={}",
-            args.images.len(),
+            "create: frames={} clips={} animated={} mismatch={} variable={} apply_rotation={} icc_profile={} probe={} validate={} prefetch={} prefetch_memory={} total={}",
+            args.segments.len(),
             clips,
+            args.segments.animated_segments(),
             args.mismatch,
             args.variable,
             args.apply_rotation,
@@ -493,42 +510,50 @@ fn gcd(mut left: i64, mut right: i64) -> i64 {
     left.abs()
 }
 
-fn validate_images(images: Vec<ImageInfo>, mismatch: bool) -> Result<Vec<ImageInfo>> {
-    let first = images
+/// Refuses a sequence whose segments do not agree on a size and format.
+///
+/// One segment is one input path, whatever number of output frames it
+/// contributes, and the comparison is between the sizes the frames are handed
+/// out as rather than the sizes the files store. An animation's own frames are
+/// checked where it is probed, because a container that changes size or format
+/// part way through its timeline is a malformed one rather than a `mismatch`
+/// question.
+fn validate_segments(segments: SegmentTable, mismatch: bool) -> Result<SegmentTable> {
+    let first = segments
+        .segments()
         .first()
         .ok_or_else(|| ImgSeqError::new("Read requires at least one file"))?;
     if !mismatch {
-        for (index, image) in images.iter().enumerate().skip(1) {
-            // The size the frames will be is the size the image is handed out
-            // as, so that is what a folder has to agree on.
-            if image.output_width() != first.output_width()
-                || image.output_height() != first.output_height()
-                || image.format != first.format
-            {
+        for (index, segment) in segments.segments().iter().enumerate().skip(1) {
+            if !segment.matches(first) {
+                let (width, height) = segment.output_size();
+                let (first_width, first_height) = first.output_size();
                 return Err(ImgSeqError::new(format!(
                     "frame {index} ('{}') has {}x{} {}, expected frame 0 ('{}') to be {}x{} {}",
-                    image.path.display(),
-                    image.output_width(),
-                    image.output_height(),
-                    image.format.name(),
-                    first.path.display(),
-                    first.output_width(),
-                    first.output_height(),
-                    first.format.name(),
+                    segment.info.path.display(),
+                    width,
+                    height,
+                    segment.info.format.name(),
+                    first.info.path.display(),
+                    first_width,
+                    first_height,
+                    first.info.format.name(),
                 )));
             }
         }
     }
-    Ok(images)
+    Ok(segments)
 }
 
-fn has_format_mismatch(images: &[ImageInfo]) -> bool {
-    let first = &images[0];
-    images.iter().skip(1).any(|image| {
-        image.output_width() != first.output_width()
-            || image.output_height() != first.output_height()
-            || image.format != first.format
-    })
+fn has_format_mismatch(segments: &SegmentTable) -> bool {
+    let Some(first) = segments.segments().first() else {
+        return false;
+    };
+    segments
+        .segments()
+        .iter()
+        .skip(1)
+        .any(|segment| !segment.matches(first))
 }
 
 fn undefined_video_format() -> vapoursynth4_rs::frame::VideoFormat {
