@@ -75,6 +75,7 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
 
 - Write the README for people using the project. Use direct wording and simple language.
 - Prefer lowercase headings and labels where it reads naturally. Keep proper capitalization for names and technical terms that require it.
+- Use full GitHub URLs for README links to repository files. Relative links do not work when the README is rendered on PyPI.
 - Never end a list item with a semicolon. Use a full stop or no terminal punctuation.
 
 ## source layout

@@ -193,8 +193,8 @@ provides values it can represent.
 
 The plugin probes image metadata when it creates a clip and decodes pixels when
 frames are requested. Background workers can read upcoming frames. See the
-[benchmark notes](docs/BENCH.md) for results and instructions to compare against
-BestSource.
+[benchmark notes](https://github.com/noaione/vs-imageseqs/blob/master/docs/BENCH.md)
+for results and instructions to compare against BestSource.
 
 ## build from source
 
@@ -220,11 +220,12 @@ python -m pip install ".[dev]"
 python -m build
 ```
 
-Windows builds use vcpkg. See [Linux build and validation](docs/LINUX-BUILD.md)
+Windows builds use vcpkg. See [Linux build and validation](https://github.com/noaione/vs-imageseqs/blob/master/docs/LINUX-BUILD.md)
 for details about Linux release builds.
 
 ## license
 
-The plugin is licensed under the Mozilla Public License 2.0. See [LICENSE](LICENSE).
+The plugin is licensed under the Mozilla Public License 2.0. See [LICENSE](https://github.com/noaione/vs-imageseqs/blob/master/LICENSE).
 The included native libraries have their own licenses. See
-[THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) and [LICENSES](LICENSES) for details.
+[THIRD_PARTY_NOTICES](https://github.com/noaione/vs-imageseqs/blob/master/THIRD_PARTY_NOTICES)
+and [LICENSES](https://github.com/noaione/vs-imageseqs/tree/master/LICENSES) for details.
