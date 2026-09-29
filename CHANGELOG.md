@@ -2,6 +2,10 @@
 
 ## unreleased
 
+nothing yet!
+
+## [0.2.0] - 2026-09-30
+
 ### added
 
 - animated GIF, APNG, WebP, JPEG XL, AVIF and HEIF/HEIC inputs now play their
