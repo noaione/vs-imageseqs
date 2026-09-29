@@ -71,6 +71,12 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
 - NEVER commit anything yourselves, this should be done by human maintainers only. if you need to commit something, please ask for permission first.
 - ALWAYS try to update CHANGELOG.md with your changes, if you are unsure about what to write, please ask for help.
 
+## writing
+
+- Write the README for people using the project. Use direct wording and simple language.
+- Prefer lowercase headings and labels where it reads naturally. Keep proper capitalization for names and technical terms that require it.
+- Never end a list item with a semicolon. Use a full stop or no terminal punctuation.
+
 ## source layout
 
 - `src/lib.rs`: plugin declaration and registration.

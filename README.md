@@ -2,85 +2,56 @@
 
 [![uv powered](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
 [![License](https://img.shields.io/github/license/noaione/vs-imageseqs)](https://github.com/noaione/vs-imageseqs/blob/master/LICENSE)
-![VapourSynth Version](https://img.shields.io/badge/vapoursynth-%3E%3DR79-blue) [![build](https://github.com/noaione/vs-imageseqs/actions/workflows/build.yml/badge.svg)](https://github.com/noaione/vs-imageseqs/actions/workflows/build.yml) [![rust tests](https://github.com/noaione/vs-imageseqs/actions/workflows/rust-tests.yml/badge.svg)](https://github.com/noaione/vs-imageseqs/actions/workflows/rust-tests.yml)
+![VapourSynth version](https://img.shields.io/badge/vapoursynth-%3E%3DR79-blue) [![build](https://github.com/noaione/vs-imageseqs/actions/workflows/build.yml/badge.svg)](https://github.com/noaione/vs-imageseqs/actions/workflows/build.yml) [![rust tests](https://github.com/noaione/vs-imageseqs/actions/workflows/rust-tests.yml/badge.svg)](https://github.com/noaione/vs-imageseqs/actions/workflows/rust-tests.yml)
 
-a rust vapoursynth source plugin for reading an ordered list of images as a
-clip.
+`vapoursynth-imageseqs` is a VapourSynth plugin that reads image files in the
+order you provide and turns them into a clip. Each file contributes one frame.
 
-## features
+## what it does
 
-- one frame per file, in the order supplied to `Read` or `ReadAlpha`;
-- separate color and alpha clips with depth-preserving opaque alpha fallback;
-- lots of [formats](#formats) support
-- native YUV output for supported WebP, HEIF/HEIC, AVIF, and JPEG 2000 files;
-- nominal 9–15-bit preservation, including 10/12-bit gray, RGB, alpha, and
-  YUV formats;
-- EXIF and codestream orientation handling with an `apply_rotation` switch;
-- CICP/container color metadata and optional raw ICC export through
-  `ICCProfile`;
-- background prefetching, bounded lookahead memory, variable-format clips.
+- reads an ordered list of image files
+- provides a color clip and, when requested, a separate alpha clip
+- keeps supported image bit depths and color formats
+- can return the source's YUV planes for supported formats
+- reads image orientation and color information
+- decodes frames in the background to help playback
 
-## requirements
-
-for normal use:
-
-- VapourSynth R79 or newer;
-- Python 3.12 or newer when installing the wheel;
-- the plugin binary for the current operating system and architecture.
-
-the wheel does not install VapourSynth or a Python helper module. Linux release
-wheels target x86-64 with glibc 2.28 or newer and bundle the `dav1d` and
-`libde265` shared libraries. macOS builds still need those libraries at runtime.
-Windows artifacts use the static `x64-windows-static-md` vcpkg triplet.
-
-Plugin ZIPs include an `imageseqs/` directory with `manifest.vs`. Copy that
-whole directory into VapourSynth's plugins directory; Linux also includes
-the required codec libraries in `imageseqs/lib/`. See
-[Linux build and validation](docs/LINUX-BUILD.md) for the auditwheel pipeline
-and the release's relinking source bundle.
-
-for source builds:
-
-- Rust 1.88 or newer and Cargo;
-- CMake, Ninja, and pkg-config;
-- Debian/Ubuntu: `libdav1d-dev`, `libde265-dev`, and `libwebp-dev`;
-- macOS: Homebrew `dav1d`, `libde265`, and `webp` packages;
-- Windows: vcpkg with the `x64-windows-static-md` triplet.
-
-JPEG 2000 uses bundled OpenJPEG sources, and libheif is built as part of the
-project. see the build section for platform commands and the legal files for
-native dependency obligations.
+Animated files currently contribute one frame each.
 
 ## install
 
-the python wheel is plugin-only. it installs the native library at
-`vapoursynth/plugins/imageseqs/` with `manifest.vs` and does not add a python module.
+Install the wheel with pip:
 
 ```console
 python -m pip install vapoursynth-imageseqs
 ```
 
-You can also download the matching DLL/so/dylib from ci artifact/release
-and copy its native file into your vapoursynth plugin directory:
+The wheel installs the plugin and its manifest under VapourSynth's plugin
+directory. It does not install VapourSynth itself. You need VapourSynth R79 or
+newer.
 
-| platform | file |
-| --- | --- |
-| windows | `vs_imageseqs.dll` |
-| linux | `libvs_imageseqs.so` |
-| macos arm64 | `libvs_imageseqs.dylib` |
-
-if vapoursynth does not find it automatically, load it explicitly:
+You can also download a plugin zip from the project's releases or CI artifacts.
+Copy the included `imageseqs` folder into VapourSynth's plugin directory. If it
+does not load automatically, call `LoadPlugin` with the path to your plugin file:
 
 ```python
-core.std.LoadPlugin(r"path/to/vs_imageseqs.dll")
+core.std.LoadPlugin(r"path/to/plugin-library")
 ```
 
-the ci artifact and wheel include `LICENSE`, `THIRD_PARTY_NOTICES`, and
-`LICENSES/`.
+Use the plugin file for your system:
 
-## use
+| system | plugin file |
+| --- | --- |
+| Windows | `vs_imageseqs.dll` |
+| Linux | `libvs_imageseqs.so` |
+| macOS arm64 | `libvs_imageseqs.dylib` |
 
-pass files in the order they should become frames:
+Linux release wheels include the required `dav1d` and `libde265` libraries.
+macOS builds need those libraries installed. Windows builds use static libraries.
+
+## quick start
+
+Pass the files in the order you want them to appear in the clip:
 
 ```python
 from pathlib import Path
@@ -97,123 +68,85 @@ clip = core.imgseqs.Read(
 )
 ```
 
-`Read` returns the color clip. `ReadAlpha` returns a dictionary containing the
-color clip and a separate gray alpha clip:
+`Read` returns the color clip. `ReadAlpha` returns the color clip and a separate
+gray clip containing alpha:
 
 ```python
 result = core.imgseqs.ReadAlpha(files=[str(path) for path in files])
-clip, alpha = result["clip"], result["alpha"]
+clip = result["clip"]
+alpha = result["alpha"]
 ```
 
-### arguments
+Files without alpha get a fully opaque alpha frame.
 
-| argument | default | meaning |
+## options
+
+| option | default | what it does |
 | --- | --- | --- |
-| `files` | required | ordered image paths |
-| `fpsnum`, `fpsden` | `24/1` | output frame rate |
-| `mismatch` | `False` | allow variable sizes and pixel formats |
-| `apply_rotation` | `True` | apply the file's exif/codestream/container orientation |
-| `icc_profile` | `False` | expose embedded ICC bytes as `ICCProfile` |
-| `debug` | `False` | log create and per-frame timings |
-| `prefetch` | half the logical cores, capped at 4 | background decode workers; `0` disables lookahead |
-| `prefetch_memory` | max of 192 MiB and one largest frame per worker | lookahead budget in MiB; `0` is invalid |
+| `files` | required | Image paths, in frame order. |
+| `fpsnum`, `fpsden` | `24`, `1` | Set the clip's frame rate. |
+| `mismatch` | `False` | Allow files with different sizes or pixel formats. |
+| `apply_rotation` | `True` | Apply the orientation stored in the image. |
+| `icc_profile` | `False` | Copy embedded ICC profile bytes to the `ICCProfile` frame property. |
+| `debug` | `False` | Write timing information to the VapourSynth log. |
+| `prefetch` | half of your logical CPU cores, up to 4 | Set the number of background decode workers. Use `0` to disable lookahead. |
+| `prefetch_memory` | 192 MiB minimum, more for large images | Set the memory limit for frames waiting to be read. `0` is invalid. |
 
-without `mismatch`, every file must have the same size and format. with it,
-each frame keeps its own size and format.
+Without `mismatch=True`, all files must have the same size and pixel format.
+With it, each frame can keep its own size and format. Downstream filters may
+still require you to convert the clip to one consistent format.
 
-rotation applies the displayed orientation by default. orientations 5–8 swap
-width and height, and `ImgSeqOrientation` still reports the original code.
-`apply_rotation=False` keeps the stored picture and stored size. a rotated and
-an upright file therefore need `mismatch=True` when rotation is enabled.
+The plugin applies image orientation by default. Some orientations swap the
+frame's width and height. Set `apply_rotation=False` to keep the stored image
+size and pixel order.
 
-a file states its orientation in one of three ways, and `ImgSeqOrientation`
-carries whichever one it used: the exif tag of a png, webp or jpeg, the
-codestream header of a jpeg xl, or the `irot` and `imir` item properties of an
-avif or heif/heic, whose every combination is one of the eight exif codes.
-a container transform is normative for those two formats, so an exif tag beside
-one is informational and is not applied on top of it.
+## supported formats
 
-`debug=True` logs probing, decoding, allocation, pixel conversion, properties,
-and total frame time to the vapoursynth log.
-
-## formats
-
-| input | notes |
+| formats | notes |
 | --- | --- |
-| png, jpeg, bmp, gif, ico, tiff | standard image decoder |
-| dds | image's DXT1, DXT3, and DXT5 decoder |
-| farbfeld | 16-bit RGBA input |
-| webp | libwebp; lossy opaque files use `YUV420P8` |
-| avif | dav1d; monochrome uses `Gray8`/`Gray10`/`Gray12`, color may use its YUV planes |
-| heif, heic | libheif/libde265; monochrome uses `Gray8`/`Gray10`/`Gray12`, color may use its YUV planes |
-| jxl | jpeg xl decoder |
-| jp2, j2k, jpf, jpx, j2c | JPEG 2000 through OpenJPEG; gray/RGB at 8–16 bits, and sYCC may use YUV planes |
-| exr, hdr, pnm, qoi, tga | standard image decoder |
+| PNG, JPEG, BMP, GIF, ICO, TIFF | Standard image formats. |
+| DDS | DXT1, DXT3, and DXT5 images. |
+| Farbfeld | 16-bit RGBA images. |
+| WebP | Lossy opaque images can be returned as YUV. |
+| AVIF | Monochrome images can be gray; color images may keep their YUV planes. |
+| HEIF, HEIC | Monochrome images can be gray; color images may keep their YUV planes. |
+| JPEG XL | Decoded by the JPEG XL library. |
+| JPEG 2000 | JP2, J2K, JPF, JPX, and J2C files. Some files can be returned as YUV. |
+| EXR, HDR, PNM, QOI, TGA | Standard image formats. |
 
-supported output includes gray and rgb at 8–16 bits, rgb 32-bit float, and the
-YUV formats needed by the source: `YUV420P8`, `YUV420P10`, `YUV422P8`,
-`YUV422P10`, `YUV444P8`, `YUV444P10`, `YUV444P12`, and `YUV444P16`.
+The plugin supports gray and RGB images from 8 to 16 bits, 32-bit float RGB,
+and several YUV formats. For image formats that state a 9–15-bit depth, the
+plugin uses the matching VapourSynth format, such as `Gray12` or `RGB30` for a
+10-bit RGB image.
 
-`Read` ignores alpha. `ReadAlpha` uses the source depth for alpha: `Gray8`–
-`Gray16`, or `GrayS`. the alpha channel is the second channel of `LA` and the
-fourth channel of `RGBA`. files without alpha get an opaque plane filled with
-the format maximum (`255`, `1023`, `4095`, `65535`, or `1.0`).
+## alpha and color
 
-both clips share the frame count, rate, and indexes. each file is decoded once,
-and `mismatch` applies to both clips.
+`Read` returns color only. `ReadAlpha` returns a separate gray alpha clip. Its
+bit depth matches the source where possible. Images without alpha receive an
+opaque plane, filled with the maximum value for that depth.
 
-a file that cannot produce a picture is reported as a decode error naming the
-file rather than stalling the frame request; an avif whose item holds no coded
-frame is the case the tests cover.
+The plugin reads color information from supported file metadata and adds it to
+VapourSynth frame properties. It does not change pixel values to apply an ICC
+color transform. Set `icc_profile=True` to include the raw ICC profile bytes in
+`ICCProfile`. The `ImgSeqHasICC` property reports whether the source contains a
+profile, whether or not you export the bytes.
 
-an avif whose primary item this plugin's own reader cannot decode — a grid of
-tiles, an item split over several extents, a construction method it does not
-follow — is handed to `image`'s avif decoder instead, so the clip is created with
-the RGB format that decoder produces rather than with the YUV the samples are.
-That decoder joins an item written as several extents; a grid of tiles is the one
-layout neither of them joins.
-
-### nominal bit depth
-
-when a container states 9–16 bits, the frame format names that depth and the
-samples are right-aligned in its word. for example, a ten-bit avif is `RGB30`
-with samples in `0..1023`, not `RGB48` with sixteen-bit-scaled samples. this
-also applies to gray and alpha. files with no stated depth, 8-bit files,
-16-bit files, and float files keep their decoder format.
-
-### yuv output
-
-the plugin keeps a file's own YUV planes when its container names a matrix that
-vapoursynth understands:
-
-- lossy webp without alpha: `YUV420P8`, `_Matrix=5`, `_Range=0`;
-- color heif/heic/avif: the source planes, such as `YUV420P8` or `YUV444P10`,
-  tagged from the file's matrix and range.
-
-an unspecified matrix (`2`) or no matrix keeps the RGB frame the plugin builds.
-lossless webp, webp with alpha, and other formats stay RGB or gray. use
-`resize` when a downstream filter needs RGB:
+When a supported source is YUV, the plugin may return those planes directly.
+VapourSynth's resize filters can convert them to RGB and read the frame's color
+properties:
 
 ```python
 rgb = core.resize.Bicubic(clip, format=vs.RGB24)
 ```
 
-the frame's `_Matrix` and `_Range` are used automatically. for an untagged
-source, provide them explicitly:
+For a source without color metadata, set the input matrix and range yourself.
+See the [VapourSynth resize documentation](https://www.vapoursynth.com/doc/functions/video/resize.html)
+for the available values.
 
-```python
-rgb = core.resize.Bicubic(
-    clip,
-    format=vs.RGB24,
-    matrix_in_s="470bg",
-    range_in_s="limited",
-)
-```
-
-`zimg` cannot convert an odd-sized 4:2:0 frame directly. for a variable clip,
-crop odd edges before conversion and add the border back. `FrameEval` can do
-that per frame, then a final `resize` can declare one constant format for
-filters such as `std.GPUUpload`:
+`zimg`, which VapourSynth uses for resizing, cannot convert an odd-sized 4:2:0
+frame directly. For a variable-size clip, crop odd edges before conversion and
+add a border back afterward. This example handles each frame with `FrameEval`
+and ends with one fixed format for filters such as `std.GPUUpload`:
 
 ```python
 source = core.imgseqs.Read(files=files, mismatch=True)
@@ -237,98 +170,61 @@ rgb = core.std.FrameEval(source, convert)
 rgb = core.resize.Bicubic(rgb, format=vs.RGB24)
 ```
 
-`Crop` and `AddBorders` need a constant size and format, so use `CropAbs` for
-variable clips. the example restores odd edges with black pixels; stack the
-last real row and column instead if edge extension is preferred. a variable
-clip is converted frame by frame, and resize arguments are ignored for RGB
-frames.
+The example fills the restored edge with black. To extend the picture instead,
+stack the last real row and column. `CropAbs` works with variable-size clips,
+whereas `Crop` and `AddBorders` need a fixed size and format.
 
 ## frame properties
 
 | property | meaning |
 | --- | --- |
-| `ImgSeqPath` | original file path |
-| `ImgSeqIndex` | input-list index |
-| `ImgSeqOriginalColorType` | decoder's original color type |
-| `ImgSeqHasICC` | whether the source has an ICC profile |
-| `ICCProfile` | raw embedded ICC bytes when `icc_profile=True` |
-| `ImgSeqOrientation` | the exif code of the orientation the source states |
-| `ImgSeqAlpha` | `1` on frames from the alpha clip |
+| `ImgSeqPath` | Source file path. |
+| `ImgSeqIndex` | File's position in the input list. |
+| `ImgSeqOriginalColorType` | Color type reported by the decoder. |
+| `ImgSeqOrientation` | Orientation code stored in the source. |
+| `ImgSeqHasICC` | Whether the source contains an ICC profile. |
+| `ICCProfile` | Raw profile bytes when `icc_profile=True`. |
+| `ImgSeqAlpha` | Set to `1` on frames from the alpha clip. |
 
-container color metadata is mapped to `_Primaries`, `_Transfer`, `_Matrix`,
-`_Range`, and, when explicitly named, `_ChromaLocation`. sources include avif
-and heif/heic `nclx`, png `cICP`, jxl codestream headers, and av1 sequence
-headers. unknown or unspecified codes are left unset. RGB frames always keep
-`_Matrix=0` and `_Range=1`. `ImgSeqHasICC` reports an embedded profile;
-`icc_profile=True` also exposes its raw bytes as `ICCProfile` without changing
-pixels or applying a color transform. The bytes are read either way, because
-whether a file carries a profile is what `ImgSeqHasICC` reports, but they are kept
-only when `icc_profile=True`: a sequence whose files each carry a large profile
-would otherwise hold one copy of it per file for as long as the clip lives.
+The plugin also sets standard VapourSynth color properties when the source
+provides values it can represent.
 
 ## performance
 
-benchmark a sequence against [bestsource](https://github.com/vapoursynth/bestsource)
-with:
+The plugin probes image metadata when it creates a clip and decodes pixels when
+frames are requested. Background workers can read upcoming frames. See the
+[benchmark notes](docs/BENCH.md) for results and instructions to compare against
+BestSource.
+
+## build from source
+
+You need Rust 1.88 or newer, Python 3.12 or newer, CMake, Ninja, and `pkg-config`.
+You also need the codec libraries for your operating system.
+
+On Debian or Ubuntu:
 
 ```console
-.venv/Scripts/python.exe tests/bench-imgseqs-vs-bestsource.vpy --reps 3 --dir images --pattern "i_%04d.webp"
-.venv/Scripts/python.exe tests/bench-imgseqs-vs-bestsource.vpy --reps 3 --extra --prefetch 16 --dir sandbox/webp --pattern "snek - p%03d.webp"
+sudo apt-get install --yes cmake ninja-build pkg-config libdav1d-dev libde265-dev libwebp-dev
 ```
 
-see [docs/BENCH.md][BENCH-LINK] for the measurements. on the same 35 pages
-stored in six containers, imgseqs is 2.73x faster than bestsource on jpeg
-(4.98x including open), 1.37x faster on png, and 1.80x slower on webp because
-ffmpeg slice-threads each vp8 frame while libwebp decodes one frame at a time.
-that bestsource build cannot open avif, heic, or jxl.
+On macOS with Homebrew:
 
-clip creation only probes container metadata; decoding happens when frames are
-requested, using the background pool. for a fair bestsource comparison, use
-`cachemode=0`, `apply_rotation=False` on both plugins, and omit `fpsnum` and
-`fpsden` because ffmpeg's image-sequence rate is 25 fps.
-opening 35 avif pages costs about 2 ms, 35 heic pages about 6 ms, and the other
-listed formats less in the recorded benchmark.
+```console
+brew install cmake ninja pkg-config dav1d libde265 webp
+```
 
-## build
+Then build the wheel:
 
 ```console
 python -m pip install ".[dev]"
 python -m build
 ```
 
-linux and macos need these native packages:
-
-```console
-# debian/ubuntu
-sudo apt-get install --yes cmake ninja-build pkg-config libdav1d-dev libde265-dev libwebp-dev
-
-# macos with homebrew
-brew install cmake ninja pkg-config dav1d libde265 webp
-```
-
-libwebp is linked from its static archive when available, so it is not needed
-at runtime. JPEG 2000 uses the OpenJPEG sources bundled by `openjpeg-sys`.
-dav1d and libde265 remain shared on unix; Linux release artifacts bundle them
-with relative loader paths. windows uses the static vcpkg triplet.
+Windows builds use vcpkg. See [Linux build and validation](docs/LINUX-BUILD.md)
+for details about Linux release builds.
 
 ## license
 
-`vs-imageseqs` is licensed under the Mozilla Public License 2.0. see
-[LICENSE][LICENSE-LINK].
-
-the plugin also contains native code under these licenses:
-
-- dav1d and OpenJPEG: BSD-2-Clause;
-- libwebp: BSD-3-Clause with its accompanying patent grant;
-- libheif and libde265: LGPL-3.0.
-
-see [THIRD_PARTY_NOTICES][THIRD-PARTY-LINK] and [LICENSES/][LICENSES-LINK] for
-the dependency versions, notices, and complete license texts. when a binary
-uses static LGPL linkage, these files are not the entire obligation: the
-release must also provide the applicable corresponding source and a practical
-way to relink the plugin with modified LGPL libraries.
-
-[BENCH-LINK]: https://github.com/noaione/vs-imageseqs/blob/master/docs/BENCH.md
-[LICENSE-LINK]: https://github.com/noaione/vs-imageseqs/blob/master/LICENSE
-[THIRD-PARTY-LINK]: https://github.com/noaione/vs-imageseqs/blob/master/THIRD_PARTY_NOTICES
-[LICENSES-LINK]: https://github.com/noaione/vs-imageseqs/tree/master/LICENSES
+The plugin is licensed under the Mozilla Public License 2.0. See [LICENSE](LICENSE).
+The included native libraries have their own licenses. See
+[THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) and [LICENSES](LICENSES) for details.
