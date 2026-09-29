@@ -192,4 +192,6 @@ what that came to:
   because the colour planes are read from the colour item either way.
 - **`n_threads` on the two decoders one frame can now create at most.** An avif
   with alpha still creates two `dav1d` decoders under `ReadAlpha`, each with the
-  host's thread count; that is [19](19-avif-thread-budget.md)'s subject.
+  host's thread count; [19](19-avif-thread-budget.md) measured it and left it
+  alone, because the default already uses 8.8 of ten cores and a share of them
+  costs 20%.

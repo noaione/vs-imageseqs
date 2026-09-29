@@ -501,8 +501,9 @@ The module is in the shape of `formats/heif.rs` and `formats/jxl.rs`:
   delay decodes the one frame on a worker thread, so a valid item's first
   `get_picture` and a missing item's only answer are the same call. A still image
   is one frame, so a frame delay is a pipeline nothing can use, and
-  `n_threads` — which is [19](improvements/19-avif-thread-budget.md)'s subject —
-  is left alone. `dav1d_flush` is *not* part of this: it discards delayed frames
+  `n_threads` — which is [19](improvements/19-avif-thread-budget.md)'s subject,
+  and which that plan measured and left alone — is untouched. `dav1d_flush` is
+  *not* part of this: it discards delayed frames
   rather than draining them, and it destroyed a valid item's picture when it was
   tried. [15](improvements/15-avif-decoder-progress.md) has the measurements.
 - **a monochrome item is still `image`'s.** `avif::handles` takes a file whose

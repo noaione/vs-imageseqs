@@ -164,11 +164,12 @@ and a backward walk of a long animation costs 1.3x to 2.4x a forward one.
 [20](20-distribution-followups.md)'s release-metadata slice. Address that plan's
 **source-build consistency** next, which needs a container and a network the
 machine this was written on does not have, then its macOS portability and source
-provenance. Measure [19](19-avif-thread-budget.md) after those.
+provenance. [19](19-avif-thread-budget.md) has been measured and decided against;
+it needs no further work.
 
 | plan | evidence | priority | status |
 | --- | --- | --- | --- |
-| [19 AVIF thread budget](19-avif-thread-budget.md) | default native decoder threading runs inside the prefetch pool | medium | experiment proposed |
+| [19 AVIF thread budget](19-avif-thread-budget.md) | default native decoder threading runs inside the prefetch pool | medium | measured and decided against: the default already uses 8.8 of ten cores, and dividing them by the worker count costs 20% |
 | [20 distribution follow-ups](20-distribution-followups.md) | sdist input mismatch, untested archive rebuilds, macOS dependencies and release metadata | high for source builds | release metadata and repeatable staging implemented; source rebuilds, macOS portability and provenance proposed |
 | [21 animated images](21-animated-images.md) | GIF, APNG, WebP, JXL and AVIF/HEIF sequence tracks need timeline expansion, composition, delay sampling and bounded random access | medium to high | implemented for every format it names, with the regression and playback benchmarks recorded |
 
@@ -299,8 +300,18 @@ directories, the staged bundle — are emptied of what a build writes before it
 writes. it is the only plan here whose subject is the release rather than the
 reader, and it is the one that came last in the plan's own order because its
 first slice needs a container and a network. the rest of the review is still
-open: 20's source rebuilds, macOS portability and provenance, and 19 is an
-experiment before any change.
+open: 20's source rebuilds, macOS portability and provenance.
+
+[19](19-avif-thread-budget.md) was the last of the 2026-09-27 review and is the
+only one of them that ended without a change. it asked whether a decoder that
+defaults to one thread per core, running several at a time inside the lookahead
+pool, should be given a share of the machine instead; a sweep over five prefetch
+depths and seven thread counts later, the answer is that the default is already
+at 8.8 of this machine's ten cores, that a share of them starves each decoder by
+20%, and that every explicit count above it moves nothing but the thread count.
+the corpus, the grid and the parity check are in [BENCH.md](../BENCH.md), and
+what would reopen it is a machine that actually oversubscribes rather than one
+that does not.
 
 ## deferred
 
@@ -446,6 +457,16 @@ C:/vcpkg/vcpkg.exe install --triplet x64-windows-static-md --x-manifest-root="$P
   vp8 frame over every core and that is most of why bestsource wins on webp.
   `image-webp` exposes no threading hooks and owns no slice parallelism, so
   this would need to happen upstream. not a change this repository can make.
+- **a thread budget for the avif decoder.** [19](19-avif-thread-budget.md) is
+  the measurement that closed it: dav1d already defaults to one thread per
+  core, the default `prefetch=4` already uses 8.8 of this machine's ten cores,
+  and giving each worker `cores / workers` starves a page that needs three to
+  four threads before its tiles are saturated — 1607.6 ms against 1343.6. every
+  explicit count of four threads or more lands within 2% of the default in both
+  directions and moves only the thread count (57 to 33 at the default, 189 to 93
+  at `prefetch=16`), and CPU per delivered frame stays where it was. a floor
+  low enough to be safe on another core count is a floor tuned to these files,
+  which is the case for leaving dav1d's own answer alone.
 - **ffmpeg as a dependency.** it would match bestsource's decoder behaviour,
   but it is a large build and licence surface for one format when libwebp is a
   smaller step with the same yuv entry point.

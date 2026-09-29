@@ -916,6 +916,109 @@ continued optimistically.
 defaults unless a row says otherwise. these rows were not taken on the windows
 machine the rest of this page describes.
 
+## avif decoder threads
+
+[19](improvements/19-avif-thread-budget.md) asked whether the avif decoder should
+be given a thread budget. one item is one frame, so
+`avif::decode_item` sets `max_frame_delay=1` and leaves dav1d's `n_threads` at
+its default, which is the machine's logical cores; the lookahead pool can run
+`prefetch` of those decoders at once, so two levels of parallelism are nested.
+the measurements below say they are not fighting, and the default stays.
+
+one process per measurement, the plugin loaded by path, best of three rounds,
+`Read` over the 35 colour pages of `sandbox/avif` (one of 3312x4717 and 34 of
+3672x5274). `threads` is what an experiment hook passed to
+`dav1d::Settings::set_n_threads`, and `auto` is dav1d's own default:
+
+| prefetch | auto | 1 | 2 | 3 | 4 | 6 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 1873.1 ms | 4727.9 | 2628.9 | 2115.5 | 1874.4 | 1859.1 |
+| 4 | 1343.6 | 2561.2 | 1607.6 | 1397.1 | 1357.3 | 1351.2 |
+| 8 | 1382.3 | 1674.6 | 1447.8 | 1395.5 | 1374.8 | 1369.8 |
+| 16 | 1300.0 | 1387.3 | 1301.1 | 1350.0 | 1293.7 | 1321.2 |
+
+peak native threads of the same rows, which is where the two levels show:
+
+| prefetch | auto | 1 | 2 | 3 | 4 | 6 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 35 | 15 | 19 | 21 | 23 | 27 |
+| 4 | 57 | 17 | 25 | 29 | 33 | 41 |
+| 8 | 101 | 21 | 37 | 45 | 53 | 69 |
+| 16 | 189 | 29 | 61 | 74 | 93 | 124 |
+
+the default is `prefetch=4` — half of this machine's ten cores, capped at four —
+and it is already at 8.81 of those ten cores. dividing the machine by the worker
+count would give two decoder threads there, which is 1607.6 ms against 1343.6 —
+a 20% regression, because a 3672x5274 page needs three to four threads before
+dav1d's own tile parallelism is saturated. every explicit count from four up
+lands within 2% of `auto` in both directions at every depth, so the only thing
+the budget moves is the thread count, 57 to 33 at the default and 189 to 93 at
+`prefetch=16`.
+
+cpu does not move with it. per delivered frame, `auto` against four threads:
+338.2 / 335.7 ms at `prefetch=4`, 342.2 / 343.5 at 16. the `prefetch=8` pair is
+the widest of the set, 338.9 / 353.4, and the sweep that also carried
+`prefetch=8` measured the same row at 338.9 / 336.7, so that one is a round's
+outlier rather than a cost. the pool does cost cpu over the serial path — 338 ms
+against 279 — but that is the concurrency itself, not the decoder's thread
+count.
+
+with lookahead off there is one decoder at a time, and it stops improving at
+four threads, which is where the 20% above comes from:
+
+| decoder threads | wall | cpu/frame | cores busy |
+| --- | ---: | ---: | ---: |
+| auto | 3359.7 ms | 277.4 ms | 2.89 |
+| 1 | 9403.7 ms | 272.7 ms | 1.01 |
+| 2 | 5184.4 ms | 274.5 ms | 1.85 |
+| 4 | 3359.7 ms | 277.4 ms | 2.89 |
+| 8 | 3355.9 ms | 277.3 ms | 2.89 |
+
+one page on its own says the same thing without the pool: 48.8 ms and 1.55 cores
+at two decoder threads or more, 74.9 ms at one, 13 threads alive at `auto` for
+the same 1.55 cores.
+
+two clips of the same set, each with its own pool, walked together — the case
+where a thread budget would pay if it paid anywhere: 2580.8 ms and 93 threads at
+the default against 2563.8 ms and 49 threads at four, 2661.8 ms at two. two pools
+cost 2x the cpu of one and still reach 9.25 of ten cores, so the second pool is
+not the loss either.
+
+a page with an alpha item is two decoders per file, so it doubles the nesting.
+twelve colour pages of `sandbox/avif` cropped to 1536x2304, encoded by
+`target/bench/p19/make-alpha-corpus.py` with the page's own grey content as alpha
+and with a gradient as alpha, walking both clips of one `ReadAlpha`:
+
+| corpus | prefetch | auto | 1 | 2 | 4 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| alpha = grey | 0 | 319.6 ms | 463.7 | 374.8 | 333.8 |
+| alpha = grey | 4 | 211.0 | 215.5 | 208.6 | 209.8 |
+| alpha = ramp | 0 | 189.2 ms | 308.1 | 235.0 | 200.7 |
+| alpha = ramp | 4 | 122.8 | 132.9 | 123.8 | 126.0 |
+
+the serial rows are 5.96 and 5.77 cores here against 2.89 for the 35-page set,
+which is what a second decoder buys, and these pages are also a fifth of its
+area, so the two are not comparable one for one. the shape is what matters: with
+the pool on, every setting of two threads or more is within 3% of `auto`, and
+with the pool off `auto` is the best row and two threads is 17% to 24% behind.
+the nesting is not what the pool is losing to.
+
+small pages are the case where there is nothing to budget: 64 copies of the 64x48
+`avif-yuv420p.avif` fixture read in 9.2 to 9.7 ms and 6 threads at `prefetch=4`
+whatever the thread setting, against 16.3 to 16.8 ms and 2 threads in the serial
+rows; 64 copies of the 4x4 `alpha-yuv420p.avif` through both clips are 13.8 to
+14.1 ms. dav1d sizes its own pool to the picture, so a page that small never
+becomes a many-threaded decoder and the setting cannot reach it.
+
+pixels: the thread count does not change a sample. hashing every plane of every
+frame of the 35-page set at `threads=1`, 2 and `auto`, and of the twelve
+alpha-mask pages at 1 and `auto`, gives byte-identical dumps.
+
+**machine**: macOS on apple silicon, rust release build, `prefetch` at its
+default unless a row says otherwise, one process per measurement so no two
+configurations share a core. these rows were not taken on the windows machine the
+rest of this page describes.
+
 ## known headroom
 
 the numbers point at one thing: a decoder that cannot use more than one core.
