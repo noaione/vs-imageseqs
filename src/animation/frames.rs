@@ -54,15 +54,15 @@ impl Kind {
 /// the concrete decoders rather than on the `ImageDecoder` trait, and it also
 /// carries a lifetime that would not be `Send`.
 enum Decoder {
-    Gif(GifDecoder<BufReader<File>>),
-    Webp(WebPDecoder<BufReader<File>>),
+    Gif(Box<GifDecoder<BufReader<File>>>),
+    Webp(Box<WebPDecoder<BufReader<File>>>),
 }
 
 impl Decoder {
     fn into_frames(self) -> Frames {
         match self {
-            Self::Gif(decoder) => Box::new(AnimationDecoder::into_frames(decoder)),
-            Self::Webp(decoder) => Box::new(AnimationDecoder::into_frames(decoder)),
+            Self::Gif(decoder) => Box::new(AnimationDecoder::into_frames(*decoder)),
+            Self::Webp(decoder) => Box::new(AnimationDecoder::into_frames(*decoder)),
         }
     }
 }
@@ -165,9 +165,9 @@ impl FrameSource {
     /// cannot share a clip, and `mismatch` does not apply to one file's own
     /// frames.
     fn durations(&mut self) -> Result<Vec<(u32, u32)>> {
-        let mut frames = self.frames()?;
+        let frames = self.frames()?;
         let mut durations = Vec::new();
-        while let Some(frame) = frames.next() {
+        for frame in frames {
             let frame = frame.map_err(|error| image_error("decode", &self.path, error))?;
             self.measure(&frame)?;
             durations.push(frame.delay().numer_denom_ms());
@@ -262,14 +262,16 @@ impl FrameSource {
             File::open(&self.path).map_err(|error| image_error("open", &self.path, error))?;
         let reader = BufReader::new(file);
         let decoder = match self.kind {
-            Kind::Gif => Decoder::Gif(
-                GifDecoder::new(reader)
-                    .map_err(|error| image_error("create decoder for", &self.path, error))?,
-            ),
-            Kind::Webp => Decoder::Webp(
-                WebPDecoder::new(reader)
-                    .map_err(|error| image_error("create decoder for", &self.path, error))?,
-            ),
+            Kind::Gif => {
+                Decoder::Gif(Box::new(GifDecoder::new(reader).map_err(|error| {
+                    image_error("create decoder for", &self.path, error)
+                })?))
+            }
+            Kind::Webp => {
+                Decoder::Webp(Box::new(WebPDecoder::new(reader).map_err(|error| {
+                    image_error("create decoder for", &self.path, error)
+                })?))
+            }
         };
         Ok(decoder.into_frames())
     }

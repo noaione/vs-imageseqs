@@ -150,12 +150,7 @@ impl SequenceArgs {
         Ok(Self {
             format,
             prefetcher: Arc::new(Prefetcher::new(
-                FrameBuilder::new(
-                    core,
-                    clips,
-                    Arc::clone(&segments),
-                    export_icc_profile,
-                ),
+                FrameBuilder::new(core, clips, Arc::clone(&segments), export_icc_profile),
                 prefetch_workers,
                 prefetch_memory,
             )),

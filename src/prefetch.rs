@@ -672,7 +672,7 @@ mod tests {
         }
 
         fn estimate(&self, index: usize) -> usize {
-            self.images.get(index).map_or(0, |image| bytes(image))
+            self.images.get(index).map_or(0, bytes)
         }
 
         fn produce(&self, index: usize) -> Result<Arc<DecodedImage>> {

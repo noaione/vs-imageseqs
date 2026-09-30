@@ -987,10 +987,7 @@ mod tests {
         // because frames are built when they are asked for and never in
         // advance.
         let segment = animated(&[1], (1 << 41, 1));
-        assert!(
-            usize::try_from(segment.frame_count()).expect("the count fits this build")
-                > i32::MAX as usize
-        );
+        assert!(segment.frame_count() > i32::MAX as usize);
         assert!(
             SegmentTable::new(vec![segment]).is_err(),
             "a clip longer than i32::MAX frames is refused"

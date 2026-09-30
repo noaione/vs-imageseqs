@@ -201,12 +201,7 @@ struct JxlSource {
 }
 
 impl JxlSource {
-    fn new(
-        path: &Path,
-        bytes: Arc<[u8]>,
-        frames: Vec<VisibleFrameInfo>,
-        header: Header,
-    ) -> Self {
+    fn new(path: &Path, bytes: Arc<[u8]>, frames: Vec<VisibleFrameInfo>, header: Header) -> Self {
         Self {
             path: path.to_path_buf(),
             bytes,
@@ -224,12 +219,13 @@ impl JxlSource {
                 self.path.display()
             ))
         })?;
-        let offset = usize::try_from(target.seek_target.decode_start_file_offset).map_err(|_| {
-            ImgSeqError::new(format!(
-                "animated image '{}' seeks past what this build can address",
-                self.path.display()
-            ))
-        })?;
+        let offset =
+            usize::try_from(target.seek_target.decode_start_file_offset).map_err(|_| {
+                ImgSeqError::new(format!(
+                    "animated image '{}' seeks past what this build can address",
+                    self.path.display()
+                ))
+            })?;
         let mut input = self.bytes.get(offset..).ok_or_else(|| {
             ImgSeqError::new(format!(
                 "animated image '{}' seeks past the end of its own data",
@@ -312,9 +308,7 @@ impl JxlSource {
         Ok(DecodedImage {
             width: header.width,
             height: header.height,
-            format: header
-                .format()
-                .unwrap_or(crate::pixel::PixelFormat::Rgb8),
+            format: header.format().unwrap_or(crate::pixel::PixelFormat::Rgb8),
             transform: crate::pixel::Transform::IDENTITY,
             pixels: Pixels::Interleaved {
                 color_type: header.color_type,

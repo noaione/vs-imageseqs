@@ -238,7 +238,12 @@ pub fn probe_segments(
 ) -> Result<SegmentTable> {
     let mut segments = Vec::with_capacity(files.len());
     for path in files {
-        segments.push(probe_segment(path, fps, apply_rotation, export_icc_profile)?);
+        segments.push(probe_segment(
+            path,
+            fps,
+            apply_rotation,
+            export_icc_profile,
+        )?);
     }
     SegmentTable::new(segments)
 }
@@ -269,9 +274,7 @@ pub fn probe_segment(
             info.clone(),
             fps,
         )?
-    } else if crate::animation::heif::owns_avif(path) {
-        crate::animation::heif::segment_info(path, info.clone(), fps)?
-    } else if crate::animation::heif::owns_heif(path) {
+    } else if crate::animation::heif::owns_avif(path) || crate::animation::heif::owns_heif(path) {
         crate::animation::heif::segment_info(path, info.clone(), fps)?
     } else if crate::animation::jxl::owns(path) {
         crate::animation::jxl::segment_info(path, info.clone(), fps)?
@@ -457,7 +460,11 @@ mod tests {
             assert!(segment.animated, "{name}");
             assert_eq!(segment.frame_count(), 14, "{name}");
             assert_eq!(segment.output_size(), (16, 12), "{name}");
-            assert_eq!(segment.info.format, crate::pixel::PixelFormat::Rgb8, "{name}");
+            assert_eq!(
+                segment.info.format,
+                crate::pixel::PixelFormat::Rgb8,
+                "{name}"
+            );
             // Every output frame shows the picture the file displays at that
             // instant, which is the documented sampling rule.
             let starts = [0i64, 80, 250, 360];
@@ -495,15 +502,18 @@ mod tests {
     #[test]
     fn a_sequence_is_placed_by_its_own_sample_tables() {
         for name in ["animation.avif", "animation.heic"] {
-            let segment =
-                probe_segment(&fixture(name), Rate::from_fps(24, 1), true, false)
-                    .expect("the fixture probes");
+            let segment = probe_segment(&fixture(name), Rate::from_fps(24, 1), true, false)
+                .expect("the fixture probes");
             assert!(segment.animated, "{name}");
             assert_eq!(segment.output_size(), (16, 12), "{name}");
             // The avif states 80/170/110/240 ms and the heic four 150 ms
             // samples; both are 600 ms, which is 14.4 ticks at 24 fps.
             assert_eq!(segment.frame_count(), 14, "{name}");
-            assert_eq!(segment.info.format, crate::pixel::PixelFormat::Rgb8, "{name}");
+            assert_eq!(
+                segment.info.format,
+                crate::pixel::PixelFormat::Rgb8,
+                "{name}"
+            );
         }
     }
 
@@ -511,8 +521,13 @@ mod tests {
     /// its frames keep the depth the codestream states.
     #[test]
     fn an_animated_jpeg_xl_is_scanned_for_its_timeline() {
-        let segment = probe_segment(&fixture("animation.jxl"), Rate::from_fps(24, 1), true, false)
-            .expect("the fixture probes");
+        let segment = probe_segment(
+            &fixture("animation.jxl"),
+            Rate::from_fps(24, 1),
+            true,
+            false,
+        )
+        .expect("the fixture probes");
         assert!(segment.animated);
         assert_eq!(segment.frame_count(), 14);
         assert_eq!(segment.output_size(), (16, 12));
@@ -545,7 +560,10 @@ mod tests {
         .expect("the fixture probes");
         assert!(segment.animated);
         assert_eq!(segment.info.format, crate::pixel::PixelFormat::Rgb16);
-        assert_eq!(segment.info.original_color_type, image::ExtendedColorType::Rgba16);
+        assert_eq!(
+            segment.info.original_color_type,
+            image::ExtendedColorType::Rgba16
+        );
         assert_eq!(segment.output_size(), (4, 3));
         // The fixture's two pictures hold for 100 ms and 200 ms, which is
         // 7.2 output ticks at 24 fps, so seven ticks start before it ends.

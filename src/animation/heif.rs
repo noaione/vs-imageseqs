@@ -206,17 +206,12 @@ impl Pass {
                 path.display()
             ))
         })?;
-        // SAFETY: the track is declared before the context, so it is dropped
-        // first and cannot outlive what it borrows. The context is owned by
-        // this same value and is never moved out of it.
-        let track = unsafe {
-            std::mem::transmute::<Track, Track>(context.track(id).ok_or_else(|| {
-                ImgSeqError::new(format!(
-                    "the sequence in '{}' holds no track {id}",
-                    path.display()
-                ))
-            })?)
-        };
+        let track = context.track(id).ok_or_else(|| {
+            ImgSeqError::new(format!(
+                "the sequence in '{}' holds no track {id}",
+                path.display()
+            ))
+        })?;
         Ok(Self {
             track,
             _context: context,
@@ -247,18 +242,15 @@ impl Pass {
 
 /// Id of the first track whose handler says it holds pictures.
 fn visual_track(context: &HeifContext<'_>) -> Option<u32> {
-    context
-        .track_ids()
-        .into_iter()
-        .find(|id| {
-            // The picture track is the one whose handler says so. `track_types`
-            // is not reachable by path because the module that holds it is
-            // private, but the code itself is stable and is the same one that
-            // module names.
-            context
-                .track(*id)
-                .is_some_and(|track| track.handler_type().0 == *b"pict")
-        })
+    context.track_ids().into_iter().find(|id| {
+        // The picture track is the one whose handler says so. `track_types`
+        // is not reachable by path because the module that holds it is
+        // private, but the code itself is stable and is the same one that
+        // module names.
+        context
+            .track(*id)
+            .is_some_and(|track| track.handler_type().0 == *b"pict")
+    })
 }
 
 /// A sequence being replayed, one presentation at a time.
@@ -462,7 +454,9 @@ fn crop_chroma(
     sub_h: u32,
     path: &Path,
 ) -> Result<Vec<u8>> {
-    if geometry.crop.x % sub_w.max(1) != 0 || geometry.crop.y % sub_h.max(1) != 0 {
+    if !geometry.crop.x.is_multiple_of(sub_w.max(1))
+        || !geometry.crop.y.is_multiple_of(sub_h.max(1))
+    {
         return Err(ImgSeqError::new(format!(
             "the sequence in '{}' presents a {}x{} aperture at {},{} of a {sub_w}:{sub_h} subsampled picture, which is not on a chroma sample",
             path.display(),

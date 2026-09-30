@@ -295,8 +295,14 @@ pub fn color_space_of(format: PixelFormat) -> Option<ColorSpace> {
         // interleaved `Rgb` variant would have to be split again here. The
         // word, not the depth, is what the request names, so a deeper rgb frame
         // is written from the same planes.
-        PixelFormat::Rgb8 | PixelFormat::Rgb9 | PixelFormat::Rgb10 | PixelFormat::Rgb11
-        | PixelFormat::Rgb12 | PixelFormat::Rgb13 | PixelFormat::Rgb14 | PixelFormat::Rgb15
+        PixelFormat::Rgb8
+        | PixelFormat::Rgb9
+        | PixelFormat::Rgb10
+        | PixelFormat::Rgb11
+        | PixelFormat::Rgb12
+        | PixelFormat::Rgb13
+        | PixelFormat::Rgb14
+        | PixelFormat::Rgb15
         | PixelFormat::Rgb16 => Some(ColorSpace::Rgb(RgbChroma::C444)),
         _ => None,
     }
@@ -727,11 +733,7 @@ mod tests {
         }
         // A colour picture coded as full resolution rgb is asked for as planar
         // rgb, which is the layout a frame is written from.
-        for format in [
-            PixelFormat::Rgb8,
-            PixelFormat::Rgb16,
-            PixelFormat::Rgb10,
-        ] {
+        for format in [PixelFormat::Rgb8, PixelFormat::Rgb16, PixelFormat::Rgb10] {
             assert_eq!(
                 color_space_of(format),
                 Some(ColorSpace::Rgb(RgbChroma::C444)),

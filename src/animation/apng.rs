@@ -382,7 +382,9 @@ impl PngSource {
     fn decoded(&self) -> DecodedImage {
         let buffer = if self.sixteen_bit {
             self.canvas
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .flat_map(|sample| [sample[1], sample[0]])
                 .collect()
         } else {
@@ -491,7 +493,9 @@ const fn color_of(color_type: png::ColorType) -> Option<ColorType> {
 fn blend(target: &mut [u8], source: &[u8], alpha: u32, maximum: u32, sixteen_bit: bool) {
     let inverse = maximum - alpha;
     if sixteen_bit {
-        for (target, source) in target.chunks_exact_mut(2).zip(source.chunks_exact(2)) {
+        let (targets, _) = target.as_chunks_mut::<2>();
+        let (sources, _) = source.as_chunks::<2>();
+        for (target, source) in targets.iter_mut().zip(sources) {
             let destination = u32::from(u16::from_be_bytes([target[0], target[1]]));
             let value = u32::from(u16::from_be_bytes([source[0], source[1]]));
             let mixed = (value * alpha + destination * inverse) / maximum;

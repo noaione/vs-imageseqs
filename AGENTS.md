@@ -275,6 +275,8 @@ after changes, run the narrowest relevant checks:
 
 ```powershell
 cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
+cargo fmt --all -- --check
 .\.venv\Scripts\python.exe tests\readalpha.vpy
 C:\Python314\python.exe tests\check-packaging-tools.py
 C:\Python314\python.exe -c "import pathlib, tomllib; tomllib.loads(pathlib.Path('pyproject.toml').read_text())"

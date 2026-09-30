@@ -88,7 +88,7 @@ fn boxes(data: &[u8], start: usize, end: usize) -> Vec<Box_> {
 }
 
 /// The first direct child box of `kind`.
-fn child<'a>(data: &'a [u8], parent: Box_, kind: &[u8; 4]) -> Option<Box_> {
+fn child(data: &[u8], parent: Box_, kind: &[u8; 4]) -> Option<Box_> {
     boxes(data, parent.start, parent.end)
         .into_iter()
         .find(|candidate| candidate.is(kind))
@@ -264,7 +264,7 @@ fn read_stts(data: &[u8], stts: Box_) -> Option<Vec<u32>> {
         if total > MAX_SAMPLES {
             return None;
         }
-        durations.extend(std::iter::repeat(delta).take(samples as usize));
+        durations.extend(std::iter::repeat_n(delta, samples as usize));
         at += 8;
     }
     Some(durations)
