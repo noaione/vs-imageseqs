@@ -5,7 +5,7 @@
 ![VapourSynth version](https://img.shields.io/badge/vapoursynth-%3E%3DR79-blue) [![build](https://github.com/noaione/vs-imageseqs/actions/workflows/build.yml/badge.svg)](https://github.com/noaione/vs-imageseqs/actions/workflows/build.yml) [![rust tests](https://github.com/noaione/vs-imageseqs/actions/workflows/rust-tests.yml/badge.svg)](https://github.com/noaione/vs-imageseqs/actions/workflows/rust-tests.yml)
 
 `vapoursynth-imageseqs` is a VapourSynth plugin that reads image files in the
-order you provide and turns them into a clip. Each file contributes one frame.
+order you provide and turns them into a clip.
 
 ## what it does
 
@@ -15,8 +15,7 @@ order you provide and turns them into a clip. Each file contributes one frame.
 - can return the source's YUV planes for supported formats
 - reads image orientation and color information
 - decodes frames in the background to help playback
-
-Animated files currently contribute one frame each.
+- process animated files contribute their displayed pictures to the clip.
 
 ## install
 
