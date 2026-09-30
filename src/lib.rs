@@ -14,7 +14,7 @@ vapoursynth4_rs::declare_plugin!(
     c"xyz.n4o.imgseqs",
     c"imgseqs",
     c"Rust-based image sequence reader",
-    (0, 1),
+    (0, 2), // Version
     vapoursynth4_rs::VAPOURSYNTH_API_VERSION,
     0,
     (Read, None),

@@ -2,7 +2,9 @@
 
 ## unreleased
 
-nothing yet!
+### build
+
+- fix wrong version number in the plugin manifest itself.
 
 ## [0.2.0] - 2026-09-30
 
