@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -101,6 +102,21 @@ def build_plugin(root: Path, environment: dict[str, str]) -> Path:
     return artifact
 
 
+def macos_architecture(environment: dict[str, str]) -> str:
+    target = environment.get("CARGO_BUILD_TARGET", "").lower()
+    if "aarch64" in target or "arm64" in target:
+        return "arm64"
+    if "x86_64" in target:
+        return "x86_64"
+
+    machine = platform.machine().lower()
+    if machine in {"arm64", "aarch64"}:
+        return "arm64"
+    if machine == "x86_64":
+        return "x86_64"
+    raise ValueError(f"unsupported macOS wheel architecture: {machine or 'unknown'}")
+
+
 def wheel_platform_tag(environment: dict[str, str]) -> str:
     if sys.platform == "linux":
         # A build host's supported tags do not certify the plugin's ABI or
@@ -108,13 +124,7 @@ def wheel_platform_tag(environment: dict[str, str]) -> str:
         # their manylinux tag, after checking and bundling those dependencies.
         return sysconfig.get_platform().replace("-", "_").replace(".", "_")
     if sys.platform == "darwin" and environment.get("MACOSX_DEPLOYMENT_TARGET"):
-        target = environment.get("CARGO_BUILD_TARGET", "").lower()
-        if "aarch64" in target or "arm64" in target:
-            architecture = "arm64"
-        elif "x86_64" in target:
-            architecture = "x86_64"
-        else:
-            architecture = sysconfig.get_platform().split("-")[-1]
+        architecture = macos_architecture(environment)
         version = environment["MACOSX_DEPLOYMENT_TARGET"].split(".", maxsplit=1)
         if len(version) != 2 or not all(part.isdigit() for part in version):
             raise ValueError("MACOSX_DEPLOYMENT_TARGET must be a major.minor version")

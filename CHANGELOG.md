@@ -5,14 +5,9 @@
 ### build
 
 - fix wrong version number in the plugin manifest itself.
-- macOS wheels and standalone plugin ZIPs now bundle dav1d and libde265 with
-  relative loader paths, so users do not need those Homebrew libraries installed
-- macOS release builds target arm64 on macOS 11 or later and disable unused
-  libheif codec backends, avoiding accidental links to codecs installed on the
-  build runner
-- keep macOS-only native search paths out of Windows wheel builds, and clear
-  the cached libheif CMake build before configuring it against the pinned codec
-  libraries
+- macOS arm64 wheels and standalone plugin ZIPs include dav1d and libde265, so
+  users do not need to install those runtime libraries separately; they target
+  macOS 11 or later
 
 ## [0.2.0] - 2026-09-30
 
