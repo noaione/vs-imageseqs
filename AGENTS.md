@@ -205,6 +205,10 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   final wheel, `package-linux-wheel.py` moves auditwheel's libraries into
   `imageseqs/lib/`, `check-linux-wheel.py` checks the repaired wheel, and
   `build-manylinux.sh` builds and repairs it in the pinned container.
+- `tools/macos-libheif-toolchain.cmake`: the macOS wheel build disables unused
+  embedded libheif codec backends; the plugin decodes HEIC with libde265 and
+  AVIF with dav1d directly. `tools/package-macos-wheel.py` bundles and checks
+  the macOS runtime dylibs before the final wheel is staged.
 - `docs/IMPLEMENTATION.md`: design notes and deferred ideas.
 - `docs/improvements/`: one plan per change, with its status; its `README.md` is
   the index of what is open, what the landed work left over and what was decided

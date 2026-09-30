@@ -170,7 +170,7 @@ it needs no further work.
 | plan | evidence | priority | status |
 | --- | --- | --- | --- |
 | [19 AVIF thread budget](19-avif-thread-budget.md) | default native decoder threading runs inside the prefetch pool | medium | measured and decided against: the default already uses 8.8 of ten cores, and dividing them by the worker count costs 20% |
-| [20 distribution follow-ups](20-distribution-followups.md) | sdist input mismatch, untested archive rebuilds, macOS dependencies and release metadata | high for source builds | release metadata and repeatable staging implemented; source rebuilds, macOS portability and provenance proposed |
+| [20 distribution follow-ups](20-distribution-followups.md) | sdist input mismatch, untested archive rebuilds, macOS dependencies and release metadata | high for source builds | release metadata, repeatable staging and macOS runtime portability implemented; source rebuilds and macOS provenance remain open |
 | [21 animated images](21-animated-images.md) | GIF, APNG, WebP, JXL and AVIF/HEIF sequence tracks need timeline expansion, composition, delay sampling and bounded random access | medium to high | implemented for every format it names, with the regression and playback benchmarks recorded |
 
 ### implemented plans
@@ -300,7 +300,7 @@ directories, the staged bundle — are emptied of what a build writes before it
 writes. it is the only plan here whose subject is the release rather than the
 reader, and it is the one that came last in the plan's own order because its
 first slice needs a container and a network. the rest of the review is still
-open: 20's source rebuilds, macOS portability and provenance.
+open: 20's source rebuilds and macOS source provenance.
 
 [19](19-avif-thread-budget.md) was the last of the 2026-09-27 review and is the
 only one of them that ended without a change. it asked whether a decoder that

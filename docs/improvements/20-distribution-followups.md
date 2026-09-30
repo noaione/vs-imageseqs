@@ -1,8 +1,8 @@
 # 20 — Finish portable packaging and source rebuild validation
 
 - status: partially implemented — **release metadata and repeatable staging**
-  landed; **source archives and rebuilds** and **macOS dependencies and source
-  provenance** are still proposed
+  and **macOS runtime portability** implemented; **source archives and rebuilds**
+  and exact macOS source provenance remain proposed
 - touches (landed slice): `tools/create-changelog.py`, `tools/build_output.py`
   (new), `tools/stage-native.py`, `tools/check-linux-wheel.py`,
   `tools/package-linux-wheel.py`, `tools/build-manylinux.sh`,
@@ -50,21 +50,60 @@ has, so it is the next one to do where those exist.
 
 ## macOS dependencies and source provenance
 
-**still proposed.** The macOS job installs dav1d/libde265 with Homebrew and tests
-on that same machine. Its dylib still depends on those system libraries. This is
-documented, but does not demonstrate a portable ZIP or wheel on a clean Mac.
+### macOS runtime portability — implemented
 
-Evaluate bundling the existing shared libraries inside `imageseqs/lib/` with
-relative install names, preserving the manifest's single plugin entry. Audit the
-complete dependency closure, architecture and deployment target. Validate the
-wheel and relocated ZIP on a separate host without the build-time Homebrew
-paths. Update exact license texts and notices if the packaged versions change.
-Choose tooling only after checking its current supported behavior.
+The macOS arm64 wheel previously linked against Homebrew libraries but was
+tested on the same build runner, so it could not establish that a user without
+Homebrew could load the plugin. The embedded libheif build also enabled optional
+codecs based on what happened to be installed on the runner; a local link audit
+found x265, x264, AOM, SVT-AV1 and other unrelated libraries in that closure.
 
-Track exact Windows native sources, triplet/options and application build inputs
-alongside their binaries, and test the documented rebuild/relink workflow. This
-continues the repository's existing `THIRD_PARTY_NOTICES` requirements; Linux's
-archive must not be described as covering other platforms.
+`hatch_build.py` selects a CMake toolchain that keeps libheif's libde265 and
+dav1d decoders and disables the other backends. Still AVIF items use the
+plugin's direct dav1d decoder; animated AVIF tracks use libheif's sequence
+decoder. The macOS wheel build
+sets a macOS 11 deployment target. `tools/package-macos-wheel.py` uses Delocate
+to copy and relink all non-system dylibs under
+`vapoursynth/plugins/imageseqs/lib/`, verifies arm64 slices and rejects absolute
+build-machine dependencies, then regenerates the wheel RECORD. The standalone
+ZIP is staged from that repaired wheel, so it carries the same closure.
+
+The build workflow validates the installed wheel and the relocated standalone
+plugin on a separate macOS runner without installing the build-time Homebrew
+packages. `THIRD_PARTY_NOTICES` and the README now describe the bundled runtime
+libraries. The existing license texts already cover dav1d and libde265.
+
+**a macOS source bundle remains proposed.** The new build script pins and
+hash-checks the dav1d and libde265 sources and build options, but it does not
+publish those archives or a complete modified-library relink bundle. Homebrew
+still supplies the build tools and statically linked libwebp. The Linux source
+archive must not be described as covering macOS. Establish and validate a
+separate source/rebuild contract before claiming macOS source provenance.
+
+### validation
+
+- Before changes, `tests/readalpha.vpy` passed on the release plugin and the
+  macOS WebP benchmark baseline was 1.935 s for 35 frames.
+- A fresh release build through `hatch_build.py`, using the pinned codec prefix
+  and the CMake toolchain, linked only `libde265` and `dav1d` besides macOS
+  system libraries. Its load commands contain no x265, x264, AOM, SVT-AV1,
+  Homebrew OpenJPEG, or Homebrew WebP dependency; `LC_BUILD_VERSION` reports
+  macOS 11.0.
+- The after validator passed with no VapourSynth warnings or errors, both from
+  the staged native bundle and from a ZIP extracted to a different temporary
+  directory with `DYLD_LIBRARY_PATH` unset.
+- The 35-frame macOS WebP benchmark measured 1.935 s before and 1.829 s after
+  (5.5% faster). The repaired wheel's RECORD hashes and plugin-only file layout
+  were checked, and `otool -L` shows only relative bundled codec paths plus
+  macOS system libraries.
+- The separate-runner wheel and ZIP validation is configured in CI but has not
+  run from this workspace.
+
+**Windows source provenance remains proposed.** Track exact Windows native
+sources, triplet/options and application build inputs alongside their binaries,
+and test the documented rebuild/relink workflow. This continues the repository's
+existing `THIRD_PARTY_NOTICES` requirements; Linux's archive must not be
+described as covering other platforms.
 
 ## release metadata and repeatable staging
 
@@ -185,7 +224,7 @@ ignored now, because they are staged build outputs like `dist/`.
 
 ## acceptance
 
-Treat these as separate patches with separate validation: source rebuilds first,
-then macOS portability, source provenance, and release metadata/staging. Keep the
+Treat these as separate patches with separate validation: source rebuilds,
+macOS portability, source provenance, and release metadata/staging. Keep the
 existing release gates and plugin-only layout. Add no new platform or codec
 dependency merely to complete this follow-up.

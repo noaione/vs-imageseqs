@@ -24,8 +24,9 @@ All platforms put the plugin and `manifest.vs` under
 Linux/macOS or `vs_imageseqs` on Windows; VapourSynth appends the extension.
 The standalone ZIP is extracted from the final wheel, preserving the
 `imageseqs/` subtree and root legal files. Copy the whole `imageseqs/` directory
-into VapourSynth's plugins directory, including its manifest and Linux `lib/`
-subdirectory. Installing the wheel handles this automatically.
+into VapourSynth's plugins directory, including its manifest and any `lib/`
+subdirectory. Installing the wheel handles this automatically. The macOS
+release uses the same `imageseqs/lib/` layout for its bundled dylibs.
 
 ## Validation and publication
 

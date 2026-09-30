@@ -41,6 +41,7 @@ dev = [
     "build>=1.2",
     "hatchling>=1.27",
     "packaging>=26.3",
+    "delocate>=0.13.0",
     "VapourSynth>=79",
     "vsrepo>=2.0"
 ]
@@ -80,6 +81,9 @@ include = [
     "tools/check-linux-wheel.py",
     "tools/create-changelog.py",
     "tools/package-linux-wheel.py",
+    "tools/package-macos-wheel.py",
+    "tools/build-macos-native.sh",
+    "tools/macos-libheif-toolchain.cmake",
     "tools/stage-native.py",
     "tools/manylinux-toolchain.cmake",
     "LICENSE",

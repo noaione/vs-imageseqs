@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -38,6 +39,24 @@ def release_directory(root: Path, environment: dict[str, str]) -> Path:
 
 def cargo_environment(root: Path) -> dict[str, str]:
     environment = os.environ.copy()
+
+    if sys.platform == "darwin":
+        # Keep the embedded libheif build independent of optional codecs found
+        # on the build host. The content-addressed path makes Cargo rerun the
+        # dependency build script when these options change. Respect an
+        # explicit toolchain selected by callers.
+        toolchain = root / "tools" / "macos-libheif-toolchain.cmake"
+        toolchain_hash = hashlib.sha256(toolchain.read_bytes()).hexdigest()[:16]
+        generated_toolchain = (
+            root / "target" / "macos-native" / "toolchains" / f"{toolchain_hash}.cmake"
+        )
+        generated_toolchain.parent.mkdir(parents=True, exist_ok=True)
+        if not generated_toolchain.is_file():
+            shutil.copy2(toolchain, generated_toolchain)
+        environment.setdefault(
+            "CMAKE_TOOLCHAIN_FILE",
+            str(generated_toolchain),
+        )
 
     # cargo-vcpkg exposes the repository-local installed packages through
     # this generated vcpkg root. Respect an explicit VCPKG_ROOT when the
@@ -82,12 +101,24 @@ def build_plugin(root: Path, environment: dict[str, str]) -> Path:
     return artifact
 
 
-def wheel_platform_tag() -> str:
+def wheel_platform_tag(environment: dict[str, str]) -> str:
     if sys.platform == "linux":
         # A build host's supported tags do not certify the plugin's ABI or
         # external libraries. Only auditwheel may give Linux release wheels
         # their manylinux tag, after checking and bundling those dependencies.
         return sysconfig.get_platform().replace("-", "_").replace(".", "_")
+    if sys.platform == "darwin" and environment.get("MACOSX_DEPLOYMENT_TARGET"):
+        target = environment.get("CARGO_BUILD_TARGET", "").lower()
+        if "aarch64" in target or "arm64" in target:
+            architecture = "arm64"
+        elif "x86_64" in target:
+            architecture = "x86_64"
+        else:
+            architecture = sysconfig.get_platform().split("-")[-1]
+        version = environment["MACOSX_DEPLOYMENT_TARGET"].split(".", maxsplit=1)
+        if len(version) != 2 or not all(part.isdigit() for part in version):
+            raise ValueError("MACOSX_DEPLOYMENT_TARGET must be a major.minor version")
+        return f"macosx_{version[0]}_{version[1]}_{architecture}"
     return next(tags.platform_tags())
 
 
@@ -135,7 +166,7 @@ class NativePluginHook(BuildHookInterface):  # type: ignore[type-arg]
         # The wheel contains a native plugin, so it must not be tagged as a
         # universal pure-Python wheel.
         build_data["pure_python"] = False
-        build_data["tag"] = f"py3-none-{wheel_platform_tag()}"
+        build_data["tag"] = f"py3-none-{wheel_platform_tag(environment)}"
 
     def finalize(
         self,

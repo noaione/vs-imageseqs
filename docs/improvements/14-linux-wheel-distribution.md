@@ -72,8 +72,9 @@ No decoder code changed and no performance benchmark was needed.
 
 - Observe the first complete GitHub Actions run, including macOS autoloading.
 - Exercise a full rebuild from the generated Linux relinking archive.
-- macOS still needs its existing system dav1d/libde265 installation; bundling
-  those libraries is separate work. Windows static-LGPL source/relinking
+- macOS runtime libraries are bundled by
+  [20](20-distribution-followups.md); exact macOS source provenance remains
+  open. Windows static-LGPL source/relinking
   obligations also remain as documented in `THIRD_PARTY_NOTICES`.
 
 Build/relink instructions: [LINUX-BUILD.md](../LINUX-BUILD.md).

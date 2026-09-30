@@ -46,8 +46,9 @@ Use the plugin file for your system:
 | Linux | `libvs_imageseqs.so` |
 | macOS arm64 | `libvs_imageseqs.dylib` |
 
-Linux release wheels include the required `dav1d` and `libde265` libraries.
-macOS builds need those libraries installed. Windows builds use static libraries.
+Linux and macOS release wheels include the required `dav1d` and `libde265`
+libraries. The macOS wheel and standalone ZIP carry them in
+`imageseqs/lib/`. Windows builds use static libraries.
 
 ## quick start
 
@@ -249,7 +250,7 @@ On Debian or Ubuntu:
 sudo apt-get install --yes cmake ninja-build pkg-config libdav1d-dev libde265-dev libwebp-dev
 ```
 
-On macOS with Homebrew:
+To build from source on macOS with Homebrew:
 
 ```console
 brew install cmake ninja pkg-config dav1d libde265 webp

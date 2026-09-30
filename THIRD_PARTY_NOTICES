@@ -7,8 +7,11 @@ distribution and preserve the applicable license texts and notices.
 
 The exact native inputs recorded here are from the x64-windows-static-md
 vcpkg installation used to build the Windows wheel. The Linux manylinux build
-uses the same upstream versions of dav1d, libde265 and libwebp, and Cargo.lock
-selects its embedded libheif and OpenJPEG sources:
+pins dav1d, libde265 and libwebp in `tools/build-manylinux.sh`; Cargo.lock
+selects the embedded libheif and OpenJPEG sources. The macOS arm64 build uses
+the same pinned dav1d and libde265 source versions, builds them as shared
+libraries, bundles them, and disables unused libheif codec backends so
+machine-local codecs are not linked:
 
   * libheif 1.23.1
   * libde265 1.1.1
@@ -31,7 +34,7 @@ Native components
 
 dav1d 1.5.3
   License: BSD 2-Clause "Simplified" License
-  Linkage: static on Windows; shared on Unix, bundled in Linux release artifacts
+  Linkage: static on Windows; shared on Unix, bundled in Linux and macOS release artifacts
   Notice: LICENSES/dav1d-COPYING.txt
   Upstream: https://code.videolan.org/videolan/dav1d
 
@@ -43,7 +46,7 @@ libheif 1.23.1
 
 libde265 1.1.1
   License: GNU Lesser General Public License, version 3
-  Linkage: static on Windows; shared on Unix, bundled in Linux release artifacts
+  Linkage: static on Windows; shared on Unix, bundled in Linux and macOS release artifacts
   Notice and license text: LICENSES/libde265-COPYING.txt
   Upstream: https://github.com/strukturag/libde265
 
@@ -61,9 +64,9 @@ openjpeg (vendored by openjpeg-sys 1.0.12)
   Upstream: https://github.com/uclouvain/openjpeg
 
 The current vcpkg manifest disables libheif default features, so x265 is not
-selected. The refreshed install contains no x265 library. Older generated
-build metadata may still mention x265; always verify the final native link
-output after changing the vcpkg feature set.
+selected on Windows. The macOS CMake toolchain also disables the optional
+libheif backends this plugin does not use, including x265. Always verify the
+final native link output after changing either dependency configuration.
 
 Static-linking release checklist
 ---------------------------------
@@ -88,11 +91,10 @@ written offer/source URL for every published binary as part of release work.
 Linux release artifacts are accompanied by linux-relink-source.tar.gz. It
 contains the application and dependency sources used by that build, including
 the vendored libheif and OpenJPEG sources, and the build/relink instructions in
-BUILDING.md. The Linux wheel and plugin ZIP include dav1d and libde265 as
-separate shared libraries with auditwheel-generated names and relative paths.
-Their license texts remain under LICENSES/. macOS still uses system-installed
-dav1d and libde265. The existing Windows source/relinking requirements above
-remain applicable to the static Windows binaries.
+BUILDING.md. The Linux and macOS wheels and plugin ZIPs include dav1d and
+libde265 as separate shared libraries with relative loader paths. Their license
+texts remain under LICENSES/. The existing Windows source/relinking
+requirements above remain applicable to the static Windows binaries.
 
 License URLs
 ------------
