@@ -10,6 +10,9 @@
 - macOS release builds target arm64 on macOS 11 or later and disable unused
   libheif codec backends, avoiding accidental links to codecs installed on the
   build runner
+- keep macOS-only native search paths out of Windows wheel builds, and clear
+  the cached libheif CMake build before configuring it against the pinned codec
+  libraries
 
 ## [0.2.0] - 2026-09-30
 

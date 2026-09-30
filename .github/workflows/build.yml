@@ -147,7 +147,10 @@ jobs:
 
       - name: build pinned macOS codec libraries
         if: runner.os == 'macOS'
-        run: bash tools/build-macos-native.sh
+        run: |
+          bash tools/build-macos-native.sh
+          echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/target/macos-native/prefix/lib/pkgconfig:/opt/homebrew/opt/webp/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "CMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/target/macos-native/prefix" >> "$GITHUB_ENV"
         env:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
 
@@ -236,12 +239,14 @@ jobs:
       - name: clear the previous build output
         run: python tools/build_output.py clear dist
 
+      - name: clear cached libheif configuration
+        if: runner.os == 'macOS'
+        run: cargo clean --release --package libheif-sys
+
       - name: build wheel
         run: python -m build --wheel --outdir dist
         env:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
-          PKG_CONFIG_PATH: ${{ github.workspace }}/target/macos-native/prefix/lib/pkgconfig:/opt/homebrew/opt/webp/lib/pkgconfig
-          CMAKE_PREFIX_PATH: ${{ github.workspace }}/target/macos-native/prefix
 
       - name: bundle macOS runtime libraries
         if: runner.os == 'macOS'
