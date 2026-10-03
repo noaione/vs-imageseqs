@@ -171,10 +171,12 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   reader decodes the primary item at all, and an item written as several extents
   is read rather than refused, because those extents are one payload split
   across the container. A container it still refuses — a grid of tiles, a
-  construction method it does not follow — is described as the format the
-  `image` decoder produces rather than as the yuv
-  its samples are; a probe must never promise a frame a decode would refuse to
-  produce.
+  construction method it does not follow — is described and decoded by `libheif`
+  instead, which reads both where the `image` decoder could not: it has no
+  monochrome avif, so a grid of monochrome cells ended as `Invalid argument`.
+  `avif::refuses` is the one answer the probe and the decode both read, so they
+  cannot disagree about which library owns a file; a probe must never promise a
+  frame a decode would refuse to produce.
 - `src/pixel.rs`: supported pixel formats, the format a nominal depth names, and
   planar frame writes, which move a wider word down to the frame's own depth.
 - `src/color.rs`: frame properties, the optional raw `ICCProfile`, and the
@@ -204,12 +206,12 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   which that script writes by hand from the coded item `avif-yuv420p.avif` holds,
   so that fixture has to exist before the script runs. That section joins nothing
   itself: it checks the plugin's joined planes against the whole file's, plane by
-  plane. its grid section reads
-  `avif-grid.avif`, a 2x2 grid of tiles encoded once by hand from the
-  `avif-grid-source.png` the same script writes (`avifenc --lossless -g 2x2`,
-  with the command in that script's header), and states the refusal every
-  decoder in this tree produces for a grid, so the check has to become a sample
-  check when one of them starts joining grids. its orientation section reads the `tests/fixtures/orientation-*.png` files written by
+  plane. its grid section reads `avif-grid.avif`, a 2x2 grid of tiles encoded
+  once by hand from the `avif-grid-source.png` the same script writes
+  (`avifenc --lossless -g 2x2`, with the command in that script's header). A
+  grid is refused by the plugin's own walk and read by `libheif`, so that
+  section checks the joined picture's four cells -- 8, 10, 15 and 17, taken at
+  each cell's middle -- rather than a refusal. its orientation section reads the `tests/fixtures/orientation-*.png` files written by
   `tests/make-orientation-fixtures.py`, plus `orientation-6.jxl`, which that
   script documents and `cjxl` makes, and its yuv orientation section reads the
   `orientation-{2,6,8}.webp` files that script cuts out of

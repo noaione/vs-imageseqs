@@ -61,6 +61,18 @@ over to every file.
 
 ## status of the order of work
 
+**Steps 1 to 4 are done.** Nothing animated is replayed through the `image`
+crate any more -- `src/animation/frames.rs`, the last adapter that did, is
+deleted -- and the avif and heif fallbacks belong to `libheif` rather than to
+it. What is left of the crate is one adapter (`src/still.rs`) and the still
+formats of step 5, which the next goal takes up.
+
+The commits, in order: `398cf4e` the shared types, `d2287ea` the route audit,
+`f42def2` jpeg, `2b0d2e8` the shared exif reader, `049463d` the png probe,
+`21c1e14` the gif compositor, `fa808f4` the webp container walk, `9549430` the
+webp canvas and blending, `380589b` the webp replay, `2de10de` the avif extent
+join, and `e08b621` the libheif fallback.
+
 Step 2 is done, in `398cf4e`. The shared representations exist
 (`src/layout.rs`), the identification does too (`src/format.rs`), and every
 remaining `image` call in production code is behind one adapter
@@ -205,17 +217,29 @@ Verified: every plane of `avif-split-extents.avif` is byte-identical to
 pixel diff shows the split-extent file as the **only** changed fixture in the
 tree.
 
-**What is left of step 4 is one piece**: send a refused avif or heif to
-libheif rather than to `image`, which plan [28](28-animation-container-decoders.md)
-decides as "one library for every refused container". That one moves the
-validator's grid section, whose pinned string today is `image`'s
-`Format error decoding Avif: Invalid argument`, and any container libheif also
-refuses needs its new error string written down. `formats/heif.rs` already has
-the entry point for a colour page, so the work is the routing and the
-expectations rather than a decoder.
+**Step 4 is done**, in `e08b621`. A container this tree's own avif walk refuses
+-- a grid of tiles, a construction method the walker does not follow -- is now
+described and decoded by `libheif`, which plan
+[28](28-animation-container-decoders.md) decides as "one library for every
+refused container". `avif::image_info` delegates and `avif::handles` reads the
+same walk, so the probe and the decode cannot disagree about who owns a file.
 
-Everything below is the scoping written before the join landed, kept because the
-second piece is still described by it.
+What made this worth doing rather than just re-routing is what the run showed:
+**`libheif` opens the grid and `image` could not**. The `image` decoder has no
+monochrome avif, and a `avifenc -g 2x2` grid's cells are monochrome, so it
+answered `Invalid argument` for a container libheif reads back at 256x256. The
+validator's grid section was written to fail the moment this happened and
+named the four cell values to check, so it became a real sample check: the
+four quadrants read 8, 10, 15 and 17, taken at each cell's middle so a wrong
+cell order cannot pass.
+
+A fixture pixel diff shows the grid as the only fixture this commit changes --
+from an error to `Gray8` 256x256 -- beside the split-extent file from the
+previous one. Nothing else in the tree moved.
+
+Everything below is the scoping written before either piece landed, kept
+because it is the record of what was decided and why.
+
 
 Both of these change what the plugin hands out rather than only where it comes
 from, which is why they were not a quiet continuation of the gif and webp work.
