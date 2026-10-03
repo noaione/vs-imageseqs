@@ -3,7 +3,12 @@
 status: proposed, research only. no decoder, dependency, public argument or
 wheel has changed. researched on 2026-10-03 against commit
 `18183fd3b5cc251cdcbe738e7bdb763a5a5bb7c5`, `image 0.25.10` and the versions in
-`Cargo.lock`.
+`Cargo.lock`. [27](27-direct-still-decoders.md) selected every still format's
+replacement on 2026-10-04 and [28](28-animation-container-decoders.md) selected
+every animated format's and both container fallbacks' the same day; no
+replacement has been implemented. The two selections together leave the
+removal with no undecided format, which is what this plan's gate waits for;
+what is left is the implementation and the measurement.
 
 ## goal
 
@@ -85,6 +90,12 @@ Each stage is independently reviewable and reversible. While migration is in
 progress, a fallback must not silently turn a recognized malformed file into a
 different decoder's interpretation. Probe and decode must select compatible
 routes and continue to detect a file changing after probing.
+
+Every line below is now answered by a decision rather than by an open question:
+[27](27-direct-still-decoders.md) for the still formats' codecs,
+[28](28-animation-container-decoders.md) for the animated ones and the
+container fallbacks, and [29](29-decoder-types-without-image.md) for the shared
+types. The boxes stay unchecked because none of it is implemented.
 
 ## removal checklist
 
