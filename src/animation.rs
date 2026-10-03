@@ -26,6 +26,7 @@ pub mod gif;
 pub mod heif;
 pub mod jxl;
 pub mod sequence;
+pub mod webp;
 
 use std::{
     collections::BTreeMap,

@@ -1,0 +1,548 @@
+//! The RIFF walk that reads an animated webp's timeline.
+//!
+//! A webp is a RIFF container. An animated one carries a `VP8X` header that
+//! states the canvas and an `ANIM` chunk with the loop count, then one `ANMF`
+//! chunk per displayed frame. Each `ANMF` states a sub-rectangle of the canvas,
+//! how long it is shown, and how it is drawn onto what is already there; inside
+//! it is the `ALPH` and `VP8`/`VP8L` payload of that one frame.
+//!
+//! This module reads all of that and nothing else. It is a walk rather than a
+//! decode: no pixel is touched, so a timeline costs two passes over a few
+//! hundred bytes of headers. That is the whole reason the container is read here
+//! rather than through a library -- libwebp's `WebPAnimDecoder` composes every
+//! canvas into a buffer it owns before handing one over, which is both the
+//! discovery decode this migration exists to remove and the wrong shape for a
+//! reader that wants one sub-rectangle at a time. See
+//! `docs/improvements/28-animation-container-decoders.md`.
+//!
+//! Two independent cross-checks read the same fields and both were run against
+//! the fixture: `webpinfo.exe`, which is libwebp's own tool, and the research
+//! walker under `target/cand-anim/webp-container.py`. Where my first walker
+//! disagreed with them it was because the `ANMF` flags byte has the blend method
+//! in bit 1 and the disposal in bit 0, which [`Frame::of`] now says explicitly.
+
+// The walk is the first half of step 4's webp third and is complete and tested
+// on its own; the compositor that consumes it lands next, and until then nothing
+// in a release build calls into this module.
+#![allow(
+    dead_code,
+    reason = "the compositor that consumes this walk lands next"
+)]
+
+use std::path::Path;
+
+use crate::error::{ImgSeqError, Result};
+
+/// File extensions that hold a webp.
+const EXTENSIONS: [&str; 1] = ["webp"];
+
+/// Bytes of a RIFF chunk header: the four-character code and the size.
+const CHUNK_HEADER: usize = 8;
+
+/// Bytes of an `ANMF` header before its sub-chunks.
+const ANMF_HEADER: usize = 16;
+
+/// Largest canvas this walk will describe, which bounds an allocation made from
+/// a field of a file. libwebp's own limit is the same order.
+const MAX_SIDE: u32 = 16_384;
+
+/// Whether this module reads `path`.
+#[must_use]
+pub fn owns(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            EXTENSIONS
+                .iter()
+                .any(|known| extension.eq_ignore_ascii_case(known))
+        })
+}
+
+/// One displayed frame's rectangle, timing and drawing rule.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Frame {
+    /// Left edge of the rectangle on the canvas.
+    pub x: u32,
+    /// Top edge of the rectangle on the canvas.
+    pub y: u32,
+    /// Width of the rectangle.
+    pub width: u32,
+    /// Height of the rectangle.
+    pub height: u32,
+    /// How long it is shown, in milliseconds.
+    pub duration_ms: u32,
+    /// Whether the rectangle is blended onto the canvas rather than written
+    /// over it. This is the `ANMF` flags bit 1 read as its *meaning*, so a frame
+    /// that says "do not blend" answers `false`.
+    pub blend: bool,
+    /// Whether the rectangle is disposed of after being shown. See
+    /// [`Animation::dispose_is_inert`].
+    pub dispose: bool,
+    /// Where this frame's `ALPH`/`VP8`/`VP8L` payload starts and ends in the
+    /// file, so a decode can be handed just that frame.
+    pub payload: std::ops::Range<usize>,
+}
+
+/// What the container states about an animated webp.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Animation {
+    /// Canvas width.
+    pub width: u32,
+    /// Canvas height.
+    pub height: u32,
+    /// The `ANIM` loop count, where zero means forever.
+    pub loop_count: u16,
+    /// Whether the `VP8X` header flags an alpha channel.
+    pub has_alpha: bool,
+    /// Whether the `VP8X` header flags an embedded ICC profile.
+    pub has_icc_profile: bool,
+    /// Whether the `VP8X` header flags an exif payload.
+    pub has_exif: bool,
+    /// The `ANIM` background colour hint, as it is written.
+    pub background: [u8; 4],
+    /// The displayed frames, in timeline order.
+    pub frames: Vec<Frame>,
+    /// Whether the disposal flag can have any effect on this reader.
+    ///
+    /// It cannot, and that is not an omission. A disposal clears its rectangle
+    /// to the animation's *background*, and the reader this replaces never sets
+    /// one: `image-webp` keeps the `ANIM` background as a `hint` and leaves the
+    /// colour it would clear to as `None` unless a caller sets it, and `image`
+    /// does not. The flag is therefore read, reported and otherwise inert, which
+    /// is what keeps this reader's pixels identical to the one it replaces.
+    pub dispose_is_inert: bool,
+}
+
+impl Animation {
+    /// Whether the container holds more than one displayed picture.
+    #[must_use]
+    pub fn is_animated(&self) -> bool {
+        self.frames.len() > 1
+    }
+}
+
+/// Reads `path`'s animation, or `None` for a file this module does not read.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the file cannot be read or its container is
+/// malformed.
+pub fn walk(path: &Path) -> Result<Option<Animation>> {
+    if !owns(path) {
+        return Ok(None);
+    }
+    let data = std::fs::read(path).map_err(|error| {
+        ImgSeqError::new(format!(
+            "failed to open image '{}': {error}",
+            path.display()
+        ))
+    })?;
+    parse(&data, path).map(Some)
+}
+
+/// Reads an animated webp out of its bytes.
+fn parse(data: &[u8], path: &Path) -> Result<Animation> {
+    let bad = |what: &str| {
+        ImgSeqError::new(format!(
+            "failed to decode image '{}': the webp container {what}",
+            path.display()
+        ))
+    };
+
+    if data.len() < 12 || &data[..4] != b"RIFF" || &data[8..12] != b"WEBP" {
+        return Err(bad("is not a RIFF/WEBP file"));
+    }
+    // The RIFF size counts everything after the two size fields, so a file that
+    // states fewer bytes than it holds is read only as far as it claims. A file
+    // that claims more is truncated rather than read past its own end.
+    let riff_size = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
+    let end = (riff_size + 8).min(data.len());
+    if end < 12 {
+        return Err(bad("states a size too small to hold a header"));
+    }
+
+    let mut header: Option<(u32, u32, bool, bool, bool)> = None;
+    let mut loop_count = 0;
+    let mut background = [0u8; 4];
+    let mut animation = false;
+    let mut frames = Vec::new();
+
+    for (fourcc, payload) in chunks(data, 12, end) {
+        match fourcc {
+            b"VP8X" => {
+                if payload.len() < 10 {
+                    return Err(bad("holds a VP8X chunk that is too short"));
+                }
+                let flags = payload[0];
+                animation = flags & 0x02 != 0;
+                // The canvas is stated one less than its size, because zero is
+                // not a valid dimension; see the spec's `Canvas Width Minus One`.
+                let width = read_three(&payload[4..7]) + 1;
+                let height = read_three(&payload[7..10]) + 1;
+                if width > MAX_SIDE || height > MAX_SIDE {
+                    return Err(bad("states a canvas larger than this reader accepts"));
+                }
+                header = Some((
+                    width,
+                    height,
+                    flags & 0x10 != 0,
+                    flags & 0x20 != 0,
+                    flags & 0x08 != 0,
+                ));
+            }
+            b"ANIM" => {
+                if payload.len() < 6 {
+                    return Err(bad("holds an ANIM chunk that is too short"));
+                }
+                background.copy_from_slice(&payload[..4]);
+                loop_count = u16::from_le_bytes([payload[4], payload[5]]);
+            }
+            b"ANMF" => {
+                let frame = Frame::of(data, payload, &bad)?;
+                frames.push(frame);
+            }
+            _ => {}
+        }
+    }
+
+    let Some((width, height, has_alpha, has_icc_profile, has_exif)) = header else {
+        return Err(bad("holds no VP8X header"));
+    };
+    if animation && frames.is_empty() {
+        return Err(bad("states an animation but holds no frame"));
+    }
+
+    Ok(Animation {
+        width,
+        height,
+        loop_count,
+        has_alpha,
+        has_icc_profile,
+        has_exif,
+        background,
+        frames,
+        dispose_is_inert: true,
+    })
+}
+
+impl Frame {
+    /// Reads one `ANMF` chunk's header, keeping the range of its payload.
+    ///
+    /// `payload` is the `ANMF` chunk's body; its first [`ANMF_HEADER`] bytes are
+    /// the header and the rest is the frame's own `ALPH`/`VP8`/`VP8L` chunks.
+    /// The range is recorded against the *whole file* rather than against the
+    /// chunk, so a decoder can be handed a slice of the bytes that were read.
+    fn of(data: &[u8], payload: &[u8], bad: &impl Fn(&str) -> ImgSeqError) -> Result<Self> {
+        if payload.len() < ANMF_HEADER {
+            return Err(bad("holds an ANMF chunk that is too short"));
+        }
+        // The rectangle is stated in units of two pixels, so each field is
+        // doubled; the size is stated one less, like the canvas.
+        let x = read_three(&payload[0..3]) * 2;
+        let y = read_three(&payload[3..6]) * 2;
+        let width = read_three(&payload[6..9]) + 1;
+        let height = read_three(&payload[9..12]) + 1;
+        let duration_ms = read_three(&payload[12..15]);
+        let flags = payload[15];
+        // Bit 1 is the blend method and bit 0 the disposal. Blend is stated as
+        // "do not blend", so the flag and the meaning are opposites.
+        let blend = flags & 0b10 == 0;
+        let dispose = flags & 0b01 != 0;
+
+        // The payload is where this chunk's body begins in the file plus its
+        // header; the chunk's own address is found by subtracting the header
+        // that was already stripped.
+        let start =
+            offset_of(payload, data).ok_or_else(|| bad("is not in the file it was read from"))?;
+        let body = start + ANMF_HEADER;
+        let finish = start + payload.len();
+        if finish > data.len() {
+            return Err(bad("holds a frame that runs past the end of the file"));
+        }
+
+        Ok(Self {
+            x,
+            y,
+            width,
+            height,
+            duration_ms,
+            blend,
+            dispose,
+            payload: body..finish,
+        })
+    }
+}
+
+/// Where `slice` starts within `data`, for a slice that is part of it.
+///
+/// The walk hands out subslices of the bytes it read, so the offset is a pointer
+/// difference rather than a second bookkeeping pass. It answers `None` for a
+/// slice that is not inside `data`, which is the check that keeps a
+/// pointer-derived index from being trusted blindly.
+fn offset_of(slice: &[u8], data: &[u8]) -> Option<usize> {
+    let base = data.as_ptr() as usize;
+    let start = slice.as_ptr() as usize;
+    let offset = start.checked_sub(base)?;
+    let end = offset.checked_add(slice.len())?;
+    (end <= data.len()).then_some(offset)
+}
+
+/// Reads a three byte little endian field, which is how a webp states a size or
+/// a duration.
+fn read_three(bytes: &[u8]) -> u32 {
+    u32::from(bytes[0]) | (u32::from(bytes[1]) << 8) | (u32::from(bytes[2]) << 16)
+}
+
+/// Walks the RIFF chunks in `[start, end)`, answering each one's code and body.
+///
+/// A chunk is padded to an even length, so the next one starts after the padding
+/// rather than immediately after the body. A chunk that claims to run past `end`
+/// ends the walk rather than being read: a truncated file describes the frames
+/// it actually holds.
+fn chunks(data: &[u8], start: usize, end: usize) -> impl Iterator<Item = (&[u8], &[u8])> {
+    let mut offset = start;
+    std::iter::from_fn(move || {
+        if offset + CHUNK_HEADER > end {
+            return None;
+        }
+        let fourcc = &data[offset..offset + 4];
+        let size = u32::from_le_bytes([
+            data[offset + 4],
+            data[offset + 5],
+            data[offset + 6],
+            data[offset + 7],
+        ]) as usize;
+        let body = offset + CHUNK_HEADER;
+        let finish = body.checked_add(size)?;
+        if finish > end {
+            return None;
+        }
+        offset = finish + (size & 1);
+        Some((fourcc, &data[body..finish]))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join(name)
+    }
+
+    /// A RIFF header around `chunks`, each written as a code, a size and a body
+    /// padded to an even length.
+    fn riff(chunks: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
+        let mut body = Vec::new();
+        for (code, payload) in chunks {
+            body.extend_from_slice(*code);
+            body.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            body.extend_from_slice(payload);
+            if payload.len() % 2 == 1 {
+                body.push(0);
+            }
+        }
+        let mut file = Vec::from(*b"RIFF");
+        file.extend_from_slice(&((body.len() + 4) as u32).to_le_bytes());
+        file.extend_from_slice(b"WEBP");
+        file.extend_from_slice(&body);
+        file
+    }
+
+    /// A `VP8X` header body stating `width` by `height` and `flags`.
+    fn vp8x(width: u32, height: u32, flags: u8) -> Vec<u8> {
+        let mut body = vec![flags, 0, 0, 0];
+        body.extend_from_slice(&(width - 1).to_le_bytes()[..3]);
+        body.extend_from_slice(&(height - 1).to_le_bytes()[..3]);
+        body
+    }
+
+    /// An `ANMF` body for a rectangle, with a `VP8L` payload of `payload`.
+    fn anmf(x: u32, y: u32, width: u32, height: u32, duration: u32, flags: u8) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&(x / 2).to_le_bytes()[..3]);
+        body.extend_from_slice(&(y / 2).to_le_bytes()[..3]);
+        body.extend_from_slice(&(width - 1).to_le_bytes()[..3]);
+        body.extend_from_slice(&(height - 1).to_le_bytes()[..3]);
+        body.extend_from_slice(&duration.to_le_bytes()[..3]);
+        body.push(flags);
+        // A minimal inner chunk; the walk does not look inside it.
+        body.extend_from_slice(b"VP8L");
+        body.extend_from_slice(&4u32.to_le_bytes());
+        body.extend_from_slice(&[1, 2, 3, 4]);
+        body
+    }
+
+    /// The fixture's fields, which `webpinfo.exe` reports independently: a 16x12
+    /// canvas, alpha, no ICC, no exif, and a background of all zeros.
+    #[test]
+    fn the_fixture_container_is_read_as_libwebp_reads_it() {
+        let animation = walk(&fixture("animation.webp"))
+            .expect("the fixture is read")
+            .expect("a webp is taken over");
+        assert_eq!((animation.width, animation.height), (16, 12));
+        assert!(animation.has_alpha, "the fixture states alpha");
+        assert!(!animation.has_icc_profile);
+        assert!(!animation.has_exif);
+        assert_eq!(animation.loop_count, 0, "zero is forever");
+        assert_eq!(animation.background, [0, 0, 0, 0]);
+        assert!(animation.is_animated());
+        assert_eq!(animation.frames.len(), 4);
+    }
+
+    /// Every frame's rectangle, duration and flags, which `webpinfo.exe` prints
+    /// for this same file: 16x12 for 80 ms, 11x10 for 170 ms, and so on, all at
+    /// the origin with blend off and no disposal.
+    #[test]
+    fn every_frame_is_read_as_libwebp_reads_it() {
+        let animation = walk(&fixture("animation.webp"))
+            .expect("the fixture is read")
+            .expect("a webp is taken over");
+        let rectangles: Vec<_> = animation
+            .frames
+            .iter()
+            .map(|f| {
+                (
+                    f.x,
+                    f.y,
+                    f.width,
+                    f.height,
+                    f.duration_ms,
+                    f.blend,
+                    f.dispose,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rectangles,
+            vec![
+                (0, 0, 16, 12, 80, false, false),
+                (0, 0, 11, 10, 170, false, false),
+                (0, 0, 14, 10, 110, false, false),
+                (0, 0, 16, 10, 240, false, false),
+            ]
+        );
+    }
+
+    /// Each frame's payload range lies inside the file and starts with the code
+    /// of the chunk that holds its pixels.
+    #[test]
+    fn every_frame_points_at_its_own_payload() {
+        let data = std::fs::read(fixture("animation.webp")).expect("the fixture is read");
+        let animation = parse(&data, Path::new("animation.webp")).expect("the container parses");
+        for (index, frame) in animation.frames.iter().enumerate() {
+            let payload = &data[frame.payload.clone()];
+            assert!(
+                payload.starts_with(b"VP8L") || payload.starts_with(b"ALPH"),
+                "frame {index} starts at {}",
+                frame.payload.start
+            );
+        }
+        // The ranges are ordered and do not overlap, which is what makes them
+        // addresses rather than guesses.
+        for pair in animation.frames.windows(2) {
+            assert!(pair[0].payload.end <= pair[1].payload.start);
+        }
+    }
+
+    /// The blend and disposal flags are read as their *meaning*, not as their
+    /// bits: bit 1 says "do not blend", so it answers `blend: false`.
+    #[test]
+    fn the_blend_flag_is_read_as_its_meaning() {
+        // Bit 1 set: do not blend. Bit 0 set: dispose.
+        let file = riff(&[
+            (b"VP8X", vp8x(4, 4, 0x02)),
+            (b"ANIM", vec![0, 0, 0, 0, 0, 0]),
+            (b"ANMF", anmf(0, 0, 4, 4, 10, 0b11)),
+        ]);
+        let animation = parse(&file, Path::new("x.webp")).expect("the container parses");
+        assert!(!animation.frames[0].blend, "bit 1 means do not blend");
+        assert!(animation.frames[0].dispose, "bit 0 means dispose");
+
+        let file = riff(&[
+            (b"VP8X", vp8x(4, 4, 0x02)),
+            (b"ANIM", vec![0, 0, 0, 0, 0, 0]),
+            (b"ANMF", anmf(0, 0, 4, 4, 10, 0b00)),
+        ]);
+        let animation = parse(&file, Path::new("x.webp")).expect("the container parses");
+        assert!(animation.frames[0].blend, "bit 1 clear means blend");
+        assert!(!animation.frames[0].dispose);
+    }
+
+    /// The rectangle's offset is stated in units of two pixels, so a frame at
+    /// `(1, 2)` is written as `(0, 1)` and has to read back as `(2, 4)`.
+    #[test]
+    fn a_rectangle_offset_is_doubled() {
+        let file = riff(&[
+            (b"VP8X", vp8x(8, 8, 0x02)),
+            (b"ANIM", vec![0, 0, 0, 0, 0, 0]),
+            (b"ANMF", anmf(2, 4, 3, 3, 10, 0)),
+        ]);
+        let animation = parse(&file, Path::new("x.webp")).expect("the container parses");
+        assert_eq!((animation.frames[0].x, animation.frames[0].y), (2, 4));
+        // The canvas and the rectangle are both stated one less than their size.
+        assert_eq!((animation.width, animation.height), (8, 8));
+        assert_eq!(
+            (animation.frames[0].width, animation.frames[0].height),
+            (3, 3)
+        );
+    }
+
+    /// Only a webp extension is taken over.
+    #[test]
+    fn only_webp_extensions_are_taken_over() {
+        for name in ["a.webp", "a.WEBP"] {
+            assert!(owns(Path::new(name)), "{name}");
+        }
+        for name in ["a.png", "a.gif", "a.webpx", "a"] {
+            assert!(!owns(Path::new(name)), "{name}");
+        }
+    }
+
+    /// A container this walk cannot describe is refused rather than guessed at.
+    #[test]
+    fn a_malformed_container_is_refused() {
+        let path = Path::new("x.webp");
+        assert!(parse(b"", path).is_err());
+        assert!(parse(b"NOTARIFFATALL", path).is_err());
+        // A RIFF that is not a webp.
+        assert!(parse(b"RIFF\x08\x00\x00\x00WAVEfmt ", path).is_err());
+        // A webp with no VP8X header.
+        let file = riff(&[(b"VP8 ", vec![0; 8])]);
+        assert!(parse(&file, path).is_err());
+        // A canvas larger than this reader accepts.
+        let file = riff(&[(b"VP8X", vp8x(20_000, 4, 0x02))]);
+        assert!(parse(&file, path).is_err());
+    }
+
+    /// A chunk that claims to run past the end of the file ends the walk rather
+    /// than being read, so a truncated container describes what it holds.
+    #[test]
+    fn a_truncated_chunk_ends_the_walk() {
+        let mut file = riff(&[
+            (b"VP8X", vp8x(4, 4, 0x02)),
+            (b"ANIM", vec![0, 0, 0, 0, 0, 0]),
+            (b"ANMF", anmf(0, 0, 4, 4, 10, 0)),
+        ]);
+        // Find the `ANMF` header and claim one more byte than the file holds,
+        // so the chunk cannot be read.
+        let anmf_at = file
+            .windows(4)
+            .position(|window| window == b"ANMF")
+            .expect("the frame chunk was written");
+        let size = u32::from_le_bytes([
+            file[anmf_at + 4],
+            file[anmf_at + 5],
+            file[anmf_at + 6],
+            file[anmf_at + 7],
+        ]);
+        file[anmf_at + 4..anmf_at + 8].copy_from_slice(&(size + 1).to_le_bytes());
+        // The frame is skipped rather than read past its own end, and a file
+        // that states an animation and then holds no readable frame is refused
+        // instead of being described as an animation of nothing.
+        assert!(parse(&file, Path::new("x.webp")).is_err());
+    }
+}
