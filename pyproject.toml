@@ -86,6 +86,7 @@ include = [
     "tools/macos-libheif-toolchain.cmake",
     "tools/stage-native.py",
     "tools/manylinux-toolchain.cmake",
+    "tools/vcpkg-ports/libheif/**",
     "LICENSE",
     "THIRD_PARTY_NOTICES",
     "LICENSES/**",

@@ -1,0 +1,3 @@
+# Upstream patch context lines contain a required single space.
+tools/vcpkg-ports/libheif/*.diff -whitespace
+tools/vcpkg-ports/libheif/*.patch -whitespace

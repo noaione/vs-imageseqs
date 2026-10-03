@@ -35,6 +35,7 @@ Native components
 dav1d 1.5.3
   License: BSD 2-Clause "Simplified" License
   Linkage: static on Windows; shared on Unix, bundled in Linux and macOS release artifacts
+  Usage: the plugin's direct AVIF decoder and libheif's AVIF sequence backend
   Notice: LICENSES/dav1d-COPYING.txt
   Upstream: https://code.videolan.org/videolan/dav1d
 
@@ -64,7 +65,12 @@ openjpeg (vendored by openjpeg-sys 1.0.12)
   Upstream: https://github.com/uclouvain/openjpeg
 
 The current vcpkg manifest disables libheif default features, so x265 is not
-selected on Windows. The macOS CMake toolchain also disables the optional
+selected on Windows. Its repository-local libheif overlay enables the built-in
+dav1d decoder using the dav1d version already listed above. The overlay's build
+recipes and patches derive from Microsoft's vcpkg baseline
+40a9bd4ccdf5dc14ff76d4ed47d46a226ce84a83 and retain its MIT license in
+LICENSES/vcpkg-LICENSE.txt. These recipes are source/build inputs, not another
+native runtime dependency. The macOS CMake toolchain also disables the optional
 libheif backends this plugin does not use, including x265. Always verify the
 final native link output after changing either dependency configuration.
 

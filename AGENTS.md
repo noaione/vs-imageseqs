@@ -267,6 +267,13 @@ if the local vcpkg adapter is missing, recreate it before building or use the
 repository's established cargo-vcpkg setup. do not commit generated
 `vcpkg_installed/` or `target/` contents.
 
+the manifest selects `tools/vcpkg-ports/libheif/`, whose `dav1d` feature builds
+libheif's AVIF sequence decoder into the library. the upstream vcpkg port
+disables that backend, so installing dav1d alone only fixes the direct still
+reader. keep libheif's default features disabled. after replacing the installed
+libheif archive, run `cargo clean --release --package libheif-sys` before the
+release build so Cargo does not reuse the old native link configuration.
+
 ## python packaging
 
 install the development extra and build both artifacts:

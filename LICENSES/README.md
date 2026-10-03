@@ -25,3 +25,9 @@ The current manifest disables libheif default features, so x265 is not part
 of the refreshed install or current native dependency set. If HEVC encoding
 is enabled later, add x265's exact `COPYING` file and update the notices
 before distributing the resulting binary.
+
+Windows libheif also uses the existing dav1d decoder for AVIF sequences, built
+into libheif rather than loaded as a separate codec plugin. The native license
+texts above cover that backend. `vcpkg-LICENSE.txt` preserves Microsoft's MIT
+license for the repository-local libheif port's build recipes and patches,
+copied from the manifest's pinned vcpkg baseline.

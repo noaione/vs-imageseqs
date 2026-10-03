@@ -2,6 +2,12 @@
 
 ## unreleased
 
+### fixed
+
+- Windows builds enable libheif's built-in dav1d decoder, so animated AVIF
+  sequences decode instead of failing with `NoMatchingDecoderInstalled`.
+  libheif's default features stay disabled, and no additional codec is selected.
+
 ### performance
 
 - PNG decoding hands each decoded row to the frame it belongs in instead of

@@ -164,7 +164,7 @@ jobs:
         if: runner.os == 'Windows'
         with:
           path: vcpkg_installed
-          key: vcpkg-${{ runner.os }}-${{ runner.arch }}-x64-windows-static-md-${{ hashFiles('vcpkg.json') }}
+          key: vcpkg-${{ runner.os }}-${{ runner.arch }}-x64-windows-static-md-${{ hashFiles('vcpkg.json', 'tools/vcpkg-ports/**') }}
           restore-keys: |
             vcpkg-${{ runner.os }}-${{ runner.arch }}-x64-windows-static-md-
 
@@ -368,7 +368,9 @@ jobs:
           for file in \
             build.rs Cargo.toml Cargo.lock vcpkg.json hatch_build.py \
             pyproject.toml CHANGELOG.md tools/build-macos-native.sh \
-            tools/macos-libheif-toolchain.cmake tools/package-macos-wheel.py; do
+            tools/macos-libheif-toolchain.cmake tools/package-macos-wheel.py \
+            tools/vcpkg-ports/libheif/vcpkg.json \
+            tools/vcpkg-ports/libheif/portfile.cmake; do
             tar -tzf "$sdist" | grep -Eq "/${file}\$" || {
               echo "missing ${file} in $sdist"
               exit 1
