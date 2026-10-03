@@ -1,11 +1,11 @@
 # 22 - a png decode path that does not go through `image`
 
-status: measured, not implemented. the plan is a `src/formats/png.rs` that
-decodes and probes with the `png` crate directly, the way
-[11](11-jxl-direct.md) dropped the `image` adapter for jxl. the numbers below
-are the evidence that it is worth doing; they were taken on
-`i5-11400h`, windows 11, rust release build, `prefetch=0`, best of three
-alternating rounds.
+status: implemented. `src/formats/png.rs` walks a png's rows straight into the
+frame it is writing, `src/decoder.rs` and `src/clip.rs` carry the interface
+that makes one pass possible, and every file the walk will not serve goes back
+to the `image` decoder unchanged. the numbers below were taken on
+`i5-11400h`, windows 11, rust release build, `prefetch=0`, and the outcome is
+in "what it measured".
 
 ## the question
 
@@ -119,44 +119,100 @@ trying to move, reads the same shape it always did on `sandbox/png`: `imgseqs`
 0.478 s against `bestsource` 0.682 s, 1.43x on frames and 3.23x including the
 open, with `prefetch=0` at 1.165 s.
 
-## the intended edit
+## what landed
 
-`src/formats/png.rs` grows a `handles`/`decode` pair beside the `cICP` reader
-it already has, and `src/decoder.rs` prefers it for a file whose extension is
-`.png` and whose header this module can follow, falling back to `image` for
-anything it refuses the way [17](17-avif-container-robustness.md) refuses a
-container it does not follow.
+`src/formats/png.rs` grew a `stream(info)` entry point beside the `cICP` reader
+it already had, `src/decoder.rs` prefers it, and `src/clip.rs` allocates the
+frames of a call before filling them so a decode can fill all of them at once.
 
-* the probe reads the header with `png::Decoder::read_header_info`, which gives
-  the width, the height, the bit depth, the colour type, the palette and the
-  icc profile without inflating anything, and keeps the existing chunk walk for
-  `cICP`. a probe must promise exactly the format `image` promised, so the
-  output colour type is computed the same way `image` computes it from
-  `Transformations::EXPAND`.
-* the decode drives `png::Reader::next_row` and writes each row into the
-  frame's plane at `stride`, which is the plane-shaped shape the prototype
-  measured. a sixteen bit page keeps two byte samples and a palette page
-  arrives already expanded, exactly as `image` hands them over today.
-* alpha is the one thing that is not a straight row copy: a file with an alpha
-  channel needs `demand` to say whether an alpha clip exists, and the two
-  planes are filled from one interleaved row the way
-  `src/formats/webp.rs` already does it.
+* `src/decoder.rs` declares a [`RowStream`]: a decode that has not read its
+  picture yet, because it can hand each row to the frame it belongs in through
+  a `RowSink` of `PlaneRows`. `Pixels` gained the `Stream` variant, with a
+  hand-written `Clone` (a stream duplicates as another reader over the same
+  file, because it is a still that has not run), `Debug` and `PartialEq`.
+* `src/clip.rs` builds the sink from the frames themselves — the plane
+  pointers and strides `pixel.rs` already writes through — and calls `fill`
+  once. A file whose rows carry no alpha leaves the alpha plane to
+  `write_opaque_alpha`, because a VapourSynth frame arrives holding whatever
+  the allocator had.
+* `src/formats/png.rs` drives `png::Reader::next_row` at
+  `Transformations::EXPAND`, the same transformation `image` sets, so the
+  samples are the ones that decoder would have produced. A grey row is one
+  copy; a three channel row is one walk that fills all three planes; a four
+  channel row and every sixteen bit row take the general per-channel path, and
+  the sixteen bit samples are swapped out of png's big endian order exactly as
+  `image` swaps its whole buffer.
+* the probe is unchanged. It already answers from `image`'s own reader, which
+  reads the header and no image data, and `stream` checks the walk against it
+  rather than replacing it: a colour type, size or geometry the two disagree
+  about is a file this walk refuses.
+
+what the walk refuses is refused for the whole file, so a sequence decides once
+per path: an interlaced png, whose rows arrive one Adam7 pass at a time rather
+than one picture row at a time; an animated one, whose first frame is not the
+picture a still decode means; a file the caller asked to rotate, which a row
+walk has no place to apply; and a `image` colour type this walk does not place.
+`target/bench/decode/png-stream-check.py` is the check that each of those lands
+on the fallback rather than being served wrongly.
 
 the animation path is untouched: `src/animation/apng.rs` already drives `png`
 itself, at `Transformations::IDENTITY`, because it composes at the file's own
 depth.
 
+## what it measured
+
+same batch, same machine, four alternating rounds per configuration, the
+pre-change build against this one, at `prefetch=0`:
+
+| set | before `total` | after `total` | |
+| --- | ---: | ---: | ---: |
+| `sandbox/png`, 35 files | 28.71 ms/frame | 23.31 ms/frame | **1.23x** |
+| `sandbox/posterize-check`, 49 files | 42.42 ms/frame | 35.17 ms/frame | **1.21x** |
+
+and against Pillow's `open` + `load` + `convert("L")` in the same batch:
+
+| set | Pillow | imgseqs | ratio | before this change |
+| --- | ---: | ---: | ---: | ---: |
+| `sandbox/png`, 35 files | 1.169 s | 0.812 s | **0.695x** | 0.940x |
+| `sandbox/posterize-check`, 49 files | 1.691 s | 1.728 s | 1.022x | 1.31x |
+| `sandbox/level-check`, 129 jpeg | 1.879 s | 1.702 s | 0.906x | 0.940x |
+
+so the posterize column, which is where this started, is now a tie rather than
+a loss, and `sandbox/png` is 1.44x faster than Pillow rather than 1.06x. the
+jpeg set is the control and its path is untouched.
+
+the prototype below predicted 23.3% off the decode side and the walk delivers
+about 20% of `read + convert`, so the two agree. where the prototype was wrong
+is the *absolute* projection: it wrote into one stride-padded buffer, and a
+VapourSynth `RGB24` frame is three planes rather than one packed buffer, so the
+deinterleave it did not have to do is still there. that is why the posterize
+column lands at a tie and not at a win.
+
+pixels are byte for byte identical to the previous build: `frame-parity.py`
+over the six sandbox sets, `tests/fixtures` and the 26 case corpus below is
+245 lines and 0 of them differ, twice in a row. `tests/readalpha.vpy` is also
+byte identical to the build before the change, 527 `ok` checks.
+
 ## how to check
 
+* `target/bench/decode/make-png-parity-corpus.py` writes 26 pngs by hand that
+  cover every colour type and bit depth, `tRNS` on grey, rgb and palette, Adam7
+  interlacing and odd widths, and asks Pillow to read every one back. it is the
+  corpus the sets the repository holds do not reach, and `frame-parity.py`
+  gained a `pngparity` set for it.
+* `target/bench/frame-parity.py` over the six `sandbox` sets, `tests/fixtures`
+  and that corpus: 245 lines of plane hashes, which is the byte for byte check
+  this change needs, because it moves where every sample is written.
+* `target/bench/decode/png-stream-check.py` reports per file whether the walk or
+  the `image` path served it, which is the check that a refusal reaches the
+  fallback: 22 of the 26 cases walk and exactly the four interlaced ones do
+  not.
 * `target/bench/decode/png-decode.py --dir sandbox/posterize-check --pattern
-  "*.*" --stage --pillow-mode gray` before and after: the `imgseqs` row should
-  move from about 1.31x Pillow to about 1.0x, and `convert` should disappear
-  from the stage table because the decode now writes the frame itself.
-* `target/bench/frame-parity.py` over the six `sandbox` sets and
-  `tests/fixtures`, which is the byte for byte check this change needs: it is
-  the one change here that moves where every sample is written.
+  "*.*" --stage --pillow-mode gray` is the measurement: `convert` disappears
+  from the stage table because the decode writes the frame itself, and the
+  `imgseqs` row lands at about 1.0x Pillow.
 * `tests/readalpha.vpy`, whose png fixtures cover the palette, the depth and
-  the alpha rows.
+  the alpha rows, and whose log must stay byte identical.
 * `cargo test --locked`, and the bit depth rows of the validator, because a
   sixteen bit page is the arm most likely to be got wrong.
 
@@ -169,6 +225,8 @@ columns are not the same amount of work, and that is
 default one is [23](23-cpu-variant-avx2.md) for the `avx2` variant and
 [24](24-cpu-variant-avx512.md) for the `avx512` one.
 
-what is left here is the decode path itself, which the numbers above say is
-where the extra pass is and therefore worth doing whatever the benchmark
-columns turn out to be comparing.
+the probe question this page also opened is still open: `describe` reads the
+header through `image`'s reader, which reads no image data but does read every
+chunk up to `IDAT`, and `png`'s own header reader would be cheaper. the
+measurement that says it is worth doing is not here, so it is not part of this
+change.

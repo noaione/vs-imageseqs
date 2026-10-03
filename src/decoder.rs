@@ -121,7 +121,7 @@ impl ImageInfo {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct DecodeTimings {
     pub open: Duration,
     pub metadata: Duration,
@@ -129,8 +129,82 @@ pub struct DecodeTimings {
     pub read: Duration,
 }
 
+/// One plane of a frame a streaming decode writes into.
+///
+/// The rows are written at `stride` rather than into a buffer of their own,
+/// which is what makes a streaming decode one pass over the picture: the bytes
+/// the decoder produces are the bytes the frame holds.
+#[derive(Debug)]
+pub struct PlaneRows<'a> {
+    /// The whole plane, the row padding a VapourSynth frame carries included.
+    pub bytes: &'a mut [u8],
+    /// Bytes between the starts of two rows.
+    pub stride: usize,
+    /// Bytes of each row that are written.
+    pub row_bytes: usize,
+}
+
+impl PlaneRows<'_> {
+    /// The writable bytes of one active row.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `row` is outside the plane, which a decoder that walked its
+    /// own height cannot ask for.
+    #[must_use]
+    pub fn row(&mut self, row: usize) -> &mut [u8] {
+        let start = row * self.stride;
+        &mut self.bytes[start..start + self.row_bytes]
+    }
+}
+
+/// The frames one streaming decode fills.
+///
+/// A colour frame is one plane for a gray format and three for an rgb one, in
+/// VapourSynth's own plane order, and `alpha` is the gray frame of the alpha
+/// clip when the call hands one out.
+pub struct RowSink<'a> {
+    /// Planes of the colour clip's frame, in the order the frame indexes them.
+    pub colour: Vec<PlaneRows<'a>>,
+    /// Planes of the alpha clip's frame, for a call that hands one out.
+    pub alpha: Option<Vec<PlaneRows<'a>>>,
+}
+
+/// A decode that has not read its picture yet.
+///
+/// A format answers with one of these when it can hand every decoded row to
+/// the frame it belongs in. That is one pass over the picture where a buffered
+/// decode is two, because the pixels never exist anywhere but the frame; see
+/// `docs/improvements/22-png-decode-path.md`.
+///
+/// It is `Send + Sync` because a decoded image is handed between the
+/// lookahead workers and the requesting thread, and `Debug` because the pixels
+/// a decode produced are printed beside the timings they cost.
+pub trait RowStream: Send + Sync + std::fmt::Debug {
+    /// Whether the rows this stream writes include an alpha channel.
+    ///
+    /// A file that states no alpha leaves the alpha clip's plane untouched, and
+    /// a VapourSynth frame arrives holding whatever the allocator held, so the
+    /// caller fills that plane with the opaque value first when this is false.
+    fn has_alpha(&self) -> bool;
+
+    /// Reads the picture into `sink`, and answers what the read cost.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ImgSeqError`] when the file cannot be read or decoded.
+    fn fill(&mut self, sink: RowSink<'_>) -> Result<DecodeTimings>;
+
+    /// A second reader over the same file.
+    ///
+    /// Cloning a decoded image clones its pixels, and a stream is a still
+    /// that has not been read, so this is another reader over the same file
+    /// rather than a reader continued from where this one is.
+    fn duplicate(&self) -> Box<dyn RowStream>;
+}
+
 /// Pixels of one decoded image, in whichever layout its format decodes to.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub enum Pixels {
     /// One buffer holding every channel of `color_type`, interleaved.
     Interleaved {
@@ -147,8 +221,58 @@ pub enum Pixels {
         planes: Vec<Vec<u8>>,
         alpha: Option<Vec<u8>>,
     },
+    /// A decode that hands each row to the frame it belongs in, and therefore
+    /// has no buffer of its own.
+    Stream(Box<dyn RowStream>),
 }
 
+impl Clone for Pixels {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Interleaved { color_type, buffer } => Self::Interleaved {
+                color_type: *color_type,
+                buffer: buffer.clone(),
+            },
+            Self::Planar { planes, alpha } => Self::Planar {
+                planes: planes.clone(),
+                alpha: alpha.clone(),
+            },
+            Self::Stream(stream) => Self::Stream(stream.duplicate()),
+        }
+    }
+}
+
+impl PartialEq for Pixels {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Interleaved {
+                    color_type: left_type,
+                    buffer: left_buffer,
+                },
+                Self::Interleaved {
+                    color_type: right_type,
+                    buffer: right_buffer,
+                },
+            ) => left_type == right_type && left_buffer == right_buffer,
+            (
+                Self::Planar {
+                    planes: left_planes,
+                    alpha: left_alpha,
+                },
+                Self::Planar {
+                    planes: right_planes,
+                    alpha: right_alpha,
+                },
+            ) => left_planes == right_planes && left_alpha == right_alpha,
+            // A stream is a picture that has not been read, so there is
+            // nothing to compare and two of them are never equal.
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Pixels {}
 #[derive(Clone, Debug)]
 pub struct DecodedImage {
     pub width: u32,
@@ -377,6 +501,22 @@ fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
 pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
     if let Some(decoded) = format_decoder(info, demand) {
         return decoded;
+    }
+
+    // A png this module can walk a row at a time is answered with a decode
+    // rather than with pixels: the rows go straight into the frame, which is
+    // one pass over the picture instead of the two a whole buffer costs. The
+    // timings come from the walk, which is where the read happens, so the ones
+    // below are a placeholder for a file this branch does not take.
+    if let Some(pixels) = formats::png::stream(info) {
+        return Ok(DecodedImage {
+            width: info.width,
+            height: info.height,
+            format: info.format,
+            transform: info.transform,
+            pixels,
+            timings: DecodeTimings::default(),
+        });
     }
 
     let open_started = Instant::now();

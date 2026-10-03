@@ -21,7 +21,8 @@
 //!
 //! A module that only reads a container exposes neither, because the `image`
 //! path decodes those files: [`png`] answers what a png states about the colour
-//! of its samples and nothing else.
+//! of its samples, and it also offers `stream` for a png it can walk a row at a
+//! time, which is a fifth entry point rather than one of the four above.
 
 pub mod avif;
 pub mod heif;

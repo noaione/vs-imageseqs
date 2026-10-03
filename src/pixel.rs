@@ -495,7 +495,7 @@ pub const fn alpha_channel(color_type: ColorType) -> Option<usize> {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct WriteTimings {
     /// Time spent converting the interleaved decoder buffer into the
     /// VapourSynth planes.

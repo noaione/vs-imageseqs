@@ -20,7 +20,7 @@ use vapoursynth4_rs::{
 use crate::{
     animation::{AnimationSource, SegmentTable},
     color::set_frame_properties,
-    decoder::{self, DecodeTimings, DecodedImage, Demand, ImageInfo, Pixels},
+    decoder::{self, DecodeTimings, DecodedImage, Demand, ImageInfo, Pixels, PlaneRows, RowSink},
     error::{ImgSeqError, Result},
     pixel::{
         PixelFormat, WriteTimings, write_alpha, write_decoded_planes, write_opaque_alpha,
@@ -182,12 +182,17 @@ impl ClipFrames {
     }
 
     /// Builds every frame of `clips` from one decoded presentation.
+    ///
+    /// The frames are allocated first and filled afterwards, which is what lets
+    /// a format that hands each decoded row to the frame it belongs in fill all
+    /// of them in one pass; see [`crate::decoder::RowStream`]. A buffered
+    /// decode is written one clip at a time, as it always was.
     fn build(
         core: &Core,
         clips: &Arc<[Clip]>,
         image: &ImageInfo,
         index: usize,
-        decoded: DecodedImage,
+        mut decoded: DecodedImage,
         export_icc_profile: bool,
     ) -> Result<Self> {
         let mut frames = Vec::with_capacity(clips.len());
@@ -199,32 +204,75 @@ impl ClipFrames {
         for &clip in clips.iter() {
             let format = clip.pixel_format(decoded.format);
             let allocate_started = Instant::now();
-            let mut frame = new_frame(core, format, output_width, output_height)?;
+            let frame = new_frame(core, format, output_width, output_height)?;
             let allocate = allocate_started.elapsed();
-            let write = write_frame(&mut frame, clip, format, &decoded)?;
+            frames.push(frame);
+            timings.push(FrameTimings {
+                allocate,
+                write: WriteTimings::default(),
+                properties: Duration::ZERO,
+            });
+        }
+
+        let decode = match &mut decoded.pixels {
+            Pixels::Stream(stream) => {
+                let width = usize::try_from(output_width)
+                    .map_err(|_| ImgSeqError::new("image width does not fit this platform"))?;
+                let height = usize::try_from(output_height)
+                    .map_err(|_| ImgSeqError::new("image height does not fit this platform"))?;
+                // A file that states no alpha leaves the alpha plane to the
+                // opaque value, and a frame arrives holding whatever the
+                // allocator had. A file that does state one overwrites every
+                // byte of the plane, so this only runs when it does not.
+                if !stream.has_alpha()
+                    && let Some(index) = clips.iter().position(|&clip| clip == Clip::Alpha)
+                {
+                    let format = Clip::Alpha.pixel_format(decoded.format);
+                    timings[index].write = write_opaque_alpha(
+                        &mut frames[index],
+                        format,
+                        output_width,
+                        output_height,
+                    )?;
+                }
+                let sink = row_sink(&mut frames, clips, decoded.format, width, height)?;
+                stream.fill(sink)?
+            }
+            _ => {
+                for (frame, &clip) in frames.iter_mut().zip(clips.iter()) {
+                    let format = clip.pixel_format(decoded.format);
+                    let write = write_frame(frame, clip, format, &decoded)?;
+                    let slot = clips
+                        .iter()
+                        .position(|&candidate| candidate == clip)
+                        .expect("the clips are the frames' own list");
+                    timings[slot].write = write;
+                }
+                decoded.timings
+            }
+        };
+
+        for ((frame, &clip), timing) in frames.iter_mut().zip(clips.iter()).zip(timings.iter_mut())
+        {
+            let format = clip.pixel_format(decoded.format);
             let properties_started = Instant::now();
             set_frame_properties(
-                &mut frame,
+                frame,
                 image,
                 index,
                 format,
                 clip.alpha_marker(),
                 export_icc_profile,
             )?;
-            let properties = properties_started.elapsed();
-            bytes = bytes.saturating_add(frame_bytes(&frame));
-            frames.push(frame);
-            timings.push(FrameTimings {
-                allocate,
-                write,
-                properties,
-            });
+            timing.properties = properties_started.elapsed();
+            bytes = bytes.saturating_add(frame_bytes(frame));
         }
+
         Ok(Self {
             clips: Arc::clone(clips),
             frames: frames.into_boxed_slice(),
             timings: timings.into_boxed_slice(),
-            decode: decoded.timings,
+            decode,
             bytes,
         })
     }
@@ -362,6 +410,76 @@ fn new_frame(core: &Core, format: PixelFormat, width: u32, height: u32) -> Resul
     Ok(core.new_video_frame(&query_format(core, format), width, height, None))
 }
 
+/// The planes a streaming decode writes into, taken from the frames it fills.
+///
+/// The rows land where the frame holds them rather than in a buffer the caller
+/// would have to copy afterwards, which is the whole point of a stream: see
+/// [`crate::decoder::RowStream`].
+fn row_sink<'a>(
+    frames: &'a mut [VideoFrame],
+    clips: &[Clip],
+    format: PixelFormat,
+    width: usize,
+    height: usize,
+) -> Result<RowSink<'a>> {
+    let mut colour = Vec::new();
+    let mut alpha = None;
+    for (frame, &clip) in frames.iter_mut().zip(clips.iter()) {
+        let planes = plane_rows(frame, clip.pixel_format(format), width, height)?;
+        match clip {
+            Clip::Color => colour = planes,
+            Clip::Alpha => alpha = Some(planes),
+        }
+    }
+    Ok(RowSink { colour, alpha })
+}
+
+/// Every plane of one frame, as rows a decoder can write.
+///
+/// The plane a frame holds is at least `stride * height` bytes and its active
+/// rows are `row_bytes` of each of them, which is the same pair
+/// [`crate::pixel`] checks before it writes a plane itself.
+fn plane_rows(
+    frame: &mut VideoFrame,
+    format: PixelFormat,
+    width: usize,
+    height: usize,
+) -> Result<Vec<PlaneRows<'_>>> {
+    let planes = format.plane_count();
+    let mut out = Vec::with_capacity(planes);
+    for plane in 0..planes {
+        let index = i32::try_from(plane).expect("the plane count fits in i32");
+        let pointer = frame.plane_mut(index);
+        if pointer.is_null() {
+            return Err(ImgSeqError::new(format!(
+                "VapourSynth returned a null pointer for plane {plane}"
+            )));
+        }
+        let rows = usize::try_from(frame.frame_height(index))
+            .map_err(|_| ImgSeqError::new("a frame plane height does not fit this platform"))?;
+        let stride = usize::try_from(frame.stride(index))
+            .map_err(|_| ImgSeqError::new("a frame plane stride does not fit this platform"))?;
+        let (plane_width, _) = format.frame_plane_dimensions(plane, width, height);
+        let row_bytes = plane_width.saturating_mul(format.bytes_per_sample());
+        if stride < row_bytes {
+            return Err(ImgSeqError::new(format!(
+                "VapourSynth plane {plane} stride {stride} is smaller than row size {row_bytes}"
+            )));
+        }
+        // SAFETY: a VapourSynth frame owns at least `stride * height` bytes for
+        // each of its planes, which is the length taken here, and the frame is
+        // borrowed mutably for as long as the slice lives.
+        let length = stride.saturating_mul(rows);
+        let bytes = unsafe { std::slice::from_raw_parts_mut(pointer, length) };
+        out.push(PlaneRows {
+            bytes,
+            stride,
+            row_bytes,
+        });
+    }
+    Ok(out)
+}
+
 /// Writes the decoded pixels of one image into one clip's frame.
 ///
 /// The frames are the size `decoded.transform` produces, and both clips of an
@@ -421,6 +539,9 @@ fn write_frame(
             buffer,
             transform,
         ),
+        // A stream fills the frames itself, so nothing reaches this arm: the
+        // builder routes one before a clip is written from pixels.
+        (_, Pixels::Stream(_)) => Err(ImgSeqError::new("a streaming decode fills its own frames")),
     }
 }
 

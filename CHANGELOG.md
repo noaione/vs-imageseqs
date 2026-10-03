@@ -4,6 +4,16 @@
 
 ### performance
 
+- PNG decoding hands each decoded row to the frame it belongs in instead of
+  building the whole picture in a buffer the plugin then copies, which is one
+  pass over the image rather than two: 1.2x on the decoded side of every PNG
+  set measured, and a frame is byte for byte identical either way
+  - this reaches every colour type and bit depth, `tRNS` on grey, rgb and
+    palette, and an odd width; an interlaced or animated file, and one the
+    caller asked to rotate, still goes through the `image` decoder
+  - a grey page is now a copy per row and a colour page a single walk over the
+    row that fills all three planes, so `Read` no longer pays a second pass at
+    all
 - x86-64 wheels carry one plugin library per microarchitecture level, and
   VapourSynth loads the widest the machine's CPU supports: 6% to 11% faster on
   the PNG and JPEG sets measured, almost all of it in the write into the frame

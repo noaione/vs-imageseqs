@@ -21,23 +21,31 @@ suite. the `total` column is therefore fair and the `decode` column is not.
 
 ## the three pairings, measured
 
-`target/bench/decode/png-decode.py` can put the same files through each side in
-the shape the other one uses. the plugin's decoder on its own is its `read`
-stage, which is what is left of the frame build once the plane write is taken
-out:
+`target/bench/decode/png-decode.py` puts the same files through each side. the
+figures below were taken after [22](22-png-decode-path.md) landed, in one batch,
+`prefetch=0`:
 
-| set | pages | Pillow `load` | Pillow `load` + `L` | plugin `read` only | plugin `total` | Pillow `load` + `RGB` |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `sandbox/png` | 35 | 1.294 s | | 0.859 s | 1.217 s | 2.201 s |
-| `sandbox/posterize-check` | 49 | | 1.948 s | 1.617 s | 2.550 s | |
-| `sandbox/level-check` | 129 | | 2.220 s | 1.330 s | 2.088 s | |
+| set | pages | Pillow `load` + `L` | plugin `total` | ratio |
+| --- | ---: | ---: | ---: | ---: |
+| `sandbox/png` | 35 | 1.169 s | 0.812 s | 0.695x |
+| `sandbox/posterize-check` | 49 | 1.691 s | 1.728 s | 1.022x |
+| `sandbox/level-check` (jpeg) | 129 | 1.879 s | 1.702 s | 0.906x |
 
-the plugin's decoder stage is the smaller of the two on all three sets, so the
-`decode` loss on the posterize suite is not a decoder at all: it is the RGB24
-frame and the pass that writes it. for the same number of bytes out, Pillow is
-1.75x the plugin's time on `sandbox/png` (2.201 against 1.217), and for the
-jpeg set, where Pillow's `L` conversion and the plugin's frame are both one
-byte per pixel, the plugin is 0.94x Pillow.
+before 22 the posterize row was 1.31x, so what this page is about had become a
+tie rather than a loss: the plugin's `total` is a smaller number than Pillow's
+column on the png set and on the jpeg set, and level with it on the palette
+set where the plugin hands out three bytes per pixel and Pillow's column stops
+at one.
+
+**the `read` stage is no longer a decoder-only figure for png.** before 22 it
+was the `image` decode alone and the plane write was `convert`; a png this
+plugin walks now places its rows inside `read`, so `convert` is zero and `read`
+is the decode and the placement together. the old table this page held compared
+`read` against Pillow's whole column and found the plugin's decoder smaller on
+all three sets; that comparison cannot be made on a walked png any more, and
+the honest one is `total` against Pillow's `decode`, which is the table above.
+what still isolates a decoder is `target/bench/decode/inflate-bench`, which
+measures inflation with no frame involved at all.
 
 ## why this is a plan and not a fix in the plugin
 
