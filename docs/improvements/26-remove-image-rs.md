@@ -1,0 +1,219 @@
+# 26 - remove image-rs after every format has a replacement
+
+status: proposed, research only. no decoder, dependency, public argument or
+wheel has changed. researched on 2026-10-03 against commit
+`18183fd3b5cc251cdcbe738e7bdb763a5a5bb7c5`, `image 0.25.10` and the versions in
+`Cargo.lock`.
+
+## goal
+
+Make probing, decoding and writing frames belong to the plugin's own format
+adapters, then remove the `image` crate **after all currently supported formats
+and fallback cases have replacements**. Reuse a codec library where one already
+exists. Reimplementing the integration does not require rewriting its compression
+algorithm or replacing every crate maintained by the image-rs organization.
+
+The motivation is a read path suited to VapourSynth: metadata without rendering
+a picture, demand-aware alpha decoding, bounded animation state, and rows or
+planes written with as few intermediate allocations and copies as the backend
+permits. Removal alone is not evidence of a speed improvement. We need to bench
+against an image-rs baseline to ensure the proposed paths really improve
+performance, including clip creation and memory use.
+
+The supporting plans are:
+
+| plan | responsibility |
+| --- | --- |
+| [27 direct still decoders](27-direct-still-decoders.md) | all still formats, direct dependencies, internal image-rs codecs and candidate alternatives |
+| [28 animation and container fallbacks](28-animation-container-decoders.md) | GIF/WebP timeline discovery and composition, AVIF/HEIF fallback coverage |
+| [29 decoder types](29-decoder-types-without-image.md) | replace image-rs enums, reader dispatch and frame wrappers with existing project types or small local definitions |
+
+## what the current code establishes
+
+`src/decoder.rs::describe` uses container probes for eligible HEIF/AVIF, JPEG XL
+and JPEG 2000. Everything else constructs an `ImageReader` decoder, asks for
+dimensions, decoded and original color types, ICC bytes and orientation, then
+drops that decoder. `decode` first tries direct format modules and PNG streaming,
+then opens another image-rs decoder, allocates a zeroed interleaved picture,
+calls `read_image`, and leaves the planar write to `src/pixel.rs`.
+
+These are different costs and should be counted separately:
+
+| path | evidence | what to investigate |
+| --- | --- | --- |
+| GIF and animated WebP | `src/animation/frames.rs::durations` walks `into_frames`, decoding and composing every presentation, then `StreamSource` opens another pass for playback | confirmed pixel decoding during timeline discovery followed by playback decoding, including presentations sampling may never display |
+| generic JPEG | image-rs `JpegDecoder::new` reads the compressed file and calls `decode_headers`; `icc_profile` and `orientation` each create another header decoder; `read_image` constructs the decoder that produces pixels | repeated header parsing and compressed-file reads, not two full JPEG pixel decodes |
+| generic still fallback | `decode` makes `vec![0; total_bytes]`, then `read_image`, then the frame writer | initialization and interleaved-to-planar work, not automatically a second decompression |
+| TIFF and EXR | image-rs adapters create a backend-owned result and copy it into the caller's buffer | an additional whole-picture buffer and copy before the plugin's planar write |
+| AVIF fallback | image-rs `AvifDecoder::new` renders the primary item and linked alpha before dimensions can be queried | constructor-time decode remains on routes that bypass the project's container probe or still use its image-rs decode fallback |
+| PNG streaming | `formats/png.rs::walkable` parses headers, and `Rows::fill` opens its reader for pixels | header reopening remains, but the existing row path already removes the generic whole-picture intermediate |
+
+Do not attribute the old lookahead re-decode problem to image-rs. [01](01-lookahead-scheduling.md)
+already addressed that scheduling problem. The native AVIF probe also already
+removed the old full decode on clip creation for the inputs it handles. Count
+remaining work per actual route rather than carrying those historical claims
+over to every file.
+
+## order of work
+
+1. Capture the current format/subtype coverage and baseline behavior, including
+   error paths and accepted extension aliases. Record which files use the direct,
+   row-stream, animation or image-rs fallback route. Add missing fixtures in a
+   future implementation task, before taking their old decoder away.
+2. Introduce the small shared representations in [29](29-decoder-types-without-image.md).
+   Keep temporary image-rs conversions at its remaining adapter boundary. This
+   stage should preserve samples, properties and performance.
+3. Move JPEG and the remaining PNG probe/fallback work onto the direct libraries
+   in [27](27-direct-still-decoders.md). Retain the working PNG row path from
+   [22](22-png-decode-path.md). Benchmark one migration at a time.
+4. Replace GIF/WebP discovery and replay, and AVIF/HEIF fallback paths, under
+   [28](28-animation-container-decoders.md). Existing direct JXL/JP2 and
+   APNG/AVIF/HEIF sequence adapters keep their behavior while losing shared
+   image-rs types.
+5. Complete TIFF, EXR, QOI, BMP, ICO, DDS, farbfeld, HDR, PNM and TGA under [27](27-direct-still-decoders.md).
+   Common-format speed work does not waive coverage of a less common format.
+   Prioritize the individual zune codecs for BMP, QOI, PNM, HDR and farbfeld,
+   verifying their header APIs and compatibility gaps. TGA remains a manual
+   reader. Every manual candidate must compete with image-rs and compatible
+   direct crates before acceptance; libpng is excluded from this research scope.
+6. Remove image-rs and the libheif image integration only when every row below
+   has passed its replacement checks. Rebuild and validate every supported wheel
+   platform and CPU variant, then compare the completed plugin with the original
+   image-rs baseline.
+
+Each stage is independently reviewable and reversible. While migration is in
+progress, a fallback must not silently turn a recognized malformed file into a
+different decoder's interpretation. Probe and decode must select compatible
+routes and continue to detect a file changing after probing.
+
+## removal checklist
+
+- [ ] Every enabled image-rs format in `Cargo.toml` has a replacement for its
+  currently accepted subtypes: AVIF, BMP, DDS, EXR, farbfeld, GIF, ICO, JPEG,
+  PNG, PNM, QOI, TGA, TIFF, WebP and HDR. HEIF/HEIC, JXL and JP2 remain supported.
+- [ ] Interlaced PNG and APNG poster/one-presentation cases, static GIF/WebP,
+  animated GIF/WebP, monochrome AVIF, RGB HEIF, and AVIF containers refused by
+  `Meta::native_eligible` no longer require image-rs.
+- [ ] Frames preserve the existing output format, integer depth, float values,
+  alpha behavior, orientation, timeline and frame properties. Palette content
+  that happens to look gray is still handed out in its existing format.
+- [ ] TIFF and ICO selection remain one still picture per input. Their pages
+  and alternatives do not become a new animation API.
+- [ ] Production and test code no longer import image-rs. The lossless WebP
+  encoder in `src/formats/webp.rs` tests also has a replacement.
+- [ ] `libheif-rs` loses its `image` feature and decoder-hook registrations.
+  `cargo tree --locked --offline -i image` currently shows both the root crate
+  and `libheif-rs` as parents, so deleting the root dependency alone is insufficient.
+- [ ] Check normal, build and dev dependency graphs, supported targets and
+  release features for transitive reintroduction of `image`. Reconcile the lock
+  file with the actual graph. Packages merely present in `Cargo.lock`, such as
+  `ravif` in this checkout, are not proof that a release links them.
+- [ ] New native inputs have exact license texts, notices, source/relinking
+  obligations and working Windows/Linux/macOS packaging. Preserve the disabled
+  libheif defaults in `vcpkg.json` and do not pull in x265 incidentally.
+- [ ] The performance gate below and the release validator pass. A known
+  baseline failure is documented and resolved separately, not called a pass.
+
+## required baseline and performance gate
+
+Follow [BENCH.md](../BENCH.md) before and after **each implementation slice**,
+and compare the final result to the original image-rs build as well as to its
+immediate predecessor. Save the baseline library, its SHA-256, commit, dependency
+versions, build flags, host CPU, selected CPU variant and corpus hashes. Load
+each library explicitly in a fresh process with plugin autoload disabled.
+
+Measure clip creation, first-frame latency, complete sequence wall time,
+process CPU time, peak RSS/private memory and decoded/intermediate buffer bytes.
+For animations also measure metadata-only open, time per presentation,
+forward/reverse/shuffled playback beyond the cache window, and decode counts.
+Probe pixel-decode counts should be zero on paths that can discover their
+metadata without rendering. Count alpha decoding separately from color and
+distinguish cache misses and backward replay from gratuitous repeated work.
+
+Use `Read` and both outputs of `ReadAlpha`, ICC export on/off, rotation on/off,
+`mismatch=True` on mixed corpora, and `prefetch=0`, default and 16 with the same
+memory budget. Include multiple concurrent clips and small, large, gray, RGB,
+YUV, palette, alpha, deep and float pictures. Cover every migrated format with a
+correctness corpus even when no large performance corpus exists yet.
+
+Alternate baseline/candidate order, use at least three passes and report all
+passes and their spread. Separate warm filesystem-cache runs from controlled
+cold-cache runs. Recreate clips so VapourSynth's frame cache cannot replace
+decoding with cached frames. Compare identical planes and properties; [25](25-decode-column-parity.md)
+explains why a smaller output or a renamed timing column is not a faster decode.
+PNG's streamed `read` already includes frame placement, so end-to-end totals are
+the common comparison when stage boundaries move.
+
+Claim an improvement only when it exceeds repeat-run variation on the relevant
+workload. Investigate and fix any significant speed or memory regression before
+landing a slice. Removing a type dependency can be performance-neutral, but
+that must be reported as neutrality, not as a speedup. No removal approval is
+implied by this research document.
+
+## research-session baseline
+
+The existing validator was attempted before editing these plans, followed by
+`cargo build --release --locked` with the repository's local vcpkg paths and
+another release-validator attempt. The build passed. Both usable validator runs
+stopped at `tests/fixtures/animation.avif` with
+`PluginLoadingError(NoMatchingDecoderInstalled)` from libheif. Earlier checks
+printed no `FAIL` lines, but the validator did not finish. The sandbox's first
+attempt could not import `_ctypes`; the two runs above were outside the sandbox.
+
+The current release DLL has SHA-256
+`E10ED35EE38828CF387EB97EF1039E3B5FC9CD54981FF51C32762ABCD91CEFDD`.
+The existing harness was run on the Windows research host, explicitly loading
+that DLL, with `--imgseqs-only --reps 3 --extra --prefetch 16`. Each corpus has
+35 files and uses `snek - p%03d.png` or `snek - p%03d.jpg`:
+
+| corpus | mode | frame totals across three passes (s) | best open + frames (s) |
+| --- | --- | --- | ---: |
+| `sandbox/png` | default | 0.302, 0.359, 0.467 | 0.308 |
+| `sandbox/png` | `prefetch=0` | 1.002, 1.093, 0.880 | 0.885 |
+| `sandbox/png` | `prefetch=16` | 0.367, 0.328, 0.356 | 0.338 |
+| `sandbox/jpeg` | default | 3.569, 3.202, 3.295 | 3.341 |
+| `sandbox/jpeg` | `prefetch=0` | 8.929, 8.821, 8.304 | 8.413 |
+| `sandbox/jpeg` | `prefetch=16` | 2.002, 2.199, 1.903 | 2.038 |
+
+Logs are under ignored `target/image-rs-research-{baseline-png,baseline-jpeg}.log`
+and `target/image-rs-research-validator-{before,release}.log`. These are current
+baseline samples, not replacement-decoder results or a full memory/format
+benchmark. There is no candidate implementation to compare, and the spread
+already requires care before claiming a small improvement. Repeat and extend
+the baseline at the start of future implementation work.
+
+After writing the plans, the release build passed again and the DLL's SHA-256
+was unchanged. The validator stopped at the same `animation.avif` decoder error.
+The same benchmark commands were repeated:
+
+| corpus | mode | frame totals after documentation edits (s) | best after / best before |
+| --- | --- | --- | ---: |
+| `sandbox/png` | default | 0.332, 0.380, 0.403 | 1.099 |
+| `sandbox/png` | `prefetch=0` | 0.924, 1.031, 0.924 | 1.050 |
+| `sandbox/png` | `prefetch=16` | 0.365, 0.320, 0.374 | 0.976 |
+| `sandbox/jpeg` | default | 2.845, 2.606, 2.732 | 0.814 |
+| `sandbox/jpeg` | `prefetch=0` | 7.907, 7.592, 8.367 | 0.914 |
+| `sandbox/jpeg` | `prefetch=16` | 1.785, 2.145, 1.939 | 0.938 |
+
+The after logs are `target/image-rs-research-after-{png,jpeg}.log` and
+`target/image-rs-research-validator-after.log`. These separate batches ran the
+identical binary, so their differences establish measurement variability, not
+an implementation improvement or regression. No CPU or peak-memory comparison
+was made in this documentation session. Future decoder experiments need the
+paired, alternating baseline protocol above rather than attributing such batch
+differences to a source change.
+
+The subsequent Windows AVIF sequence fix is recorded in
+[30](30-windows-avif-sequence-decoder.md). It enables libheif's existing dav1d
+backend and lets the full release validator finish. The failed runs above
+remain the historical research baseline, not the state of the repaired build.
+Future image-rs migration experiments must take a fresh baseline from that
+working build before comparing performance.
+
+## source evidence
+
+The local Cargo registry's exact `image-0.25.10` source was inspected, especially
+`src/codecs/{jpeg/decoder.rs,avif/decoder.rs,tiff.rs,openexr.rs}` and its feature
+table. The versioned [image source](https://docs.rs/crate/image/0.25.10/source/)
+and [libheif-rs source](https://docs.rs/crate/libheif-rs/3.0.0/source/) are the
+upstream references. The supporting plans link the candidate codec APIs.

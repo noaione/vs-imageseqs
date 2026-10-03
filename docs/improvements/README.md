@@ -143,6 +143,23 @@ open plus frames to 4.99 s.
 
 ## plans
 
+### image-rs removal goal — 2026-10-03
+
+These four plans are research only. The goal is to replace the integration for
+every supported format and fallback case, then remove `image`; the underlying
+codec libraries can remain. Each future implementation must be benchmarked
+against an image-rs baseline to prove any claimed speed or memory improvement
+and catch significant regressions. The current code confirms GIF/WebP timeline
+discovery decodes presentations before playback decodes them again; other paths
+need separate accounting for header reads, buffers and copies.
+
+| plan | scope | status |
+| --- | --- | --- |
+| [26 remove image-rs](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/26-remove-image-rs.md) | staged goal, complete-coverage removal gate, required baseline protocol and current baseline attempts/results | proposed, no implementation |
+| [27 direct still decoders](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/27-direct-still-decoders.md) | all still formats, zune header/decoder candidates and coverage blockers, manual-reader comparisons, libpng excluded | proposed, no implementation |
+| [28 animation and container decoders](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/28-animation-container-decoders.md) | metadata-only GIF/WebP discovery, composition and remaining AVIF/HEIF fallback coverage | proposed, no implementation |
+| [29 decoder types without image](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/29-decoder-types-without-image.md) | enums, source labels, orientation, dispatch, frame ownership, tests and transitive dependency removal | proposed, no implementation |
+
 ### proposed for review — 2026-09-27
 
 Plans 17–20 were documentation only when they were written. Each records the
