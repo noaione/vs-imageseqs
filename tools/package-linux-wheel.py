@@ -27,10 +27,13 @@ def main() -> None:
         root, = Path(temporary).iterdir()
         plugin_directory = root / "vapoursynth/plugins/imageseqs"
         shutil.move(str(root / "vapoursynth_imageseqs.libs"), str(plugin_directory / "lib"))
-        subprocess.run([
-            "patchelf", "--set-rpath", "$ORIGIN/lib",
-            str(plugin_directory / "libvs_imageseqs.so"),
-        ], check=True)
+        # Every CPU variant is a library of its own and every one of them needs
+        # the loader path to the directory the codecs just moved into.
+        for library in sorted(plugin_directory.glob("libvs_imageseqs*.so")):
+            subprocess.run([
+                "patchelf", "--set-rpath", "$ORIGIN/lib",
+                str(library),
+            ], check=True)
         # wheel pack regenerates RECORD after both the move and ELF modification.
         args.destination.mkdir(parents=True, exist_ok=True)
         build_output.clear(args.destination, ("*.whl",))

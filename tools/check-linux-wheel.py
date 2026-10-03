@@ -14,10 +14,24 @@ from pathlib import Path, PurePosixPath
 import build_output
 
 PLUGIN = "vapoursynth/plugins/imageseqs/libvs_imageseqs.so"
+PLUGIN_STEM = "vapoursynth/plugins/imageseqs/libvs_imageseqs"
+PLUGIN_EXTENSION = ".so"
 MANIFEST = "vapoursynth/plugins/imageseqs/manifest.vs"
 LIBRARIES = "vapoursynth/plugins/imageseqs/lib"
 TAG = "py3-none-manylinux_2_28_x86_64"
 
+
+def is_plugin_variant(name: str) -> bool:
+    """Whether a wheel member is a CPU variant of the plugin's own library.
+
+    The build stages one library per x86-64 level beside the baseline, named
+    ``<stem>.<variant><extension>``, which is the shape VapourSynth finds them
+    by; see ``hatch_build.py``.
+    """
+    if not name.startswith(f"{PLUGIN_STEM}.") or not name.endswith(PLUGIN_EXTENSION):
+        return False
+    variant = name[len(PLUGIN_STEM) + 1 : -len(PLUGIN_EXTENSION)]
+    return bool(variant) and variant.isalnum()
 
 def check_wheel(wheel: Path) -> None:
     with zipfile.ZipFile(wheel) as archive:
@@ -48,7 +62,8 @@ def check_wheel(wheel: Path) -> None:
                 raise ValueError(f"invalid archive path: {name}")
             if name.endswith("/") or ".dist-info/" in name:
                 continue
-            if name not in required and not name.startswith(("LICENSES/", f"{LIBRARIES}/")):
+            allowed = (name in required) or name.startswith(("LICENSES/", f"{LIBRARIES}/"))
+            if not allowed and not is_plugin_variant(name):
                 raise ValueError(f"unexpected content in plugin-only wheel: {name}")
             if name in libraries and not path.name.startswith(("libdav1d-", "libde265-")):
                 raise ValueError(f"unexpected bundled dependency; review its license: {name}")

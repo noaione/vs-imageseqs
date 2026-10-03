@@ -117,11 +117,18 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   the lookahead workers build. the demand one decode is asked for comes from the
   same clip list the frames are built from (`demand_of`), so a decode and the
   payload built from it cannot disagree about whether the alpha plane is there.
+  the frames of a call are allocated before any of them is filled, which is what
+  lets a decode that hands each row to the frame it belongs in fill all of them
+  in one pass; see [`decoder::RowStream`].
 - `src/decoder.rs`: image probing and lazy decoding. `Demand` is what a decode has
   to produce, and `probe` reads an embedded ICC profile either way — whether a
   file has one is the `ImgSeqHasICC` fact — but keeps its bytes only when the
   caller asked to export them, because a sequence whose files each carry a large
   profile would otherwise hold one copy per file for the life of the clip.
+  [`Pixels`] is what a buffered decode produced, and `RowStream` is the decode
+  that has not read its picture yet because it can write each row into the frame;
+  a format answers with one only when it can fill every frame of the call, and
+  anything it refuses goes back to the `image` path.
 - `src/formats/`: per-format paths for what the `image` crate cannot express or
   reports wrongly, one module per container and picked by extension (`heif.rs`
   for monochrome heif/heic and for the colour pages of both containers, which are
@@ -131,7 +138,9 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   probing an avif does not decode it, `jxl.rs` for every jpeg xl, which the `jxl`
   crate decodes directly because `image` has no jxl format of its own, `jp2.rs`
   for JPEG 2000 header probing and OpenJPEG decoding, `png.rs` for the `cICP`
-  chunk, which `image` has no accessor for, and `webp.rs` for the libwebp decode
+  chunk, which `image` has no accessor for, and for the png files whose rows it
+  walks straight into the frame instead of buffering the picture whole, and
+  `webp.rs` for the libwebp decode
   and the lossy yuv format). a monochrome avif still goes through `image` and is
   corrected to `Gray8` here. an avif alpha item is a coded item of its own and a
   heif alpha plane is a buffer this module packs, so both readers take the
@@ -164,7 +173,12 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   and `_Range`.
 - `src/error.rs`: errors returned through the VapourSynth boundary.
 - `hatch_build.py`: Cargo build, plugin staging, wheel tagging, and legal-file
-  inclusion.
+  inclusion. it builds one library per x86-64 level — the baseline with no
+  `-C target-cpu`, `.avx2` for `x86-64-v3` and `.avx512` for `x86-64-v4` — which
+  is the shape VapourSynth's manifest looks for, so `manifest.vs` names the
+  stem alone and the core picks the build the host CPU supports; see
+  `docs/improvements/23-cpu-variant-avx2.md`. every other target gets the one
+  baseline library.
 - `tests/readalpha.vpy`: the VapourSynth validator, against the fixtures written
   by `tests/make-alpha-fixtures.py`; the heif and avif fixtures are encoded from
   that script's `mono-alpha.png` and `alpha-rgba8.png` with `heif-enc` and
@@ -265,11 +279,17 @@ the wheel should contain:
 
 ```text
 vapoursynth/plugins/imageseqs/vs_imageseqs.dll
+vapoursynth/plugins/imageseqs/vs_imageseqs.avx2.dll
+vapoursynth/plugins/imageseqs/vs_imageseqs.avx512.dll
 vapoursynth/plugins/imageseqs/manifest.vs
 LICENSE
 THIRD_PARTY_NOTICES
 LICENSES/
 ```
+
+the two suffixed libraries are x86-64 only, one per microarchitecture level,
+and the manifest names the stem rather than any of them; a unix wheel spells
+the same three `libvs_imageseqs{,.avx2,.avx512}.so`.
 
 it should not contain `python/`, `vs_imageseqs/`, or a python module. the
 wheel is platform-specific but does not depend on the python abi, so the

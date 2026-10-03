@@ -1,8 +1,8 @@
 # 24 - ship an `x86-64-v4` build as an `avx512` variant
 
-status: measured, not implemented. this is the second variant of
-[23](23-cpu-variant-avx2.md) and needs the packaging that page describes before
-it can ship; the build and the measurement are done.
+status: implemented with [23](23-cpu-variant-avx2.md). this page is the row that
+plan's `variants()` carries for `x86-64-v4`, and the measurements below are the
+evidence that it is worth a third build.
 
 ## the suffix
 
@@ -52,14 +52,13 @@ these numbers come from reports avx2, avx512f and avx512bw, and the build runs
 there; a machine with only part of the set falls back to the `avx2` or the
 baseline file, which is the whole point of a variant.
 
-## the intended edit
+## what landed
 
-* add the row to the variant list [23](23-cpu-variant-avx2.md) introduces:
-  `Variant(".avx512", "x86-64-v4")`, so the same `hatch_build.py` change builds
-  and stages three files per x86-64 wheel instead of two. nothing else in the
-  build needs a new concept.
-* the release CI and the wheel checkers then see three files, which is what
-  `tools/check-linux-wheel.py` and `tools/stage-native.py` have to expect.
+one row in the list [23](23-cpu-variant-avx2.md) introduces:
+`Variant(".avx512", "x86-64-v4")`, which makes the same `hatch_build.py` build
+and stage three files per x86-64 wheel instead of one. the tools that read the
+plugin tree were changed once, in that plan, and see the third file the same
+way they see the second.
 
 ## what it costs
 

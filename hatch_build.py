@@ -8,6 +8,7 @@ import subprocess
 import sys
 import sysconfig
 from pathlib import Path
+from typing import NamedTuple
 
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 from packaging import tags
@@ -17,14 +18,89 @@ PLUGIN_FILENAME_BY_PLATFORM = {
     "darwin": "libvs_imageseqs.dylib",
 }
 
+#: x86-64 microarchitecture levels. One row of [`variants`] per level, and a
+#: level only means something on x86-64: naming one for another target makes
+#: rustc warn that the processor is not recognized and ignore it, so an arm64
+#: build passes no flag at all.
+X86_64_V3 = "x86-64-v3"
+X86_64_V4 = "x86-64-v4"
 
-def plugin_filename(environment: dict[str, str]) -> str:
+
+class Variant(NamedTuple):
+    """One CPU optimization level of the plugin."""
+
+    #: Suffix between the plugin's stem and its extension, empty for the
+    #: baseline build. VapourSynth appends this itself when the host CPU
+    #: supports the level, so a variant is never named in the manifest.
+    suffix: str
+    #: Value for cargo's `-C target-cpu`, or `None` to pass no flag at all,
+    #: which is what makes the baseline build run anywhere.
+    target_cpu: str | None
+
+
+def base_plugin_filename(environment: dict[str, str]) -> str:
+    """The name cargo writes for every variant of the library."""
     target = environment.get("CARGO_BUILD_TARGET", "").lower()
     if "windows" in target or "mingw" in target:
         return "vs_imageseqs.dll"
     if "darwin" in target or "apple" in target:
         return "libvs_imageseqs.dylib"
     return PLUGIN_FILENAME_BY_PLATFORM.get(sys.platform, "libvs_imageseqs.so")
+
+
+def plugin_stem(environment: dict[str, str]) -> str:
+    """The stem the manifest names, which is what a variant suffix follows."""
+    return base_plugin_filename(environment).rsplit(".", 1)[0]
+
+
+def plugin_extension(environment: dict[str, str]) -> str:
+    """The platform's library extension, leading dot included."""
+    return f".{base_plugin_filename(environment).rsplit('.', 1)[1]}"
+
+
+def plugin_filename(environment: dict[str, str], variant: Variant) -> str:
+    """The name one variant is staged as."""
+    return f"{plugin_stem(environment)}{variant.suffix}{plugin_extension(environment)}"
+
+
+def target_triple(environment: dict[str, str]) -> str:
+    return environment.get("CARGO_BUILD_TARGET", "").lower()
+
+
+def is_x86_64(environment: dict[str, str]) -> bool:
+    """Whether this build targets x86-64, the one target with levels to name."""
+    triple = target_triple(environment)
+    if triple:
+        return "x86_64" in triple or "amd64" in triple
+    return sysconfig.get_platform().startswith(("win-amd64", "linux-x86_64"))
+
+
+def variants(environment: dict[str, str]) -> list[Variant]:
+    """The builds this host ships, baseline first.
+
+    The baseline names no level, so it runs wherever the crate builds. The
+    wider ones are only loaded by a host whose CPU has the level, which is
+    what makes carrying them safe; the measurements are in
+    `docs/improvements/23-cpu-variant-avx2.md` and
+    `docs/improvements/24-cpu-variant-avx512.md`.
+    """
+    if not is_x86_64(environment):
+        return [Variant("", None)]
+    return [
+        Variant("", None),
+        Variant(".avx2", X86_64_V3),
+        Variant(".avx512", X86_64_V4),
+    ]
+
+
+def manifest(environment: dict[str, str]) -> str:
+    """The `manifest.vs` for this plugin.
+
+    It names the plugin's stem alone: VapourSynth appends the variant suffix
+    itself, looking for `<stem>.<variant><extension>`, so no variant is named
+    here.
+    """
+    return f"[VapourSynth Manifest V1]\n{plugin_stem(environment)}\n"
 
 
 def release_directory(root: Path, environment: dict[str, str]) -> Path:
@@ -82,21 +158,35 @@ def cargo_environment(root: Path) -> dict[str, str]:
     return environment
 
 
-def build_plugin(root: Path, environment: dict[str, str]) -> Path:
+def build_plugin(root: Path, environment: dict[str, str], variant: Variant) -> Path:
+    """Builds one CPU variant and answers the artifact cargo wrote.
+
+    Cargo writes the same file name for every variant, so the answer is the
+    baseline's name whichever variant was asked for; the caller stages it under
+    the variant's own name.
+    """
     cargo = environment.get("CARGO", "cargo")
+    build_environment = dict(environment)
+    if variant.target_cpu is not None:
+        # RUSTFLAGS is part of cargo's fingerprint, so a variant recompiles the
+        # whole dependency graph rather than only this crate.
+        existing = build_environment.get("RUSTFLAGS", "").strip()
+        flag = f"-C target-cpu={variant.target_cpu}"
+        build_environment["RUSTFLAGS"] = f"{existing} {flag}".strip()
     try:
         subprocess.run(
             [cargo, "build", "--release", "--locked"],
             cwd=root,
-            env=environment,
+            env=build_environment,
             check=True,
         )
     except FileNotFoundError as error:
         raise RuntimeError("Cargo is required to build the VapourSynth plugin") from error
     except subprocess.CalledProcessError as error:
-        raise RuntimeError("Cargo failed while building the VapourSynth plugin") from error
+        level = variant.target_cpu or "the baseline"
+        raise RuntimeError(f"Cargo failed while building {level}") from error
 
-    artifact = release_directory(root, environment) / plugin_filename(environment)
+    artifact = release_directory(root, environment) / base_plugin_filename(environment)
     if not artifact.is_file():
         raise RuntimeError(f"Cargo completed but did not produce {artifact}")
     return artifact
@@ -142,26 +232,41 @@ class NativePluginHook(BuildHookInterface):  # type: ignore[type-arg]
     plugin_directory = Path("vapoursynth") / "plugins" / "imageseqs"
 
     def initialize(self, version: str, build_data: dict[str, object]) -> None:
+        del version
         root = Path(self.root)
         environment = cargo_environment(root)
-        artifact = build_plugin(root, environment)
-
-        destination_directory = root / self.plugin_directory
-        destination_directory.mkdir(parents=True, exist_ok=True)
-        staged_plugin = destination_directory / artifact.name
-        shutil.copy2(artifact, staged_plugin)
-        manifest = destination_directory / "manifest.vs"
-        manifest.write_text(
-            f"[VapourSynth Manifest V1]\n{artifact.stem}\n", encoding="utf-8", newline="\n"
-        )
 
         force_include = build_data.setdefault("force_include", {})
         if not isinstance(force_include, dict):
             raise TypeError("Hatch build data force_include must be a mapping")
-        force_include[str(staged_plugin)] = str(
-            self.plugin_directory / artifact.name
+
+        destination_directory = root / self.plugin_directory
+        destination_directory.mkdir(parents=True, exist_ok=True)
+
+        built = variants(environment)
+        for variant in built:
+            artifact = build_plugin(root, environment, variant)
+            staged_plugin = destination_directory / plugin_filename(environment, variant)
+            shutil.copy2(artifact, staged_plugin)
+            force_include[str(staged_plugin)] = str(
+                self.plugin_directory / staged_plugin.name
+            )
+
+        # Cargo writes one name for every variant, so the release directory is
+        # left holding whichever was built last. Put the baseline back: it is
+        # what a plain `cargo build` produces and what the benchmarks and the
+        # Linux build's own readelf check read from that path.
+        baseline = destination_directory / plugin_filename(environment, built[0])
+        shutil.copy2(
+            baseline,
+            release_directory(root, environment) / base_plugin_filename(environment),
         )
-        force_include[str(manifest)] = str(self.plugin_directory / manifest.name)
+
+        manifest_path = destination_directory / "manifest.vs"
+        manifest_path.write_text(manifest(environment), encoding="utf-8", newline="\n")
+        force_include[str(manifest_path)] = str(
+            self.plugin_directory / manifest_path.name
+        )
 
         # Keep the license and attribution files beside the native artifact in
         # every wheel. Hatch's normal package selection does not include
@@ -186,6 +291,6 @@ class NativePluginHook(BuildHookInterface):  # type: ignore[type-arg]
     ) -> None:
         del version, build_data, artifact_path
         shutil.rmtree(
-            Path(self.root) / self.plugin_directory,
+            Path(self.root) / "vapoursynth",
             ignore_errors=True,
         )

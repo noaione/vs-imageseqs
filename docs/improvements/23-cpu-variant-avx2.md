@@ -1,8 +1,11 @@
 # 23 - ship an `x86-64-v3` build as a `avx2` variant
 
-status: measured, not implemented. the build itself is done and checked (see
-[22](22-png-decode-path.md) for the benchmark it was built for); what is
-missing is the packaging that would let a wheel carry more than one build.
+status: implemented. `hatch_build.py` builds and stages one library per x86-64
+level, `manifest.vs` names the stem, and the tools that stage or check a wheel
+know a variant set rather than one filename. the measurements below are the
+evidence it was worth doing; the wheel it produces was built and inspected,
+and `tests/check-packaging-tools.py` covers the wheels that would get it
+wrong.
 
 ## what was measured
 
@@ -60,43 +63,58 @@ def manifest(environment):
     return MANIFEST_HEADER + f"{plugin_stem(environment)}\n"
 ```
 
-so the baseline is `x86-64-v2`, not `x86-64`: v2 is sse4.2 and runs from
-Nehalem onward, which is a floor a wheel can take for free, and the `avx2`
-variant is the one for everything newer. its own CI builds both levels in
-`.github/workflows/rust-tests.yml`, and its `docs/HANDOFF-nmanga.md` describes
-the installed tree as `vs_nimages.dll` plus `vs_nimages.avx2.dll`.
+`vs-nimages` puts its baseline at `x86-64-v2`, which is sse4.2 and runs from
+Nehalem onward, and its `avx2` variant above it. this repository keeps its
+baseline a plain build with no `-C target-cpu` at all, which is a lower floor
+still and a strictly additive change: nothing that loaded the plugin before
+can stop loading it. the measurement above puts plain `x86-64` and
+`x86-64-v2` within noise of each other on this machine (1.217 against
+1.206 s), so moving the baseline buys no number, and the convention that does
+matter — the stem in the manifest and the `.avx2` suffix beside it — is taken
+from that checkout.
 
-the variant this plan adds is the `avx2` one, over the same `x86-64-v2`
-baseline `vs-nimages` uses, so a wheel built here is installable on the same
-machines one built there is. moving this repository's baseline off plain
-`x86-64` is part of this plan rather than a separate one: the measurement above
-puts the two within noise of each other on this machine (1.217 against 1.206 s),
-so the reason to move is the shared floor and not a number.
-
-## the intended edit
+## what landed
 
 * `hatch_build.py`: a `Variant` record holding a suffix and a `target-cpu`
-  value, a `variants(environment)` that answers one baseline build off x86-64
-  and two on it, `build_plugin` taking the variant and appending
-  `-C target-cpu=...` to `RUSTFLAGS`, and `initialize` staging every variant
-  into `vapoursynth/plugins/imageseqs/` beside one `manifest.vs`. The manifest
-  keeps naming the stem, which it already does.
-* `tools/stage-native.py` and the two wheel checkers
-  (`tools/check-linux-wheel.py`, `tools/package-linux-wheel.py`) stage and
-  check the plugin tree, so each has to know a variant set rather than one
-  filename.
-* `.github/workflows`: the x86_64 rows build and check both variants, the way
-  `vs-nimages`' `rust-tests.yml` does.
+  value, a `variants(environment)` that answers the baseline plus `.avx2` and
+  `.avx512` on x86-64 and the baseline alone anywhere else, `build_plugin`
+  taking the variant and appending `-C target-cpu=...` to `RUSTFLAGS`, and
+  `initialize` building and staging every variant into
+  `vapoursynth/plugins/imageseqs/` beside one `manifest.vs`. the manifest names
+  the stem, which is what the core appends a variant suffix to.
+* cargo writes the baseline's file name whichever variant it just built, so
+  `initialize` copies the baseline back into the release directory afterwards.
+  a plain `cargo build`, the benchmarks and the Linux build's own `readelf`
+  check all read that path.
+* `tools/stage-native.py` checks the shape rather than a count: the library the
+  manifest names has to be there, and every other library in the plugin's
+  directory has to be `<stem>.<variant><extension>`. `tools/package-linux-wheel.py`
+  sets `$ORIGIN/lib` on every variant, not only the baseline, and
+  `tools/check-linux-wheel.py` accepts the suffixed libraries as part of the
+  plugin rather than as unexpected content.
+* `tests/check-packaging-tools.py` has a `check_variants` case: a variant wheel
+  stages all three libraries, an unexpected library is refused by name, and a
+  manifest naming a stem the wheel does not hold is refused.
+
+the CI workflows need no change: `python -m build` is what drives the hook, so
+the x86_64 jobs produce the variants where they already build. macOS is arm64
+only — `tools/package-macos-wheel.py` refuses any binary without an arm64
+slice — so that wheel gets the single baseline library and nothing there
+changed.
 
 ## how to check
 
+* `C:\Python314\python.exe tests\check-packaging-tools.py`, which is the
+  offline one and covers the staging path the release uses.
+* a zip listing of the built wheel: the three libraries, their manifest, and
+  no variant named inside `manifest.vs`.
 * `python -c "import vapoursynth as vs; print(vs.core.imgseqs.plugin_path)"`
-  against an installed wheel on a machine with avx2, which must report the
-  `.avx2` file.
-* `tests/readalpha.vpy` against each build through `IMGSEQS_PLUGIN`, which
+  against that wheel installed, which must report the file whose suffix this
+  host's CPU supports.
+* `tests/readalpha.vpy` against each library through `IMGSEQS_PLUGIN`, which
   must produce byte identical logs.
-* `tools/check-linux-wheel.py`, and a zip listing of the wheel: both files,
-  their manifest, and no variant named in `manifest.vs`.
+* `tools/check-linux-wheel.py` on the repaired Linux wheel, which now has to
+  accept three `libvs_imageseqs*.so` and reject anything else.
 * `target/bench/decode/png-decode.py` before and after, which is where the
   6% to 11% should show up.
 

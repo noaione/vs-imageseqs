@@ -173,8 +173,6 @@ it needs no further work.
 | [20 distribution follow-ups](20-distribution-followups.md) | sdist input mismatch, untested archive rebuilds, macOS dependencies and release metadata | high for source builds | release metadata, repeatable staging and macOS runtime portability implemented; source rebuilds and macOS provenance remain open |
 | [21 animated images](21-animated-images.md) | GIF, APNG, WebP, JXL and AVIF/HEIF sequence tracks need timeline expansion, composition, delay sampling and bounded random access | medium to high | implemented for every format it names, with the regression and playback benchmarks recorded |
 | [22 png decode path](22-png-decode-path.md) | the png decode and probe go through `image`, which materialises one whole output buffer per file for the plugin to copy into the frame; driving `png` directly is a measured 0.767x the decode side of that path | medium | measured, not implemented: on `sandbox/posterize-check` the plugin's decode column is 1.31x Pillow's today and would land at about 1.0x, and `x86-64-v3`/`x86-64-v4` builds are worth another 6% to 11% |
-| [23 avx2 variant](23-cpu-variant-avx2.md) | `-C target-cpu=x86-64-v3` is 6% to 11% faster and the gain is the plane write; VapourSynth already picks `<stem>.<variant><ext>` from a manifest that names the stem | medium | measured, not implemented: the build and its parity check are done, the packaging that would carry more than one build is not (the `avx2` suffix and the `x86-64-v2` baseline come from `vs-nimages`) |
-| [24 avx512 variant](24-cpu-variant-avx512.md) | `-C target-cpu=x86-64-v4` is the best of the four on two of the three sets and the worst of the three builds on the third; the core knows the `avx512` suffix and ranks it above `avx2` | low | measured, not implemented: it is the second variant of 23 and needs that packaging first, and it triples the builds in an x86-64 wheel |
 | [25 decode column parity](25-decode-column-parity.md) | Pillow's `decode` stops at `L` while the plugin's ends at the file's own format, so on a palette corpus the two columns are 12 MB against 36 MB per frame | medium for how the suites are read | measured, not implemented: the plugin's own decoder stage is smaller than Pillow's decode on all three sets, so the column is what needs fixing and not the hand-out |
 
 ### implemented plans
@@ -184,8 +182,18 @@ bundled Linux dependencies, an `imageseqs/manifest.vs` installation layout,
 and release validation. Implemented and validated locally on Linux and Windows;
 that page records the completed checks and remaining CI validation.
 
+[23](23-cpu-variant-avx2.md) and [24](24-cpu-variant-avx512.md) are the
+distribution half of that: an x86-64 wheel now carries one library per
+microarchitecture level, and VapourSynth's own manifest rules pick the one the
+host CPU supports. The measurement that made it worth a second and third build
+is in the table below: 6% to 11% on every png and jpeg set tried, almost all of
+it in the plane write. The baseline build still passes no `-C target-cpu` at
+all, so no machine that could load the plugin before can stop loading it.
+
 | plan | touches | expected | risk | status |
 | --- | --- | --- | --- | --- |
+| [23 avx2 variant](23-cpu-variant-avx2.md) | `hatch_build.py`, `tools/stage-native.py`, `tools/check-linux-wheel.py`, `tools/package-linux-wheel.py`, `tests/check-packaging-tools.py` | an x86-64 wheel carries `vs_imageseqs.dll`, `.avx2` and `.avx512`, and VapourSynth loads the widest its host CPU supports from a manifest that names only the stem | low: no pixel changes, and the validator logs are byte identical across the three builds | implemented |
+| [24 avx512 variant](24-cpu-variant-avx512.md) | `hatch_build.py` | the same, with the `x86-64-v4` library and the `avx512` suffix | low: it needs avx512f/bw/cd/dq/vl, and the core only picks it on a host that has them | implemented |
 | [18 demand-aware decoding](18-demand-aware-decoding.md) | `src/decoder.rs`, `src/clip.rs`, `src/prefetch.rs`, `src/formats/avif.rs`, `src/formats/heif.rs`, fixtures, `tests/readalpha.vpy` | a call that hands out no alpha clip does not decode an avif alpha item, and a call that does not export an ICC profile does not keep its bytes | low to medium, a colour-only read stops failing on a broken alpha item | implemented |
 | [20 distribution follow-ups](20-distribution-followups.md) | `tools/`, `tests/check-packaging-tools.py`, CI, `.gitignore`, `pyproject.toml` | a release cannot be published from a tag whose version, `pyproject.toml`, `Cargo.toml` and changelog do not agree, and a second build in one checkout starts from what it built | low, release tooling and CI only | release metadata and repeatable staging implemented; source rebuilds, macOS portability and provenance proposed |
 | [17 AVIF container robustness](17-avif-container-robustness.md) | `src/formats/avif.rs`, `tests/make-alpha-fixtures.py`, fixtures, `tests/readalpha.vpy` | a malformed avif container is refused instead of panicking, allocating gigabytes or answering wrongly, and a container this reader will not decode is described as the format the fallback decoder produces | low to medium, it changes what an unsupported container is described as | implemented |

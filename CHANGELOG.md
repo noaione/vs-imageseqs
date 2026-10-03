@@ -2,7 +2,18 @@
 
 ## unreleased
 
-nothing yet!
+### performance
+
+- x86-64 wheels carry one plugin library per microarchitecture level, and
+  VapourSynth loads the widest the machine's CPU supports: 6% to 11% faster on
+  the PNG and JPEG sets measured, almost all of it in the write into the frame
+  - the libraries are `vs_imageseqs.dll`, `vs_imageseqs.avx2.dll` for AVX2 and
+    `vs_imageseqs.avx512.dll` for AVX-512, and a unix wheel names the same
+    three with a `lib` prefix and a `.so` extension
+  - all three decode identically, and the plain library still passes no
+    `-C target-cpu`, so a machine that could load the plugin before still can
+  - the Windows wheel is 10.4 MiB instead of 3.8 MiB, which is what the three
+    builds cost
 
 ## [0.2.1] - 2026-09-30
 

@@ -215,13 +215,28 @@ def check_changelog() -> None:
     check(result.returncode != 0, "changelog: no tag is an error rather than an empty release")
 
 
-def wheel(directory: Path, version: str, *, extra: bool) -> Path:
-    """A wheel holding what the staging tool reads, and nothing else."""
+def wheel(
+    directory: Path,
+    version: str,
+    *,
+    extra: bool,
+    baseline: bool = True,
+    plugins: tuple[str, ...] = (),
+) -> Path:
+    """A wheel holding what the staging tool reads, and nothing else.
+
+    ``baseline`` writes the library the manifest names and ``plugins`` writes
+    whatever else belongs in the plugin's directory, so a caller can build the
+    wheel a CPU variant set produces and the wheels a broken one would.
+    """
     path = directory / f"vapoursynth_imageseqs-{version}-py3-none-win_amd64.whl"
     prefix = "vapoursynth/plugins/imageseqs/"
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr(prefix + "manifest.vs", "[VapourSynth Manifest V1]\nvs_imageseqs\n")
-        archive.writestr(prefix + "vs_imageseqs.dll", b"the plugin")
+        if baseline:
+            archive.writestr(prefix + "vs_imageseqs.dll", b"the plugin")
+        for name in plugins:
+            archive.writestr(prefix + name, b"the plugin")
         if extra:
             archive.writestr(prefix + "only-in-the-first-wheel.txt", b"stale")
         archive.writestr("LICENSE", f"the license of {version}\n")
@@ -315,6 +330,51 @@ def check_clearing() -> None:
     # A directory that does not exist is not an error: the first build has none.
     check(build_output.clear(SCRATCH / "nowhere") == [], "clearing: a directory that does not exist is left alone")
 
+def check_variants() -> None:
+    """One library per CPU level, and the wheels that would lie about them.
+
+    A wheel carries the baseline build plus a variant for each x86-64 level the
+    build produces; VapourSynth picks between them by the host CPU, so the
+    bundle has to carry all of them and the manifest has to name the stem
+    alone. Both halves of that are what this checks.
+    """
+    dist = SCRATCH / "variant-dist"
+    native = SCRATCH / "variant-native"
+    dist.mkdir(parents=True, exist_ok=True)
+    native.mkdir(parents=True, exist_ok=True)
+    staged = native / "imageseqs"
+    names = ("vs_imageseqs.dll", "vs_imageseqs.avx2.dll", "vs_imageseqs.avx512.dll")
+
+    wheel(dist, "0.3.0", extra=False, plugins=names[1:])
+    result = run("stage-native.py", str(dist), str(native))
+    check(result.returncode == 0, f"variants: a variant wheel stages ({message_of(result)[:120]})")
+    for name in names:
+        check((staged / name).is_file(), f"variants: {name} is staged")
+    check(
+        (staged / "manifest.vs").read_text(encoding="utf-8")
+        == "[VapourSynth Manifest V1]\nvs_imageseqs\n",
+        "variants: the manifest names the stem and no variant",
+    )
+    # A library that is neither the stem nor a variant of it is not something
+    # the manifest can have promised.
+    # Staging it would put a file in the install tree no VapourSynth can name.
+    build_output.clear(dist)
+    stray = "vs_imageseqs_bad.dll"
+    wheel(dist, "0.4.0", extra=False, plugins=(stray,))
+    result = run("stage-native.py", str(dist), str(native))
+    check(result.returncode != 0, "variants: an unexpected plugin library is an error")
+    check(stray in message_of(result), f"variants: and the error names it ({message_of(result)[:120]})")
+    # A manifest naming a stem the wheel does not hold is a wheel with no
+    # plugin, however many variants of something else it carries.
+    build_output.clear(dist)
+    wheel(dist, "0.5.0", extra=False, baseline=False, plugins=(names[1],))
+    result = run("stage-native.py", str(dist), str(native))
+    check(result.returncode != 0, "variants: a manifest the wheel does not satisfy is an error")
+    missing = "which the wheel does not hold"
+    check(missing in message_of(result), f"variants: and says so ({message_of(result)[:120]})")
+
+
+
 
 def prepare_scratch() -> None:
     """Makes the scratch tree empty, without clearing anyone else's.
@@ -338,7 +398,7 @@ def prepare_scratch() -> None:
 def main() -> None:
     prepare_scratch()
     try:
-        for test in (check_changelog, check_staging, check_clearing):
+        for test in (check_changelog, check_staging, check_variants, check_clearing):
             print(f"--- {test.__name__}")
             test()
     finally:
