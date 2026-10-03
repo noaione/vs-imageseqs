@@ -128,7 +128,29 @@ independent oracle **14 of 14 frames match Pillow**. Seven unit tests pin the
 compositor's own behaviour, including the two deliberate departures from the
 specification.
 
-The WebP third of step 4, the libheif fallbacks, and step 5 are not started.
+Step 4's webp third is half done, in `fa808f4`: `src/animation/webp.rs` walks
+the RIFF container and reads the canvas, the loop count, the alpha/ICC/exif
+flags and every frame's rectangle, duration, blend and disposal, with the
+payload range that a decode will be handed. It is a walk and not a decode, so a
+timeline costs no pixels. Eight unit tests pass, asserting the fixture's real
+fields against the values `webpinfo.exe` prints for it -- an independent
+cross-check, and the one that caught that my own expectation for frames 2 and 3
+was wrong, not the walk.
+Nothing consumes the walk yet, so the plugin is unchanged: `frame-parity.py`
+is 245 of 245 and the validator passes.
+
+Two things the compositor needs, both found while reading what it replaces:
+
+- `image-webp` never sets a background colour. It keeps the `ANIM` background
+  as a `hint` and leaves the colour a disposal would clear to as `None`
+  unless a caller sets it, and `image` does not. A disposal is therefore
+  **inert** in the path being replaced. Reproducing that is what keeps the
+  pixels identical, and [`Animation::dispose_is_inert`] records it.
+- Alpha blending is not a plain multiply: the path uses libwebp's integer
+  routine, whose `div_by_255` rounds to nearest rather than down. It is in
+  `image-webp`'s `alpha_blending.rs` and has to be ported exactly.
+
+The webp compositor, the libheif fallbacks, and step 5 are not started.
 
 ## the order of work
 
