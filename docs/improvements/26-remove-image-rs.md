@@ -104,7 +104,31 @@ What was checked, both before and after, for each half:
   interlaced page: identical probe facts *and* identical pixel hashes.
 - The release validator reports `all checks passed`.
 
-Steps 4 and 5 are not started.
+Step 4's gif third is done, in `21c1e14`. `src/animation/gif.rs` reads the
+timeline with `skip_frame_decoding(true)` and composes the canvas itself, which
+is the port [28](28-animation-container-decoders.md) called for. `frames.rs` is
+now WebP alone and says so.
+
+Two things about that port are worth keeping in view, because both are places
+where the obvious implementation is wrong:
+
+- The displayed picture must be built from the sub-rectangle *and* the
+  undisposed canvas. Keeping the drawn canvas instead — the first thing I
+  wrote — makes every frame after the first read content the last one had
+  already replaced, and it is invisible on a file whose frames cover the whole
+  canvas.
+- `Previous` restores the last *undisposed* picture, not the previous frame's
+  displayed picture. A `Previous`-disposed frame's drawing therefore does not
+  become the next frame's base, which is what makes it usable for a one-frame
+  flourish.
+
+Verified three ways: `frame-parity.py` 245 of 245 lines byte-identical, every
+fixture's pixel hashes identical to the compositor it replaced, and the
+independent oracle **14 of 14 frames match Pillow**. Seven unit tests pin the
+compositor's own behaviour, including the two deliberate departures from the
+specification.
+
+The WebP third of step 4, the libheif fallbacks, and step 5 are not started.
 
 ## the order of work
 
