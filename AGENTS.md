@@ -168,9 +168,11 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   length and field width is checked against the type it is read into: a malformed
   container is refused rather than read past its own bounds, because a release
   build aborts on a panic. `Meta::native_eligible` is what decides whether this
-  reader decodes the primary item at all, and a container it refuses — a grid of
-  tiles, an item in several extents, a construction method it does not follow —
-  is described as the format the `image` decoder produces rather than as the yuv
+  reader decodes the primary item at all, and an item written as several extents
+  is read rather than refused, because those extents are one payload split
+  across the container. A container it still refuses — a grid of tiles, a
+  construction method it does not follow — is described as the format the
+  `image` decoder produces rather than as the yuv
   its samples are; a probe must never promise a frame a decode would refuse to
   produce.
 - `src/pixel.rs`: supported pixel formats, the format a nominal depth names, and
@@ -200,7 +202,9 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   plus `alpha-yuv420p.avif`, and those four are likewise described by hand in
   that script's header. its split-extent section reads `avif-split-extents.avif`,
   which that script writes by hand from the coded item `avif-yuv420p.avif` holds,
-  so that fixture has to exist before the script runs. its grid section reads
+  so that fixture has to exist before the script runs. That section joins nothing
+  itself: it checks the plugin's joined planes against the whole file's, plane by
+  plane. its grid section reads
   `avif-grid.avif`, a 2x2 grid of tiles encoded once by hand from the
   `avif-grid-source.png` the same script writes (`avifenc --lossless -g 2x2`,
   with the command in that script's header), and states the refusal every

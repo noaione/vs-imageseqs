@@ -182,12 +182,45 @@ all, so the walk errored where it had to *decline*: `parse` now answers
 `Ok(None)` for a webp that states no animation, which is what keeps every still
 webp on the libwebp path. A test pins both directions.
 
-### what is left of step 4, scoped
+### step 4's remaining piece
 
-Two pieces, and both of them change what the plugin hands out rather than only
-where it comes from -- which is why they are not a quiet continuation of the
-gif and webp work. Each needs a `CHANGELOG.md` entry and an updated validator,
-and neither can be checked by "the pixels are unchanged".
+**The extent join is done, in `2de10de`.** `data_range` became `data_ranges` and
+hands out every extent of an item, `primary_data`/`alpha_data` became
+`primary_ranges`/`alpha_ranges`, and the three read sites join them through a
+new `read_ranges`. `limit` now bounds the *joined* payload rather than each
+extent, so a prefix request does not read the same length out of every extent.
+`native_eligible` stopped refusing several extents and still refuses a grid and
+an unknown construction method, which is what it should do.
+
+What changed for a user: `avif-split-extents.avif` is now `YUV420P8`, the yuv
+its container states, where it used to be the `RGB24` the `image` decoder
+built. The validator's extents section no longer asserts a format and no longer
+needs `mismatch`; it checks the joined file's planes against the whole file's
+**plane for plane**, which is a stronger check than the sample-by-sample one it
+replaced and the one that would catch a wrong extent order.
+
+Verified: every plane of `avif-split-extents.avif` is byte-identical to
+`avif-yuv420p.avif`'s, 209 unit tests pass, `clippy -D warnings` and `fmt
+--check` are clean, the validator reports `all checks passed`, and a fixture
+pixel diff shows the split-extent file as the **only** changed fixture in the
+tree.
+
+**What is left of step 4 is one piece**: send a refused avif or heif to
+libheif rather than to `image`, which plan [28](28-animation-container-decoders.md)
+decides as "one library for every refused container". That one moves the
+validator's grid section, whose pinned string today is `image`'s
+`Format error decoding Avif: Invalid argument`, and any container libheif also
+refuses needs its new error string written down. `formats/heif.rs` already has
+the entry point for a colour page, so the work is the routing and the
+expectations rather than a decoder.
+
+Everything below is the scoping written before the join landed, kept because the
+second piece is still described by it.
+
+Both of these change what the plugin hands out rather than only where it comes
+from, which is why they were not a quiet continuation of the gif and webp work.
+Each needs a `CHANGELOG.md` entry and an updated validator, and neither can be
+checked by "the pixels are unchanged".
 
 **1. Join an item's extents in the container walker.**
 `avif-split-extents.avif` is the coded item of `avif-yuv420p.avif` cut in half
