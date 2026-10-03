@@ -35,14 +35,15 @@ def plugin_libraries(archive: zipfile.ZipFile, prefix: str, stem: str) -> list[s
 
     A variant is named ``<stem>.<variant><extension>``, which is the shape
     VapourSynth looks for itself, so what is checked is that shape rather than
-    a list of variant names kept in step with the build.
+    a list of variant names kept in step with the build. Only libraries beside
+    the manifest are plugins; bundled runtime dependencies live below ``lib/``.
     """
-    directory = prefix + "imageseqs/"
+    directory = PurePosixPath(prefix) / "imageseqs"
     extensions = {".dll", ".so", ".dylib"}
     found = []
     for name in archive.namelist():
         path = PurePosixPath(name)
-        if not name.startswith(directory) or path.suffix not in extensions:
+        if path.parent != directory or path.suffix not in extensions:
             continue
         library = path.stem
         if library != stem and not library.startswith(f"{stem}."):

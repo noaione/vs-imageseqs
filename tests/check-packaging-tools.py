@@ -13,7 +13,7 @@ Three tools are covered, each against the failure it exists to catch:
   repository's own changelog is not read.
 - ``tools/stage-native.py``: two consecutive stagings in one checkout, including
   a version change, where the second wheel no longer carries a file the first one
-  did.
+  did, plus macOS/Linux bundles whose runtime dependencies live below ``lib/``.
 - ``tools/build_output.py``: what a build clears from its own output directory,
   and what it leaves alone.
 
@@ -330,6 +330,7 @@ def check_clearing() -> None:
     # A directory that does not exist is not an error: the first build has none.
     check(build_output.clear(SCRATCH / "nowhere") == [], "clearing: a directory that does not exist is left alone")
 
+
 def check_variants() -> None:
     """One library per CPU level, and the wheels that would lie about them.
 
@@ -374,6 +375,53 @@ def check_variants() -> None:
     check(missing in message_of(result), f"variants: and says so ({message_of(result)[:120]})")
 
 
+def check_bundled_staging() -> None:
+    """Plugin validation must distinguish bundled codecs from manifest siblings."""
+    prefix = "vapoursynth/plugins/imageseqs/"
+    stem = "libvs_imageseqs"
+    cases = (
+        ("macos", "macosx_12_0_arm64", ".dylib", ("",),
+         ("lib/libdav1d.7.dylib", "lib/libde265.0.2.1.dylib")),
+        ("linux", "manylinux_2_28_x86_64", ".so", ("", ".avx2", ".avx512"),
+         ("lib/libdav1d-test.so.7", "lib/libde265-test.so.0", "lib/libdav1d-unversioned.so")),
+    )
+    for platform, tag, extension, variants, dependencies in cases:
+        dist = SCRATCH / f"{platform}-dist"
+        native = SCRATCH / f"{platform}-native"
+        dist.mkdir(parents=True, exist_ok=True)
+        archive_path = dist / f"vapoursynth_imageseqs-0.3.0-py3-none-{tag}.whl"
+        manifest = f"[VapourSynth Manifest V1]\n{stem}\n".encode()
+        metadata = {prefix + "manifest.vs": manifest, "LICENSE": b"license"}
+        bundled = {prefix + name: name.encode() for name in dependencies}
+        plugins = {prefix + f"{stem}{variant}{extension}": variant.encode() or b"baseline"
+                   for variant in variants}
+
+        def write_archive(contents: dict[str, bytes]) -> None:
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                for name, content in contents.items():
+                    archive.writestr(name, content)
+
+        write_archive({**metadata, **bundled, **plugins})
+        result = run("stage-native.py", str(dist), str(native))
+        check(result.returncode == 0,
+              f"{platform}: bundled dependencies stage ({message_of(result)[:160]})")
+        for name, content in {**metadata, **bundled, **plugins}.items():
+            staged = native / name.removeprefix("vapoursynth/plugins/")
+            check(staged.is_file() and staged.read_bytes() == content,
+                  f"{platform}: {staged.relative_to(native)} is preserved byte for byte")
+
+        # A matching filename inside lib/ cannot satisfy the manifest: the
+        # core looks beside the manifest, not in the dependency directory.
+        write_archive({**metadata, prefix + f"lib/{stem}{extension}": b"misplaced plugin"})
+        result = run("stage-native.py", str(dist), str(native))
+        check(result.returncode != 0 and "which the wheel does not hold" in message_of(result),
+              f"{platform}: a nested plugin cannot replace the manifest's baseline")
+
+        stray = f"other_plugin{extension}"
+        write_archive({**metadata, **bundled, **plugins, prefix + stray: b"unexpected plugin"})
+        result = run("stage-native.py", str(dist), str(native))
+        check(result.returncode != 0 and stray in message_of(result),
+              f"{platform}: an unexpected manifest sibling is still rejected")
 
 
 def prepare_scratch() -> None:
@@ -398,7 +446,7 @@ def prepare_scratch() -> None:
 def main() -> None:
     prepare_scratch()
     try:
-        for test in (check_changelog, check_staging, check_variants, check_clearing):
+        for test in (check_changelog, check_staging, check_variants, check_bundled_staging, check_clearing):
             print(f"--- {test.__name__}")
             test()
     finally:
