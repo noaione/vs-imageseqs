@@ -3,6 +3,7 @@ mod clip;
 mod color;
 mod decoder;
 mod error;
+mod exif;
 mod format;
 mod formats;
 mod layout;
