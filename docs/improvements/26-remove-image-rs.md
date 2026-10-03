@@ -150,7 +150,39 @@ Two things the compositor needs, both found while reading what it replaces:
   routine, whose `div_by_255` rounds to nearest rather than down. It is in
   `image-webp`'s `alpha_blending.rs` and has to be ported exactly.
 
-The webp compositor, the libheif fallbacks, and step 5 are not started.
+Step 4's webp third is done, in `380589b`. `src/animation/webp.rs` replays the
+timeline the walk reads, builds the smallest container libwebp will decode one
+frame out of, and composes the canvas with libwebp's own integer alpha
+blending. **`src/animation/frames.rs` is deleted**: no animated format is
+replayed through the `image` crate any more.
+
+Verified four ways:
+
+- `frame-parity.py`: 245 of 245 lines byte-identical to the baseline.
+- Every fixture's pixel hashes identical to the path it replaced, including
+  `animation.webp` and `lossy.webp`.
+- **14 of 14 frames match libwebp's own `anim_dump`**, which is the oracle that
+  settles whether the compositor is right rather than merely unchanged.
+- The release validator reports `all checks passed`.
+
+Two things the port turned up, both worth keeping:
+
+- The blending routine is **lossy even for an opaque source**: a sample of 10
+  over anything comes back as 9, including over a transparent canvas, because
+  the renormalisation's 24-bit reciprocal truncates. Three of my own
+  from-first-principles expectations for it were wrong and the port was right,
+  so it is pinned with exact values rather than tolerances.
+- `webpinfo` shows every frame of the fixture uses *do not blend*, so the
+  fixture never exercises blending at all. It had to be verified by
+  construction, and the fixture's pixels could only ever settle the copy path.
+
+The first attempt broke `lossy.webp` outright. Claiming every `.webp` means a
+still webp reaches the walk, and a plain lossy webp has no `VP8X` header at
+all, so the walk errored where it had to *decline*: `parse` now answers
+`Ok(None)` for a webp that states no animation, which is what keeps every still
+webp on the libwebp path. A test pins both directions.
+
+The libheif fallbacks of step 4, and step 5, are not started.
 
 ## the order of work
 

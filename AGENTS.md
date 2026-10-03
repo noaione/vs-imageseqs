@@ -103,8 +103,14 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   consumer's next request replay the wrong picture.
 - `src/animation/`: one module per animated format. `apng.rs` composes APNG
   frames at the file's own depth, because the `image` compositor's 16-bit arm is
-  `unreachable!` and it refuses every 16-bit colour type. `frames.rs` replays the
-  two formats `image` already composites over the full logical canvas. `jxl.rs`
+  `unreachable!` and it refuses every 16-bit colour type. `gif.rs` reads the
+  timeline with the frame decoding skipped and composes the canvas itself,
+  keeping `image`'s two deliberate departures from the specification: the
+  background colour is never used, and `Any` disposal means `Keep`. `webp.rs`
+  walks the RIFF container for the same timeline, builds the smallest container
+  libwebp will decode one frame out of, and composes the canvas with libwebp's
+  own integer alpha blending. Neither names `frames.rs`, which is gone: no
+  animated format is replayed through the `image` crate any more. `jxl.rs`
   scans frame headers without rendering and decodes each presentation from its
   own seek checkpoint. `sequence.rs` reads an avif or heif sequence's sample
   table and clean aperture from the container, because the embedded libheif
