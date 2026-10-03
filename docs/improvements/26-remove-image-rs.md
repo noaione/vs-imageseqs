@@ -182,7 +182,54 @@ all, so the walk errored where it had to *decline*: `parse` now answers
 `Ok(None)` for a webp that states no animation, which is what keeps every still
 webp on the libwebp path. A test pins both directions.
 
-The libheif fallbacks of step 4, and step 5, are not started.
+### what is left of step 4, scoped
+
+Two pieces, and both of them change what the plugin hands out rather than only
+where it comes from -- which is why they are not a quiet continuation of the
+gif and webp work. Each needs a `CHANGELOG.md` entry and an updated validator,
+and neither can be checked by "the pixels are unchanged".
+
+**1. Join an item's extents in the container walker.**
+`avif-split-extents.avif` is the coded item of `avif-yuv420p.avif` cut in half
+and located as two extents: the same picture, written a legal way this reader
+declines. `Meta::native_eligible` refuses it and the probe therefore describes
+it as the format the `image` decoder produces, so the file currently comes out
+`RGB24` where the file it was cut from comes out `YUV420P8`.
+
+What has to change, all inside `src/formats/avif.rs`:
+
+- `data_range` (line ~1070) returns one `Range<usize>` and refuses more than
+  one extent. It becomes a multi-range accessor: every extent of method 0 is
+  relative to the file and every extent of method 1 to `idat`, and each range
+  still has to be checked against its container before a caller allocates it.
+  `idat` may hold only one extent, which the specification already says and
+  which is worth keeping as an explicit refusal.
+- `primary_data` and `alpha_data` (~1040 and ~1048) hand out those ranges, and
+  the five production call sites (~107, ~267, ~272, ~1028) read the bytes. The
+  three read sites concatenate, which is the actual join.
+- `native_eligible` (~1027) stops refusing several extents. It must keep
+  refusing a grid and an unknown construction method.
+- Eight unit tests assert the old refusal, including two that assert
+  `primary_data` equals a single range; they become join assertions.
+- `tests/readalpha.vpy`'s extents section turns from "the fallback's format"
+  into a sample check against `avif-yuv420p.avif`, which is the point: the two
+  files become the same picture through the same decoder. The `mismatch`
+  assertion at the end of that section goes away with the format difference.
+
+**2. Send a refused avif or heif to libheif rather than to `image`.**
+Plan [28](28-animation-container-decoders.md) decides "one library for every
+refused container". Today `src/formats/avif.rs` (~91 and ~235) asks
+`native_eligible` and leaves a `false` answer to the `image` hooks, whose error
+string is what the validator's grid section pins today
+(`Format error decoding Avif: Invalid argument`).
+
+So this one moves two validator sections at once: the grid's refusal becomes
+whatever libheif does with a grid, and any container libheif also refuses needs
+its new error string written down. `formats/heif.rs` already has the entry
+point for a colour page, which is what plan 28's "HEIF RGB page" row names, so
+the work is the routing and the expectations rather than a decoder.
+
+Step 5, the remaining still formats, is untouched.
 
 ## the order of work
 
