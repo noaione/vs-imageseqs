@@ -240,7 +240,7 @@ for results and instructions to compare against BestSource.
 
 ## build from source
 
-You need Rust 1.88 or newer, Python 3.12 or newer, CMake, Ninja, and `pkg-config`.
+You need Rust 1.94 or newer, Python 3.12 or newer, CMake, Ninja, and `pkg-config`.
 You also need the codec libraries for your operating system.
 
 On Debian or Ubuntu:

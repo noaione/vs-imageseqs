@@ -9,7 +9,7 @@ keywords = ["vapoursynth", "image-reader"]
 description = "Rust-based image sequences reader for VapourSynth"
 repository = "https://github.com/noaione/vs-imageseqs"
 homepage = "https://github.com/noaione/vs-imageseqs"
-rust-version = "1.88.0"
+rust-version = "1.94.0"
 
 [lib]
 crate-type = ["cdylib"]
