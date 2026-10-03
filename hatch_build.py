@@ -158,6 +158,26 @@ def cargo_environment(root: Path) -> dict[str, str]:
     return environment
 
 
+def rust_host_target(root: Path, environment: dict[str, str]) -> str:
+    """The native target, named explicitly to separate Cargo's host tools."""
+    try:
+        result = subprocess.run(
+            [environment.get("RUSTC", "rustc"), "--version", "--verbose"],
+            cwd=root,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError) as error:
+        raise RuntimeError("rustc is required to identify the native plugin target") from error
+    for line in result.stdout.splitlines():
+        if line.startswith("host: ") and (target := line.removeprefix("host: ").strip()):
+            return target
+    raise RuntimeError("rustc did not report a host target")
+
+
 def build_plugin(root: Path, environment: dict[str, str], variant: Variant) -> Path:
     """Builds one CPU variant and answers the artifact cargo wrote.
 
@@ -167,15 +187,28 @@ def build_plugin(root: Path, environment: dict[str, str], variant: Variant) -> P
     """
     cargo = environment.get("CARGO", "cargo")
     build_environment = dict(environment)
+    command = [cargo, "build", "--release", "--locked"]
     if variant.target_cpu is not None:
-        # RUSTFLAGS is part of cargo's fingerprint, so a variant recompiles the
-        # whole dependency graph rather than only this crate.
-        existing = build_environment.get("RUSTFLAGS", "").strip()
-        flag = f"-C target-cpu={variant.target_cpu}"
-        build_environment["RUSTFLAGS"] = f"{existing} {flag}".strip()
+        # Even a native build needs --target: otherwise RUSTFLAGS also compile
+        # build scripts and proc macros for an ISA the CI host may not support.
+        target = build_environment.get("CARGO_BUILD_TARGET") or rust_host_target(root, environment)
+        build_environment["CARGO_BUILD_TARGET"] = target
+        command.extend(["--target", target])
+        # Keep the whole target dependency graph optimized, preserving caller
+        # flags in whichever environment variable Cargo gives precedence to.
+        if "CARGO_ENCODED_RUSTFLAGS" in build_environment:
+            existing = build_environment["CARGO_ENCODED_RUSTFLAGS"]
+            flag = f"-C\x1ftarget-cpu={variant.target_cpu}"
+            build_environment["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(
+                part for part in (existing, flag) if part
+            )
+        else:
+            existing = build_environment.get("RUSTFLAGS", "").strip()
+            flag = f"-C target-cpu={variant.target_cpu}"
+            build_environment["RUSTFLAGS"] = f"{existing} {flag}".strip()
     try:
         subprocess.run(
-            [cargo, "build", "--release", "--locked"],
+            command,
             cwd=root,
             env=build_environment,
             check=True,
@@ -186,7 +219,7 @@ def build_plugin(root: Path, environment: dict[str, str], variant: Variant) -> P
         level = variant.target_cpu or "the baseline"
         raise RuntimeError(f"Cargo failed while building {level}") from error
 
-    artifact = release_directory(root, environment) / base_plugin_filename(environment)
+    artifact = release_directory(root, build_environment) / base_plugin_filename(build_environment)
     if not artifact.is_file():
         raise RuntimeError(f"Cargo completed but did not produce {artifact}")
     return artifact
@@ -252,8 +285,8 @@ class NativePluginHook(BuildHookInterface):  # type: ignore[type-arg]
                 self.plugin_directory / staged_plugin.name
             )
 
-        # Cargo writes one name for every variant, so the release directory is
-        # left holding whichever was built last. Put the baseline back: it is
+        # An explicit caller target shares a release directory across variants.
+        # Put the baseline back in that directory: it is
         # what a plain `cargo build` produces and what the benchmarks and the
         # Linux build's own readelf check read from that path.
         baseline = destination_directory / plugin_filename(environment, built[0])

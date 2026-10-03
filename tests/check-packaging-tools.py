@@ -4,7 +4,7 @@ Run from the repository root with any Python 3.12 or later:
 
     python tests/check-packaging-tools.py
 
-Three tools are covered, each against the failure it exists to catch:
+The build hook and packaging tools are covered against release failures:
 
 - ``tools/create-changelog.py``: a tag, ``pyproject.toml``, ``Cargo.toml`` and a
   changelog section that do not agree, a section that is missing or empty, the
@@ -16,6 +16,8 @@ Three tools are covered, each against the failure it exists to catch:
   did, plus macOS/Linux bundles whose runtime dependencies live below ``lib/``.
 - ``tools/build_output.py``: what a build clears from its own output directory,
   and what it leaves alone.
+- ``hatch_build.py``: CPU flags reach target dependencies while Cargo's host
+  build scripts and proc macros remain runnable on the build machine.
 
 The scratch tree is ``target/check-packaging-tools`` rather than the system
 temporary directory, because the repository's ignored build tree is the one
@@ -25,12 +27,15 @@ it somewhere else. It is removed on success and kept on failure.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import shutil
 import subprocess
 import sys
 import zipfile
 from pathlib import Path
+from types import ModuleType
+from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -424,6 +429,84 @@ def check_bundled_staging() -> None:
               f"{platform}: an unexpected manifest sibling is still rejected")
 
 
+def check_build_targets() -> None:
+    """Check the actual hook without requiring Hatchling, Rust or a wheel."""
+    # Only the hook's third-party imports are stubbed. Its build command,
+    # environment and artifact lookup run unchanged, with Cargo simulated.
+    names = (
+        "hatchling", "hatchling.builders", "hatchling.builders.hooks",
+        "hatchling.builders.hooks.plugin", "hatchling.builders.hooks.plugin.interface",
+        "packaging", "packaging.tags",
+    )
+    imports = {name: ModuleType(name) for name in names}
+    imports[names[4]].BuildHookInterface = object  # pyright: ignore[reportAttributeAccessIssue]
+    imports["packaging"].tags = imports["packaging.tags"]  # pyright: ignore[reportAttributeAccessIssue]
+    spec = importlib.util.spec_from_file_location("imageseqs_build_hook_check", ROOT / "hatch_build.py")
+    assert spec is not None and spec.loader is not None
+    hook = importlib.util.module_from_spec(spec)
+    with patch.dict(sys.modules, imports):
+        spec.loader.exec_module(hook)
+
+    root = SCRATCH / "build-hook"
+    root.mkdir()
+    for host in ("x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"):
+        for variant in hook.variants({"CARGO_BUILD_TARGET": host}):
+            for explicit_target in (False, True):
+                environment = {"CARGO": "selected-cargo", "RUSTC": "selected-rustc",
+                               "CARGO_TARGET_DIR": "cargo-output", "RUSTFLAGS": "--cfg existing"}
+                if explicit_target:
+                    environment["CARGO_BUILD_TARGET"] = host
+                original = dict(environment)
+                effective = dict(environment)
+                if variant.target_cpu:
+                    effective["CARGO_BUILD_TARGET"] = host
+                artifact = hook.release_directory(root, effective) / hook.base_plugin_filename(effective)
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                artifact.write_bytes(b"built plugin")
+                with patch.object(hook.subprocess, "run") as compiler:
+                    compiler.return_value.stdout = f"rustc test\nhost: {host}\n"
+                    result = hook.build_plugin(root, environment, variant)
+                calls = compiler.call_args_list
+                command = ["selected-cargo", "build", "--release", "--locked"]
+                if variant.target_cpu:
+                    command.extend(["--target", host])
+                label = f"build: {host} {variant.target_cpu or 'baseline'} target={explicit_target}"
+                check(calls[-1].args[0] == command, f"{label} selects the correct Cargo target")
+                expected_flags = "--cfg existing"
+                if variant.target_cpu:
+                    expected_flags += f" -C target-cpu={variant.target_cpu}"
+                check(calls[-1].kwargs["env"]["RUSTFLAGS"] == expected_flags,
+                      f"{label} preserves caller flags and selects the CPU level")
+                discovery = bool(variant.target_cpu and not explicit_target)
+                check(len(calls) == 1 + discovery
+                      and (not discovery or calls[0].args[0] == ["selected-rustc", "--version", "--verbose"]),
+                      f"{label} discovers the host only when needed")
+                check(result == artifact and environment == original,
+                      f"{label} finds the artifact without changing the caller environment")
+
+    for existing in ("", "--cfg\x1fexisting"):
+        environment = {"CARGO_BUILD_TARGET": "x86_64-unknown-linux-gnu",
+                       "RUSTFLAGS": "ignored lower-priority flags", "CARGO_ENCODED_RUSTFLAGS": existing}
+        artifact = hook.release_directory(root, environment) / hook.base_plugin_filename(environment)
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_bytes(b"encoded flags plugin")
+        with patch.object(hook.subprocess, "run") as compiler:
+            hook.build_plugin(root, environment, hook.Variant(".avx512", "x86-64-v4"))
+        expected = (existing + "\x1f" if existing else "") + "-C\x1ftarget-cpu=x86-64-v4"
+        check(compiler.call_args.kwargs["env"]["CARGO_ENCODED_RUSTFLAGS"] == expected,
+              f"build: encoded flags {existing!r} retain precedence and receive the CPU level")
+
+    with patch.object(hook.subprocess, "run") as compiler:
+        compiler.return_value.stdout = "rustc test without a host\n"
+        try:
+            hook.build_plugin(root, {}, hook.Variant(".avx512", "x86-64-v4"))
+        except RuntimeError as error:
+            check("host target" in str(error) and compiler.call_count == 1,
+                  "build: missing host information stops before an unsafe Cargo invocation")
+        else:
+            check(False, "build: missing host information must be refused")
+
+
 def prepare_scratch() -> None:
     """Makes the scratch tree empty, without clearing anyone else's.
 
@@ -446,7 +529,8 @@ def prepare_scratch() -> None:
 def main() -> None:
     prepare_scratch()
     try:
-        for test in (check_changelog, check_staging, check_variants, check_bundled_staging, check_clearing):
+        for test in (check_changelog, check_staging, check_variants, check_bundled_staging,
+                     check_clearing, check_build_targets):
             print(f"--- {test.__name__}")
             test()
     finally:

@@ -51,7 +51,7 @@ After the fix, all 74 checks in `tests/check-packaging-tools.py` pass:
 
 Python AST and `git diff HEAD --check` pass. The full native validator passed
 all 580 checks before the release build, again after that build, and after the
-tooling edits, with no warning or failure lines. Release builds pass before
+tooling edits, with no warnings or failing checks. Release builds pass before
 and after. The DLL SHA-256 is identical throughout:
 `74f9f2c5322621e125d5ee56d239a30d767239f74b22c724a93df6ace5b1e031`.
 
