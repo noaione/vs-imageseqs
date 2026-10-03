@@ -104,7 +104,8 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
     // `avifenc` writes one, and a lot of other writers state the codes in the
     // bitstream alone.
     let cicp = header.cicp.or_else(|| {
-        let payload = read_range(&mut file, meta.primary_data(SEQUENCE_HEADER_LIMIT).ok()?).ok()?;
+        let payload =
+            read_ranges(&mut file, &meta.primary_ranges(SEQUENCE_HEADER_LIMIT).ok()?).ok()?;
         sequence_header_cicp(&payload)
     });
 
@@ -264,12 +265,12 @@ pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
             yuv_format(header.chroma, header.depth).map(PixelFormat::name),
         )));
     }
-    let coded = read_range(&mut file, meta.primary_data(usize::MAX)?)
+    let coded = read_ranges(&mut file, &meta.primary_ranges(usize::MAX)?)
         .map_err(|error| image_error("read", &info.path, error))?;
     let expects_alpha = crate::pixel::alpha_channel(info.color_type).is_some() && demand.alpha;
     let alpha_coded = if expects_alpha {
         Some(
-            meta.alpha_data(usize::MAX)?
+            meta.alpha_ranges(usize::MAX)?
                 .ok_or_else(|| {
                     image_error(
                         "read the alpha item of",
@@ -277,8 +278,8 @@ pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
                         "the container holds none",
                     )
                 })
-                .and_then(|range| {
-                    read_range(&mut file, range)
+                .and_then(|ranges| {
+                    read_ranges(&mut file, &ranges)
                         .map_err(|error| image_error("read", &info.path, error))
                 })?,
         )
@@ -1025,7 +1026,9 @@ impl Meta {
     /// The item has to be locatable for the same reason: a range the file does
     /// not hold is one this reader cannot read either.
     fn native_eligible(&self) -> bool {
-        !self.grid && self.primary_data(usize::MAX).is_ok() && self.alpha_data(usize::MAX).is_ok()
+        !self.grid
+            && self.primary_ranges(usize::MAX).is_ok()
+            && self.alpha_ranges(usize::MAX).is_ok()
     }
 
     /// The extents of one item, and what their offsets are relative to.
@@ -1036,52 +1039,47 @@ impl Meta {
             .map(|(_, method, ranges)| (*method, ranges.as_slice()))
     }
 
-    /// The bytes of the primary item's payload, up to `limit` of them.
-    fn primary_data(&self, limit: usize) -> Result<Range<usize>> {
+    /// The byte ranges of the primary item's payload, up to `limit` of them.
+    fn primary_ranges(&self, limit: usize) -> Result<Vec<Range<usize>>> {
         let (method, ranges) = self
             .extents_of(self.primary)
             .ok_or_else(|| ImgSeqError::new("the container does not locate its primary item"))?;
-        self.data_range(method, ranges, limit)
+        self.data_ranges(method, ranges, limit)
     }
 
-    /// The bytes of the alpha item's payload, when the container holds one.
-    fn alpha_data(&self, limit: usize) -> Result<Option<Range<usize>>> {
+    /// The byte ranges of the alpha item's payload, when the container holds one.
+    fn alpha_ranges(&self, limit: usize) -> Result<Option<Vec<Range<usize>>>> {
         let Some(aux) = self.aux.filter(|_| self.has_alpha()) else {
             return Ok(None);
         };
         let (method, ranges) = self
             .extents_of(aux)
             .ok_or_else(|| ImgSeqError::new("the container does not locate its alpha item"))?;
-        self.data_range(method, ranges, limit).map(Some)
+        self.data_ranges(method, ranges, limit).map(Some)
     }
 
-    /// One contiguous range of an item's bytes.
+    /// The byte ranges an item's payload occupies, up to `limit` bytes of it.
     ///
     /// An extent of an item written into `idat` is an offset into that box, and
-    /// every other one is an offset into the file. Only a payload one extent
-    /// holds is read here: a file that splits its item over several extents is
-    /// left to the `image` decoder, which joins them.
+    /// every other one is an offset into the file. An item written as several
+    /// extents is one payload split across the container, so every extent of it
+    /// is handed out in the order `iloc` lists them and the caller joins them.
     ///
     /// Every range is checked against the container it is written in before it
     /// is handed out, because the caller allocates it: an offset the file does
     /// not reach and a length that overflows an address are both errors rather
     /// than a large allocation or a panic. `limit` caps the length for a caller
     /// that wants a prefix of the payload.
-    fn data_range(
+    fn data_ranges(
         &self,
         method: u8,
         ranges: &[(usize, usize)],
         limit: usize,
-    ) -> Result<Range<usize>> {
-        let Some((offset, length)) = ranges.first().copied() else {
+    ) -> Result<Vec<Range<usize>>> {
+        if ranges.is_empty() {
             return Err(ImgSeqError::new("the container lists no data for an item"));
-        };
-        if ranges.len() > 1 {
-            return Err(ImgSeqError::new(
-                "the item is split over several extents, which this reader does not join",
-            ));
         }
-        // What the extent's offset is relative to, and where that ends.
+        // What every extent's offset is relative to, and where that ends.
         let (base, container_end, container) = match method {
             0 => (0, self.file_len, "the file"),
             1 => {
@@ -1097,19 +1095,31 @@ impl Meta {
                 ));
             }
         };
-        let start = base
-            .checked_add(offset)
-            .ok_or_else(|| ImgSeqError::new(format!("the item is past the end of {container}")))?;
-        let end = start
-            .checked_add(length.min(limit))
-            .ok_or_else(|| ImgSeqError::new(format!("the item is past the end of {container}")))?;
-        if end > container_end {
-            return Err(ImgSeqError::new(format!(
-                "the item is {} bytes past the end of {container}",
-                end - container_end,
-            )));
+        // `limit` caps the *joined* payload rather than each extent, so an
+        // item split over several also ends when the budget does.
+        let mut remaining = limit;
+        let mut out = Vec::with_capacity(ranges.len());
+        for (offset, length) in ranges {
+            if remaining == 0 {
+                break;
+            }
+            let start = base.checked_add(*offset).ok_or_else(|| {
+                ImgSeqError::new(format!("the item is past the end of {container}"))
+            })?;
+            let take = (*length).min(remaining);
+            let end = start.checked_add(take).ok_or_else(|| {
+                ImgSeqError::new(format!("the item is past the end of {container}"))
+            })?;
+            if end > container_end {
+                return Err(ImgSeqError::new(format!(
+                    "the item is {} bytes past the end of {container}",
+                    end - container_end,
+                )));
+            }
+            remaining -= take;
+            out.push(start..end);
         }
-        Ok(start..end)
+        Ok(out)
     }
 }
 
@@ -1644,6 +1654,31 @@ fn file_length(file: &File) -> std::io::Result<usize> {
     })
 }
 
+/// Reads several byte ranges of an open file and joins them.
+///
+/// An item written as several extents is one payload split across the
+/// container, so joining it is a concatenation in the order `iloc` lists them.
+/// Every range is checked against the file before it is read, exactly as a
+/// single range is, and the total is checked before anything is allocated.
+fn read_ranges(file: &mut File, ranges: &[Range<usize>]) -> std::io::Result<Vec<u8>> {
+    let total = ranges
+        .iter()
+        .try_fold(0usize, |total, range| {
+            total.checked_add(range.end - range.start)
+        })
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the item is larger than this platform can address",
+            )
+        })?;
+    let mut out = Vec::with_capacity(total);
+    for range in ranges {
+        out.extend_from_slice(&read_range(file, range.clone())?);
+    }
+    Ok(out)
+}
+
 /// Reads one byte range of an open file.
 ///
 /// The range is checked against the file before the buffer is allocated, so a
@@ -2130,7 +2165,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["ispe", "av1C", "colr"]
         );
-        assert_eq!(meta.primary_data(usize::MAX).expect("located"), 0..8);
+        assert_eq!(
+            meta.primary_ranges(usize::MAX).expect("located"),
+            std::iter::once(0..8).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -2138,7 +2176,10 @@ mod tests {
         let boxes = container(&properties(), &[(b"auxl", 2, 1)], Some(ALPHA_AUX_TYPES[0]));
         let meta = walked(&boxes).expect("the container is walked");
         assert!(meta.has_alpha());
-        assert_eq!(meta.alpha_data(usize::MAX).expect("located"), Some(0..8));
+        assert_eq!(
+            meta.alpha_ranges(usize::MAX).expect("located"),
+            Some(std::iter::once(0..8).collect())
+        );
     }
 
     #[test]
@@ -2151,7 +2192,7 @@ mod tests {
         let meta = walked(&boxes).expect("the container is walked");
         assert!(!meta.has_alpha());
         assert_eq!(
-            meta.alpha_data(usize::MAX).expect("nothing to locate"),
+            meta.alpha_ranges(usize::MAX).expect("nothing to locate"),
             None
         );
     }
@@ -2164,13 +2205,21 @@ mod tests {
     }
 
     #[test]
-    fn an_item_split_over_several_extents_is_not_read() {
+    fn an_item_split_over_several_extents_is_read_as_the_join() {
         let boxes = container(&properties(), &[], None);
         let mut meta = walked(&boxes).expect("the container is walked");
         let (item, method, ranges) = meta.extents.pop().expect("one item");
         assert_eq!((item, method), (1, 0));
+        // The same extent twice, which is what the join reads twice.
         meta.extents.push((1, 0, vec![ranges[0], ranges[0]]));
-        assert!(meta.primary_data(usize::MAX).is_err());
+        let both = meta
+            .primary_ranges(usize::MAX)
+            .expect("the extents are located");
+        assert_eq!(both, vec![ranges[0].0..ranges[0].0 + ranges[0].1; 2]);
+        // And the budget bounds the joined payload, not each extent.
+        let capped = meta.primary_ranges(4).expect("the extents are located");
+        let total: usize = capped.iter().map(|range| range.end - range.start).sum();
+        assert_eq!(total, 4, "the limit bounds the join");
     }
 
     #[test]
@@ -2320,7 +2369,7 @@ mod tests {
         let mut meta = walked(&boxes).expect("the container is walked");
         meta.extents = vec![(1, 0, vec![(boxes.len() - 4, 8)])];
         let error = meta
-            .primary_data(usize::MAX)
+            .primary_ranges(usize::MAX)
             .expect_err("the extent is past the end of the file");
         assert!(
             error.to_string().contains("past the end of the file"),
@@ -2329,7 +2378,7 @@ mod tests {
 
         meta.extents = vec![(1, 0, vec![(usize::MAX - 3, 8)])];
         let error = meta
-            .primary_data(usize::MAX)
+            .primary_ranges(usize::MAX)
             .expect_err("the extent leaves the address space");
         assert!(
             error.to_string().contains("past the end of the file"),
@@ -2345,11 +2394,14 @@ mod tests {
         let mut meta = walked(&boxes).expect("the container is walked");
         let idat = meta.idat.clone().expect("the container holds one");
         meta.extents = vec![(1, 1, vec![(0, idat.len())])];
-        assert_eq!(meta.primary_data(usize::MAX).expect("located"), idat);
+        assert_eq!(
+            meta.primary_ranges(usize::MAX).expect("located"),
+            vec![idat.clone()]
+        );
 
         meta.extents = vec![(1, 1, vec![(0, idat.len() + 1)])];
         let error = meta
-            .primary_data(usize::MAX)
+            .primary_ranges(usize::MAX)
             .expect_err("the extent leaves the item data box");
         assert!(
             error
@@ -2362,7 +2414,7 @@ mod tests {
         // is written into is not located at all.
         meta.idat = None;
         let error = meta
-            .primary_data(usize::MAX)
+            .primary_ranges(usize::MAX)
             .expect_err("the container has no item data box");
         assert!(error.to_string().contains("no idat box"), "{error}");
     }
@@ -2406,8 +2458,9 @@ mod tests {
         let (item, method, ranges) = meta.extents.pop().expect("one item");
         assert_eq!((item, method), (1, 0));
 
+        // An item in two extents is joined here, so it is this reader's.
         meta.extents.push((1, 0, vec![ranges[0], ranges[0]]));
-        assert!(!meta.native_eligible(), "an item in two extents");
+        assert!(meta.native_eligible(), "an item in two extents");
         meta.extents.pop();
 
         meta.extents.push((1, 2, vec![ranges[0]]));
@@ -2421,24 +2474,29 @@ mod tests {
         );
     }
 
-    /// The committed fixture is the yuv one with its item cut into two extents:
-    /// the probe describes it as the r,g,b the `image` decoder produces rather
-    /// than as the yuv its samples are, and that decoder joins the extents and
-    /// reads the same picture the file it was cut from holds.
+    /// The committed fixture is the yuv one with its item cut into two extents.
+    ///
+    /// The extents are joined here, so the fixture is this reader's and comes out
+    /// as the yuv its samples are: the same picture, through the same decoder, as
+    /// the file it was cut from. Before the join it was described as the r,g,b the
+    /// `image` decoder produces and handed to that decoder.
     #[test]
-    fn a_split_item_fixture_is_left_to_the_decoder() {
+    fn a_split_item_fixture_is_read_as_the_yuv_it_holds() {
         let path = Path::new("tests/fixtures/avif-split-extents.avif");
         let info = crate::decoder::probe(path, true, false).expect("the container describes it");
         assert_eq!((info.width, info.height), (64, 48));
-        assert_eq!(info.format, PixelFormat::Rgb8);
-        assert!(!handles(&info));
+        assert_eq!(info.format, PixelFormat::Yuv420P8);
+        assert!(handles(&info), "the extents are joined here");
         let decoded =
             crate::decoder::decode(&info, Demand::ALL).expect("the decoder joins the extents");
-        let Pixels::Interleaved { buffer, .. } = decoded.pixels else {
-            panic!("the image decoder hands out one interleaved buffer");
+        // The reader hands out its own planes now, so the picture is the yuv the
+        // container states rather than one interleaved buffer.
+        let Pixels::Planar { planes, .. } = decoded.pixels else {
+            panic!("the direct reader hands out its own planes");
         };
-        assert_eq!(buffer.len(), 64 * 48 * 4);
-        assert_eq!(&buffer[..4], &[74, 75, 70, 255]);
+        assert_eq!(planes.len(), 3);
+        assert_eq!(planes[0].len(), 64 * 48, "the luma plane is the page");
+        assert_eq!(planes[1].len(), 32 * 24, "and the chroma is subsampled");
     }
 
     #[test]
@@ -2797,8 +2855,11 @@ mod tests {
         let file_len = file_length(&file).expect("the fixture has a length");
         let boxes = leading_boxes(&mut file).expect("the boxes are read");
         let meta = Meta::read(&boxes, file_len).expect("the item boxes are walked");
-        read_range(&mut file, meta.primary_data(usize::MAX).expect("located"))
-            .expect("the item is read")
+        read_ranges(
+            &mut file,
+            &meta.primary_ranges(usize::MAX).expect("located"),
+        )
+        .expect("the item is read")
     }
 
     /// A coded payload cut down to its sequence header, which states an image

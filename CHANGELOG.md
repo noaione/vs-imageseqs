@@ -1,6 +1,15 @@
 # changelog
 
 ## unreleased
+### changed
+
+- An AVIF whose coded item is written as several extents is read by the plugin
+  itself instead of being handed to the `image` decoder. The extents are one
+  payload split across the container, and joining them is a concatenation in
+  the order the file lists them, so the file and the one it was cut from are now
+  the same picture through the same reader. A file written that way used to
+  come out as `RGB24` where the file it was cut from came out as the `YUV420P8`
+  the container states.
 
 ### fixed
 
