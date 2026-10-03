@@ -72,7 +72,13 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
 - update `THIRD_PARTY_NOTICES` and `LICENSES/` when native dependencies or
   linkage change.
 - NEVER commit anything yourselves, this should be done by human maintainers only. if you need to commit something, please ask for permission first.
-- ALWAYS try to update CHANGELOG.md with your changes, if you are unsure about what to write, please ask for help.
+- ALWAYS try to update CHANGELOG.md when a change a user can see lands. a note
+  or a plan under `docs/`, benchmark tooling under `target/`, and anything else
+  that changes no frame, no format, no property, no argument and no wheel
+  content are not user-facing, so they do not get an entry: `docs/improvements/`
+  is the record for those and its `README.md` index is where they are listed.
+  if you are unsure about whether a change is user-facing, or about what to
+  write, please ask for help.
 
 ## writing
 

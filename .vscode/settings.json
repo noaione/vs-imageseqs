@@ -7,5 +7,6 @@
         "ForEach-Object": true,
         "Get-Command": true,
         "gh": true
-    }
+    },
+    "python.analysis.ignore": ["./target/**/*"]
 }
