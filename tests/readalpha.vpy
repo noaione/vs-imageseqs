@@ -877,6 +877,42 @@ def test_avif_extents() -> None:
         check(False, "extents: the two formats need mismatch")
 
 
+def test_avif_grid() -> None:
+    """A 2x2 grid avif is refused, and this check is the lock on that.
+
+    ``avif-grid.avif`` is written by ``avifenc -g 2x2`` from
+    ``avif-grid-source.png``: four 128x128 squares of one sample each, so the
+    grid's four cells are four distinct uniform values (top left 8, top right
+    10, bottom left 15, bottom right 17). ``avifdec`` reads the file back at
+    256x256 with those four quadrants, so the container is valid and it is the
+    readers that refuse it.
+
+    Both readers do refuse it today. The plugin's own avif walker excludes a
+    grid in ``Meta::native_eligible``, and the ``image`` fallback it reaches
+    instead fails in ``mp4parse``/``dav1d``, which is the error this check
+    states. So the check is written to fail the moment the grid starts
+    decoding: that is the signal to turn it into the sample check above -- the
+    clip is 256x256, its format is the one the container states, and the four
+    quadrants hold the four values -- rather than a refusal.
+    """
+    try:
+        clip = core.imgseqs.Read(files=[fixture("avif-grid.avif")])
+    except Exception as error:
+        message = str(error).strip()
+        check(
+            "avif-grid.avif" in message and "Invalid argument" in message,
+            "grid: a 2x2 grid avif is refused with the fallback decoder's error "
+            f"(got {message})",
+        )
+    else:
+        check(
+            False,
+            "grid: a 2x2 grid avif is refused (it now decodes as "
+            f"{clip.format.name} {clip.width}x{clip.height}; this check has to "
+            "become the sample check the docstring describes)",
+        )
+
+
 def test_alpha_demand() -> None:
     """A colour-only read does not decode an alpha item it never hands out.
 
@@ -1583,6 +1619,7 @@ def main() -> None:
         test_errors,
         test_no_picture,
         test_avif_extents,
+        test_avif_grid,
         test_alpha_demand,
         test_animation,
     ):

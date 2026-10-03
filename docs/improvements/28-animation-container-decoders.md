@@ -93,6 +93,26 @@ which is `image`'s own message, reached through the fallback. `libavif`'s
 `avifdec` decodes the same file to 256x256, so the file is valid and the
 refusal is the readers'.
 
+**The grid fixture is committed, and the validator pins the refusal.** It is
+`tests/fixtures/avif-grid.avif`, written by `avifenc --lossless -g 2x2` from
+`tests/fixtures/avif-grid-source.png`, which
+`tests/make-alpha-fixtures.py` writes: four 128x128 squares of one sample each,
+so the grid's four cells are four distinct uniform values -- top left 8, top
+right 10, bottom left 15, bottom right 17. A reader that joins the grid has to
+place all four cells at the right offsets, and one taken from the wrong tile or
+written at the wrong offset is a wrong quadrant rather than a wrong pixel
+somewhere. `tests/readalpha.vpy`'s `test_avif_grid` states the refusal it
+produces today, error text included, so the check fails the moment the grid
+starts decoding and has to become the sample check its docstring describes.
+That is deliberate: a fixture nothing reads is only useful if something says
+when that changes.
+
+The other container this section names already has its fixture:
+`avif-split-extents.avif` has been committed since
+[17](17-avif-container-robustness.md) and its samples are already read by
+[`test_avif_extents`](../../tests/readalpha.vpy), so the split-extent join has a
+before and an after to compare.
+
 ### the animated baseline an implementation has to reproduce
 
 `target/cand-anim/animation-parity.py` prints one hash per output frame of both

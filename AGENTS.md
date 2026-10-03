@@ -194,7 +194,12 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   plus `alpha-yuv420p.avif`, and those four are likewise described by hand in
   that script's header. its split-extent section reads `avif-split-extents.avif`,
   which that script writes by hand from the coded item `avif-yuv420p.avif` holds,
-  so that fixture has to exist before the script runs. its orientation section reads the `tests/fixtures/orientation-*.png` files written by
+  so that fixture has to exist before the script runs. its grid section reads
+  `avif-grid.avif`, a 2x2 grid of tiles encoded once by hand from the
+  `avif-grid-source.png` the same script writes (`avifenc --lossless -g 2x2`,
+  with the command in that script's header), and states the refusal every
+  decoder in this tree produces for a grid, so the check has to become a sample
+  check when one of them starts joining grids. its orientation section reads the `tests/fixtures/orientation-*.png` files written by
   `tests/make-orientation-fixtures.py`, plus `orientation-6.jxl`, which that
   script documents and `cjxl` makes, and its yuv orientation section reads the
   `orientation-{2,6,8}.webp` files that script cuts out of
