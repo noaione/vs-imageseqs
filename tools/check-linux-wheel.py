@@ -1,5 +1,9 @@
-"""Check the final repaired Linux wheel, including its RECORD hashes."""
+"""Check the final repaired Linux wheel, including its RECORD hashes.
 
+The glibc and the musl wheel hold the same layout and differ in what the
+platform's auditwheel policy leaves outside the wheel: `--tag` names the tag the
+wheel has to carry and `--allow-library` a dependency auditwheel bundled for it.
+"""
 from __future__ import annotations
 
 import argparse
@@ -19,6 +23,9 @@ PLUGIN_EXTENSION = ".so"
 MANIFEST = "vapoursynth/plugins/imageseqs/manifest.vs"
 LIBRARIES = "vapoursynth/plugins/imageseqs/lib"
 TAG = "py3-none-manylinux_2_28_x86_64"
+#: The bundled codecs every Linux wheel holds, because no auditwheel policy
+#: promises them on the host.
+CODEC_LIBRARIES = ("libdav1d-", "libde265-")
 
 
 def is_plugin_variant(name: str) -> bool:
@@ -33,27 +40,27 @@ def is_plugin_variant(name: str) -> bool:
     variant = name[len(PLUGIN_STEM) + 1 : -len(PLUGIN_EXTENSION)]
     return bool(variant) and variant.isalnum()
 
-def check_wheel(wheel: Path) -> None:
+def check_wheel(wheel: Path, tag: str, allowed: tuple[str, ...]) -> None:
     with zipfile.ZipFile(wheel) as archive:
         names = set(archive.namelist())
         metadata_names = [name for name in names if name.endswith(".dist-info/WHEEL")]
         if len(metadata_names) != 1:
             raise ValueError("expected one WHEEL metadata file")
         metadata = Parser().parsestr(archive.read(metadata_names[0]).decode())
-        if metadata.get_all("Tag") != [TAG] or not wheel.name.endswith(f"-{TAG}.whl"):
-            raise ValueError(f"expected auditwheel's {TAG} tag")
+        if metadata.get_all("Tag") != [tag] or not wheel.name.endswith(f"-{tag}.whl"):
+            raise ValueError(f"expected auditwheel's {tag} tag")
         if metadata.get("Root-Is-Purelib", "").lower() != "false":
             raise ValueError("a native wheel must not be marked pure Python")
         required = {
             PLUGIN, MANIFEST, "LICENSE", "THIRD_PARTY_NOTICES", "LICENSES/README.md",
             "LICENSES/dav1d-COPYING.txt", "LICENSES/libde265-COPYING.txt",
-            "LICENSES/libheif-COPYING.txt", "LICENSES/libwebp-COPYING.txt",
-            "LICENSES/openjpeg-COPYING.txt",
+            "LICENSES/gcc-runtime-COPYING.txt", "LICENSES/libheif-COPYING.txt",
+            "LICENSES/libwebp-COPYING.txt", "LICENSES/openjpeg-COPYING.txt",
         }
         if missing := required - names:
             raise ValueError(f"missing wheel contents: {sorted(missing)}")
         libraries = {name for name in names if name.startswith(f"{LIBRARIES}/") and not name.endswith("/")}
-        for library in ("libdav1d-", "libde265-"):
+        for library in CODEC_LIBRARIES:
             if not any(PurePosixPath(name).name.startswith(library) for name in libraries):
                 raise ValueError(f"missing auditwheel-bundled {library} library")
         for name in names:
@@ -62,10 +69,10 @@ def check_wheel(wheel: Path) -> None:
                 raise ValueError(f"invalid archive path: {name}")
             if name.endswith("/") or ".dist-info/" in name:
                 continue
-            allowed = (name in required) or name.startswith(("LICENSES/", f"{LIBRARIES}/"))
-            if not allowed and not is_plugin_variant(name):
+            permitted = (name in required) or name.startswith(("LICENSES/", f"{LIBRARIES}/"))
+            if not permitted and not is_plugin_variant(name):
                 raise ValueError(f"unexpected content in plugin-only wheel: {name}")
-            if name in libraries and not path.name.startswith(("libdav1d-", "libde265-")):
+            if name in libraries and not path.name.startswith(CODEC_LIBRARIES + allowed):
                 raise ValueError(f"unexpected bundled dependency; review its license: {name}")
         if archive.read(MANIFEST) != b"[VapourSynth Manifest V1]\nlibvs_imageseqs\n":
             raise ValueError("manifest must list only the plugin, without its extension")
@@ -86,8 +93,22 @@ def check_wheel(wheel: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
+    parser.add_argument(
+        "--tag",
+        default=TAG,
+        help=f"the platform tag the wheel must carry (default: {TAG})",
+    )
+    parser.add_argument(
+        "--allow-library",
+        action="append",
+        default=[],
+        metavar="PREFIX",
+        help=("a bundled dependency the policy for this platform does not promise, "
+              "such as the C++ runtime on musllinux; repeatable"),
+    )
     args = parser.parse_args()
-    check_wheel(build_output.single(args.directory, "*.whl", "repaired wheel"))
+    wheel = build_output.single(args.directory, "*.whl", "repaired wheel")
+    check_wheel(wheel, args.tag, tuple(args.allow_library))
 
 
 if __name__ == "__main__":

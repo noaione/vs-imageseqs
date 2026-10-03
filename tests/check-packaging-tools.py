@@ -14,6 +14,8 @@ The build hook and packaging tools are covered against release failures:
 - ``tools/stage-native.py``: two consecutive stagings in one checkout, including
   a version change, where the second wheel no longer carries a file the first one
   did, plus macOS/Linux bundles whose runtime dependencies live below ``lib/``.
+- ``tools/check-linux-wheel.py``: the platform tag a repaired Linux wheel has to
+  carry, and the dependencies each platform's auditwheel policy lets it bundle.
 - ``tools/build_output.py``: what a build clears from its own output directory,
   and what it leaves alone.
 - ``hatch_build.py``: CPU flags reach target dependencies while Cargo's host
@@ -27,7 +29,11 @@ it somewhere else. It is removed on success and kept on failure.
 
 from __future__ import annotations
 
+import base64
+import csv
+import hashlib
 import importlib.util
+import io
 import os
 import shutil
 import subprocess
@@ -155,6 +161,7 @@ def check_changelog() -> None:
     )
     check("a section before the one under test" not in notes, "changelog: another version's notes are not included")
     check("linux-relink-source.tar.gz" in notes, "changelog: the release lists the Linux relinking archive")
+    check("linux-musl-relink-source.tar.gz" in notes, "changelog: and the musl one")
 
     # The same run through the environment the workflow uses.
     result = run(
@@ -429,6 +436,137 @@ def check_bundled_staging() -> None:
               f"{platform}: an unexpected manifest sibling is still rejected")
 
 
+LINUX_LICENSES = (
+    "LICENSES/README.md",
+    "LICENSES/dav1d-COPYING.txt",
+    "LICENSES/gcc-runtime-COPYING.txt",
+    "LICENSES/libde265-COPYING.txt",
+    "LICENSES/libheif-COPYING.txt",
+    "LICENSES/libwebp-COPYING.txt",
+    "LICENSES/openjpeg-COPYING.txt",
+)
+MANYLINUX_TAG = "py3-none-manylinux_2_28_x86_64"
+MUSLLINUX_TAG = "py3-none-musllinux_1_2_x86_64"
+
+
+def linux_record(contents: dict[str, bytes], record_name: str) -> bytes:
+    """The RECORD rows for one wheel: a hash and a size per member, in order."""
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    for member, content in contents.items():
+        digest = base64.urlsafe_b64encode(hashlib.sha256(content).digest()).rstrip(b"=").decode()
+        writer.writerow((member, f"sha256={digest}", len(content)))
+    writer.writerow((record_name, "", ""))
+    return buffer.getvalue().encode()
+
+
+def linux_wheel(
+    directory: Path,
+    tag: str,
+    *,
+    libraries: tuple[str, ...] = ("libdav1d-abc.so.7", "libde265-abc.so.0"),
+    licenses: tuple[str, ...] = LINUX_LICENSES,
+) -> Path:
+    """A repaired Linux wheel holding what the checker reads, and nothing else."""
+    prefix = "vapoursynth/plugins/imageseqs/"
+    dist_info = "vapoursynth_imageseqs-0.3.0.dist-info"
+    record_name = f"{dist_info}/RECORD"
+    contents = {
+        f"{prefix}libvs_imageseqs.so": b"the plugin",
+        f"{prefix}libvs_imageseqs.avx2.so": b"the avx2 plugin",
+        f"{prefix}manifest.vs": b"[VapourSynth Manifest V1]\nlibvs_imageseqs\n",
+        "LICENSE": b"the license",
+        "THIRD_PARTY_NOTICES": b"notices",
+        f"{dist_info}/WHEEL": (
+            "Wheel-Version: 1.0\n"
+            "Generator: check-packaging-tools\n"
+            f"Tag: {tag}\n"
+            "Root-Is-Purelib: false\n"
+        ).encode(),
+    }
+    contents.update({file: f"the text of {file}\n".encode() for file in licenses})
+    contents.update({f"{prefix}lib/{library}": library.encode() for library in libraries})
+    contents[record_name] = linux_record(contents, record_name)
+    path = directory / f"vapoursynth_imageseqs-0.3.0-{tag}.whl"
+    with zipfile.ZipFile(path, "w") as archive:
+        for member, content in contents.items():
+            archive.writestr(member, content)
+    return path
+
+
+def check_linux_wheel() -> None:
+    """The tag and the bundled dependencies a platform's policy allows.
+
+    A glibc wheel leaves the C++ runtime the embedded libheif needs to the
+    manylinux policy, which allows it, and a musl wheel carries it because the
+    musl policy allows only libc and libz. The checker has to accept both, and
+    refuse a wheel that bundles something its build did not name.
+    """
+    dist = SCRATCH / "linux-wheel-dist"
+    dist.mkdir(parents=True, exist_ok=True)
+    allowed = ("--allow-library", "libstdc++", "--allow-library", "libgcc_s")
+
+    build_output.clear(dist)
+    linux_wheel(dist, MANYLINUX_TAG)
+    result = run("check-linux-wheel.py", str(dist))
+    check(result.returncode == 0, f"linux wheel: a manylinux wheel passes ({message_of(result)[:160]})")
+
+    # The same wheel asked for under the musl tag is a mismatch, which is what
+    # makes the tag an argument rather than a habit.
+    result = run("check-linux-wheel.py", "--tag", MUSLLINUX_TAG, str(dist))
+    check(
+        result.returncode != 0 and MUSLLINUX_TAG in message_of(result),
+        f"linux wheel: the platform tag is checked ({message_of(result)[:160]})",
+    )
+
+    # What auditwheel bundles for musl is not what it bundles for glibc.
+    build_output.clear(dist)
+    linux_wheel(
+        dist,
+        MUSLLINUX_TAG,
+        libraries=("libdav1d-abc.so.7", "libde265-abc.so.0", "libstdc++-abc.so.6"),
+    )
+    result = run("check-linux-wheel.py", "--tag", MUSLLINUX_TAG, str(dist))
+    check(
+        result.returncode != 0 and "libstdc++-abc.so.6" in message_of(result),
+        f"linux wheel: an undeclared bundled runtime is refused ({message_of(result)[:160]})",
+    )
+    # The same runtime is accepted once the build says it meant to bundle it,
+    # and the musl policy is why that takes two names rather than one.
+    build_output.clear(dist)
+    linux_wheel(
+        dist,
+        MUSLLINUX_TAG,
+        libraries=("libdav1d-abc.so.7", "libde265-abc.so.0", "libstdc++-abc.so.6", "libgcc_s-abc.so.1"),
+    )
+
+    result = run("check-linux-wheel.py", "--tag", MUSLLINUX_TAG, *allowed, str(dist))
+    check(result.returncode == 0, f"linux wheel: a declared bundled runtime passes ({message_of(result)[:160]})")
+
+    # Both codecs are required whatever else the platform bundles.
+    build_output.clear(dist)
+    linux_wheel(dist, MUSLLINUX_TAG, libraries=("libdav1d-abc.so.7",))
+    result = run("check-linux-wheel.py", "--tag", MUSLLINUX_TAG, *allowed, str(dist))
+    check(
+        result.returncode != 0 and "libde265-" in message_of(result),
+        f"linux wheel: a missing codec is refused ({message_of(result)[:160]})",
+    )
+
+    # The exception the bundled C++ runtime is conveyed under is part of the
+    # distribution rather than an optional extra.
+    build_output.clear(dist)
+    linux_wheel(
+        dist,
+        MUSLLINUX_TAG,
+        licenses=tuple(file for file in LINUX_LICENSES if "gcc-runtime" not in file),
+    )
+    result = run("check-linux-wheel.py", "--tag", MUSLLINUX_TAG, *allowed, str(dist))
+    check(
+        result.returncode != 0 and "gcc-runtime-COPYING.txt" in message_of(result),
+        f"linux wheel: the runtime exception text is required ({message_of(result)[:160]})",
+    )
+
+
 def check_build_targets() -> None:
     """Check the actual hook without requiring Hatchling, Rust or a wheel."""
     # Only the hook's third-party imports are stubbed. Its build command,
@@ -530,7 +668,7 @@ def main() -> None:
     prepare_scratch()
     try:
         for test in (check_changelog, check_staging, check_variants, check_bundled_staging,
-                     check_clearing, check_build_targets):
+                     check_linux_wheel, check_clearing, check_build_targets):
             print(f"--- {test.__name__}")
             test()
     finally:

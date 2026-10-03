@@ -23,5 +23,6 @@ native/
 source-bundle/
 
 docs/HANDOFF*
+vapoursynth/plugins
 
 CHANGELOG-GENERATED.md

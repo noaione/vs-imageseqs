@@ -77,6 +77,8 @@ include = [
     "CHANGELOG.md",
     "docs/**/*.md",
     "tools/build-manylinux.sh",
+    "tools/build-musllinux.sh",
+    "tools/make-linux-source-bundle.sh",
     "tools/build_output.py",
     "tools/check-linux-wheel.py",
     "tools/create-changelog.py",

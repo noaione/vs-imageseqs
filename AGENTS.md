@@ -178,8 +178,9 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   `-C target-cpu`, `.avx2` for `x86-64-v3` and `.avx512` for `x86-64-v4` — which
   is the shape VapourSynth's manifest looks for, so `manifest.vs` names the
   stem alone and the core picks the build the host CPU supports; see
-  `docs/improvements/23-cpu-variant-avx2.md`. every other target gets the one
-  baseline library.
+  `docs/improvements/23-cpu-variant-avx2.md`. the musl target is x86-64 as
+  well, so it carries the same three; every other target gets the one baseline
+  library.
 - `tests/readalpha.vpy`: the VapourSynth validator, against the fixtures written
   by `tests/make-alpha-fixtures.py`; the heif and avif fixtures are encoded from
   that script's `mono-alpha.png` and `alpha-rgba8.png` with `heif-enc` and
@@ -224,8 +225,11 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   a build writes, and it is the only tool whose name has an underscore, because
   the others import it. `stage-native.py` stages the standalone bundle from the
   final wheel, `package-linux-wheel.py` moves auditwheel's libraries into
-  `imageseqs/lib/`, `check-linux-wheel.py` checks the repaired wheel, and
-  `build-manylinux.sh` builds and repairs it in the pinned container.
+  `imageseqs/lib/`, `check-linux-wheel.py` checks the repaired wheel for the
+  platform tag and the dependencies that platform's policy lets it bundle,
+  `make-linux-source-bundle.sh` writes the relinking source archive both Linux
+  builds ship, and `build-manylinux.sh` and `build-musllinux.sh` build and
+  repair a wheel in their own pinned container.
 - `tools/macos-libheif-toolchain.cmake`: the macOS wheel build disables unused
   embedded libheif codec backends; the plugin decodes HEIC with libde265 and
   AVIF with dav1d directly. `tools/package-macos-wheel.py` bundles and checks
@@ -282,6 +286,12 @@ install the development extra and build both artifacts:
 C:\Python314\python.exe -m pip install ".[dev]"
 C:\Python314\python.exe -m build
 ```
+`python -m build` runs the hook with the environment it is given. When
+`VCPKG_ROOT` is already set — a machine with vcpkg installed system-wide has
+it — the hook keeps that tree instead of the repository-local one, and a build
+then fails at `libheif-sys` with "package libheif is not installed for vcpkg
+triplet x64-windows-static-md". Set the three variables of the local build
+section above before building a wheel on such a machine.
 
 the wheel should contain:
 
@@ -301,7 +311,8 @@ the same three `libvs_imageseqs{,.avx2,.avx512}.so`.
 
 it should not contain `python/`, `vs_imageseqs/`, or a python module. the
 wheel is platform-specific but does not depend on the python abi, so the
-expected windows tag is `py3-none-win_amd64`.
+expected windows tag is `py3-none-win_amd64`, and auditwheel writes the Linux
+ones: `py3-none-manylinux_2_28_x86_64` or `py3-none-musllinux_1_2_x86_64`.
 
 ## validation
 
@@ -341,17 +352,23 @@ after everything is done, do the same thing. what you need to make sure is:
 
 ## native licenses
 
-Linux release wheels are built in manylinux_2_28 and repaired with auditwheel;
-`tools/build-manylinux.sh` builds the native inputs, and
+Linux release wheels are built twice, in manylinux_2_28 and in musllinux_1_2,
+and repaired with auditwheel for that platform. `tools/build-manylinux.sh` and
+`tools/build-musllinux.sh` build the native inputs, and
 `tools/check-linux-wheel.py` checks the repaired wheel and stages the standalone
 bundle. Both Linux layouts include shared dav1d/libde265 with relative loader
-paths, and a fresh container validates them before publishing. The Linux
-release includes a relinking source archive; see `docs/LINUX-BUILD.md`.
+paths, and a fresh container validates them before publishing. Each Linux build
+includes a relinking source archive; see `docs/LINUX-BUILD.md`.
 
 the current native set is dav1d, libheif, libde265, libwebp, and the OpenJPEG
 sources vendored by `openjpeg-sys`. dav1d and OpenJPEG use the bsd-2-clause
 license and libwebp uses bsd-3-clause. libheif and libde265 are lgplv3 and are
 statically linked. keep the exact upstream texts in `LICENSES/`.
+
+the musllinux wheel also carries the gcc runtime libraries (`libstdc++`,
+`libgcc_s`) the embedded libheif links, because auditwheel's musl policy
+promises the host only libc and libz; `LICENSES/gcc-runtime-COPYING.txt` is the
+exception they are conveyed under.
 
 on windows the vcpkg `x64-windows-static-md` triplet makes every vcpkg native
 library static. `jpeg2k` compiles its vendored OpenJPEG sources on every

@@ -46,8 +46,14 @@ Use the plugin file for your system:
 | macOS arm64 | `libvs_imageseqs.dylib` |
 
 Linux and macOS release wheels include the required `dav1d` and `libde265`
-libraries. The macOS wheel and standalone ZIP carry them in
-`imageseqs/lib/`. Windows builds use static libraries.
+libraries. The macOS wheel and standalone ZIP carry them in `imageseqs/lib/`.
+Windows builds use static libraries.
+
+Linux wheels are published for both C libraries: `manylinux_2_28` for glibc
+systems and `musllinux_1_2` for musl ones such as Alpine. A wheel built for one
+cannot load on the other. The musl wheel also bundles the C++ runtime
+(`libstdc++`, `libgcc_s`) that the embedded libheif links, because auditwheel's
+musl policy promises the host only `libc` and `libz`.
 
 ## quick start
 

@@ -42,11 +42,13 @@ Following are the files included in this release:
 | platform | file |
 | --- | --- |
 | windows x64 | `windows-x86_64-plugin.zip` |
-| linux x64 | `linux-x86_64-plugin.zip` |
-| linux x64, relinking sources | `linux-relink-source.tar.gz` |
+| linux x64 (glibc) | `linux-x86_64-plugin.zip` |
+| linux x64 (glibc), relinking sources | `linux-relink-source.tar.gz` |
+| linux x64 (musl) | `linux-musl-x86_64-plugin.zip` |
+| linux x64 (musl), relinking sources | `linux-musl-relink-source.tar.gz` |
 | macos arm64 | `macos-arm64-plugin.zip` |
 
-There is also an attached wheel, mirrored to here from PyPI, and a source
+There are also the attached wheels, mirrored to here from PyPI, and a source
 distribution to build from.
 
 Please make sure to download the correct file for your system.

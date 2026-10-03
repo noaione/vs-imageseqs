@@ -7,6 +7,10 @@ evidence it was worth doing; the wheel it produces was built and inspected,
 and `tests/check-packaging-tools.py` covers the wheels that would get it
 wrong.
 
+[32](32-host-safe-cpu-variant-builds.md) fixes the build on CI hosts without
+the variant's instructions: the hook gives Cargo an explicit target so the
+CPU flags optimize target dependencies while host build tools remain runnable.
+
 ## what was measured
 
 the same source built with `-C target-cpu=x86-64-v3` is 6% to 11% faster than

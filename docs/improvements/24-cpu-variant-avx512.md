@@ -4,6 +4,10 @@ status: implemented with [23](23-cpu-variant-avx2.md). this page is the row that
 plan's `variants()` carries for `x86-64-v4`, and the measurements below are the
 evidence that it is worth a third build.
 
+[32](32-host-safe-cpu-variant-builds.md) fixes building this variant on CI
+hosts without AVX512. An explicit Cargo target isolates host build scripts
+and procedural macros from the variant's CPU flags.
+
 ## the suffix
 
 the file is `vs_imageseqs.avx512.dll` on Windows (`libvs_imageseqs.avx512.so`
@@ -64,7 +68,7 @@ way they see the second.
 
 three builds per x86_64 wheel. at these sizes the plugin files alone are 8.90 +
 8.66 + 8.23 MiB uncompressed, against 8.90 for one, and each variant is a full
-dependency rebuild because `RUSTFLAGS` is part of cargo's fingerprint: about two
+target dependency rebuild because `RUSTFLAGS` is part of cargo's fingerprint: about two
 and a half minutes each on this machine. the release workflow pays that once per
 platform; a source build pays it on the user's machine.
 

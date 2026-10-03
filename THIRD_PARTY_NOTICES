@@ -6,9 +6,10 @@ code from the projects listed below. The files in LICENSES/ are part of the
 distribution and preserve the applicable license texts and notices.
 
 The exact native inputs recorded here are from the x64-windows-static-md
-vcpkg installation used to build the Windows wheel. The Linux manylinux build
-pins dav1d, libde265 and libwebp in `tools/build-manylinux.sh`; Cargo.lock
-selects the embedded libheif and OpenJPEG sources. The macOS arm64 build uses
+vcpkg installation used to build the Windows wheel. The two Linux builds pin
+dav1d, libde265 and libwebp in `tools/build-manylinux.sh` and
+`tools/build-musllinux.sh`; Cargo.lock selects the embedded libheif and OpenJPEG
+sources. The macOS arm64 build uses
 the same pinned dav1d and libde265 source versions, builds them as shared
 libraries, bundles them, and disables unused libheif codec backends so
 machine-local codecs are not linked:
@@ -64,6 +65,16 @@ openjpeg (vendored by openjpeg-sys 1.0.12)
   Notice: LICENSES/openjpeg-COPYING.txt
   Upstream: https://github.com/uclouvain/openjpeg
 
+libstdc++ and libgcc_s, the GCC runtime libraries
+  License: GNU General Public License, version 3, with the GCC Runtime Library
+    Exception, version 3.1
+  Linkage: linked by every Linux build, which reaches them through the embedded
+    libheif; the manylinux wheel leaves them to the system, whose policy allows
+    them, and the musllinux wheel bundles them, because the musl policy allows
+    only libc and libz
+  Notice and license text: LICENSES/gcc-runtime-COPYING.txt
+  Upstream: https://gcc.gnu.org/
+
 The current vcpkg manifest disables libheif default features, so x265 is not
 selected on Windows. Its repository-local libheif overlay enables the built-in
 dav1d decoder using the dav1d version already listed above. The overlay's build
@@ -94,13 +105,15 @@ metadata, but the ignored vcpkg_installed directory is not itself a
 Corresponding Source archive. Arrange an exact-source archive or a valid
 written offer/source URL for every published binary as part of release work.
 
-Linux release artifacts are accompanied by linux-relink-source.tar.gz. It
-contains the application and dependency sources used by that build, including
-the vendored libheif and OpenJPEG sources, and the build/relink instructions in
-BUILDING.md. The Linux and macOS wheels and plugin ZIPs include dav1d and
-libde265 as separate shared libraries with relative loader paths. Their license
-texts remain under LICENSES/. The existing Windows source/relinking
-requirements above remain applicable to the static Windows binaries.
+Each Linux build's artifacts are accompanied by a relinking source archive:
+`linux-relink-source.tar.gz` for the manylinux wheel and
+`linux-musl-relink-source.tar.gz` for the musllinux one. Each contains the
+application and dependency sources used by that build, including the vendored
+libheif and OpenJPEG sources, and the build/relink instructions in BUILDING.md.
+The Linux and macOS wheels and plugin ZIPs include dav1d and libde265 as
+separate shared libraries with relative loader paths. Their license texts
+remain under LICENSES/. The existing Windows source/relinking requirements
+above remain applicable to the static Windows binaries.
 
 License URLs
 ------------
@@ -112,6 +125,7 @@ dependency installation used for this build.
   * GNU LGPLv3: https://www.gnu.org/licenses/lgpl-3.0.html
   * GNU GPLv3: https://www.gnu.org/licenses/gpl-3.0.html
   * GNU GPLv2: https://www.gnu.org/licenses/old-licenses/gpl-2.0.html
+  * GNU GCC Runtime Library Exception: https://www.gnu.org/licenses/gcc-exception-3.1.html
   * dav1d: https://code.videolan.org/videolan/dav1d/-/blob/master/COPYING
   * libheif: https://github.com/strukturag/libheif/blob/master/COPYING
   * libde265: https://github.com/strukturag/libde265/blob/master/COPYING

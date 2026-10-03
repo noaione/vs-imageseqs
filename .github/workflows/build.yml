@@ -108,6 +108,89 @@ jobs:
             env -u LD_LIBRARY_PATH IMGSEQS_PLUGIN="$plugin" python tests/readalpha.vpy
           done
 
+  linux-musl-wheel:
+    name: linux-x86_64 (musllinux)
+    runs-on: ubuntu-26.04
+    # The musl counterpart of the manylinux job above, from the Alpine-based
+    # image of the same policy. It runs the image's own shell, and the build
+    # script installs the toolchain the image does not carry.
+    container: quay.io/pypa/musllinux_1_2_x86_64@sha256:ff786af69d772d7ac3e318c00a2b682428a352cc822d6175f6a0d4b431c0d44d
+    defaults:
+      run:
+        shell: sh
+    steps:
+      - name: check out source
+        uses: actions/checkout@v7
+
+      - name: build and repair musllinux wheel
+        run: sh tools/build-musllinux.sh
+
+      - name: upload repaired wheel
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-musl-x86_64-wheels
+          path: dist/*.whl
+          if-no-files-found: error
+
+      - name: upload standalone plugin and bundled libraries
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-musl-x86_64-plugins
+          path: native/**
+          if-no-files-found: error
+
+      - name: upload Linux relinking sources
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-musl-relink-source
+          path: source-bundle/*.tar.gz
+          if-no-files-found: error
+
+  linux-musl-validation:
+    name: validate musllinux distribution without build dependencies
+    needs: linux-musl-wheel
+    runs-on: ubuntu-26.04
+    # A fresh copy of that image: it holds neither the native prefix nor the
+    # loader paths the builder used, so this validates the published layouts.
+    container: quay.io/pypa/musllinux_1_2_x86_64@sha256:ff786af69d772d7ac3e318c00a2b682428a352cc822d6175f6a0d4b431c0d44d
+    defaults:
+      run:
+        shell: sh
+    steps:
+      - name: check out source
+        uses: actions/checkout@v7
+
+      - name: download repaired wheel
+        uses: actions/download-artifact@v7
+        with:
+          name: linux-musl-x86_64-wheels
+          path: dist
+
+      - name: download standalone plugin
+        uses: actions/download-artifact@v7
+        with:
+          name: linux-musl-x86_64-plugins
+          path: native
+
+      - name: validate wheel and standalone plugin
+        run: |
+          set -eu
+          export PATH="/opt/python/cp312-cp312/bin:$PATH"
+          python -m pip install --only-binary=:all: "VapourSynth==79"
+          python tools/check-linux-wheel.py \
+            --tag py3-none-musllinux_1_2_x86_64 \
+            --allow-library libstdc++ \
+            --allow-library libgcc_s \
+            dist
+          auditwheel show dist/*.whl
+          python -m pip install --no-deps dist/*.whl
+          env -u LD_LIBRARY_PATH python tests/check-autoload.py
+          installed_plugin=$(python -c 'import vapoursynth as vs; print(vs.get_plugin_dir() + "/imageseqs/libvs_imageseqs.so")')
+          for plugin in "$installed_plugin" "$PWD/native/imageseqs/libvs_imageseqs.so"; do
+            env -u LD_LIBRARY_PATH python -c 'import ctypes, sys; ctypes.CDLL(sys.argv[1])' "$plugin"
+            env -u LD_LIBRARY_PATH IMGSEQS_PLUGIN="$plugin" python tests/readalpha.vpy
+          done
+
   wheels:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -368,6 +451,7 @@ jobs:
           for file in \
             build.rs Cargo.toml Cargo.lock vcpkg.json hatch_build.py \
             pyproject.toml CHANGELOG.md tools/build-macos-native.sh \
+            tools/build-musllinux.sh tools/make-linux-source-bundle.sh \
             tools/macos-libheif-toolchain.cmake tools/package-macos-wheel.py \
             tools/vcpkg-ports/libheif/vcpkg.json \
             tools/vcpkg-ports/libheif/portfile.cmake; do
@@ -394,6 +478,7 @@ jobs:
     needs:
       - tests
       - linux-validation
+      - linux-musl-validation
       - macos-validation
       - wheels
       - source
@@ -431,6 +516,7 @@ jobs:
     needs:
       - tests
       - linux-validation
+      - linux-musl-validation
       - macos-validation
       - wheels
       - source
@@ -464,7 +550,7 @@ jobs:
 
           find artifacts -type f \( -name '*.whl' -o -name '*.tar.gz' \) -exec cp {} release-assets/ \;
 
-          for platform in linux-x86_64 macos-arm64 windows-x86_64; do
+          for platform in linux-x86_64 linux-musl-x86_64 macos-arm64 windows-x86_64; do
             plugin_dir="artifacts/${platform}-plugins"
             test -f "$plugin_dir/LICENSE"
             bundle="release-assets/${platform}-plugin"

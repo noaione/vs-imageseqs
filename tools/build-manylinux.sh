@@ -79,16 +79,4 @@ python tools/stage-native.py dist native
 
 # Include the exact dependency sources and application code needed to rebuild
 # and relink the Linux binary, including libheif/OpenJPEG vendored by Rust crates.
-bundle="$work/linux-relink-source"
-mkdir -p "$bundle/.cargo" "$bundle/native-archives" source-bundle
-cp -a src tools tests docs LICENSES "$bundle/"
-cp Cargo.toml Cargo.lock build.rs pyproject.toml hatch_build.py README.md CHANGELOG.md \
-    LICENSE THIRD_PARTY_NOTICES "$bundle/"
-cp "$archives"/*.tar.gz "$bundle/native-archives/"
-cp docs/LINUX-BUILD.md "$bundle/BUILDING.md"
-(
-    cd "$bundle"
-    cargo vendor --locked --versioned-dirs vendor > .cargo/config.toml
-    { rustc -Vv; cmake --version; python -m pip freeze; } > BUILD-ENVIRONMENT.txt
-)
-tar -czf source-bundle/linux-relink-source.tar.gz -C "$work" linux-relink-source
+sh tools/make-linux-source-bundle.sh linux-relink-source "$work" "$archives"

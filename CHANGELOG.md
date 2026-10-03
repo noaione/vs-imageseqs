@@ -35,6 +35,19 @@
   - the Windows wheel is 10.4 MiB instead of 3.8 MiB, which is what the three
     builds cost
 
+### build
+
+- the Linux release includes a musllinux wheel beside the manylinux one, for
+  hosts whose C library is musl rather than glibc, where the manylinux wheel
+  cannot load at all
+  - the musl wheel carries the same three plugin libraries, so an AVX2 or
+    AVX-512 host is served there the same way
+  - auditwheel's musl policy promises the host only libc and libz, so the wheel
+    bundles the C++ runtime the embedded libheif needs instead of leaving the
+    plugin needing a package Alpine does not install by default
+  - it is accompanied by `linux-musl-relink-source.tar.gz`, the corresponding
+    source archive the manylinux wheel already has
+
 ## [0.2.1] - 2026-09-30
 
 ### build

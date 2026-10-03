@@ -4,8 +4,11 @@ This directory contains the license texts and notices that accompany the
 native components used by the plugin, whether linked statically or bundled as
 shared libraries. Linux release wheels and plugin ZIPs bundle dav1d 1.5.3 and
 libde265 1.1.1 as shared libraries; their upstream license texts below are the
-same as the Windows inputs. The accompanying `linux-relink-source.tar.gz`
-provides the exact source inputs and rebuild instructions for Linux artifacts.
+same as the Windows inputs. The musllinux wheel also bundles the C++ runtime the
+embedded libheif needs, which the musl auditwheel policy does not promise the
+host provides. The accompanying `linux-relink-source.tar.gz` and
+`linux-musl-relink-source.tar.gz` provide the exact source inputs and rebuild
+instructions for the artifacts of each Linux build.
 
 ## Native components
 
@@ -20,6 +23,11 @@ These files are copied verbatim from the dependency sources used by the build:
   additional IP rights grant for patents.
 - `openjpeg-COPYING.txt` — the OpenJPEG sources vendored by `openjpeg-sys`
   1.0.12, BSD 2-Clause.
+- `gcc-runtime-COPYING.txt` — the FSF's GCC Runtime Library Exception, version
+  3.1, the additional permission libstdc++ and libgcc_s are governed by. It is
+  the `COPYING.RUNTIME` a GCC installation ships: that runtime is part of the
+  toolchain rather than one of the pinned inputs above, and the musllinux image
+  provides no license file for its copy of it.
 
 The current manifest disables libheif default features, so x265 is not part
 of the refreshed install or current native dependency set. If HEVC encoding
