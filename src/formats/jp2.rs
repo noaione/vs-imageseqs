@@ -17,7 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use image::ColorType;
+use crate::layout::ColorType;
 use jpeg2k::{ColorSpace, Image, ImagePixelData};
 
 use crate::{
@@ -105,7 +105,7 @@ pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<ImageInfo> {
         icc_profile: header.icc_profile,
         cicp: cicp(header.color),
         chroma_location: None,
-        orientation: image::metadata::Orientation::NoTransforms,
+        orientation: crate::layout::Orientation::NoTransforms,
         transform: Transform::IDENTITY,
         format,
     })

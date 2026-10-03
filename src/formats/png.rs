@@ -19,7 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use image::ColorType;
+use crate::layout::ColorType;
 
 use crate::{
     color::Cicp,

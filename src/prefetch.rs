@@ -562,7 +562,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use image::{ColorType, ExtendedColorType, metadata::Orientation};
+    use crate::layout::{ColorType, Orientation, SourceColorType};
 
     use super::{
         DEFAULT_BYTE_BUDGET, Payload, Prefetcher, Prepare, READY_ENTRY_MARGIN, State,
@@ -597,7 +597,7 @@ mod tests {
             width,
             height,
             color_type,
-            original_color_type: ExtendedColorType::from(color_type),
+            original_color_type: SourceColorType::from(color_type),
             has_icc_profile: false,
             icc_profile: None,
             cicp: None,

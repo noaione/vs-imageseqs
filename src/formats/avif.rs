@@ -31,13 +31,13 @@ use std::{
 };
 
 use dav1d::{PixelLayout, PlanarImageComponent};
-use image::{ColorType, metadata::Orientation};
 use vapoursynth4_rs::ColorFamily;
 
 use crate::{
     color::{Cicp, UNSPECIFIED},
     decoder::{DecodeTimings, DecodedImage, Demand, ImageInfo, Pixels, image_error},
     error::{ImgSeqError, Result},
+    layout::{ColorType, Orientation},
     pixel::{PixelFormat, Transform},
 };
 
@@ -1695,7 +1695,7 @@ mod tests {
     use std::io::Cursor;
     use std::path::PathBuf;
 
-    use image::ExtendedColorType;
+    use crate::layout::SourceColorType;
 
     use crate::pixel::alpha_channel;
 
@@ -1705,7 +1705,7 @@ mod tests {
             width: 64,
             height: 48,
             color_type,
-            original_color_type: ExtendedColorType::Rgb8,
+            original_color_type: SourceColorType::Rgb8,
             has_icc_profile: false,
             icc_profile: None,
             cicp: None,
@@ -2534,7 +2534,7 @@ mod tests {
         // left to reports four channels for it, which is what the frame request
         // is checked against.
         assert_eq!(info.color_type, ColorType::Rgba8);
-        assert_eq!(info.original_color_type, ExtendedColorType::La8);
+        assert_eq!(info.original_color_type, SourceColorType::La8);
         assert_eq!(alpha_channel(info.color_type), Some(3));
         assert!(!handles(&info));
         assert_eq!(

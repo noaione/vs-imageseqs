@@ -3,10 +3,13 @@ mod clip;
 mod color;
 mod decoder;
 mod error;
+mod format;
 mod formats;
+mod layout;
 mod pixel;
 mod prefetch;
 mod source;
+mod still;
 
 use source::{Read, ReadAlpha};
 

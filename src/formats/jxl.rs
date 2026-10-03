@@ -33,7 +33,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use image::{ColorType, metadata::Orientation};
+use crate::layout::{ColorType, Orientation};
 use jxl::{
     api::{
         Endianness, JxlBitDepth, JxlColorEncoding, JxlColorProfile, JxlColorType, JxlDataFormat,

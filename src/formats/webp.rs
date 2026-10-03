@@ -27,7 +27,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use image::ColorType;
+use crate::layout::ColorType;
 
 use crate::{
     decoder::{DecodeTimings, DecodedImage, ImageInfo, Pixels, image_error},
@@ -148,14 +148,28 @@ fn has_webp_extension(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case(EXTENSION))
 }
 
-/// The libwebp decoder entry points, from `webp/decode.h`.
+/// The libwebp entry points, from `webp/decode.h` and `webp/encode.h`.
 ///
-/// Declared by hand rather than through a `*-sys` crate: the subset used is two
-/// functions that have kept their signature since libwebp 0.4, so a binding
-/// generator would add a build dependency and a header search path for nothing.
-#[allow(non_snake_case)]
+/// Declared by hand rather than through a `*-sys` crate: the subset used has
+/// kept its signature since libwebp 0.4, so a binding generator would add a
+/// build dependency and a header search path for nothing.
+///
+/// The encode entry points and the release they need are used by the tests'
+/// round trip only, which is why they are allowed to be unused in a build
+/// without them.
+#[allow(non_snake_case, dead_code)]
 mod libwebp {
     use std::ffi::{c_int, c_uchar};
+
+    /// The signature `WebPEncodeLosslessRGB` and `WebPEncodeLosslessRGBA`
+    /// share.
+    pub(super) type EncodeEntryPoint = unsafe extern "C" fn(
+        pixels: *const c_uchar,
+        width: c_int,
+        height: c_int,
+        stride: c_int,
+        output: *mut *mut c_uchar,
+    ) -> usize;
 
     unsafe extern "C" {
         /// Width and height of a bitstream, read from its header.
@@ -210,6 +224,32 @@ mod libwebp {
             v_size: usize,
             v_stride: c_int,
         ) -> *mut c_uchar;
+
+        /// Encodes interleaved rgb as a lossless bitstream.
+        ///
+        /// The returned buffer is allocated by libwebp and is the caller's to
+        /// release with [`WebPFree`]. A null answer means the picture could
+        /// not be encoded, which for a small test picture does not happen.
+        pub(super) fn WebPEncodeLosslessRGB(
+            rgb: *const c_uchar,
+            width: c_int,
+            height: c_int,
+            stride: c_int,
+            output: *mut *mut c_uchar,
+        ) -> usize;
+
+        /// Encodes interleaved rgba as a lossless bitstream, which keeps the
+        /// alpha channel the rgb entry point would drop.
+        pub(super) fn WebPEncodeLosslessRGBA(
+            rgba: *const c_uchar,
+            width: c_int,
+            height: c_int,
+            stride: c_int,
+            output: *mut *mut c_uchar,
+        ) -> usize;
+
+        /// Releases a buffer libwebp allocated.
+        pub(super) fn WebPFree(pointer: *mut std::ffi::c_void);
     }
 }
 
@@ -460,7 +500,7 @@ fn stride_of(row_bytes: usize, info: &ImageInfo) -> Result<i32> {
 mod tests {
     use std::path::PathBuf;
 
-    use image::ExtendedColorType;
+    use crate::layout::SourceColorType;
 
     use super::*;
     use crate::decoder::probe;
@@ -483,12 +523,12 @@ mod tests {
             width,
             height,
             color_type,
-            original_color_type: ExtendedColorType::Rgb8,
+            original_color_type: SourceColorType::Rgb8,
             has_icc_profile: false,
             icc_profile: None,
             cicp: None,
             chroma_location: None,
-            orientation: image::metadata::Orientation::NoTransforms,
+            orientation: crate::layout::Orientation::NoTransforms,
             transform: crate::pixel::Transform::IDENTITY,
             format: crate::pixel::PixelFormat::from_color_type(color_type)
                 .expect("a supported color type"),
@@ -501,16 +541,53 @@ mod tests {
         name: &str,
         width: u32,
         height: u32,
-        color_type: ExtendedColorType,
+        color_type: SourceColorType,
         pixels: &[u8],
     ) -> (PathBuf, ImageInfo) {
-        let mut encoded = Vec::new();
-        image::codecs::webp::WebPEncoder::new_lossless(&mut encoded)
-            .encode(pixels, width, height, color_type)
-            .expect("a lossless webp stream");
+        let encoded = encode_lossless(pixels, width, height, color_type);
         let path = write_temp(&format!("{name}.webp"), &encoded);
         let probed = probe(&path, true, false).expect("the image to probe");
         (path, probed)
+    }
+
+    /// Encodes one picture as a lossless webp through libwebp's own encoder.
+    ///
+    /// The round trip is what these tests are about, so the stream is written
+    /// by the same library that reads it back. The `image` crate used to write
+    /// it here, which was the last thing this crate's production code needed it
+    /// for.
+    fn encode_lossless(
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+        color_type: SourceColorType,
+    ) -> Vec<u8> {
+        let width = i32::try_from(width).expect("a test width");
+        let height = i32::try_from(height).expect("a test height");
+        let (channels, encode) = match color_type {
+            SourceColorType::Rgb8 => (
+                3,
+                libwebp::WebPEncodeLosslessRGB as libwebp::EncodeEntryPoint,
+            ),
+            SourceColorType::Rgba8 => (
+                4,
+                libwebp::WebPEncodeLosslessRGBA as libwebp::EncodeEntryPoint,
+            ),
+            other => panic!("a webp round trip is rgb or rgba, not {other:?}"),
+        };
+        let stride = width * channels;
+        let mut output: *mut u8 = std::ptr::null_mut();
+        // SAFETY: the buffer holds one packed row per row of the picture, the
+        // dimensions are positive, and libwebp writes to the out pointer it
+        // was given. The returned buffer is released below.
+        let size = unsafe { encode(pixels.as_ptr(), width, height, stride, &raw mut output) };
+        assert!(size > 0, "libwebp encoded the picture");
+        // SAFETY: libwebp returned this buffer with this length, and it is
+        // copied out before it is released.
+        let encoded = unsafe { std::slice::from_raw_parts(output, size).to_vec() };
+        // SAFETY: the buffer came from libwebp's encoder and is released once.
+        unsafe { libwebp::WebPFree(output.cast()) };
+        encoded
     }
 
     /// Writes bytes to a temp file named for this test process.
@@ -627,7 +704,7 @@ mod tests {
         assert_eq!(header_dimensions(b"not a webp image"), None);
         // A lossless stream is short enough to build by hand: the signature,
         // then the VP8L payload the encoder writes.
-        let (path, _) = write_and_probe("header", 3, 2, ExtendedColorType::Rgb8, &RGB);
+        let (path, _) = write_and_probe("header", 3, 2, SourceColorType::Rgb8, &RGB);
         let encoded = std::fs::read(&path).unwrap();
         assert_eq!(header_dimensions(&encoded), Some((3, 2)));
         let _ = std::fs::remove_file(&path);
@@ -844,7 +921,7 @@ mod tests {
 
     #[test]
     fn decodes_rgb_back_to_the_source_pixels() {
-        let (path, probed) = write_and_probe("rgb", 3, 2, ExtendedColorType::Rgb8, &RGB);
+        let (path, probed) = write_and_probe("rgb", 3, 2, SourceColorType::Rgb8, &RGB);
         assert_eq!(probed.color_type, ColorType::Rgb8);
 
         let decoded = decode(&probed).expect("the stream to decode");
@@ -856,18 +933,38 @@ mod tests {
 
     #[test]
     fn decodes_alpha_untouched() {
-        let (path, probed) = write_and_probe("rgba", 3, 2, ExtendedColorType::Rgba8, &RGBA);
+        let (path, probed) = write_and_probe("rgba", 3, 2, SourceColorType::Rgba8, &RGBA);
         assert_eq!(probed.color_type, ColorType::Rgba8);
 
         let decoded = decode(&probed).expect("the stream to decode");
         assert_eq!(decoded.format, PixelFormat::Rgb8);
-        assert_eq!(decoded.pixels, interleaved(ColorType::Rgba8, &RGBA));
+        // libwebp's lossless encoder is free to clear the rgb of a fully
+        // transparent pixel, because no reader can see it; the first pixel of
+        // the fixture is exactly that case. Every other sample, alpha included,
+        // has to come back untouched, so the two are checked apart rather than
+        // by relaxing the whole buffer.
+        let Pixels::Interleaved {
+            color_type: decoded_type,
+            buffer,
+        } = &decoded.pixels
+        else {
+            panic!("a webp decodes into an interleaved buffer");
+        };
+        assert_eq!(*decoded_type, ColorType::Rgba8);
+        let transparent = buffer[..4] == [0, 0, 0, 0];
+        assert!(
+            transparent || buffer[..4] == RGBA[..4],
+            "{:?}",
+            &buffer[..4]
+        );
+        assert_eq!(buffer[3], RGBA[3], "the transparent alpha");
+        assert_eq!(buffer[4..], RGBA[4..]);
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn a_size_that_changed_after_probing_is_reported() {
-        let (path, probed) = write_and_probe("resized", 3, 2, ExtendedColorType::Rgb8, &RGB);
+        let (path, probed) = write_and_probe("resized", 3, 2, SourceColorType::Rgb8, &RGB);
         assert_eq!((probed.width, probed.height), (3, 2));
         let stale = info(&path, ColorType::Rgb8, 4, 2);
 

@@ -17,10 +17,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use image::{
-    AnimationDecoder, ColorType, Frame, ImageReader,
-    codecs::{gif::GifDecoder, webp::WebPDecoder},
-};
+use image::codecs::{gif::GifDecoder, webp::WebPDecoder};
+use image::{Frame, ImageReader};
 
 use crate::{
     decoder::{DecodeTimings, DecodedImage, Pixels, image_error},
@@ -61,8 +59,8 @@ enum Decoder {
 impl Decoder {
     fn into_frames(self) -> Frames {
         match self {
-            Self::Gif(decoder) => Box::new(AnimationDecoder::into_frames(*decoder)),
-            Self::Webp(decoder) => Box::new(AnimationDecoder::into_frames(*decoder)),
+            Self::Gif(decoder) => Box::new(image::AnimationDecoder::into_frames(*decoder)),
+            Self::Webp(decoder) => Box::new(image::AnimationDecoder::into_frames(*decoder)),
         }
     }
 }
@@ -225,7 +223,7 @@ impl FrameSource {
             format: self.format,
             transform: self.transform,
             pixels: Pixels::Interleaved {
-                color_type: ColorType::Rgba8,
+                color_type: crate::layout::ColorType::Rgba8,
                 buffer,
             },
             timings: DecodeTimings {

@@ -4,13 +4,13 @@ use std::{
     slice,
     time::{Duration, Instant},
 };
-
-use image::{ColorType, metadata::Orientation};
 use vapoursynth4_rs::frame::VideoFrame;
 use vapoursynth4_rs::{ColorFamily, SampleType};
 
-use crate::error::{ImgSeqError, Result};
-
+use crate::{
+    error::{ImgSeqError, Result},
+    layout::{ColorType, Orientation},
+};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PixelFormat {
     Gray8,
@@ -60,7 +60,6 @@ impl PixelFormat {
             ColorType::Rgb8 | ColorType::Rgba8 => Some(Self::Rgb8),
             ColorType::Rgb16 | ColorType::Rgba16 => Some(Self::Rgb16),
             ColorType::Rgb32F | ColorType::Rgba32F => Some(Self::Rgb32F),
-            _ => None,
         }
     }
 
@@ -646,15 +645,18 @@ fn frame_depth(frame: &VideoFrame, source: PixelFormat) -> Result<FrameDepth> {
     })
 }
 
-pub(crate) fn channel_count(color_type: ColorType) -> Result<usize> {
+/// Channels one decoded layout holds.
+///
+/// Every layout has a channel count, so this is not fallible: a backend enum
+/// that could name something else is translated before it reaches here, and
+/// [`ColorType::from_image`] answers `None` for one this build does not know.
+#[must_use]
+pub(crate) const fn channel_count(color_type: ColorType) -> usize {
     match color_type {
-        ColorType::L8 | ColorType::L16 => Ok(1),
-        ColorType::La8 | ColorType::La16 => Ok(2),
-        ColorType::Rgb8 | ColorType::Rgb16 | ColorType::Rgb32F => Ok(3),
-        ColorType::Rgba8 | ColorType::Rgba16 | ColorType::Rgba32F => Ok(4),
-        _ => Err(ImgSeqError::new(format!(
-            "unsupported image color type {color_type:?}"
-        ))),
+        ColorType::L8 | ColorType::L16 => 1,
+        ColorType::La8 | ColorType::La16 => 2,
+        ColorType::Rgb8 | ColorType::Rgb16 | ColorType::Rgb32F => 3,
+        ColorType::Rgba8 | ColorType::Rgba16 | ColorType::Rgba32F => 4,
     }
 }
 
@@ -679,7 +681,7 @@ fn image_layout(
         .map_err(|_| ImgSeqError::new("image width does not fit in memory"))?;
     let height = usize::try_from(height)
         .map_err(|_| ImgSeqError::new("image height does not fit in memory"))?;
-    let channels = channel_count(color_type)?;
+    let channels = channel_count(color_type);
     let row_bytes = width
         .checked_mul(channels)
         .and_then(|value| value.checked_mul(format.bytes_per_sample()))
@@ -1406,7 +1408,7 @@ mod tests {
         PixelFormat, TRANSFORM_BLOCK, Transform, alpha_channel, extract_channel, for_each_block,
         image_layout, inverse_orientation, planes_to_write, reverse_samples,
     };
-    use image::{ColorType, metadata::Orientation};
+    use crate::layout::{ColorType, Orientation};
     use vapoursynth4_rs::{ColorFamily, SampleType};
 
     /// The 3x2 source every orientation test rearranges, whose values are

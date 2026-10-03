@@ -645,8 +645,8 @@ fn ceil_div(numerator: i128, denominator: i128) -> i128 {
 mod tests {
     use super::{AnimationSource, Presentation, Rate, Segment, SegmentTable};
     use crate::decoder::ImageInfo;
+    use crate::layout::{ColorType, Orientation, SourceColorType};
     use crate::pixel::{PixelFormat, Transform};
-    use image::{ColorType, ExtendedColorType, metadata::Orientation};
     use std::path::PathBuf;
 
     /// A segment record without a decoder, for the timeline tests.
@@ -656,7 +656,7 @@ mod tests {
             width: 4,
             height: 4,
             color_type: ColorType::Rgba8,
-            original_color_type: ExtendedColorType::Rgba8,
+            original_color_type: SourceColorType::Rgba8,
             has_icc_profile: false,
             icc_profile: None,
             cicp: None,

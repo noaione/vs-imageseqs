@@ -4,8 +4,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use image::metadata::Orientation;
-use image::{ColorType, ExtendedColorType, ImageDecoder, ImageReader};
 use vapoursynth4_rs::ffi;
 
 use crate::{
@@ -13,7 +11,9 @@ use crate::{
     color::Cicp,
     error::{ImgSeqError, Result},
     formats,
+    layout::{ColorType, Orientation, SourceColorType},
     pixel::{PixelFormat, Transform},
+    still,
 };
 
 static DECODER_HOOKS: Once = Once::new();
@@ -85,7 +85,7 @@ pub struct ImageInfo {
     pub width: u32,
     pub height: u32,
     pub color_type: ColorType,
-    pub original_color_type: ExtendedColorType,
+    pub original_color_type: SourceColorType,
     pub has_icc_profile: bool,
     /// The source's embedded ICC profile, when it has one.
     pub icc_profile: Option<Arc<[u8]>>,
@@ -314,15 +314,9 @@ pub const fn orientation_size(transform: Transform, width: u32, height: u32) -> 
     }
 }
 
-fn open_decoder(path: &Path) -> Result<impl ImageDecoder> {
+fn open_decoder(path: &Path) -> Result<still::Decoder> {
     register_decoder_hooks();
-    let reader = ImageReader::open(path)
-        .map_err(|error| image_error("open", path, error))?
-        .with_guessed_format()
-        .map_err(|error| image_error("identify", path, error))?;
-    reader
-        .into_decoder()
-        .map_err(|error| image_error("create decoder for", path, error))
+    still::Decoder::open(path).map_err(|error| image_error(error.action, path, error.detail))
 }
 
 /// Builds the error every decoder path reports, so the format modules in
@@ -449,23 +443,19 @@ fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
         return formats::jp2::image_info(path, apply_rotation);
     }
 
-    let mut decoder = open_decoder(path)?;
-    let (width, height) = decoder.dimensions();
-    let color_type = decoder.color_type();
-    let original_color_type = decoder.original_color_type();
-    let icc_profile = decoder
-        .icc_profile()
-        .map_err(|error| image_error("read metadata from", path, error))?
-        .map(Arc::<[u8]>::from);
+    let decoder = open_decoder(path)?;
+    let metadata = decoder.metadata();
+    let (width, height) = (metadata.width, metadata.height);
+    let color_type = metadata.color_type;
+    let original_color_type = metadata.original_color_type;
+    let icc_profile = decoder.icc_profile().map(Arc::<[u8]>::from);
     // The containers that state a colour description do it somewhere the `image`
     // decoder has no accessor for: a heif item property inside a `libheif`
     // handle, or a chunk beside the data of a png. Both are read from the file
     // rather than from the decoder, and both decline a file of another kind
     // without opening it.
     let cicp = formats::heif::cicp(path).or_else(|| formats::png::cicp(path));
-    let orientation = decoder
-        .orientation()
-        .map_err(|error| image_error("read orientation from", path, error))?;
+    let orientation = metadata.orientation;
     let format = format_override(path, color_type)
         .or_else(|| PixelFormat::from_color_type(color_type))
         .ok_or_else(|| {
@@ -524,8 +514,8 @@ pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
     let open = open_started.elapsed();
 
     let metadata_started = Instant::now();
-    let (width, height) = decoder.dimensions();
-    let color_type = decoder.color_type();
+    let probed = decoder.metadata();
+    let (width, height, color_type) = (probed.width, probed.height, probed.color_type);
     let metadata = metadata_started.elapsed();
     if (width, height, color_type) != (info.width, info.height, info.color_type) {
         return Err(ImgSeqError::new(format!(
@@ -540,7 +530,7 @@ pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
         )));
     }
 
-    let size = usize::try_from(decoder.total_bytes()).map_err(|_| {
+    let size = usize::try_from(probed.total_bytes).map_err(|_| {
         ImgSeqError::new(format!(
             "decoded image '{}' is too large for this platform",
             info.path.display()
@@ -551,8 +541,8 @@ pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
     let buffer = buffer_started.elapsed();
     let read_started = Instant::now();
     decoder
-        .read_image(&mut pixels)
-        .map_err(|error| image_error("decode", &info.path, error))?;
+        .read(&mut pixels)
+        .map_err(|error| image_error(error.action, &info.path, error.detail))?;
     let read = read_started.elapsed();
 
     Ok(DecodedImage {
@@ -580,7 +570,7 @@ mod tests {
 
     use super::probe_segment;
     use crate::animation::Rate;
-    use image::ColorType;
+    use crate::layout::{ColorType, SourceColorType};
     use std::path::PathBuf;
 
     fn fixture(name: &str) -> PathBuf {
@@ -700,10 +690,7 @@ mod tests {
         .expect("the fixture probes");
         assert!(segment.animated);
         assert_eq!(segment.info.format, crate::pixel::PixelFormat::Rgb16);
-        assert_eq!(
-            segment.info.original_color_type,
-            image::ExtendedColorType::Rgba16
-        );
+        assert_eq!(segment.info.original_color_type, SourceColorType::Rgba16);
         assert_eq!(segment.output_size(), (4, 3));
         // The fixture's two pictures hold for 100 ms and 200 ms, which is
         // 7.2 output ticks at 24 fps, so seven ticks start before it ends.

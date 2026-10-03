@@ -17,7 +17,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use image::ColorType;
+use crate::layout::ColorType;
 use png::{BitDepth, BlendOp, Decoder, DisposeOp, Reader};
 
 use crate::{

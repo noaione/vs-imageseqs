@@ -34,7 +34,7 @@
 
 use std::{path::Path, sync::Arc, time::Instant};
 
-use image::{ColorType, metadata::Orientation};
+use crate::layout::{ColorType, Orientation};
 use libheif_rs::{
     Chroma, ColorPrimaries, ColorProfile, ColorSpace, HeifContext, ImageHandle, LibHeif,
     MatrixCoefficients, Plane, RgbChroma, TransferCharacteristics, color_profile_types,
@@ -624,7 +624,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    use image::ExtendedColorType;
+    use crate::layout::SourceColorType;
 
     fn info(path: &str, format: PixelFormat, color_type: ColorType) -> ImageInfo {
         sized_info(path, format, color_type, 3, 2)
@@ -642,7 +642,7 @@ mod tests {
             width,
             height,
             color_type,
-            original_color_type: ExtendedColorType::L8,
+            original_color_type: SourceColorType::L8,
             has_icc_profile: false,
             icc_profile: None,
             cicp: None,
@@ -792,7 +792,7 @@ mod tests {
         assert_eq!((info.width, info.height), (3, 2));
         assert_eq!(info.format, PixelFormat::Yuv420P8);
         assert_eq!(info.color_type, ColorType::Rgba8);
-        assert_eq!(info.original_color_type, ExtendedColorType::Rgba8);
+        assert_eq!(info.original_color_type, SourceColorType::Rgba8);
         assert_eq!(info.transform, Transform::IDENTITY);
         assert_eq!(
             info.cicp,
