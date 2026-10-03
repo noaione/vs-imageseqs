@@ -63,7 +63,36 @@ const ALPHA_AUX_TYPES: [&[u8]; 2] = [
 /// Only a file the probe described as yuv is decoded here; a file whose samples
 /// the container does not name keeps the r,g,b the `image` decoder produces.
 pub fn handles(info: &ImageInfo) -> bool {
-    has_avif_extension(&info.path) && info.format.color_family() == ColorFamily::YUV
+    has_avif_extension(&info.path)
+        && info.format.color_family() == ColorFamily::YUV
+        && !refuses(&info.path)
+}
+
+/// Whether this reader's own walk of `path` refuses the container.
+///
+/// [`image_info`] hands such a file to libheif, so this is what keeps the probe
+/// and the decode from disagreeing: a container this answers `true` for is the
+/// one libheif describes, and `heif::handles` is what claims it.
+///
+/// A file this reader cannot open at all answers `false`, because it is not a
+/// container the walk *refused*: the walk that described it already decided, and
+/// an unreadable file's error belongs to whoever tried to open it rather than to
+/// a reassignment to another library.
+#[must_use]
+pub fn refuses(path: &Path) -> bool {
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let Ok(file_len) = file_length(&file) else {
+        return false;
+    };
+    let Some(boxes) = leading_boxes(&mut file) else {
+        return true;
+    };
+    match Meta::read(&boxes, file_len) {
+        Some(meta) => !meta.native_eligible(),
+        None => true,
+    }
 }
 
 /// What the container of an avif states about its image, when this module can
@@ -82,14 +111,27 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
         return None;
     }
     let meta = Meta::read(&boxes, file_len)?;
+    // A container this reader will not decode is libheif's to describe and to
+    // decode, and that is a decision the *container* makes rather than the
+    // samples: a grid of tiles and a construction method this walker does not
+    // follow are the cases, and libheif reads both. The `image` decoder used to
+    // be asked instead, and could not: it has no monochrome avif, so a grid of
+    // monochrome tiles ended as `Invalid argument`.
+    //
+    // This is asked before the properties are read, because a container this
+    // walk refuses may not have the properties this reader wants at all, and it
+    // is before any format is chosen, so the probe reports the format libheif
+    // hands out. [`handles`] reads the same walk, so the probe and the decode
+    // cannot disagree about which library owns the file.
+    if !meta.native_eligible() {
+        return super::heif::describe(path, apply_rotation);
+    }
     let header = AvifHeader::read(&meta.primary_properties()?)?;
     let (width, height) = (header.width, header.height);
     if width == 0 || height == 0 {
         return None;
     }
     let has_alpha = meta.has_alpha();
-    let native = meta.native_eligible();
-    // `dav1d` hands the item over as it is coded, so the size and the samples
     // here are the stored ones and the container's own transform is the plugin's
     // to apply; see [`container_orientation`].
     let orientation = header.orientation;
@@ -140,17 +182,11 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
     // produces, and is still described here, because the colour it states is
     // written into the frame's properties either way.
     //
-    // The second half of that is a container this reader will not decode: a grid
-    // of tiles, an item split over several extents and a construction method it
-    // does not follow are all described as the r,g,b that decoder hands back,
-    // because a yuv probe would promise a frame this module would then refuse to
-    // produce; see [`Meta::native_eligible`].
-    let yuv = match native {
-        true => cicp
-            .filter(|cicp| usable_matrix(cicp.matrix))
-            .and_then(|_| yuv_format(header.chroma, header.depth)),
-        false => None,
-    };
+    // An item split over several extents used to be described here too, and is
+    // not any more: this reader joins them, so it decodes such a file itself.
+    let yuv = cicp
+        .filter(|cicp| usable_matrix(cicp.matrix))
+        .and_then(|_| yuv_format(header.chroma, header.depth));
     let (format, color_type) = match yuv {
         Some(format) => (format, header.colour_color_type(has_alpha)),
         // The color type the `image` decoder reports, which is what the frame

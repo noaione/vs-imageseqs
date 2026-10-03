@@ -57,7 +57,15 @@ const HEIF_EXTENSIONS: [&str; 4] = ["heic", "heics", "heif", "hif"];
 /// through the libheif hook, which is where those files have always been read;
 /// every other file this module describes is read here, from libheif's planes.
 pub fn handles(info: &ImageInfo) -> bool {
-    has_heif_extension(&info.path) && info.format.color_family() != ColorFamily::RGB
+    if has_heif_extension(&info.path) {
+        return info.format.color_family() != ColorFamily::RGB;
+    }
+    // An avif whose container this tree's own walker refuses is libheif's,
+    // which is what described it in [`super::avif::image_info`]. The walker's
+    // own descriptions stay with it -- and an r,g,b one of those is the `image`
+    // decoder's, because the samples have no planar yuv format to be handed out
+    // as -- so this asks the same question the probe did.
+    super::avif::owns_extension(&info.path) && super::avif::refuses(&info.path)
 }
 
 /// What the container of a heif states about its primary image, when this
@@ -71,6 +79,20 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
     if !has_heif_extension(path) {
         return None;
     }
+    describe(path, apply_rotation)
+}
+
+/// What libheif states about a file's primary image, whatever its extension.
+///
+/// [`image_info`] is this plus the extension gate, and the extra entry point
+/// exists because a container this tree's own avif walker refuses is libheif's
+/// to read: libheif opens a grid of tiles and reports the picture it holds,
+/// where the `image` decoder could not -- it has no monochrome avif, so a grid
+/// of monochrome tiles ended as `Invalid argument` rather than as a frame.
+///
+/// Returning `None` means libheif will not open the file either, and the
+/// `image` decoder keeps whatever it makes of it.
+pub fn describe(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
     let handle = heif_handle(path)?;
     let header = HeifHeader::read(&handle)?;
     // The container's own `irot` and `imir`, which `libheif` applies as it

@@ -10,6 +10,12 @@
   the same picture through the same reader. A file written that way used to
   come out as `RGB24` where the file it was cut from came out as the `YUV420P8`
   the container states.
+- An AVIF whose coded item is a grid of tiles now decodes instead of being
+  refused. The plugin's own walk does not join a grid, so the file goes to
+  `libheif`, which does, rather than to the `image` decoder, which could not:
+  it has no monochrome avif, and a grid's cells are monochrome, so it answered
+  `Invalid argument`. A `avifenc -g 2x2` file reads back as the joined
+  256x256 `Gray8` picture `avifdec` reads from it.
 
 ### fixed
 
