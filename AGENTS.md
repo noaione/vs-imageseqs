@@ -139,7 +139,8 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   crate decodes directly because `image` has no jxl format of its own, `jp2.rs`
   for JPEG 2000 header probing and OpenJPEG decoding, `png.rs` for the `cICP`
   chunk, which `image` has no accessor for, and for the png files whose rows it
-  walks straight into the frame instead of buffering the picture whole, and
+  walks straight into the frame instead of buffering the picture whole — which
+  includes expanding a palette page's indices itself — and
   `webp.rs` for the libwebp decode
   and the lossy yuv format). a monochrome avif still goes through `image` and is
   corrected to `Gray8` here. an avif alpha item is a coded item of its own and a

@@ -11,9 +11,13 @@
   - this reaches every colour type and bit depth, `tRNS` on grey, rgb and
     palette, and an odd width; an interlaced or animated file, and one the
     caller asked to rotate, still goes through the `image` decoder
-  - a grey page is now a copy per row and a colour page a single walk over the
-    row that fills all three planes, so `Read` no longer pays a second pass at
-    all
+  - a grey page is a copy per row and a colour page a single walk over the row
+    that fills all three planes, so `Read` no longer pays a second pass at all
+  - a palette page is expanded by the plugin rather than by the decoder, which
+    is one pass over one byte per pixel where `Transformations::EXPAND` is a
+    pass over three: a further 1.10x on the pages made of them
+  - every png set measured is now ahead of Pillow's own decode column, from
+    0.89x to 0.69x of its time
 - x86-64 wheels carry one plugin library per microarchitecture level, and
   VapourSynth loads the widest the machine's CPU supports: 6% to 11% faster on
   the PNG and JPEG sets measured, almost all of it in the write into the frame

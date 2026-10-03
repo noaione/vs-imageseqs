@@ -27,15 +27,15 @@ figures below were taken after [22](22-png-decode-path.md) landed, in one batch,
 
 | set | pages | Pillow `load` + `L` | plugin `total` | ratio |
 | --- | ---: | ---: | ---: | ---: |
-| `sandbox/png` | 35 | 1.169 s | 0.812 s | 0.695x |
-| `sandbox/posterize-check` | 49 | 1.691 s | 1.728 s | 1.022x |
+| `sandbox/png` | 35 | 1.190 s | 0.820 s | 0.689x |
+| `sandbox/posterize-check` | 49 | 1.733 s | 1.544 s | 0.891x |
 | `sandbox/level-check` (jpeg) | 129 | 1.879 s | 1.702 s | 0.906x |
 
-before 22 the posterize row was 1.31x, so what this page is about had become a
-tie rather than a loss: the plugin's `total` is a smaller number than Pillow's
-column on the png set and on the jpeg set, and level with it on the palette
-set where the plugin hands out three bytes per pixel and Pillow's column stops
-at one.
+before 22 the posterize row was 1.31x, so what this page is about is settled in
+the plugin's favour rather than left as a tie: its `total` is a smaller number
+than Pillow's column on all three sets now, including the one where it hands out
+three bytes per pixel and Pillow's column stops at one. the jpeg set is the
+control and its path is untouched.
 
 **the `read` stage is no longer a decoder-only figure for png.** before 22 it
 was the `image` decode alone and the plane write was `convert`; a png this

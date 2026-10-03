@@ -168,13 +168,58 @@ impl Layout {
     }
 }
 
+/// Where the samples of one row come from, and what the walk does with them.
+///
+/// The colour type `png` has to produce is part of this rather than a separate
+/// check, because the two sources ask the decoder for two different things.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Source {
+    /// The decoder expanded the row into the colour type the frame is, which
+    /// is what `image` asks for too, so the walk only has to place it.
+    Expanded((png::ColorType, png::BitDepth)),
+    /// The row holds palette indices and the table is expanded by the walk.
+    ///
+    /// `EXPAND` would turn each index into three bytes in a scratch buffer
+    /// that the walk reads back; a lookup per pixel into the table is one pass
+    /// over the indices instead of two passes over three times their size. The
+    /// measurement is in `docs/improvements/22-png-decode-path.md`.
+    Indices(Vec<u8>),
+}
+
 /// What the `png` crate has to report for this walk to be the same picture
-/// `image` would hand over.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// `image` would hand over, and what a row of it is.
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct Walkable {
     width: u32,
     height: u32,
-    output: (png::ColorType, png::BitDepth),
+    source: Source,
+}
+
+/// An eight bit index can name any of these, so the table is widened to all of
+/// them.
+const PALETTE_BYTES: usize = 256 * 3;
+
+/// The palette widened to every entry an eight bit index can name.
+///
+/// A conforming file never names an entry past its own table. One that does is
+/// still not a file a release build may abort on, and an index with no check
+/// would read past the table, so the last entry is repeated to the end of the
+/// range instead: a table lookup is then bounded for every possible index and
+/// costs nothing to make so.
+fn padded_palette(palette: &[u8]) -> Vec<u8> {
+    let last = palette.len().saturating_sub(3);
+    let entry = [
+        palette.get(last).copied().unwrap_or(0),
+        palette.get(last + 1).copied().unwrap_or(0),
+        palette.get(last + 2).copied().unwrap_or(0),
+    ];
+    let mut out = Vec::with_capacity(PALETTE_BYTES);
+    out.extend_from_slice(palette);
+    while out.len() < PALETTE_BYTES {
+        out.extend_from_slice(&entry);
+    }
+    out.truncate(PALETTE_BYTES);
+    out
 }
 
 /// The colour type and depth `png` has to produce for `color_type`, which is
@@ -199,7 +244,7 @@ fn expanded_type(color_type: ColorType) -> Option<(png::ColorType, png::BitDepth
 /// The reads here are the metadata at the front of the file and no image data,
 /// so this is a header parse and not a decode; [`Rows::fill`] opens the file a
 /// second time to read the rows themselves.
-fn walkable(path: &Path) -> Option<Walkable> {
+fn walkable(path: &Path, info: &ImageInfo) -> Option<Walkable> {
     let file = File::open(path).ok()?;
     let mut decoder = png::Decoder::new(BufReader::new(file));
     // The same transformation `image`'s own png decoder sets, so the samples
@@ -213,10 +258,33 @@ fn walkable(path: &Path) -> Option<Walkable> {
     if header.interlaced || header.animation_control.is_some() {
         return None;
     }
+    // A palette page the frame wants as r,g,b is expanded here rather than by
+    // the decoder. The probe reports the colour type `EXPAND` produces, which
+    // for such a file is `Rgb8`, so this is the only place that knows the file
+    // holds indices at all; `fill` checks that `IDENTITY` really does hand
+    // them over before it reads a row.
+    if header.color_type == png::ColorType::Indexed
+        && header.bit_depth == png::BitDepth::Eight
+        && header.trns.is_none()
+        && info.color_type == ColorType::Rgb8
+        && let Some(palette) = header.palette.as_ref()
+    {
+        return Some(Walkable {
+            width: header.width,
+            height: header.height,
+            source: Source::Indices(padded_palette(palette)),
+        });
+    }
+    // Anything else has to arrive as the colour type the frame is, or the
+    // frame the clip sized from the probe is not the frame these rows fit.
+    let output = reader.output_color_type();
+    if output != expanded_type(info.color_type)? {
+        return None;
+    }
     Some(Walkable {
         width: header.width,
         height: header.height,
-        output: reader.output_color_type(),
+        source: Source::Expanded(output),
     })
 }
 
@@ -241,6 +309,8 @@ struct Rows {
     /// Whether the rows carry an alpha channel, which is what says whether the
     /// alpha clip's plane has to be made opaque before the walk runs.
     has_alpha: bool,
+    /// Where a row's samples come from, which is what the walk does with it.
+    source: Source,
 }
 
 /// The decode a png this module can walk is answered with, or `None` for one
@@ -264,11 +334,12 @@ pub fn stream(info: &ImageInfo) -> Option<Pixels> {
     // The colour type has to be one this walk has a layout for, which is the
     // same set `expanded_type` answers for.
     let layout = Layout::of(info.color_type)?;
-    let expected = expanded_type(info.color_type)?;
-    let header = walkable(&info.path)?;
+    let header = walkable(&info.path, info)?;
     // The probe and this walk have to be describing the same picture, or the
-    // frame the clip sized from the probe is not the frame these rows fit.
-    if (header.width, header.height) != (info.width, info.height) || header.output != expected {
+    // frame the clip sized from the probe is not the frame these rows fit. The
+    // colour type each source needs is checked by `walkable`, which is the only
+    // place that has both answers.
+    if (header.width, header.height) != (info.width, info.height) {
         return None;
     }
     Some(Pixels::Stream(Box::new(Rows {
@@ -277,6 +348,7 @@ pub fn stream(info: &ImageInfo) -> Option<Pixels> {
         height: info.height,
         color_type: info.color_type,
         has_alpha: layout.channels != layout.colour_channels,
+        source: header.source,
     })))
 }
 
@@ -284,6 +356,8 @@ pub fn stream(info: &ImageInfo) -> Option<Pixels> {
 struct Placer<'a> {
     layout: Layout,
     sink: RowSink<'a>,
+    /// Bytes one row of the decoder's own output holds, before placement.
+    source_row_bytes: usize,
 }
 
 impl<'a> Placer<'a> {
@@ -293,7 +367,13 @@ impl<'a> Placer<'a> {
     /// header's, so the two are checked against each other here rather than
     /// trusted: a mismatch is a decode that refuses instead of a frame with a
     /// row in the wrong place.
-    fn new(layout: Layout, sink: RowSink<'a>, width: u32, path: &Path) -> Result<Self> {
+    fn new(
+        layout: Layout,
+        sink: RowSink<'a>,
+        width: u32,
+        source_row_bytes: usize,
+        path: &Path,
+    ) -> Result<Self> {
         let row_bytes = usize::try_from(width)
             .map_err(|_| ImgSeqError::new("image width does not fit this platform"))?
             .saturating_mul(layout.sample_bytes);
@@ -316,7 +396,28 @@ impl<'a> Placer<'a> {
                 )));
             }
         }
-        Ok(Self { layout, sink })
+        Ok(Self {
+            layout,
+            sink,
+            source_row_bytes,
+        })
+    }
+
+    /// Refuses a row that is not the width the planes were checked against.
+    ///
+    /// A short row would leave the tail of every plane holding whatever the
+    /// frame arrived with, which is the same class of mistake the alpha plane
+    /// needs its own fill for.
+    fn check_row(&self, data: &[u8], path: &Path) -> Result<()> {
+        if data.len() != self.source_row_bytes {
+            return Err(ImgSeqError::new(format!(
+                "png '{}' handed over a {} byte row, but its rows are {}",
+                path.display(),
+                data.len(),
+                self.source_row_bytes
+            )));
+        }
+        Ok(())
     }
 
     /// Writes one decoded row into the rows of the planes it holds.
@@ -369,6 +470,38 @@ impl<'a> Placer<'a> {
             *red_byte = pixel[0];
             *green_byte = pixel[1];
             *blue_byte = pixel[2];
+        }
+        Ok(())
+    }
+
+    /// Writes one row of palette indices into the three colour planes.
+    ///
+    /// `EXPAND` would have turned each index into three bytes in the decoder's
+    /// scratch buffer for this walk to read back; a lookup into the table is
+    /// one pass over the indices instead, and the table is small enough to sit
+    /// in cache. The measurement is in
+    /// `docs/improvements/22-png-decode-path.md`.
+    ///
+    /// The table is padded to every entry an index can name, so the lookup
+    /// needs no bound of its own.
+    fn place_indices(&mut self, data: &[u8], row: usize, palette: &[u8]) -> Result<()> {
+        let (red, rest) = self
+            .sink
+            .colour
+            .split_first_mut()
+            .ok_or_else(missing_colour_planes)?;
+        let (green, rest) = rest.split_first_mut().ok_or_else(missing_colour_planes)?;
+        let (blue, _) = rest.split_first_mut().ok_or_else(missing_colour_planes)?;
+        let planes = red
+            .row(row)
+            .iter_mut()
+            .zip(green.row(row).iter_mut())
+            .zip(blue.row(row).iter_mut());
+        for (index, ((red_byte, green_byte), blue_byte)) in data.iter().zip(planes) {
+            let entry = usize::from(*index) * 3;
+            *red_byte = palette[entry];
+            *green_byte = palette[entry + 1];
+            *blue_byte = palette[entry + 2];
         }
         Ok(())
     }
@@ -429,7 +562,12 @@ impl RowStream for Rows {
         let file =
             File::open(&self.path).map_err(|error| image_error("open", &self.path, error))?;
         let mut decoder = png::Decoder::new(BufReader::new(file));
-        decoder.set_transformations(png::Transformations::EXPAND);
+        // A palette page is expanded here, so it is read as the indices it
+        // holds; everything else arrives as the colour type the frame is.
+        decoder.set_transformations(match self.source {
+            Source::Expanded(_) => png::Transformations::EXPAND,
+            Source::Indices(_) => png::Transformations::IDENTITY,
+        });
         let mut reader = decoder
             .read_info()
             .map_err(|error| image_error("decode", &self.path, error))?;
@@ -448,12 +586,12 @@ impl RowStream for Rows {
         );
         let output = reader.output_color_type();
         let metadata = metadata_started.elapsed();
-        let expected = expanded_type(self.color_type).ok_or_else(|| {
-            ImgSeqError::new(format!(
-                "png '{}' has a colour type this walk does not place",
-                self.path.display()
-            ))
-        })?;
+        let expected = match &self.source {
+            Source::Expanded(expected) => *expected,
+            // `IDENTITY` hands a palette page's own indices over, and a `tRNS`
+            // is what `walkable` refused, so this is the pair to see.
+            Source::Indices(_) => (png::ColorType::Indexed, png::BitDepth::Eight),
+        };
         if geometry != (self.width, self.height, false, false) || output != expected {
             return Err(ImgSeqError::new(format!(
                 "png '{}' changed after probing",
@@ -463,14 +601,28 @@ impl RowStream for Rows {
 
         let layout =
             Layout::of(self.color_type).expect("a colour type this walk places has a layout");
-        let mut placer = Placer::new(layout, sink, self.width, &self.path)?;
+        // A row is the frame's own samples when the decoder expanded it, and one
+        // index per pixel when the walk does.
+        let source_row_bytes = match &self.source {
+            Source::Indices(_) => usize::try_from(self.width).unwrap_or(usize::MAX),
+            Source::Expanded(_) => usize::try_from(self.width)
+                .unwrap_or(usize::MAX)
+                .saturating_mul(layout.channels)
+                .saturating_mul(layout.sample_bytes),
+        };
+        let mut placer = Placer::new(layout, sink, self.width, source_row_bytes, &self.path)?;
+
         let read_started = Instant::now();
         let mut row = 0usize;
         while let Some(line) = reader
             .next_row()
             .map_err(|error| image_error("decode", &self.path, error))?
         {
-            placer.place(line.data(), row)?;
+            placer.check_row(line.data(), &self.path)?;
+            match &self.source {
+                Source::Indices(palette) => placer.place_indices(line.data(), row, palette)?,
+                Source::Expanded(_) => placer.place(line.data(), row)?,
+            }
             row += 1;
         }
         let read = read_started.elapsed();
@@ -503,6 +655,7 @@ impl RowStream for Rows {
             height: self.height,
             color_type: self.color_type,
             has_alpha: self.has_alpha,
+            source: self.source.clone(),
         })
     }
 }

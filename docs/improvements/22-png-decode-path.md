@@ -135,13 +135,20 @@ frames of a call before filling them so a decode can fill all of them at once.
   once. A file whose rows carry no alpha leaves the alpha plane to
   `write_opaque_alpha`, because a VapourSynth frame arrives holding whatever
   the allocator had.
-* `src/formats/png.rs` drives `png::Reader::next_row` at
-  `Transformations::EXPAND`, the same transformation `image` sets, so the
-  samples are the ones that decoder would have produced. A grey row is one
-  copy; a three channel row is one walk that fills all three planes; a four
-  channel row and every sixteen bit row take the general per-channel path, and
-  the sixteen bit samples are swapped out of png's big endian order exactly as
+* `src/formats/png.rs` drives `png::Reader::next_row`. A grey row is one copy;
+  a three channel row is one walk that fills all three planes; a four channel
+  row and every sixteen bit row take the general per-channel path, and the
+  sixteen bit samples are swapped out of png's big endian order exactly as
   `image` swaps its whole buffer.
+* the walk has two sources, and a file's header decides which. `Source::Expanded`
+  asks for `Transformations::EXPAND`, the same transformation `image` sets, so
+  the samples are the ones that decoder would have produced. `Source::Indices`
+  is a palette page at eight bits with no `tRNS` that the frame wants as r,g,b:
+  the walk reads the indices themselves at `Transformations::IDENTITY` and does
+  the table lookup into the three planes, which is one pass over one byte per
+  pixel where `EXPAND` is a pass over three. the table is padded to all 256
+  entries so a lookup needs no bound of its own, and an index past a short
+  table reads the last entry rather than past the end of it.
 * the probe is unchanged. It already answers from `image`'s own reader, which
   reads the header and no image data, and `stream` checks the walk against it
   rather than replacing it: a colour type, size or geometry the two disagree
@@ -161,32 +168,58 @@ depth.
 
 ## what it measured
 
-same batch, same machine, four alternating rounds per configuration, the
-pre-change build against this one, at `prefetch=0`:
+the walk came in two steps. The first was the row walk itself, against the
+build before it, in one batch over four alternating rounds per configuration at
+`prefetch=0`:
 
-| set | before `total` | after `total` | |
+| set | before `total` | after the walk | |
 | --- | ---: | ---: | ---: |
 | `sandbox/png`, 35 files | 28.71 ms/frame | 23.31 ms/frame | **1.23x** |
 | `sandbox/posterize-check`, 49 files | 42.42 ms/frame | 35.17 ms/frame | **1.21x** |
 
 and against Pillow's `open` + `load` + `convert("L")` in the same batch:
 
-| set | Pillow | imgseqs | ratio | before this change |
+| set | Pillow | imgseqs | ratio | before the walk |
 | --- | ---: | ---: | ---: | ---: |
 | `sandbox/png`, 35 files | 1.169 s | 0.812 s | **0.695x** | 0.940x |
 | `sandbox/posterize-check`, 49 files | 1.691 s | 1.728 s | 1.022x | 1.31x |
 | `sandbox/level-check`, 129 jpeg | 1.879 s | 1.702 s | 0.906x | 0.940x |
 
-so the posterize column, which is where this started, is now a tie rather than
-a loss, and `sandbox/png` is 1.44x faster than Pillow rather than 1.06x. the
-jpeg set is the control and its path is untouched.
+so the palette column, where this started, was a tie rather than a loss, and
+`sandbox/png` was 1.44x faster than Pillow rather than 1.06x. the jpeg set is
+the control and its path is untouched.
+
+the second step is what closed the palette column. `RGB24` is three planes, so
+the walk still had to split a row `EXPAND` had written; expanding the palette
+itself makes that one pass over the indices instead of two passes over three
+times their size. `inflate-bench --bin png-expand` measures the two shapes on
+the 40 palette pages of that corpus, both checked against each other first:
+
+| shape | 40 pages, 1390 MiB of planes |
+| --- | ---: |
+| `EXPAND` into a scratch buffer, then scatter | 1529.6 ms |
+| indices expanded straight into the planes | **1390.3 ms, 90.9%, 1.10x** |
+
+which is 3.5 ms of a frame. with it the same batch reads:
+
+| set | Pillow | imgseqs | ratio |
+| --- | ---: | ---: | ---: |
+| `sandbox/png`, 35 files | 1.190 s | 0.820 s | **0.689x** |
+| `sandbox/posterize-check`, 49 files | 1.733 s | 1.544 s | **0.891x** |
+| `sandbox/level-check`, 129 jpeg | 1.879 s | 1.702 s | 0.906x |
+
+the plugin is ahead of Pillow's own decode column on every set measured, and
+`total` on the palette corpus went 42.42 -> 31.30 ms/frame across the two steps,
+1.36x. the repository's own benchmark reads 2.14x over bestsource on frames and
+5.08x including the open, against 1.30x and 3.02x before any of this.
 
 the prototype below predicted 23.3% off the decode side and the walk delivers
 about 20% of `read + convert`, so the two agree. where the prototype was wrong
 is the *absolute* projection: it wrote into one stride-padded buffer, and a
-VapourSynth `RGB24` frame is three planes rather than one packed buffer, so the
-deinterleave it did not have to do is still there. that is why the posterize
-column lands at a tie and not at a win.
+VapourSynth `RGB24` frame is three planes rather than one packed buffer. that
+is the deinterleave the walk still had to do, and expanding the palette itself
+is what pays it down.
+
 
 pixels are byte for byte identical to the previous build: `frame-parity.py`
 over the six sandbox sets, `tests/fixtures` and the 26 case corpus below is

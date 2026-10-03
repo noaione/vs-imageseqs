@@ -272,18 +272,40 @@ slower at 87.336 s.
 
 | reading the set | frames | median frame | open | total |
 | --- | --- | --- | --- | --- |
-| imgseqs `Read` | 0.62 s | 9.1 ms | 0.003 s | 0.63 s |
-| imgseqs `Read`, `prefetch=0` | 1.43 s | 29.0 ms | 0.003 s | 1.43 s |
-| imgseqs `Read`, `prefetch=16` | 0.60 s | 7.7 ms | 0.003 s | 0.61 s |
-| bestsource `VideoSource` | 0.86 s | 14.3 ms | 1.00 s | 1.85 s |
-| bestsource `VideoSource`, `threads=1` | 2.21 s | 48.4 ms | 2.30 s | 4.50 s |
+| imgseqs `Read` | 0.322 s | 2.86 ms | 0.006 s | 0.328 s |
+| imgseqs `Read`, `prefetch=0` | 0.803 s | 15.62 ms | 0.005 s | 0.808 s |
+| imgseqs `Read`, `prefetch=16` | 0.249 s | 0.14 ms | 0.006 s | 0.255 s |
+| bestsource `VideoSource` | 0.632 s | 9.61 ms | 0.876 s | 1.508 s |
+| bestsource `VideoSource`, `threads=1` | 1.970 s | 42.87 ms | 2.175 s | 4.144 s |
 
-the closest of the six. imgseqs is 1.37x faster on frames and 2.96x including
-the open, and it is the only set where it wins the serial comparison as well as
-the parallel one (1.43 s against 2.21 s), so here the margin is the decoder and
-the skipped indexing pass rather than the lookahead: these frames fit the
-lookahead budget either way, so sixteen workers only edge out the default
-(0.60 s against 0.62 s).
+the closest of the six, and the change that moved a set the most:
+[22](improvements/22-png-decode-path.md) is a png whose rows the plugin
+places itself rather than building the picture in a buffer and copying it, and
+a palette page whose expansion is the plugin's rather than the decoder's. imgseqs
+is 1.97x faster on frames and 4.60x including the open, and it is the only set
+where it wins the serial comparison as well as the parallel one (0.803 s against
+1.970 s), so here the margin is the decoder and the skipped indexing pass rather
+than the lookahead: these frames fit the lookahead budget either way, so sixteen
+workers only edge out the default (0.249 s against 0.322 s). the serial row
+every other row on this page is measured on is itself 1.8x faster than it was,
+1.43 s to 0.803 s.
+
+this row was re-measured on its own after that change rather than in the batch
+the other sets' sections came from, so it is the one number here that is not
+from the same run as its neighbours. `sandbox/webp` was measured in the same
+batch as a control, against both builds: its serial row is unchanged (12.047 s
+before against 11.962 s after) and its pooled rows sit 15% to 22% above the
+record in its own section on *both* builds, which is this machine rather than
+either change.
+
+the comparison this page does not otherwise carry is against Pillow, timed
+through `target/bench/decode/png-decode.py`, one batch per set: Pillow's
+`open` + `load` + `convert("L")` is 1.284 s against imgseqs's 0.874 s on this
+set, 1.902 s against 1.662 s on `sandbox/posterize-check`, and 1.984 s against
+1.888 s on the jpeg set. imgseqs's stage split on this set is 24.44 ms of `read`
+and 0.00 ms of `convert`, because there is no buffer left to convert; the jpeg
+set's is 9.63 ms and 3.80 ms, which is that path unchanged. the tables are in
+[22](improvements/22-png-decode-path.md).
 
 ## jxl
 
