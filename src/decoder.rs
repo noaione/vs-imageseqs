@@ -394,16 +394,11 @@ pub fn probe_segment(
         crate::animation::heif::segment_info(path, info.clone(), fps)?
     } else if crate::animation::jxl::owns(path) {
         crate::animation::jxl::segment_info(path, info.clone(), fps)?
-    } else if crate::animation::frames::owns(path, crate::animation::frames::Kind::Webp) {
+    } else if crate::animation::webp::owns(path) {
         // A webp whose bitstream is a still image stays on the libwebp path,
         // which is what hands a lossy file out as its own yuv planes. Only an
         // animated one is claimed here.
-        crate::animation::frames::segment_info(
-            path,
-            crate::animation::frames::Kind::Webp,
-            info.clone(),
-            fps,
-        )?
+        crate::animation::webp::segment_info(path, info.clone(), fps)?
     } else {
         None
     };

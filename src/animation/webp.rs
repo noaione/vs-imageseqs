@@ -21,18 +21,16 @@
 //! disagreed with them it was because the `ANMF` flags byte has the blend method
 //! in bit 1 and the disposal in bit 0, which [`Frame::of`] now says explicitly.
 
-// The walk is the first half of step 4's webp third and is complete and tested
-// on its own; the compositor that consumes it lands next, and until then nothing
-// in a release build calls into this module.
-#![allow(
-    dead_code,
-    reason = "the compositor that consumes this walk lands next"
-)]
+use std::path::{Path, PathBuf};
 
-use std::path::Path;
+use crate::{
+    decoder::{DecodeTimings, DecodedImage, Pixels, image_error},
+    error::{ImgSeqError, Result},
+    layout::ColorType,
+    pixel::PixelFormat,
+};
 
-use crate::error::{ImgSeqError, Result};
-
+use super::{AnimationDecoder, AnimationSource, Presentation, Rate, SegmentInfo};
 /// File extensions that hold a webp.
 const EXTENSIONS: [&str; 1] = ["webp"];
 
@@ -233,6 +231,221 @@ const fn div_by_255(value: u32) -> u32 {
     (((value + 0x80) >> 8) + value + 0x80) >> 8
 }
 
+/// The smallest webp container libwebp will decode one frame out of.
+///
+/// An `ANMF` frame's payload is the frame's own `ALPH` and `VP8`/`VP8L`
+/// chunks with no RIFF wrapper, because the wrapper belongs to the whole
+/// animation. libwebp's still decoder wants a file, so a frame that carries
+/// alpha gets one built around it: a `VP8X` header stating the alpha flag and
+/// the rectangle's size, then the payload's chunks as they already are.
+///
+/// A frame with no `ALPH` needs no wrapper at all. A `VP8` or `VP8L` bitstream
+/// is what the decoder's simple entry points accept directly, and a `VP8L`
+/// carries its own alpha in-band, so wrapping it would only add a header that
+/// says nothing.
+fn container(payload: &[u8], width: u32, height: u32) -> Vec<u8> {
+    if !payload.starts_with(b"ALPH") {
+        return payload.to_vec();
+    }
+    // The canvas is stated one less than its size, exactly as the animation's
+    // own header states it.
+    let mut header = vec![0x10u8, 0, 0, 0];
+    header.extend_from_slice(&width.saturating_sub(1).to_le_bytes()[..3]);
+    header.extend_from_slice(&height.saturating_sub(1).to_le_bytes()[..3]);
+
+    let mut body = Vec::with_capacity(payload.len() + 32);
+    push_chunk(&mut body, b"VP8X", &header);
+    // The payload's chunks already carry their own headers and padding.
+    body.extend_from_slice(payload);
+
+    let mut file = Vec::with_capacity(body.len() + 12);
+    file.extend_from_slice(b"RIFF");
+    // The RIFF size counts the four bytes of `WEBP` and the body.
+    file.extend_from_slice(&((body.len() + 4) as u32).to_le_bytes());
+    file.extend_from_slice(b"WEBP");
+    file.extend_from_slice(&body);
+    file
+}
+
+/// Appends one RIFF chunk, padded to an even length.
+fn push_chunk(out: &mut Vec<u8>, code: &[u8; 4], payload: &[u8]) {
+    out.extend_from_slice(code);
+    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    out.extend_from_slice(payload);
+    if payload.len() % 2 == 1 {
+        out.push(0);
+    }
+}
+
+/// Whether one frame's payload carries an alpha channel of its own.
+///
+/// A `VP8L` bitstream is treated as carrying one whatever it holds, because
+/// that is what the reader being replaced does: it decides the frame's alpha
+/// from the chunk's *kind* rather than from its contents, and that decision is
+/// what selects between blending and overwriting.
+fn payload_has_alpha(payload: &[u8]) -> bool {
+    payload.starts_with(b"ALPH") || payload.starts_with(b"VP8L")
+}
+
+/// The rate a webp's delays are counted in: microseconds, from milliseconds.
+const RATE: Rate = Rate::new(1_000_000, 1);
+
+/// Describes an animated webp's timeline without holding its pictures.
+///
+/// Returns `None` for a webp that displays one picture, which leaves it on the
+/// still path it was on before.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the container cannot be read.
+pub fn segment_info(
+    path: &Path,
+    info: crate::decoder::ImageInfo,
+    fps: Rate,
+) -> Result<Option<SegmentInfo>> {
+    let Some(animation) = walk(path)? else {
+        return Ok(None);
+    };
+    if !animation.is_animated() {
+        return Ok(None);
+    }
+    let mut presentations = Vec::with_capacity(animation.frames.len());
+    let mut timestamp = 0i64;
+    for frame in &animation.frames {
+        // A millisecond is a thousand microseconds, and the rate counts
+        // microseconds.
+        let duration = i64::from(frame.duration_ms) * 1_000;
+        presentations.push(Presentation {
+            timestamp,
+            duration: Some(duration),
+        });
+        timestamp = timestamp.checked_add(duration).ok_or_else(|| {
+            ImgSeqError::new(format!("the timeline of '{}' overflows", path.display()))
+        })?;
+    }
+
+    let source = std::sync::Arc::new(AnimationSource::new(
+        path.to_path_buf(),
+        Box::new(Source::new(path, &animation, info.transform, info.format)),
+    ));
+    Ok(Some(SegmentInfo {
+        info,
+        rate: RATE,
+        presentations,
+        decoder: source,
+        fps,
+    }))
+}
+
+/// One pass over the container, which is what a source keeps per request.
+struct Source {
+    path: PathBuf,
+    /// What the container states, kept so a decode needs no second walk.
+    animation: Animation,
+    transform: crate::pixel::Transform,
+    format: PixelFormat,
+    canvas: Canvas,
+    next: usize,
+}
+
+impl Source {
+    fn new(
+        path: &Path,
+        animation: &Animation,
+        transform: crate::pixel::Transform,
+        format: PixelFormat,
+    ) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            canvas: Canvas::new(animation.width, animation.height),
+            animation: animation.clone(),
+            transform,
+            format,
+            next: 0,
+        }
+    }
+
+    /// Starts the pass again, which is what a backward request needs.
+    fn restart(&mut self) {
+        self.canvas = Canvas::new(self.animation.width, self.animation.height);
+        self.next = 0;
+    }
+
+    /// Replays presentation `index`, advancing the pass to it.
+    fn presentation(&mut self, index: usize) -> Result<DecodedImage> {
+        if index < self.next {
+            self.restart();
+        }
+        // The bytes are read once for the whole pass rather than once per
+        // frame: a frame's payload is addressed by offset into this file.
+        let data =
+            std::fs::read(&self.path).map_err(|error| image_error("open", &self.path, error))?;
+        while self.next <= index {
+            let Some(frame) = self.animation.frames.get(self.next) else {
+                return Err(ImgSeqError::new(format!(
+                    "animated image '{}' holds no presentation {index}",
+                    self.path.display()
+                )));
+            };
+            let payload = data.get(frame.payload.clone()).ok_or_else(|| {
+                image_error(
+                    "decode",
+                    &self.path,
+                    "a frame runs past the end of the file",
+                )
+            })?;
+            let container = container(payload, frame.width, frame.height);
+            let (width, height, pixels) = crate::formats::webp::decode_rgba(&container)
+                .map_err(|error| image_error("decode", &self.path, error))?;
+            if (width, height) != (frame.width, frame.height) {
+                return Err(ImgSeqError::new(format!(
+                    "animated image '{}' states a {}x{} frame that decodes as {width}x{height}",
+                    self.path.display(),
+                    frame.width,
+                    frame.height
+                )));
+            }
+            // Blending is only meaningful for a frame that carries alpha of
+            // its own; a frame without it is written over the canvas, which is
+            // also what keeps the lossy renormalisation out of a frame that
+            // has no transparency to preserve.
+            let blend = frame.blend && payload_has_alpha(payload);
+            let composed = self
+                .canvas
+                .draw(frame.x, frame.y, &pixels, width, height, blend);
+            self.next += 1;
+            if self.next - 1 == index {
+                return Ok(DecodedImage {
+                    width: self.canvas.width as u32,
+                    height: self.canvas.height as u32,
+                    format: self.format,
+                    transform: self.transform,
+                    pixels: Pixels::Interleaved {
+                        color_type: ColorType::Rgba8,
+                        buffer: composed,
+                    },
+                    timings: DecodeTimings::default(),
+                });
+            }
+        }
+        unreachable!("the loop returns on the presentation it was asked for")
+    }
+}
+
+impl AnimationDecoder for Source {
+    fn seek(&mut self, index: usize) -> Result<()> {
+        if index < self.next {
+            self.restart();
+        }
+        Ok(())
+    }
+
+    fn next_presentation(&mut self) -> Result<DecodedImage> {
+        let index = self.next;
+        self.presentation(index)
+    }
+}
+
 /// Reads `path`'s animation, or `None` for a file this module does not read.
 ///
 /// # Errors
@@ -249,11 +462,19 @@ pub fn walk(path: &Path) -> Result<Option<Animation>> {
             path.display()
         ))
     })?;
-    parse(&data, path).map(Some)
+    parse(&data, path)
 }
 
 /// Reads an animated webp out of its bytes.
-fn parse(data: &[u8], path: &Path) -> Result<Animation> {
+/// Reads an animated webp out of its bytes, or `None` for a webp that is not
+/// animated.
+///
+/// A plain webp has no `VP8X` header at all -- the extended format exists for
+/// the features a still bitstream cannot state -- and one with a `VP8X` whose
+/// animation flag is clear is a still picture that happens to carry a profile
+/// or an alpha chunk. Both are declined here rather than refused, because both
+/// are valid files that belong on the still path.
+fn parse(data: &[u8], path: &Path) -> Result<Option<Animation>> {
     let bad = |what: &str| {
         ImgSeqError::new(format!(
             "failed to decode image '{}': the webp container {what}",
@@ -317,14 +538,19 @@ fn parse(data: &[u8], path: &Path) -> Result<Animation> {
         }
     }
 
+    // No `VP8X`: a plain still bitstream, which is not this reader's.
     let Some((width, height, has_alpha, has_icc_profile, has_exif)) = header else {
-        return Err(bad("holds no VP8X header"));
+        return Ok(None);
     };
-    if animation && frames.is_empty() {
+    // An extended webp that states no animation is a still picture.
+    if !animation {
+        return Ok(None);
+    }
+    if frames.is_empty() {
         return Err(bad("states an animation but holds no frame"));
     }
 
-    Ok(Animation {
+    Ok(Some(Animation {
         width,
         height,
         loop_count,
@@ -334,9 +560,8 @@ fn parse(data: &[u8], path: &Path) -> Result<Animation> {
         background,
         frames,
         dispose_is_inert: true,
-    })
+    }))
 }
-
 impl Frame {
     /// Reads one `ANMF` chunk's header, keeping the range of its payload.
     ///
@@ -544,7 +769,9 @@ mod tests {
     #[test]
     fn every_frame_points_at_its_own_payload() {
         let data = std::fs::read(fixture("animation.webp")).expect("the fixture is read");
-        let animation = parse(&data, Path::new("animation.webp")).expect("the container parses");
+        let animation = parse(&data, Path::new("animation.webp"))
+            .expect("the container parses")
+            .expect("it is an animation");
         for (index, frame) in animation.frames.iter().enumerate() {
             let payload = &data[frame.payload.clone()];
             assert!(
@@ -570,7 +797,9 @@ mod tests {
             (b"ANIM", vec![0, 0, 0, 0, 0, 0]),
             (b"ANMF", anmf(0, 0, 4, 4, 10, 0b11)),
         ]);
-        let animation = parse(&file, Path::new("x.webp")).expect("the container parses");
+        let animation = parse(&file, Path::new("x.webp"))
+            .expect("the container parses")
+            .expect("it is an animation");
         assert!(!animation.frames[0].blend, "bit 1 means do not blend");
         assert!(animation.frames[0].dispose, "bit 0 means dispose");
 
@@ -579,7 +808,9 @@ mod tests {
             (b"ANIM", vec![0, 0, 0, 0, 0, 0]),
             (b"ANMF", anmf(0, 0, 4, 4, 10, 0b00)),
         ]);
-        let animation = parse(&file, Path::new("x.webp")).expect("the container parses");
+        let animation = parse(&file, Path::new("x.webp"))
+            .expect("the container parses")
+            .expect("it is an animation");
         assert!(animation.frames[0].blend, "bit 1 clear means blend");
         assert!(!animation.frames[0].dispose);
     }
@@ -593,7 +824,9 @@ mod tests {
             (b"ANIM", vec![0, 0, 0, 0, 0, 0]),
             (b"ANMF", anmf(2, 4, 3, 3, 10, 0)),
         ]);
-        let animation = parse(&file, Path::new("x.webp")).expect("the container parses");
+        let animation = parse(&file, Path::new("x.webp"))
+            .expect("the container parses")
+            .expect("it is an animation");
         assert_eq!((animation.frames[0].x, animation.frames[0].y), (2, 4));
         // The canvas and the rectangle are both stated one less than their size.
         assert_eq!((animation.width, animation.height), (8, 8));
@@ -622,12 +855,37 @@ mod tests {
         assert!(parse(b"NOTARIFFATALL", path).is_err());
         // A RIFF that is not a webp.
         assert!(parse(b"RIFF\x08\x00\x00\x00WAVEfmt ", path).is_err());
-        // A webp with no VP8X header.
-        let file = riff(&[(b"VP8 ", vec![0; 8])]);
+        // A VP8X that says animation but holds no frame.
+        let file = riff(&[(b"VP8X", vp8x(4, 4, 0x02))]);
         assert!(parse(&file, path).is_err());
         // A canvas larger than this reader accepts.
         let file = riff(&[(b"VP8X", vp8x(20_000, 4, 0x02))]);
         assert!(parse(&file, path).is_err());
+    }
+
+    /// A webp that is not animated is *declined*, not refused, so that a still
+    /// webp stays on the libwebp path it was already on. This is the case that
+    /// a reader claiming every `.webp` gets wrong: `lossy.webp` has no `VP8X`
+    /// at all, and erroring on it would break every lossy still in the tree.
+    #[test]
+    fn a_still_webp_is_declined_rather_than_refused() {
+        let path = Path::new("x.webp");
+        // A plain bitstream, which is what a lossy or lossless still is.
+        let file = riff(&[(b"VP8 ", vec![0; 8])]);
+        assert!(matches!(parse(&file, path), Ok(None)));
+        let file = riff(&[(b"VP8L", vec![0; 8])]);
+        assert!(matches!(parse(&file, path), Ok(None)));
+        // An extended webp with the animation flag clear: a still that
+        // carries a profile or an alpha chunk.
+        let file = riff(&[(b"VP8X", vp8x(4, 4, 0x10)), (b"VP8 ", vec![0; 8])]);
+        assert!(matches!(parse(&file, path), Ok(None)));
+        // And the same file with the flag set is claimed.
+        let file = riff(&[
+            (b"VP8X", vp8x(4, 4, 0x12)),
+            (b"ANIM", vec![0, 0, 0, 0, 0, 0]),
+            (b"ANMF", anmf(0, 0, 4, 4, 10, 0)),
+        ]);
+        assert!(matches!(parse(&file, path), Ok(Some(_))));
     }
 
     /// A chunk that claims to run past the end of the file ends the walk rather

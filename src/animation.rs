@@ -21,7 +21,6 @@
 //! tested against exact boundaries without a fixture per case.
 
 pub mod apng;
-pub mod frames;
 pub mod gif;
 pub mod heif;
 pub mod jxl;
