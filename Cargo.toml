@@ -59,6 +59,13 @@ jpeg2k = { version = "0.10.1", default-features = false, features = [
 # animated png is composed here rather than by `image`, whose APNG compositor
 # refuses every 16-bit colour type; see `src/animation/apng.rs`
 png = { version = "0.18.1", default-features = false }
+# a jpeg is decoded here rather than by `image`, whose reader parses the file's
+# headers four times for one probe and one decode, and whose EXIF and ICC
+# accessors each rebuild it; see `src/formats/jpeg.rs`. `zune-core` is the
+# colorspace and options type the two crates share, and it is named directly so
+# that a decoder is built by this module's own options rather than a default.
+zune-core = { version = "0.5.3", default-features = false, features = ["std"] }
+zune-jpeg = { version = "0.5.15", default-features = false, features = ["std"] }
 
 # native stuff: find libwebp, see build.rs
 [target.'cfg(windows)'.build-dependencies]

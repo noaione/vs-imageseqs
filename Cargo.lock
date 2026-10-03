@@ -1492,6 +1492,8 @@ dependencies = [
  "png",
  "vapoursynth4-rs",
  "vcpkg",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

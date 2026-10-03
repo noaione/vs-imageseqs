@@ -69,6 +69,9 @@ fn format_decoder(info: &ImageInfo, demand: Demand) -> Option<Result<DecodedImag
     if formats::jp2::handles(info) {
         return Some(formats::jp2::decode(info));
     }
+    if formats::jpeg::owns(&info.path) {
+        return Some(formats::jpeg::decode(info));
+    }
     None
 }
 
@@ -441,6 +444,12 @@ fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
     }
     if formats::jp2::owns(path) {
         return formats::jp2::image_info(path, apply_rotation);
+    }
+    // A jpeg is read here rather than through the generic decoder, whose
+    // reader would parse the file's headers four times for one probe; see
+    // [`crate::formats::jpeg`].
+    if let Some(info) = formats::jpeg::image_info(path, apply_rotation)? {
+        return Ok(info);
     }
 
     let decoder = open_decoder(path)?;
