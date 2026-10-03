@@ -121,6 +121,118 @@ impl Animation {
     }
 }
 
+/// A canvas that a webp's frames are drawn onto.
+///
+/// One buffer persists between frames and it is the canvas itself: unlike a
+/// gif, a webp frame is drawn *onto* what is already there rather than starting
+/// from an undisposed copy, so the two containers need different state even
+/// though both compose sub-rectangles.
+///
+/// It starts transparent, which is what the reader being replaced does: the
+/// `ANIM` background is a hint that nothing sets, so the canvas is zeros.
+struct Canvas {
+    width: usize,
+    height: usize,
+    pixels: Vec<u8>,
+}
+
+impl Canvas {
+    fn new(width: u32, height: u32) -> Self {
+        let (width, height) = (width as usize, height as usize);
+        Self {
+            width,
+            height,
+            pixels: vec![0; width.saturating_mul(height).saturating_mul(4)],
+        }
+    }
+
+    /// Draws one decoded rectangle at `(x, y)` and answers the canvas.
+    ///
+    /// `blend` is the frame's own rule: a blending frame is combined with what
+    /// is under it, and a non-blending one is written over it. A rectangle that
+    /// runs past the canvas is clipped rather than refused, which is what the
+    /// reader being replaced does and what keeps a slightly oversized frame
+    /// readable.
+    fn draw(
+        &mut self,
+        x: u32,
+        y: u32,
+        frame: &[u8],
+        width: u32,
+        height: u32,
+        blend: bool,
+    ) -> Vec<u8> {
+        let frame_width = width as usize;
+        let columns = frame_width.min(self.width.saturating_sub(x as usize));
+        let rows = (height as usize).min(self.height.saturating_sub(y as usize));
+        for row in 0..rows {
+            for column in 0..columns {
+                let source = (row * frame_width + column) * 4;
+                let target = ((y as usize + row) * self.width + (x as usize + column)) * 4;
+                let sample: [u8; 4] = frame[source..source + 4].try_into().expect("four samples");
+                if blend {
+                    let under: [u8; 4] = self.pixels[target..target + 4]
+                        .try_into()
+                        .expect("four samples");
+                    self.pixels[target..target + 4].copy_from_slice(&over(sample, under));
+                } else {
+                    self.pixels[target..target + 4].copy_from_slice(&sample);
+                }
+            }
+        }
+        self.pixels.clone()
+    }
+}
+
+/// One sample of `source` drawn over one sample of `under`, both straight
+/// (not premultiplied) alpha.
+///
+/// This is a port of libwebp's own integer routine, which is what the reader
+/// being replaced uses, and it is not the obvious `(dst * (255 - src_a)) / 255`:
+/// the partial factor is divided by 255 *rounding to nearest*, and the colour
+/// channels are renormalised by `(1 << 24) / blended_alpha` so that a partly
+/// transparent result keeps its colour. Both details change the output by a
+/// count or two on the fixtures, which is exactly the size of error that would
+/// pass a loose comparison and fail a byte-for-byte one.
+///
+/// The source came from `image-webp`'s `alpha_blending.rs`, which itself cites
+/// libwebp's `src/demux/anim_decode.c`.
+fn over(source: [u8; 4], under: [u8; 4]) -> [u8; 4] {
+    let source_alpha = source[3];
+    if source_alpha == 0 {
+        // Nothing of the source shows, so the sample under it stands, alpha
+        // included.
+        return under;
+    }
+    let under_alpha = under[3];
+    // The part of the destination that survives is its alpha scaled by how
+    // much of the source is missing, rounded to nearest.
+    let keep = div_by_255(u32::from(under_alpha) * (255 - u32::from(source_alpha)));
+    let blended_alpha = u32::from(source_alpha) + keep;
+    if blended_alpha == 0 {
+        return [0, 0, 0, 0];
+    }
+    // Renormalises each channel back onto the blended alpha. The shift is 24
+    // because the scale is a 24-bit reciprocal.
+    let scale = (1u32 << 24) / blended_alpha;
+    let mut out = [0u8; 4];
+    for channel in 0..3 {
+        let blended =
+            u32::from(source[channel]) * u32::from(source_alpha) + u32::from(under[channel]) * keep;
+        out[channel] = ((blended * scale) >> 24) as u8;
+    }
+    out[3] = blended_alpha as u8;
+    out
+}
+
+/// `value / 255`, rounding to nearest rather than down.
+///
+/// Integer division truncates, which would leave every blended sample one low
+/// often enough to be visible in a byte-for-byte comparison.
+const fn div_by_255(value: u32) -> u32 {
+    (((value + 0x80) >> 8) + value + 0x80) >> 8
+}
+
 /// Reads `path`'s animation, or `None` for a file this module does not read.
 ///
 /// # Errors
@@ -544,5 +656,84 @@ mod tests {
         // that states an animation and then holds no readable frame is refused
         // instead of being described as an animation of nothing.
         assert!(parse(&file, Path::new("x.webp")).is_err());
+    }
+
+    /// The blending routine is libwebp's, and these four are the cases where
+    /// the obvious implementation differs from it.
+    #[test]
+    fn a_sample_is_blended_the_way_libwebp_blends_it() {
+        // A source with no alpha leaves the canvas exactly as it was, alpha
+        // included. A plain multiply would darken it.
+        assert_eq!(
+            over([10, 20, 30, 0], [200, 100, 50, 128]),
+            [200, 100, 50, 128]
+        );
+        // An opaque source over anything: the alpha is the source's, and the
+        // colours come back through the same renormalisation -- which is
+        // *lossy*. 10 becomes 9, because `2550 * ((1 << 24) / 255) >> 24`
+        // truncates. That is the routine being ported, not a mistake in it, and
+        // it is why a byte-for-byte comparison is the only honest check.
+        assert_eq!(
+            over([10, 20, 30, 255], [200, 100, 50, 128]),
+            [9, 19, 29, 255]
+        );
+        // Nothing underneath is the same arithmetic, not a shortcut: the
+        // renormalisation applies even when there is nothing to blend with, so
+        // a first frame drawn onto the transparent canvas is one low on every
+        // channel too. That is why the reader being replaced cannot simply
+        // copy an opaque sample, and why the fixture's own pixels are the
+        // only reference that settles it.
+        assert_eq!(over([10, 20, 30, 255], [0, 0, 0, 0]), [9, 19, 29, 255]);
+        // Half over half. The destination's surviving alpha is
+        // `div_by_255(128 * 127)` = 64, not 127: the factor is the destination's
+        // alpha scaled by the source's *shortfall*, so two half-transparent
+        // samples do not add up to opaque.
+        assert_eq!(over([255, 0, 0, 128], [0, 0, 255, 128]), [169, 0, 84, 192]);
+    }
+
+    /// `div_by_255` rounds to nearest. Truncating division would leave the
+    /// result one low for every value that is not an exact multiple, which is
+    /// most of them.
+    #[test]
+    fn division_by_255_rounds_to_nearest() {
+        assert_eq!(div_by_255(0), 0);
+        assert_eq!(div_by_255(255), 1);
+        assert_eq!(div_by_255(510), 2);
+        // 127.5 rounds up, where `127 / 255` truncating would answer 0.
+        assert_eq!(div_by_255(128), 1, "128/255 rounds to 1, not 0");
+        assert_eq!(div_by_255(127), 0, "127/255 rounds to 0");
+    }
+
+    /// A frame drawn onto a transparent canvas is the frame, and a rectangle
+    /// that is smaller than the canvas leaves the rest of it alone.
+    #[test]
+    fn a_rectangle_is_drawn_where_it_says_on_the_canvas() {
+        let mut canvas = Canvas::new(3, 3);
+        // Every sample of a two by two frame is the same opaque colour.
+        let patch: Vec<u8> = [40u8, 50, 60, 255].repeat(4);
+        let composed = canvas.draw(1, 1, &patch, 2, 2, false);
+        let at = |pixels: &[u8], x: usize, y: usize| {
+            let index = (y * 3 + x) * 4;
+            [
+                pixels[index],
+                pixels[index + 1],
+                pixels[index + 2],
+                pixels[index + 3],
+            ]
+        };
+        assert_eq!(at(&composed, 1, 1), [40, 50, 60, 255]);
+        assert_eq!(at(&composed, 2, 2), [40, 50, 60, 255]);
+        assert_eq!(at(&composed, 0, 0), [0, 0, 0, 0], "outside the rectangle");
+    }
+
+    /// A rectangle that runs past the canvas is clipped rather than refused or
+    /// read past its end.
+    #[test]
+    fn a_rectangle_past_the_canvas_is_clipped() {
+        let mut canvas = Canvas::new(2, 2);
+        let patch: Vec<u8> = [1u8, 2, 3, 255].repeat(16);
+        let composed = canvas.draw(1, 1, &patch, 4, 4, false);
+        assert_eq!(composed.len(), 2 * 2 * 4, "the canvas did not grow");
+        assert_eq!(&composed[12..16], &[1, 2, 3, 255], "the corner was drawn");
     }
 }

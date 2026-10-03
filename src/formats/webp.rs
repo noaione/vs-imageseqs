@@ -262,6 +262,50 @@ type EntryPoint = unsafe extern "C" fn(
     output_stride: std::ffi::c_int,
 ) -> *mut std::ffi::c_uchar;
 
+/// Decodes one standalone webp bitstream into interleaved RGBA.
+///
+/// The animation reader hands this the payload of one `ANMF` frame -- an
+/// optional `ALPH` chunk followed by `VP8`/`VP8L`, wrapped by the caller into
+/// the smallest container libwebp will accept -- and gets back the rectangle
+/// that frame draws. RGBA is always asked for, because the canvas it is
+/// composed onto is RGBA whatever the frame itself carries.
+///
+/// # Errors
+///
+/// Returns a message naming what libwebp refused, for the caller to qualify
+/// with the path it was reading.
+#[allow(dead_code, reason = "the animated webp compositor calls this next")]
+pub(crate) fn decode_rgba(data: &[u8]) -> std::result::Result<(u32, u32, Vec<u8>), String> {
+    let mut width: std::ffi::c_int = 0;
+    let mut height: std::ffi::c_int = 0;
+    // SAFETY: the buffer and its length describe the same allocation, and the
+    // two out parameters are writable locals.
+    let known =
+        unsafe { libwebp::WebPGetInfo(data.as_ptr(), data.len(), &raw mut width, &raw mut height) };
+    if known == 0 || width <= 0 || height <= 0 {
+        return Err("the frame is not a webp bitstream".to_string());
+    }
+    let (width, height) = (width as u32, height as u32);
+    let row = usize::try_from(width)
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+        .ok_or_else(|| "the frame is too wide to decode".to_string())?;
+    let size = row
+        .checked_mul(height as usize)
+        .ok_or_else(|| "the frame is too large to decode".to_string())?;
+    let stride = std::ffi::c_int::try_from(row)
+        .map_err(|_| "the frame is too wide for libwebp".to_string())?;
+    let mut buffer = vec![0u8; size];
+    // SAFETY: `buffer` is `size` bytes and the stride is its row length, so
+    // libwebp writes exactly the allocation it was given.
+    let decoded = unsafe {
+        libwebp::WebPDecodeRGBAInto(data.as_ptr(), data.len(), buffer.as_mut_ptr(), size, stride)
+    };
+    if decoded.is_null() {
+        return Err("libwebp could not decode the frame".to_string());
+    }
+    Ok((width, height, buffer))
+}
 /// Decodes one webp image into an interleaved buffer.
 pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     let open_started = Instant::now();
