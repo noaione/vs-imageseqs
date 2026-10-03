@@ -59,7 +59,22 @@ removed the old full decode on clip creation for the inputs it handles. Count
 remaining work per actual route rather than carrying those historical claims
 over to every file.
 
-## order of work
+## status of the order of work
+
+Step 2 is done, in `398cf4e`. The shared representations exist
+(`src/layout.rs`), the identification does too (`src/format.rs`), and every
+remaining `image` call in production code is behind one adapter
+(`src/still.rs`). Probe, samples, properties and the public source labels are
+unchanged: 186 unit tests pass, the release validator reports `all checks
+passed`, and the one error message a container's refusal carries is
+byte-identical to the old build's.
+
+Step 1's route audit is recorded below, and the fixtures it asked for are the
+ones [28](28-animation-container-decoders.md) already committed.
+
+Steps 3, 4 and 5 are not started.
+
+## the order of work
 
 1. Capture the current format/subtype coverage and baseline behavior, including
    error paths and accepted extension aliases. Record which files use the direct,
@@ -90,6 +105,39 @@ Each stage is independently reviewable and reversible. While migration is in
 progress, a fallback must not silently turn a recognized malformed file into a
 different decoder's interpretation. Probe and decode must select compatible
 routes and continue to detect a file changing after probing.
+
+## the route audit step 1 asked for
+
+`src/format.rs` is now the inventory, and it is complete rather than a
+signature table with an `Other` bucket: every container this plugin can be
+handed has a variant, including the three the crate had no entry for at all
+(jpeg xl, jpeg 2000) and the four heif spellings. The table below is what the
+code says the route is, and it is the same list the old build took.
+
+| route | claimed by | formats |
+| --- | --- | --- |
+| container probe, no decode | `formats::heif::image_info`, `formats::avif::image_info` | heif, heic, hif, avif |
+| native module, extension-selected | `formats::jxl`, `formats::jp2` | jxl, jp2, j2k, j2c, jpx |
+| native module, probe-selected | `formats::avif`, `formats::heif`, `formats::webp` | avif, heif, heic, webp |
+| row stream | `formats::png::stream` | png, apng (still, non-indexed and indexed) |
+| animation adapter | `animation::{apng, frames, heif, jxl}` | png, gif, webp, jxl, avif, heic |
+| generic still decode | `src/still.rs` | png, jpeg, gif, webp, tiff, dds, bmp, ico, hdr, exr, qoi, pnm, farbfeld, tga, avif, heif |
+
+The extension aliases the old table accepted are the ones `Format::of_path`
+accepts, and the four entries that table did not have (`jfif` was already
+there; `dib`, `cur`, `heics`, `hif`, `j2k`, `j2c`, `jpx`, `jpf`, `jpc` are the
+additions) only widen which files are recognized, never which decoder a
+recognized file reaches.
+
+The content side is where the audit found something worth writing down. The
+crate's own signature table matches `ftyp` with its masked `avif` entry for
+*any* ISO base media file, so a `hevx` heic was read as the crate's avif and
+handed to the libheif hooks. This plugin's table reads the actual brand, which
+is more accurate, and `src/still.rs` therefore keeps the crate's own order
+(extension seed, hook guess, then the crate's sniffing) rather than steering it
+with the more accurate answer: the decoder that succeeds is the authority, and
+the plugin's identification is used for diagnostics and metadata. The comment
+on `still::decode_reader` is the record of that.
 
 Every line below is now answered by a decision rather than by an open question:
 [27](27-direct-still-decoders.md) for the still formats' codecs,
