@@ -72,7 +72,24 @@ byte-identical to the old build's.
 Step 1's route audit is recorded below, and the fixtures it asked for are the
 ones [28](28-animation-container-decoders.md) already committed.
 
-Steps 3, 4 and 5 are not started.
+Step 3's jpeg half is done, in `f42def2`. `src/formats/jpeg.rs` reads a jpeg
+with `zune-jpeg` and owns the two facts the crate did not supply: the ICC
+profile and the exif orientation, the latter through a small TIFF reader that
+reads both byte orders. The measurements, both interleaved against a build of
+`5b10d67`:
+
+| jpeg, 35 pages | before | after |
+| --- | ---: | ---: |
+| clip creation (`open`) | 104–121 ms | **3 ms** |
+| frames | 2.15–2.61 s | 2.16–2.20 s |
+
+The probe win is the point of the migration: `image`'s jpeg reader reads the
+whole compressed file to identify it and again for each accessor, so creating a
+clip over the 213 MB corpus read all of it several times. This reads the header
+bytes and stops. The frames are unchanged because the samples are the crate's,
+and 245 of 245 `frame-parity.py` lines are byte-identical to the old build.
+
+Step 3's PNG half, and steps 4 and 5, are not started.
 
 ## the order of work
 
