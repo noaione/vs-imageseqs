@@ -1484,6 +1484,7 @@ name = "vs-imageseqs"
 version = "0.2.1"
 dependencies = [
  "dav1d",
+ "gif",
  "image",
  "jpeg2k",
  "jxl",

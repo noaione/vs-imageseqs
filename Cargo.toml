@@ -66,6 +66,10 @@ png = { version = "0.18.1", default-features = false }
 # that a decoder is built by this module's own options rather than a default.
 zune-core = { version = "0.5.3", default-features = false, features = ["std"] }
 zune-jpeg = { version = "0.5.15", default-features = false, features = ["std"] }
+# animated gif is composed here rather than by `image`, whose compositor is
+# the one this replaces and whose frame iterator decodes every picture to find
+# the timeline; see `src/animation/gif.rs`
+gif = { version = "0.14.2", default-features = false, features = ["std"] }
 
 # native stuff: find libwebp, see build.rs
 [target.'cfg(windows)'.build-dependencies]

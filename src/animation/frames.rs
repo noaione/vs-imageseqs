@@ -1,9 +1,14 @@
-//! The animation adapters that ride the `image` crate's frame iterator.
+//! The animated WebP adapter that rides the `image` crate's frame iterator.
 //!
-//! Animated GIF and animated WebP both arrive as a stream of already composited
-//! logical canvases: `image` runs each format's blend and disposal before it
-//! hands a frame over, so there is no composition to do here. What is left is
-//! the timeline, which is what this module reads and replays.
+//! Animated WebP arrives as a stream of already composited logical canvases:
+//! `image` runs each frame's blend before it hands one over, so there is no
+//! composition to do here. What is left is the timeline, which is what this
+//! module reads and replays.
+//!
+//! Animated gif used to share this module and no longer does: it has its own
+//! `src/animation/gif.rs`, because its timeline is read without decoding a
+//! picture and its canvas is composed by the plugin. This module is what is
+//! left, and it goes the same way when WebP is done.
 //!
 //! An iterator cannot be seeked, so a backward request restarts it. The first
 //! pass through the file is also where the delays come from, which is why the
@@ -17,7 +22,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use image::codecs::{gif::GifDecoder, webp::WebPDecoder};
+use image::codecs::webp::WebPDecoder;
 use image::{Frame, ImageReader};
 
 use crate::{
@@ -28,38 +33,34 @@ use crate::{
 
 use super::{AnimationDecoder as SourceDecoder, AnimationSource, Presentation, Rate, SegmentInfo};
 
-/// A format `image` decodes as a stream of full-canvas animation frames.
+/// The format `image` decodes as a stream of full-canvas animation frames.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Kind {
-    Gif,
     Webp,
 }
 
 impl Kind {
     fn name(self) -> &'static str {
         match self {
-            Self::Gif => "gif",
             Self::Webp => "webp",
         }
     }
 }
 
-/// The two decoders whose frames are already composited logical canvases.
+/// The decoder whose frames are already composited logical canvases.
 ///
-/// Both hand their frames over as owned buffers, so neither borrows the reader
-/// and the frame iterator can be erased behind one type. The alternative, a box
+/// It hands them over as owned buffers, so it does not borrow the reader and
+/// the frame iterator can be erased behind one type. The alternative, a box
 /// over `impl ImageDecoder`, cannot reach `into_frames`: that method lives on
-/// the concrete decoders rather than on the `ImageDecoder` trait, and it also
+/// the concrete decoder rather than on the `ImageDecoder` trait, and it also
 /// carries a lifetime that would not be `Send`.
 enum Decoder {
-    Gif(Box<GifDecoder<BufReader<File>>>),
     Webp(Box<WebPDecoder<BufReader<File>>>),
 }
 
 impl Decoder {
     fn into_frames(self) -> Frames {
         match self {
-            Self::Gif(decoder) => Box::new(image::AnimationDecoder::into_frames(*decoder)),
             Self::Webp(decoder) => Box::new(image::AnimationDecoder::into_frames(*decoder)),
         }
     }
@@ -69,7 +70,6 @@ impl Decoder {
 #[must_use]
 pub fn owns(path: &Path, kind: Kind) -> bool {
     let extension = match kind {
-        Kind::Gif => "gif",
         Kind::Webp => "webp",
     };
     path.extension()
@@ -244,7 +244,6 @@ impl FrameSource {
             .with_guessed_format()
             .map_err(|error| image_error("identify", &self.path, error))?;
         let expected = match self.kind {
-            Kind::Gif => image::ImageFormat::Gif,
             Kind::Webp => image::ImageFormat::WebP,
         };
         if identified.format() != Some(expected) {
@@ -260,11 +259,6 @@ impl FrameSource {
             File::open(&self.path).map_err(|error| image_error("open", &self.path, error))?;
         let reader = BufReader::new(file);
         let decoder = match self.kind {
-            Kind::Gif => {
-                Decoder::Gif(Box::new(GifDecoder::new(reader).map_err(|error| {
-                    image_error("create decoder for", &self.path, error)
-                })?))
-            }
             Kind::Webp => {
                 Decoder::Webp(Box::new(WebPDecoder::new(reader).map_err(|error| {
                     image_error("create decoder for", &self.path, error)

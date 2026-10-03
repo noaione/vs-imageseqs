@@ -388,13 +388,8 @@ pub fn probe_segment(
     // answers for a file of its format that turns out not to be animated.
     let animated = if crate::animation::apng::owns(path) {
         crate::animation::apng::segment_info(path, info.clone(), fps)?
-    } else if crate::animation::frames::owns(path, crate::animation::frames::Kind::Gif) {
-        crate::animation::frames::segment_info(
-            path,
-            crate::animation::frames::Kind::Gif,
-            info.clone(),
-            fps,
-        )?
+    } else if crate::animation::gif::owns(path) {
+        crate::animation::gif::segment_info(path, info.clone(), fps)?
     } else if crate::animation::heif::owns_avif(path) || crate::animation::heif::owns_heif(path) {
         crate::animation::heif::segment_info(path, info.clone(), fps)?
     } else if crate::animation::jxl::owns(path) {
