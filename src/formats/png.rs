@@ -1,4 +1,5 @@
-//! Container reads for a png that the `image` decoder has no accessor for.
+//! Container reads for a png that the `image` decoder has no accessor for, and
+//! the probe that reads a png without going through that decoder at all.
 //!
 //! `image` hands out the pixels of a png, its size and its ICC profile, but not
 //! the `cICP` chunk, which is where a png states its own colour in the same
@@ -7,10 +8,12 @@
 //! rather than by decoding the picture; see
 //! `docs/improvements/08-color-metadata.md`.
 //!
-//! This module reads the `cICP` chunk of every png, and it walks the rows of a
-//! png the `image` decoder would otherwise materialise whole: see [`stream`]. It
-//! places the samples itself and leaves everything it will not walk to the
-//! `image` png decoder.
+//! This module reads the `cICP` chunk of every png, it walks the rows of a png
+//! the `image` decoder would otherwise materialise whole (see [`stream`]), and
+//! it answers what a probe asks about a png ([`image_info`]) from the `png`
+//! crate directly. It leaves everything it will not walk to the `image` png
+//! decoder, which is the same crate underneath with the same transformation
+//! set, so the two cannot disagree about the picture they describe.
 
 use std::{
     fs::File,
@@ -25,6 +28,8 @@ use crate::{
     color::Cicp,
     decoder::{DecodeTimings, ImageInfo, Pixels, RowSink, RowStream, image_error},
     error::{ImgSeqError, Result},
+    exif::orientation_of,
+    layout::{Orientation, SourceColorType},
     pixel::{PixelFormat, Transform},
 };
 
@@ -117,6 +122,92 @@ fn cicp_chunk(payload: &[u8]) -> Option<Cicp> {
         transfer: *transfer,
         matrix: *matrix,
         full_range: *full_range != 0,
+    })
+}
+
+/// Probes `path` without decoding its picture, from the png crate itself.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the file cannot be read or its header cannot be
+/// parsed.
+pub fn image_info(path: &Path, apply_rotation: bool) -> Result<Option<ImageInfo>> {
+    if !has_png_extension(path) {
+        return Ok(None);
+    }
+    let file = File::open(path).map_err(|error| image_error("open", path, error))?;
+    let mut decoder = png::Decoder::new(BufReader::new(file));
+    // The one transformation `image`'s own png decoder sets, so the layout this
+    // probe reports is the layout that decoder produces. It is what widens a
+    // palette index to r,g,b, turns a `tRNS` into an alpha channel, and takes a
+    // one, two or four bit grey page up to eight bits.
+    decoder.set_transformations(png::Transformations::EXPAND);
+    let reader = decoder
+        .read_info()
+        .map_err(|error| image_error("create decoder for", path, error))?;
+    let header = reader.info();
+    let color_type = expanded_color_type(reader.output_color_type(), path)?;
+    let orientation = header
+        .exif_metadata
+        .as_deref()
+        .and_then(orientation_of)
+        .unwrap_or(Orientation::NoTransforms);
+
+    Ok(Some(ImageInfo {
+        path: path.to_path_buf(),
+        width: header.width,
+        height: header.height,
+        color_type,
+        // The `image` png decoder does not override this, so the label a png
+        // reports is the name of the layout its samples decode to. That is
+        // why a palette page reads `Rgb8` rather than naming its indices.
+        original_color_type: SourceColorType::from(color_type),
+        has_icc_profile: header.icc_profile.is_some(),
+        icc_profile: header
+            .icc_profile
+            .as_ref()
+            .map(|profile| std::sync::Arc::from(profile.as_ref())),
+        cicp: cicp(path),
+        // A png states no chroma sample position: it is grey or r,g,b.
+        chroma_location: None,
+        orientation,
+        transform: if apply_rotation {
+            Transform::from_orientation(orientation)
+        } else {
+            Transform::IDENTITY
+        },
+        format: PixelFormat::from_color_type(color_type).ok_or_else(|| {
+            ImgSeqError::new(format!(
+                "image '{}' has a colour type this plugin has no format for",
+                path.display()
+            ))
+        })?,
+    }))
+}
+
+/// The layout the png crate's expanded output is written as.
+///
+/// The eight arms are the eight layouts `EXPAND` can produce, and they are the
+/// same eight and the same names `image`'s png decoder maps them to. The narrow
+/// depths are absent because `EXPAND` has already widened them, so an arm for
+/// one would be unreachable rather than a fallback.
+fn expanded_color_type(output: (png::ColorType, png::BitDepth), path: &Path) -> Result<ColorType> {
+    Ok(match output {
+        (png::ColorType::Grayscale, png::BitDepth::Eight) => ColorType::L8,
+        (png::ColorType::Grayscale, png::BitDepth::Sixteen) => ColorType::L16,
+        (png::ColorType::GrayscaleAlpha, png::BitDepth::Eight) => ColorType::La8,
+        (png::ColorType::GrayscaleAlpha, png::BitDepth::Sixteen) => ColorType::La16,
+        (png::ColorType::Rgb, png::BitDepth::Eight) => ColorType::Rgb8,
+        (png::ColorType::Rgb, png::BitDepth::Sixteen) => ColorType::Rgb16,
+        (png::ColorType::Rgba, png::BitDepth::Eight) => ColorType::Rgba8,
+        (png::ColorType::Rgba, png::BitDepth::Sixteen) => ColorType::Rgba16,
+        (color, depth) => {
+            return Err(image_error(
+                "create decoder for",
+                path,
+                format!("a {color:?} page of {depth:?} bits is not a layout this plugin reads"),
+            ));
+        }
     })
 }
 

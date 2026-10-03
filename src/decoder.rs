@@ -445,6 +445,12 @@ fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
     if formats::jp2::owns(path) {
         return formats::jp2::image_info(path, apply_rotation);
     }
+    // A png is read here for the same reason a jpeg is, and one thing more:
+    // the `cICP` chunk is not something the `image` decoder exposes at all.
+    // See [`crate::formats::png::image_info`].
+    if let Some(info) = formats::png::image_info(path, apply_rotation)? {
+        return Ok(info);
+    }
     // A jpeg is read here rather than through the generic decoder, whose
     // reader would parse the file's headers four times for one probe; see
     // [`crate::formats::jpeg`].
