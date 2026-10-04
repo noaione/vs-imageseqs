@@ -1255,6 +1255,41 @@ ways across these rounds.
 That is the dds budget spent: four attempts, all measured, all reverted, and the
 block arithmetic shown to be equivalent to the reference. Whatever the 12% is, it
 is not in the code this page has looked at.
+### the row placer, lifted out of png.rs
+
+The dds attempts failed for a reason that reading `png.rs` explains. Its
+`place_rgb` takes the three plane rows apart with `split_first_mut`, holds them
+together, and walks them with
+
+```rust
+let planes = red.row(row).iter_mut()
+    .zip(green.row(row).iter_mut())
+    .zip(blue.row(row).iter_mut());
+for (pixel, ((red_byte, green_byte), blue_byte)) in
+    data.as_chunks::<3>().0.iter().zip(planes)
+```
+
+-- a `zip` over the source pixels and the three rows at once, so there is no index
+and no bound check per byte. The dds stream indexed a plane per pixel with
+`get_mut`, which is the same walk carrying a check per byte, and that is what made
+it lose to the copy it removed.
+
+That technique is now `RowSink::place_rgb8` in `src/decoder.rs`, and `png.rs`
+calls it rather than keeping its own copy. Both the extraction and the delegate
+are behaviour-preserving by construction -- the body did not change, it moved --
+so this is the one change here that did not need a measurement to justify: every
+frame is byte-identical across the fixture set and the validator is at `all checks
+passed`.
+
+**What is not established is a measured win from it.** `target/bench/step5-corpus`
+holds `bmp`, `dds`, `exr`, `ff`, `hdr`, `ico`, `ppm`, `qoi`, `tga` and `tiff` and
+no png, so the extraction cannot be timed where it came from, and the half of the
+work that would give it something new to speed up -- answering `Pixels::Stream`
+from a format that currently buffers the whole picture -- is where the budget ran
+out. The first target is `ppm`, whose binary `P6` rows are exactly `width * 3`
+bytes in the file and therefore exactly what `place_rgb8` takes, and `tga`'s
+uncompressed rows are the same shape. Until one of those is streamed and measured,
+the honest statement is that the facility exists and the win does not.
 **`dds` remains the one open regression**, at 1.12x where `tga` was 1.34x and is
 now 1.13x.
 
