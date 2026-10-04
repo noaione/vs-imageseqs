@@ -674,8 +674,37 @@ the shape to copy:
 - `frame-parity.py` is the pixel half and has been run: 0 of 245 differ, which
   is recorded per slice above. The speed half is what is missing.
 
-A clean answer is either "inside the spread" or a ratio with a cause. An
-unmeasured claim of no regression is not one.
+**It has been run, and it found four regressions.** `target/bench/step5-ab.py`,
+five rounds, alternating the two builds inside each round, `prefetch=0`, against
+`vs_imageseqs-nohooks.dll`. The per-round ratio is what decides, because the
+best-of column alone hides drift:
+
+| format | per-round after/before | reading |
+| --- | --- | --- |
+| `bmp` | 0.61 0.55 0.66 0.55 0.71 | **faster**, every round |
+| `ff` | 0.44 0.33 0.44 0.41 0.38 | **faster**, every round |
+| `ico` | 0.54 0.41 0.46 0.44 0.43 | **faster**, every round |
+| `qoi` | 0.70 0.70 0.63 0.74 0.97 | **faster**, four of five |
+| `tiff` | 1.09 1.04 0.88 1.01 0.93 | unchanged |
+| `exr` | 0.94 0.99 1.34 0.98 1.31 | unchanged, wide |
+| `dds` | 1.57 1.36 1.20 1.18 1.14 | **slower**, every round |
+| `hdr` | 1.41 1.71 1.29 1.35 1.47 | **slower**, every round |
+| `ppm` | 1.00 1.23 1.46 1.84 1.10 | **slower**, four of five |
+| `tga` | 2.04 1.28 1.14 1.46 1.11 | **slower**, every round |
+
+Four of the nine ports are about **1.2x to 1.3x slower** than the reader they
+replaced, and the goal's own rule is that a regression is investigated and
+fixed rather than noted. The four are `dds`, `hdr`, `ppm` and `tga`; the other
+five are faster or unchanged, so this is not one systemic mistake but something
+the four have in common.
+
+What they have in common, from their own code: each allocates per row or per
+block where the reader it replaces writes into a buffer it was handed, and
+`hdr` and `dds` additionally build an intermediate `Vec` per scanline or per
+block. The fix is to write the picture into one buffer allocated once and to
+keep the per-row work in that buffer, which is the shape `png.rs` already uses.
+That is the next action, and this corpus and this harness are what will say
+whether it worked.
 Step 6, removing the crate, still waits for all of these plus plan 28's
 fallback cases.
 
