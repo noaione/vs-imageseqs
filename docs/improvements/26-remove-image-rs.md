@@ -355,8 +355,29 @@ clips are byte-identical to the build before each, across the whole fixture
 set, and no changelog entry was written because nothing a user can see moved.
 
 What is left, in plan 27's order, with the fixtures each still needs:
-- ico and bmp — **no fixtures**; the plan warns the research corpus was
-  synthetic and nothing committed exercises a palette or an RLE bitmap.
+- **ico and bmp** — fixtures **landed** in `2bd0edc`, the port still to do.
+  Sixteen files from [`tests/make-bmp-ico-fixtures.py`](../../tests/make-bmp-ico-fixtures.py),
+  and the fixture work found three things worth recording:
+
+  - **`magick` cannot write the BMP fixtures.** Its BMP encoder ignores
+    `-depth` and `-compress`: `-depth 1`, `-depth 4` and `-depth 8` each wrote an
+    eight bit `BI_RLE8` bitmap, `-depth 16` wrote a thirty-two bit one, and a
+    `-flip` turned the `-depth 24` recipe into a bitfields file. The first pass
+    silently produced four copies of one file under four names. Every BMP header
+    is written out field by field here instead, and the script's own docstring
+    says so.
+  - **The research corpus has no PNG-payload icon.** Its `png-payload.ico`
+    holds a bare DIB -- the directory entry points at DIB bytes, not at a PNG
+    signature -- so the PNG arm of the ICO payload sniffer was never exercised.
+    `ico-png.ico` is written by hand and is the file that exercises it.
+  - **The baseline confirms every parity rule empirically.** Read against the
+    build before the port, the four thirty-two bit cases split exactly as the
+    plan says: `bmp-rgb32` (BI_RGB, V3) and `bmp-rgb32-v5` (BI_RGB, V5) both
+    report `Rgb8` with an opaque alpha clip, so the fourth byte is dropped in
+    both; `bmp-bitfields32-noalpha` (alpha mask zero) is `Rgb8` too, while
+    `bmp-bitfields32` (mask `0xFF000000`) is `Rgba8` with real alpha. The two
+    no-alpha files share one identical alpha hash, which is what makes the rule
+    a measurement rather than an assertion.
 - tga — **no fixtures**.
 - dds — `alpha-dds.dds` exists.
 - pnm — `gray.pgm` and `rgb.ppm` exist.
