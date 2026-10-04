@@ -139,6 +139,7 @@ pub struct Sequence {
 ///
 /// Returns [`ImgSeqError`] when the file holds a movie box that cannot be read.
 pub fn read(path: &Path) -> Result<Option<Sequence>> {
+    crate::animation::count_timeline_read();
     let mut file = File::open(path).map_err(|error| image_error("open", path, error))?;
     let length = file
         .seek(SeekFrom::End(0))

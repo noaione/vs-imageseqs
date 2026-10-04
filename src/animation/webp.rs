@@ -518,6 +518,7 @@ pub fn walk(path: &Path) -> Result<Option<Animation>> {
 /// to read -- answers `true`, which leaves the refusal to [`walk`], the same walk
 /// that made it before this check existed.
 fn header_states_animation(path: &Path) -> Result<bool> {
+    crate::animation::count_timeline_read();
     let mut file = File::open(path).map_err(|error| image_error("open", path, error))?;
     let mut riff = [0; 12];
     let mut header = [0; CHUNK_HEADER];

@@ -669,6 +669,75 @@ mod tests {
         assert_eq!(segment.info.route, Some(Format::Png));
     }
 
+    /// The routing head read is one for an animated file too: the timeline
+    /// decision reuses the route the probe saved, exactly as a still's does.
+    ///
+    /// What this does **not** count is the front a format reads for itself to
+    /// find a timeline -- `apng`'s chunk walk, `webp`'s RIFF window -- because
+    /// those do not go through `identify::head_of`. Those are what a shared
+    /// probe reader would unify, so they need a measure of their own before
+    /// that slice starts, and this test records the half that is already one.
+    #[test]
+    fn an_animation_probe_reads_the_routing_head_once() {
+        use crate::formats::identify;
+
+        for name in ["animation.png", "animation.gif", "animation.webp"] {
+            let path = fixture(name);
+            identify::reset_head_reads();
+            let segment = probe_segment(&path, Rate::from_fps(24, 1), true, false)
+                .expect("the fixture probes");
+            assert!(segment.animated, "{name}");
+            assert_eq!(identify::head_reads(), 1, "{name}: the routing head read");
+        }
+    }
+
+    /// A probe of an animated file opens it once more for itself, and that one
+    /// open is what the shared probe reader would remove.
+    ///
+    /// Beside the routing head read -- already pinned as one by
+    /// [`an_animation_probe_reads_the_routing_head_once`] -- this is the number a
+    /// format spends finding a timeline: `apng`'s chunk walk, `gif`'s scan,
+    /// `webp`'s RIFF window and the avif/heif sequence walk each open the file for
+    /// itself, so each costs one. A jpeg xl is the control that already spends
+    /// none, because its animation adapter answers from the codestream header its
+    /// own probe read.
+    ///
+    /// The counts were measured by running this loop, not predicted:
+    /// `png`/`gif`/`webp`/`avif`/`heic` one each, `jxl` none. A future slice that
+    /// gives those four a shared reader moves them to the `jxl` line, and this
+    /// test is what says so.
+    #[test]
+    fn an_animation_probe_reads_the_front_of_the_file_once_for_its_timeline() {
+        use crate::animation;
+
+        let spends = [
+            ("animation.png", 1usize),
+            ("animation-rgba16.png", 1),
+            ("animation.gif", 1),
+            ("animation.webp", 1),
+            ("animation.avif", 1),
+            ("animation.heic", 1),
+            ("animation.jxl", 0),
+        ];
+
+        for (name, expected) in spends {
+            let path = fixture(name);
+            animation::reset_timeline_reads();
+            let segment = probe_segment(&path, Rate::from_fps(24, 1), true, false)
+                .expect("the fixture probes");
+            assert!(segment.animated, "{name}: the fixture is an animation");
+            assert!(
+                !segment.presentations.is_empty(),
+                "{name}: has presentations"
+            );
+            assert_eq!(
+                animation::timeline_reads(),
+                expected,
+                "{name}: front reads a format spends finding a timeline"
+            );
+        }
+    }
+
     /// The decode reads the route the probe saved instead of the head again.
     #[test]
     fn a_decode_reads_the_head_none() {

@@ -68,6 +68,7 @@ struct Timing {
 /// Returns [`ImgSeqError`] when the file cannot be read or its stream is
 /// malformed.
 fn timings(path: &Path) -> Result<Vec<Timing>> {
+    crate::animation::count_timeline_read();
     let file = File::open(path).map_err(|error| image_error("open", path, error))?;
     let mut options = DecodeOptions::new();
     options.set_color_output(ColorOutput::RGBA);

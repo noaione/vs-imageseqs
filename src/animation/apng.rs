@@ -126,6 +126,7 @@ pub fn segment_info(
 /// Returns [`ImgSeqError`] when the file cannot be read or states fewer frames
 /// than that chunk counted.
 fn timing(path: &Path, expected: usize) -> Result<(Rate, Vec<Presentation>)> {
+    crate::animation::count_timeline_read();
     let mut file = File::open(path).map_err(|error| image_error("open", path, error))?;
     let length = file
         .seek(SeekFrom::End(0))
