@@ -1287,6 +1287,30 @@ the same properties as its source. `ImgSeqPath` is excluded, because a renamed
 file's path differs by construction and is not a routing fact -- including it made
 the first run report 51 phantom property failures.
 
+### the routing check, committed
+
+`tests/routing.py` is plan 34 phase 1's acceptance check, moved out of the
+scratch tooling so that the criterion is a committed artifact rather than a script
+under `target/`. It makes its own copies from `tests/fixtures/` -- one source per
+distinct extension, each under `.bmp`, `.jpg`, `.dat` and its own uppercased
+extension -- and requires every copy to decode to the same bytes, the same alpha
+and the same properties as its source. `ImgSeqPath` is excluded, because a renamed
+file's path differs by construction and is not a routing fact.
+
+It reports **59 of 84 wrong** and is expected to reach 0 when `describe` and
+`format_decoder` consult `src/formats/identify.rs` instead of the extension. It
+exits non-zero on a failure and aborts if the plugin cannot be loaded, so it
+cannot pass by measuring nothing -- which is the mistake its first version made
+when it was pointed at the plan's research set and skipped every group whose
+original was missing.
+
+The wiring is wider than it looks and is the next slice. `describe` and
+`format_decoder` both gate through each module's `owns(path)`, and that gate is
+called *inside* `image_info` and `decode`, so the identification has to reach them
+through either a new parameter on fifteen functions or a read inside `owns`
+itself. The plan's phase 3 asks for one open per operation, so the parameter is
+the shape that will survive; doing it as a read inside `owns` would be correct but
+would open the file once per format check.
 ### the identification table, landed before its wiring
 
 `src/formats/identify.rs` is the strong half of the plan's rule. It reads sixteen

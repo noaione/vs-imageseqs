@@ -264,6 +264,13 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   fixtures all state the same four 80/170/110/240 ms pictures over a 16x12
   canvas, and the heic fixture holds four equal 150 ms samples because `heif-enc`
   accepts one duration for a whole sequence.
+- `tests/routing.py`: the phase 1 acceptance check for plan 34. It copies one
+  fixture per format under a wrong extension and under an uppercase one and
+  requires every copy to decode to the same bytes, alpha and properties as its
+  source, so it measures whether a file's *content* decides how it is read rather
+  than its name. It reports 59 of 84 copies wrong while `owns()` is extension-only
+  and is expected to reach 0 when routing consults `src/formats/identify.rs`. It
+  needs a release build and the plugin, like `tests/readalpha.vpy`.
 - `tests/check-packaging-tools.py`: the checks for `tools/`, run with any Python
   3.12 or later. it builds its own tree under `target/check-packaging-tools`, so
   it needs no wheel and no network; `IMGSEQS_CHECK_TMP` moves that tree, and a
