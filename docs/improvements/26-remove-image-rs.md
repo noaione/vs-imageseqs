@@ -423,7 +423,12 @@ What is left, in plan 27's order, with the fixtures each still needs:
   5-to-8 bit expansion" is that difference, and reusing `bmp::expand` would have
   been wrong -- as the author of this note found out by writing the
   round-to-nearest table into the test that exists to tell the two apart.
-- **pnm** — fixtures **landed** in `1bb56df`, the port still to do. Sixteen files from
+- **pnm** — **done**. Fixtures in `1bb56df`, the port in `6cf86fc`, and `image`'s
+  `pnm` feature is off. Parity is exact everywhere except the wording of one
+  error: 15 of the 16 fixtures are byte-identical in probe facts, colour planes
+  and both clips, and the sixteenth is `pnm-ascii-comment.pgm`, which both
+  readers *refuse* -- only the message differs, and a diagnostic is not a frame.
+  Sixteen files from
   [`tests/make-pnm-fixtures.py`](../../tests/make-pnm-fixtures.py) beside the two the
   validator already had, and the set covers the rule's three parts rather than
   the format as a whole:

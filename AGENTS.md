@@ -157,6 +157,8 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   DirectDraw surfaces, whose DXT1, DXT3 and DXT5 blocks and their DX10
   equivalents are a port, and whose five and six bit channels widen by
   truncating division where the bitmap and targa readers round to nearest,
+  `pnm.rs` for the netpbm family, whose seven subtypes, ASCII and binary rasters
+  and MAXVAL rescale are a port,
   `qoi.rs` for the quite
   ok image, whose fourteen byte header is read without a
   sample and whose decoder is the `qoi` crate's, `farbfeld.rs` for the format

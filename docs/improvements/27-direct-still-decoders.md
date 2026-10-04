@@ -36,7 +36,7 @@ path then reads with its own reader.
 | dds | ported header and DXT | header | the port | `Pixels::Interleaved` | **landed** in [`formats/dds.rs`](../../src/formats/dds.rs); `image`'s `dds` feature is off |
 | farbfeld | written here | header | here | `Pixels::Interleaved` | **landed** in [`formats/farbfeld.rs`](../../src/formats/farbfeld.rs), and `image`'s `ff` feature is off |
 | hdr | written here | header | here | `Pixels::Interleaved` | the candidate gets the exponent and the orientations wrong; the ported decoder is 687 lines, so writing it is the cheaper half |
-| pnm | ported | header | the port | `Pixels::Interleaved` | the candidate has no `decode_into`, no `MAXVAL` rescale and no P1 to P4 |
+| pnm | ported | header | the port | `Pixels::Interleaved` | **landed** in [`formats/pnm.rs`](../../src/formats/pnm.rs); `image`'s `pnm` feature is off |
 | tga | ported | header | the port | `Pixels::Interleaved` | **landed** in [`formats/tga.rs`](../../src/formats/tga.rs); `image`'s `tga` feature is off |
 
 Where the table says *ported*, the decoder inside `image` is the starting
