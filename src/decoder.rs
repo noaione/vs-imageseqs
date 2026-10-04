@@ -1,6 +1,6 @@
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, Once},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -15,15 +15,6 @@ use crate::{
     pixel::{PixelFormat, Transform},
     still,
 };
-
-static DECODER_HOOKS: Once = Once::new();
-
-fn register_decoder_hooks() {
-    DECODER_HOOKS.call_once(|| {
-        libheif_rs::integration::image::register_heif_decoding_hook();
-        libheif_rs::integration::image::register_heic_decoding_hook();
-    });
-}
 
 /// What one decode has to produce.
 ///
@@ -318,7 +309,9 @@ pub const fn orientation_size(transform: Transform, width: u32, height: u32) -> 
 }
 
 fn open_decoder(path: &Path) -> Result<still::Decoder> {
-    register_decoder_hooks();
+    // No hooks are registered here any more. Every container this plugin reads
+    // is read by the module that owns it, and the libheif integration that
+    // taught `image` to read an avif or a heif is gone with them.
     still::Decoder::open(path).map_err(|error| image_error(error.action, path, error.detail))
 }
 

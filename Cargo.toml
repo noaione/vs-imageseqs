@@ -42,7 +42,9 @@ image = { version = "0.25.10", default-features = false, features = [
     "rayon"
 ] }
 libheif-rs = { version = "3.0.0", default-features = false, features = [
-    "image",
+    # `image` is deliberately not enabled: this tree reads every heif and avif
+    # through this crate's own API, and the integration that taught `image` to
+    # read one was the last thing that needed it.
     "v1_23", # target libheif v1.23.x
     "embedded-libheif" # build on linux (v1.23.0)
 ] }

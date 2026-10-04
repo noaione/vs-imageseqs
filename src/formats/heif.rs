@@ -1130,14 +1130,19 @@ mod tests {
     #[test]
     fn an_rgb_container_is_the_picture_the_image_decoder_reads() {
         for name in [
-            // The unrotated ones. The one container with a rotation is checked
-            // by the test below, because the two decoders disagree about where
-            // the rotation is applied and that is not a difference in the
-            // picture.
+            // The avif ones. The one container with a rotation is checked by
+            // the test below, because the two decoders disagree about where the
+            // rotation is applied and that is not a difference in the picture.
+            //
+            // `animation.heic` is not here any more, and cannot be: the `image`
+            // crate reads an avif itself (`avif-native`) but has no heif of its
+            // own, so `register_heic_decoding_hook` was the only thing that let
+            // it read one. That hook is gone, which is the point of the step
+            // that removed it -- there is no second decoder left to compare
+            // against, and the fixture's own test is what covers it now.
             "cicp-rgb8.avif",
             "alpha-rgba8.avif",
             "animation.avif",
-            "animation.heic",
         ] {
             let path = std::path::PathBuf::from("tests/fixtures").join(name);
             let info = describe(&path, true).unwrap_or_else(|| panic!("{name} is described"));

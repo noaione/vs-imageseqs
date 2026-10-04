@@ -239,19 +239,19 @@ const fn image_format(format: Format) -> Option<ImageFormat> {
         Format::Bmp => ImageFormat::Bmp,
         Format::Ico => ImageFormat::Ico,
         Format::Hdr => ImageFormat::Hdr,
-        Format::Avif => ImageFormat::Avif,
         Format::Exr => ImageFormat::OpenExr,
         Format::Qoi => ImageFormat::Qoi,
         Format::Pnm => ImageFormat::Pnm,
         Format::Farbfeld => ImageFormat::Farbfeld,
-        // A heif shares the avif decoder here, and that is not a shortcut: the
-        // crate has no heif format of its own, so every `ftyp` file it was ever
-        // given -- an `avif`, a `heic`, a `hevx` mif1 -- was guessed as avif and
-        // handed to the libheif hooks, which are registered for exactly that
-        // format. A real `.heic` in this tree's own fixtures carries the brand
-        // `hevx`, so this is the arm that keeps it readable.
-        Format::Heif => ImageFormat::Avif,
-        Format::Jxl | Format::Jpeg2000 | Format::Tga | Format::Other => return None,
+        // A file that reaches this function with an avif, a heif, a jxl or a jpeg
+        // 2000 is therefore one no adapter claimed, and it is refused as what it
+        // is rather than handed on: `image` cannot describe any of the four.
+        Format::Jxl
+        | Format::Jpeg2000
+        | Format::Avif
+        | Format::Heif
+        | Format::Tga
+        | Format::Other => return None,
     })
 }
 
