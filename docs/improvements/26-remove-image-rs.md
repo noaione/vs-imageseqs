@@ -344,16 +344,17 @@ landed so far.
   checks that its planes, alpha, source label and colour properties all equal the
   plain file's.
 
-Parity was exact: probe facts, colour planes and both clips are byte-identical
-to the build before it, across the whole fixture set, and no changelog entry was
-written because nothing a user can see moved.
-
-What is left, in plan 27's order, with the fixtures each still needs:
 - **farbfeld** — done. [`src/formats/farbfeld.rs`](../../src/formats/farbfeld.rs): a
   magic and two numbers, then one big-endian `u16` per channel per pixel.
   `image`'s `ff` feature is off. The format has one spelling, so
   `alpha-rgba16.ff` was already the whole surface and no new fixture was
   needed.
+
+Parity was exact for both: probe facts, colour planes and both `ReadAlpha`
+clips are byte-identical to the build before each, across the whole fixture
+set, and no changelog entry was written because nothing a user can see moved.
+
+What is left, in plan 27's order, with the fixtures each still needs:
 - ico and bmp — **no fixtures**; the plan warns the research corpus was
   synthetic and nothing committed exercises a palette or an RLE bitmap.
 - tga — **no fixtures**.
