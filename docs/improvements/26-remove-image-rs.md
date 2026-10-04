@@ -1255,6 +1255,49 @@ ways across these rounds.
 That is the dds budget spent: four attempts, all measured, all reverted, and the
 block arithmetic shown to be equivalent to the reference. Whatever the 12% is, it
 is not in the code this page has looked at.
+## plan 34, phase 1: routing reproduced
+
+`docs/improvements/34-input-routing-and-planar-decode.md` calls for one content
+identification and one saved decoder plan. Before changing dispatch, its problem
+was reproduced in this tree from committed fixtures.
+
+**The cause is that `owns()` is extension-only.** Every format module's is the
+same shape:
+
+```rust
+pub fn owns(path: &Path) -> bool {
+    path.extension()...is_some_and(|e| EXTENSIONS.iter().any(|k| e.eq_ignore_ascii_case(k)))
+}
+```
+
+`format_decoder` checks `handles(info)` for avif, heif, webp, jxl and jp2 -- those
+read content -- and then `owns(&info.path)` for everything else. So ten of the
+fifteen routers pick a backend from the filename alone, and a correct file under a
+wrong name is handed to a decoder that cannot read it.
+
+**The plan's own research set cannot be used to show this.**
+`target/research-routing-p72melmd/` holds 86 files and every one of them is 85
+bytes of bare signature -- the renamed copies were kept and the files they were
+made from were not, so there is nothing to compare a copy against.
+
+`target/bench/routing.py` makes its own copies from `tests/fixtures/` instead, one
+source per distinct extension, each copied under `.bmp`, `.jpg`, `.dat` and its
+own extension uppercased. A copy must decode to the same bytes, the same alpha and
+the same properties as its source. `ImgSeqPath` is excluded, because a renamed
+file's path differs by construction and is not a routing fact -- including it made
+the first run report 51 phantom property failures.
+
+**The baseline is 59 of 84 copies wrong**, and they separate by suffix:
+
+| suffix | failures | what happens |
+| --- | --- | --- |
+| `.jpg` | 21 | the jpeg adapter is chosen by extension and refuses the bytes |
+| `.bmp` | 20 | the bitmap adapter is chosen by extension and refuses them |
+| `.dat` | 17 | nothing claims it, so `image` guesses from the extension and refuses |
+
+Every uppercase case passes, and no property differs, so the check is measuring
+routing and nothing else. The fix is the plan's: identify content once, save the
+route, and let both the probe and the decode read the saved one.
 ### bmp, and the reversal that is not a transpose
 
 A bitmap's rows are the frame's rows, only possibly in the other order: stored
