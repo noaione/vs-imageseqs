@@ -1287,6 +1287,44 @@ the same properties as its source. `ImgSeqPath` is excluded, because a renamed
 file's path differs by construction and is not a routing fact -- including it made
 the first run report 51 phantom property failures.
 
+### the EXR probe and decode pick different layers, and why
+
+Item (2) is diagnosed rather than fixed, because the repair is a design step and
+guessing at it would be the mistake this whole exercise keeps repeating.
+
+**They ask different questions of the same file.**
+
+```rust
+// the probe, exr.rs:178
+let Some(layer) = metadata.headers.iter().find(|header| flat_rgb(header)) else { ... };
+
+// the decode
+read_first_flat_layer_from_file(path)
+```
+
+`read_first_flat_layer_from_file` is `read().no_deep_data().largest_resolution_level()
+.all_channels().first_valid_layer().all_attributes().from_file(path)`, so it takes
+the first layer that is merely *flat*. The probe takes the first that is flat **and
+carries R, G and B**. A file whose first part is Z-only and whose second is r,g,b
+therefore has the probe describe the second and the decode read the first, and the
+decode then fails on the missing `R` channel -- which is exactly the plan's
+reproduction, now explained rather than only observed. It is the same shape as the
+`jxl`/`jp2` bug: two halves of one reader answering one question two ways.
+
+**What the fix needs is not more identification.** Both halves agree on the
+backend; they disagree about which layer *inside* it. The plan calls for a saved
+decoder plan, and this is the case that shows why: the probe's choice has to be
+recorded and reused rather than made a second time. The crate offers the prelude
+reader and a `read()` builder ending in `.first_valid_layer()`, and no
+layer-selecting accessor turned up in a search of its public functions, so the
+shape of the repair is not yet settled -- whether the probe should instead report
+the first flat layer and let the frame be grey, or the decode should walk the
+builder's layers and take the same one the probe took. That is the decision to
+make before writing code, and the plan's `## architecture` section is where to
+settle it.
+
+Reproducing it needs a two-part EXR, which nothing in `tests/fixtures` is: every
+EXR there has one part. Writing one is the first step of the slice.
 ### the tiff adapter was throwing its own metadata away
 
 Plan 34 records a TIFF stating orientation 6 and carrying an ICC profile coming out
