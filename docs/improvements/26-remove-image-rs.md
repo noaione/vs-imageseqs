@@ -908,6 +908,32 @@ keep the per-row work in that buffer, which is the shape `png.rs` already uses.
 That is the next action, and this corpus and this harness are what will say
 whether it worked.
 
+### the probe never promises what a decode refuses
+
+Also checked directly for the first time, rather than read off each slice by hand.
+`target/bench/probe-agreement.py` asks every fixture and the whole step-5 corpus
+the way a caller does -- `Read` probes while the clip is built, `get_frame`
+decodes what the probe accepted -- and counts the files that get a clip and then
+fail on their frame. Those are the violation; a file the probe refuses outright
+is not.
+
+| build | decoded | refused up front | promised then broken |
+| --- | --- | --- | --- |
+| pre-step-5 | 161 | 6 | 2 |
+| this tree | **165** | **2** | 2 |
+
+**The same two files promise and then refuse in both builds**, so step 5 did not
+introduce one: `avif-no-picture.avif` (the item holds no picture) and
+`pnm-ascii-comment.pgm` (a comment in an ASCII raster). Both are **content-level**
+defects -- a legal header over a body that is not -- and a probe cannot find them
+without decoding, which is what probing is for. The rule is about a probe and a
+decoder disagreeing over a file they both own, and for that the count is zero in
+both builds.
+
+The other half of the table is the pleasant part: step 5 took the files this tree
+refuses from 6 to 2, because three HDR orientations and one other now read where
+the crate would not take them.
+
 ### the request-order half of the verification
 
 This page asks that baseline and candidate agree "including both `ReadAlpha` clips
