@@ -37,7 +37,7 @@ path then reads with its own reader.
 | farbfeld | written here | header | here | `Pixels::Interleaved` | **landed** in [`formats/farbfeld.rs`](../../src/formats/farbfeld.rs), and `image`'s `ff` feature is off |
 | hdr | written here | header | here | `Pixels::Interleaved` | the candidate gets the exponent and the orientations wrong; the ported decoder is 687 lines, so writing it is the cheaper half |
 | pnm | ported | header | the port | `Pixels::Interleaved` | the candidate has no `decode_into`, no `MAXVAL` rescale and no P1 to P4 |
-| tga | ported | header | the port | `Pixels::Interleaved` | the plan's own choice was a reader written here; the ported decoder is 456 lines and its header parser 156 |
+| tga | ported | header | the port | `Pixels::Interleaved` | **landed** in [`formats/tga.rs`](../../src/formats/tga.rs); `image`'s `tga` feature is off |
 
 Where the table says *ported*, the decoder inside `image` is the starting
 point and not a licence to copy blindly. Three things make a port the right

@@ -381,7 +381,9 @@ What is left, in plan 27's order, with the fixtures each still needs:
     `bmp-bitfields32` (mask `0xFF000000`) is `Rgba8` with real alpha. The two
     no-alpha files share one identical alpha hash, which is what makes the rule
     a measurement rather than an assertion.
-- **tga** — fixtures **landed** in `490117f`, the port still to do. Twelve files from
+- **tga** — **done**. Fixtures in `490117f`, the port in `fa9ec1d`, and `image`'s
+  `tga` feature is off. Parity is exact: probe facts, colour planes and both clips
+  byte-identical across all twelve fixtures. Twelve files from
   [`tests/make-tga-fixtures.py`](../../tests/make-tga-fixtures.py) covering all six image
   types the format uses in practice (the three raw ones and their three
   run-length forms), the four depths that change the outcome, and the two
