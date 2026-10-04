@@ -657,6 +657,15 @@ the shape to copy:
   builds, alternating inside one batch, per set -- and its own section says a
   run-to-run spread of up to 4% makes a single pair meaningless, so the number
   to read is the ratio over several rounds rather than any one pass.
+- **The corpus is built and verified.** `target/bench/make-step5-corpus.py`
+  writes 80 files, 202 MB, from one `sandbox/png` page in each of the ten moved
+  formats, eight copies each so a run takes seconds. Every one of the ten reads;
+  the formats and what they hand out are `bmp`, `dds`, `tga`, `qoi`, `tiff`,
+  `ppm` as `RGB24`, `hdr` and `exr` as `RGBS`, `ff` as `RGB48` (its samples are
+  words), and `ico` at 256x192 as `RGB24`. Its own writer was wrong first --
+  farbfeld is **always four channels**, so an r,g,b buffer has to be widened
+  with an opaque alpha, and the plugin refused all eight files with "holds
+  6480000 bytes of pixels where the header states 8640000" until it was.
 - The sets that matter here are the ones whose formats moved: `sandbox/png`
   holds no step-5 format and is the control, while the fixtures tree holds
   every one of them. A set of the moved formats at a size worth timing does not
