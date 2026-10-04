@@ -641,6 +641,32 @@ What is left, in plan 27's order, with the fixtures each still needs:
     `tiff-rgba8.tiff` is `RGB24 original=Rgba8` and every EXR RGBA is `RGBS
     original=Rgba32F`, with the alpha in `GrayS` on its own clip.
 
+### the benchmark check this step still owes
+
+Every slice above is a parity migration, so none of them claims a speed
+improvement and **fewer `image` APIs is not evidence of one**. What they owe is
+the opposite check: that nine formats moved off `image` without making the read
+path slower. That has not been run yet, and it is the one item on this list that
+is not a format.
+
+It is a paired A/B against the pre-step-5 build, which is
+`target/bench/vs_imageseqs-nohooks.dll`. `docs/BENCH.md` names the harness and
+the shape to copy:
+
+- `target/bench/ab-sets.py` is the tool the page uses for exactly this -- two
+  builds, alternating inside one batch, per set -- and its own section says a
+  run-to-run spread of up to 4% makes a single pair meaningless, so the number
+  to read is the ratio over several rounds rather than any one pass.
+- The sets that matter here are the ones whose formats moved: `sandbox/png`
+  holds no step-5 format and is the control, while the fixtures tree holds
+  every one of them. A set of the moved formats at a size worth timing does not
+  exist yet and would have to be built, because the committed fixtures are
+  37x23.
+- `frame-parity.py` is the pixel half and has been run: 0 of 245 differ, which
+  is recorded per slice above. The speed half is what is missing.
+
+A clean answer is either "inside the spread" or a ratio with a cause. An
+unmeasured claim of no regression is not one.
 Step 6, removing the crate, still waits for all of these plus plan 28's
 fallback cases.
 
