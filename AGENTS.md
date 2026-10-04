@@ -148,7 +148,9 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   walks straight into the frame instead of buffering the picture whole — which
   includes expanding a palette page's indices itself — and
   `qoi.rs` for the quite ok image, whose fourteen byte header is read without a
-  sample and whose decoder is the `qoi` crate's, and `webp.rs` for the libwebp decode
+  sample and whose decoder is the `qoi` crate's, `farbfeld.rs` for the format
+  that is a magic and a size and nothing else, whose samples are big-endian on
+  disk and native in the frame, and `webp.rs` for the libwebp decode
   and the lossy yuv format). an avif this tree's walk decodes itself is the yuv
   its container states, and everything else is `heif.rs`'s: an r,g,b container,
   a monochrome one, and one the walk refuses. both readers name the same

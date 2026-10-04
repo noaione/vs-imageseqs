@@ -328,8 +328,9 @@ the work is the routing and the expectations rather than a decoder.
 
 ### step 5, the remaining still formats
 
-Started, in `f329f79` for qoi. The order and the per-format decisions are
-[27](27-direct-still-decoders.md)'s; this is what has landed so far.
+Started, in `f329f79` for qoi and `3aedaee` for farbfeld. The order and the
+per-format decisions are [27](27-direct-still-decoders.md)'s; this is what has
+landed so far.
 
 - **qoi** — done. `qoi 0.4.1` was already in the lock behind `image`, so the
   crate was promoted and [`src/formats/qoi.rs`](../../src/formats/qoi.rs) reads
@@ -348,8 +349,11 @@ to the build before it, across the whole fixture set, and no changelog entry was
 written because nothing a user can see moved.
 
 What is left, in plan 27's order, with the fixtures each still needs:
-
-- farbfeld — `alpha-rgba16.ff` exists and is already validated.
+- **farbfeld** — done. [`src/formats/farbfeld.rs`](../../src/formats/farbfeld.rs): a
+  magic and two numbers, then one big-endian `u16` per channel per pixel.
+  `image`'s `ff` feature is off. The format has one spelling, so
+  `alpha-rgba16.ff` was already the whole surface and no new fixture was
+  needed.
 - ico and bmp — **no fixtures**; the plan warns the research corpus was
   synthetic and nothing committed exercises a palette or an RLE bitmap.
 - tga — **no fixtures**.

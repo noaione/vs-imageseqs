@@ -34,7 +34,7 @@ path then reads with its own reader.
 | bmp | image-rs's BMP decoder, ported | header | the port | `Pixels::Interleaved` | no candidate crate passes: `zune-bmp` fails every palette and RLE file in the corpus |
 | ico | ported directory, then the BMP port or `png` | directory | the payload reader | the payload's route | `zune-bmp` has no DIB entry point and answers `probe_bmp=false` on every `.ico` |
 | dds | ported header and DXT | header | the port | `Pixels::Interleaved` | `ddsfile` adds a proc-macro to the build graph and `bcdec_rs` changes samples and panics on a truncated block |
-| farbfeld | written here | header | here | `Pixels::Interleaved` | the candidate's `decode_into` is unusable; the format is 8 bytes of header and BE `u16` rows |
+| farbfeld | written here | header | here | `Pixels::Interleaved` | **landed** in [`formats/farbfeld.rs`](../../src/formats/farbfeld.rs), and `image`'s `ff` feature is off |
 | hdr | written here | header | here | `Pixels::Interleaved` | the candidate gets the exponent and the orientations wrong; the ported decoder is 687 lines, so writing it is the cheaper half |
 | pnm | ported | header | the port | `Pixels::Interleaved` | the candidate has no `decode_into`, no `MAXVAL` rescale and no P1 to P4 |
 | tga | ported | header | the port | `Pixels::Interleaved` | the plan's own choice was a reader written here; the ported decoder is 456 lines and its header parser 156 |
@@ -166,10 +166,16 @@ dependency changes, which wait for the module shape to settle.
    three channel file, a four channel one with varying alpha, and one whose
    colours flag is set, which exists only to pin that the flag stays informative
    and never becomes a `_Transfer` property.
-3. **farbfeld, written here** — 50 to 80 lines, one format, no dependency,
-   and the smallest module that exercises a ported reader's shape
-   ([`decoder::RowStream`](../../src/decoder.rs) or
-   `Pixels::Interleaved`).
+3. **farbfeld, written here** — **done**, in `3aedaee`
+   ([`src/formats/farbfeld.rs`](../../src/formats/farbfeld.rs)). It is a magic and two
+   numbers, then one big-endian `u16` per channel per pixel, and the whole
+   reader is a header function and a decode. Two things are the only ways it
+   can go wrong, and both are pinned: the samples are big-endian on disk and
+   native in memory, because a frame is written from a `u16` cast; and every
+   farbfeld is four channels, so every file is `Rgba16` with an alpha plane
+   whatever its samples hold. `image`'s `ff` feature is off, so the crate no
+   longer reads one. No new fixture was needed: the format has one spelling,
+   so the existing `alpha-rgba16.ff` is the whole surface.
 4. **ico and bmp, porting both together** — the ICO directory is 383 lines
    and the BMP decoder it needs is 1399, the largest of the set; the DIB path
    lives in the BMP file, so the two land as one slice. Port the accepted
