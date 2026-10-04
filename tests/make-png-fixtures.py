@@ -31,7 +31,17 @@ HEIGHT = 23
 
 
 def magick(*args: str) -> None:
-    subprocess.run(["magick", *args], check=True)
+    # The encoder stamps a `tIME` chunk and a date `tEXt` into every png it writes,
+    # so the same command twice does not produce the same bytes: the picture is
+    # identical and the file is not. Both are excluded, which is what lets a run
+    # of this script be re-derived by whoever gets the tree next.
+    #
+    # The settings go before the output path because ImageMagick applies them in
+    # order, and the last argument is always the file being written.
+    subprocess.run(
+        ["magick", *args[:-1], "-define", "png:exclude-chunk=date,time", args[-1]],
+        check=True,
+    )
 
 
 def source(name: str, depth: int = 8) -> str:
