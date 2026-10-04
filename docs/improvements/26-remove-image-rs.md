@@ -540,7 +540,33 @@ What is left, in plan 27's order, with the fixtures each still needs:
   create decoder`), and both refuse it before a frame is promised. The five bugs
   the attempts found are listed below and each is a real trap rather than a typo.
 
-- **exr** — fixtures **landed** in `2205e87`, the module still to do.
+- **exr** — fixtures **landed** in `2205e87`, the module still to do. The crate's
+  API is researched, so the next attempt starts from a shape rather than a
+  search:
+
+  - **`read_first_rgba_layer_from_file` is the wrong door.** It takes two
+    closures and returns a `PixelImage<Pixels, RgbaChannels>`, which is for a
+    caller that wants the crate to drive a pixel store. What this module wants is
+    the samples, and
+    **`exr::prelude::read_first_flat_layer_from_file(path)`** hands them over
+    directly as `Image<Layer<AnyChannels<FlatSamples>>>`.
+  - **The data is already one flat vector per channel**, which is the shape a
+    planar decode wants: `AnyChannels::list` is a list of `Channel<FlatSamples>`,
+    each with a `name: Text` and a `FlatSamples` that is
+    `F16(Vec<f16>) | F32(Vec<f32>) | U32(Vec<u32>)`. So the channels are selected
+    by name -- `R`, `G`, `B`, and `A` when the file has one -- rather than by
+    position, and a file with the channels in another order still reads.
+  - **A half sample is `half::f16`** (`half 2.7.1` is already in the lock behind
+    `exr`), and `FlatSamples::values_as_f32` walks either width as `f32` without
+    allocating. The frame is `Rgb32F` whatever the file held, which is the
+    baseline: every EXR fixture reports `RGBS` with `Rgb32F` or `Rgba32F`.
+  - **`Pixels::Interleaved`, not `Pixels::Planar`.** The plan says exr writes
+    planar, and that is true of how the *crate* gives the data, but
+    `Pixels::Planar { planes, alpha }` is the yuv shape `webp.rs` builds and its
+    planes are byte planes of a subsampled frame. An EXR frame is interleaved
+    float `Rgb32F` and is exactly the shape `hdr.rs` already hands over as
+    `Pixels::Interleaved`, so that arm is both the proven one and the correct
+    one. Interleaving three float channels is a copy per sample, not a transpose.
   Eight EXR files and thirteen TIFF files from
   [`tests/make-tiff-exr-fixtures.py`](../../tests/make-tiff-exr-fixtures.py).
   Every EXR reads (`RGBS` with `original=Rgb32F` or `Rgba32F`) across all five
