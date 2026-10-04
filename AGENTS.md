@@ -147,7 +147,11 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   chunk, which `image` has no accessor for, and for the png files whose rows it
   walks straight into the frame instead of buffering the picture whole — which
   includes expanding a palette page's indices itself — and
-  `qoi.rs` for the quite ok image, whose fourteen byte header is read without a
+  `bmp.rs` for Windows bitmaps, whose palette, run-length and bitfield paths are a
+  port of the `image` reader and whose alpha rule is the format's rather than the
+  obvious one, `ico.rs` for Windows icons, which picks a directory entry and hands
+  its payload to `bmp.rs` or to the `png` crate, `qoi.rs` for the quite ok image,
+  whose fourteen byte header is read without a
   sample and whose decoder is the `qoi` crate's, `farbfeld.rs` for the format
   that is a magic and a size and nothing else, whose samples are big-endian on
   disk and native in the frame, and `webp.rs` for the libwebp decode

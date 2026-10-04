@@ -355,9 +355,12 @@ clips are byte-identical to the build before each, across the whole fixture
 set, and no changelog entry was written because nothing a user can see moved.
 
 What is left, in plan 27's order, with the fixtures each still needs:
-- **ico and bmp** — fixtures **landed** in `2bd0edc`, the port still to do.
-  Sixteen files from [`tests/make-bmp-ico-fixtures.py`](../../tests/make-bmp-ico-fixtures.py),
-  and the fixture work found three things worth recording:
+- **bmp and ico** — **done**. Fixtures in `2bd0edc`, the ports in `6603a6d` (bmp) and
+  `6a7a246` (ico), and `image`'s `bmp` and `ico` features are both off. Parity is
+  exact: probe facts, colour planes and both `ReadAlpha` clips are byte-identical
+  across all thirteen `bmp-*` and all three `ico-*` fixtures. The fixture work
+  found three things worth recording:
+  Sixteen files from [`tests/make-bmp-ico-fixtures.py`](../../tests/make-bmp-ico-fixtures.py).
 
   - **`magick` cannot write the BMP fixtures.** Its BMP encoder ignores
     `-depth` and `-compress`: `-depth 1`, `-depth 4` and `-depth 8` each wrote an

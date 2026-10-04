@@ -31,8 +31,8 @@ path then reads with its own reader.
 | tiff | `tiff 0.11.3` | `Decoder::new`, `dimensions`, `colortype`, tags | `read_image_to_buffer`, or `read_image_bytes` per chunk | `Pixels::Interleaved`, one pass | promote the crate from `image`'s adapter to a direct dependency |
 | exr | `exr 1.74.2` | header read, no pixels | `SpecificChannels` for the channels a frame has | `Pixels::Planar` | promote the crate to a direct dependency |
 | qoi | `qoi 0.4.1` | `decode_header`, 14 bytes | `Decoder::decode_to_buf` | `Pixels::Interleaved` | **landed** in [`formats/qoi.rs`](../../src/formats/qoi.rs), and `image`'s qoi feature is off |
-| bmp | image-rs's BMP decoder, ported | header | the port | `Pixels::Interleaved` | no candidate crate passes: `zune-bmp` fails every palette and RLE file in the corpus |
-| ico | ported directory, then the BMP port or `png` | directory | the payload reader | the payload's route | `zune-bmp` has no DIB entry point and answers `probe_bmp=false` on every `.ico` |
+| bmp | image-rs's BMP decoder, ported | header | the port | `Pixels::Interleaved` | **landed** in [`formats/bmp.rs`](../../src/formats/bmp.rs); `image`'s `bmp` feature is off |
+| ico | ported directory, then the BMP port or `png` | directory | the payload reader | the payload's route | **landed** in [`formats/ico.rs`](../../src/formats/ico.rs); `image`'s `ico` feature is off |
 | dds | ported header and DXT | header | the port | `Pixels::Interleaved` | `ddsfile` adds a proc-macro to the build graph and `bcdec_rs` changes samples and panics on a truncated block |
 | farbfeld | written here | header | here | `Pixels::Interleaved` | **landed** in [`formats/farbfeld.rs`](../../src/formats/farbfeld.rs), and `image`'s `ff` feature is off |
 | hdr | written here | header | here | `Pixels::Interleaved` | the candidate gets the exponent and the orientations wrong; the ported decoder is 687 lines, so writing it is the cheaper half |
