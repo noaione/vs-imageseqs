@@ -572,16 +572,21 @@ What is left, in plan 27's order, with the fixtures each still needs:
        `tiff-rgba8.tiff` then failed with "the frame holds 4 byte samples, but
        the decoder returned 1 byte samples". `Rgba8` is `Rgb8`, `Rgba16` is
        `Rgb16` and only `Rgba32F` is `Rgb32F`.
-    3. **`DecodingResult` is not the only arm to match.** The refusal for a
-       short read reported the sample count before it reported the type, and
-       `tiff-planar.tiff` is the case: the crate documents that `read_image`
-       "will currently only read the first sample's plane" and that it "will be
-       fixed in a future major version", so a planar file comes back as one
-       plane of three channels -- 851 samples where 2553 belong. Whatever
-       replaces `read_image` has to be the plane aware reader; the sample count
-       check is the guard that stops a wrong picture being handed out in the
-       meantime.
-    6. **A palette page is refused at *identify*, not at decode**, which keeps
+    3. **`read_image` reads one plane, and `read_image_to_buffer` fixes the
+       count and not the layout.** The crate documents that `read_image` "will
+       currently only read the first sample's plane" and calls
+       `result_extent_for_planes(0..1)` to do it: `tiff-planar.tiff` came back as
+       851 samples where 2553 belong. The plane aware call is necessary and **not
+       sufficient** -- it returned all 2553 and then wrote them out as if they
+       were interleaved, and the raster is three planes laid end to end, so the
+       picture had the right size and the wrong colours. It returns a
+       `BufferLayoutPreference`, which is the instruction the second attempt
+       ignored: a third should read the file, check that preference, and
+       reorder the planes itself when it says `Planar`.
+    4. **The sample count guard is worth keeping even after that**, because
+       `read_image_to_buffer` falls back to one plane when the file's own size
+       exceeds the decoder's buffer limit.
+    5. **A palette page is refused at *identify*, not at decode**, which keeps
        the probe from promising a frame the decode would refuse. That part
        worked.
 
