@@ -82,6 +82,7 @@ pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<ImageInfo> {
 
     Ok(ImageInfo {
         route: None,
+        subimage: None,
         path: path.to_path_buf(),
         width: header.width,
         height: header.height,

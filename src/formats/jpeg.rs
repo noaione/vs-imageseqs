@@ -219,6 +219,7 @@ fn too_wide(path: &Path) -> ImgSeqError {
 fn info(path: &Path, header: &Header, apply_rotation: bool) -> ImageInfo {
     ImageInfo {
         route: None,
+        subimage: None,
         path: path.to_path_buf(),
         width: header.width,
         height: header.height,

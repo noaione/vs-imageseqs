@@ -125,6 +125,12 @@ pub struct ImageInfo {
     /// timeline decision and the decode reuse it instead of reading the head
     /// again. It is `None` for an `ImageInfo` that no probe built.
     pub route: Option<Format>,
+    /// The subimage the probe selected, in whatever namespace the format uses
+    /// for one -- an icon's directory index, say. Kept for the same reason as
+    /// [`Self::route`]: a decode of this `ImageInfo` reads the subimage the
+    /// probe described rather than scoring the container again. It is `None`
+    /// for an `ImageInfo` that no probe built, which selects one itself.
+    pub subimage: Option<usize>,
 }
 
 impl ImageInfo {

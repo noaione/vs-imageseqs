@@ -955,6 +955,7 @@ pub fn image_info(
     let header = header(&data, 0, true).map_err(|error| image_error("identify", path, error))?;
     Ok(Some(ImageInfo {
         route: None,
+        subimage: None,
         path: path.to_path_buf(),
         width: header.width,
         height: header.height,

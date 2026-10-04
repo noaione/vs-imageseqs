@@ -344,6 +344,7 @@ pub fn image_info(
         .unwrap_or(Orientation::NoTransforms);
     Ok(Some(ImageInfo {
         route: None,
+        subimage: None,
         path: path.to_path_buf(),
         width: header.width,
         height: header.height,
@@ -805,6 +806,7 @@ mod tests {
     fn info(path: &Path, color_type: ColorType, width: u32, height: u32) -> ImageInfo {
         ImageInfo {
             route: None,
+            subimage: None,
             path: path.to_path_buf(),
             width,
             height,

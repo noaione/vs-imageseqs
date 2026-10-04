@@ -99,6 +99,7 @@ pub fn describe(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
         crate::formats::avif::container_orientation(path).unwrap_or(Orientation::NoTransforms);
     Some(ImageInfo {
         route: None,
+        subimage: None,
         path: path.to_path_buf(),
         width: header.width,
         height: header.height,
@@ -646,6 +647,7 @@ mod tests {
     ) -> ImageInfo {
         ImageInfo {
             route: None,
+            subimage: None,
             path: PathBuf::from(path),
             width,
             height,

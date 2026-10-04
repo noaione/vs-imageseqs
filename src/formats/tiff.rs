@@ -718,6 +718,7 @@ pub fn image_info(
 
     Ok(Some(ImageInfo {
         route: None,
+        subimage: None,
         path: path.to_path_buf(),
         width,
         height,

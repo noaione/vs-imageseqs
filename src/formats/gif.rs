@@ -68,6 +68,7 @@ pub fn image_info(
     let profile = icc_profile.map(Arc::<[u8]>::from);
     Ok(Some(ImageInfo {
         route: None,
+        subimage: None,
         path: path.to_path_buf(),
         width,
         height,

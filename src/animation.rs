@@ -652,6 +652,7 @@ mod tests {
     fn info(name: &str) -> ImageInfo {
         ImageInfo {
             route: None,
+            subimage: None,
             path: PathBuf::from(name),
             width: 4,
             height: 4,

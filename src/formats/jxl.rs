@@ -340,6 +340,7 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
     let header = Header::read(&opened.decoder, path)?;
     Ok(ImageInfo {
         route: None,
+        subimage: None,
         path: path.to_path_buf(),
         width: header.width,
         height: header.height,

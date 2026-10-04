@@ -123,6 +123,7 @@ pub fn image_info(
     let header = Header::read(&data, path)?;
     Ok(Some(ImageInfo {
         route: None,
+        subimage: None,
         path: path.to_path_buf(),
         width: header.width,
         height: header.height,

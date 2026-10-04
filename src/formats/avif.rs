@@ -138,6 +138,7 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
     let color_type = header.colour_color_type(has_alpha);
     Some(ImageInfo {
         route: None,
+        subimage: None,
         path: path.to_path_buf(),
         width,
         height,
@@ -1652,6 +1653,7 @@ mod tests {
     fn info(path: &str, format: PixelFormat, color_type: ColorType) -> ImageInfo {
         ImageInfo {
             route: None,
+            subimage: None,
             path: PathBuf::from(path),
             width: 64,
             height: 48,

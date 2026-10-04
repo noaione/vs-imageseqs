@@ -173,6 +173,23 @@ pub fn best_entry(entries: &[Entry]) -> Result<Entry> {
     Ok(best)
 }
 
+/// The index of the entry [`best_entry`] selects.
+///
+/// A caller that has to remember which subimage it described wants the index
+/// rather than the entry: the search keeps the *later* entry on a tie, so this
+/// is the last one that matches rather than the first.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the directory is empty.
+pub fn best_index(entries: &[Entry]) -> Result<usize> {
+    let best = best_entry(entries)?;
+    Ok(entries
+        .iter()
+        .rposition(|candidate| *candidate == best)
+        .unwrap_or(0))
+}
+
 /// The payload of `entry`, checked against the file.
 fn payload<'a>(data: &'a [u8], entry: Entry, path: &Path) -> Result<&'a [u8]> {
     let start = entry.offset as usize;
@@ -216,7 +233,8 @@ pub fn image_info(
         return Ok(None);
     }
     let entries = entries(&data).map_err(|error| image_error("identify", path, error))?;
-    let entry = best_entry(&entries).map_err(|error| image_error("identify", path, error))?;
+    let index = best_index(&entries).map_err(|error| image_error("identify", path, error))?;
+    let entry = entries[index];
     let payload = payload(&data, entry, path)?;
 
     // The payload decides the size, not the directory: a directory entry stores
@@ -242,6 +260,7 @@ pub fn image_info(
 
     Ok(Some(ImageInfo {
         route: None,
+        subimage: Some(index),
         path: path.to_path_buf(),
         width,
         height,
@@ -286,7 +305,16 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     let open = open_started.elapsed();
 
     let entries = entries(&data).map_err(|error| image_error("decode", &info.path, error))?;
-    let entry = best_entry(&entries).map_err(|error| image_error("decode", &info.path, error))?;
+    // The probe recorded which entry it described, so a decode of that
+    // `ImageInfo` reads the same payload rather than scoring the directory
+    // again; an `ImageInfo` built by hand has none and selects one here.
+    let index = match info.subimage {
+        Some(index) => index,
+        None => best_index(&entries).map_err(|error| image_error("decode", &info.path, error))?,
+    };
+    let entry = *entries
+        .get(index)
+        .ok_or_else(|| image_error("decode", &info.path, "the selected entry is out of range"))?;
     let payload = payload(&data, entry, &info.path)?;
 
     let read_started = std::time::Instant::now();
@@ -392,6 +420,44 @@ mod tests {
             .join("tests")
             .join("fixtures")
             .join(name)
+    }
+
+    /// The probe records the entry it described, and a decode of that
+    /// `ImageInfo` reads *that* entry rather than scoring the directory again.
+    /// An `ImageInfo` built by hand has none and selects one itself, to the
+    /// same picture.
+    #[test]
+    fn the_probe_records_the_entry_its_decode_reads() {
+        let path = fixture("ico-multi.ico");
+        let data = std::fs::read(&path).expect("the fixture is read");
+        let index = best_index(&entries(&data).expect("read")).expect("selected");
+        let info = image_info(&path, true, None)
+            .expect("read")
+            .expect("taken over");
+        assert_eq!(info.subimage, Some(index));
+
+        // An index the directory does not hold is refused rather than silently
+        // replaced, which is what says the decode reads the saved one at all.
+        let mut wrong = image_info(&path, true, None)
+            .expect("read")
+            .expect("taken over");
+        wrong.subimage = Some(entries(&data).expect("read").len());
+        let error = decode(&wrong).expect_err("an entry that is not there is refused");
+        assert!(error.to_string().contains("out of range"), "{error}");
+
+        // An `ImageInfo` no probe built selects one, and reaches the same pixels.
+        let mut hand_built = image_info(&path, true, None)
+            .expect("read")
+            .expect("taken over");
+        hand_built.subimage = None;
+        let from_probe = decode(&info).expect("decodes");
+        let from_hand = decode(&hand_built).expect("decodes");
+        let (Pixels::Interleaved { buffer: one, .. }, Pixels::Interleaved { buffer: other, .. }) =
+            (from_probe.pixels, from_hand.pixels)
+        else {
+            panic!("an icon decodes to one interleaved buffer");
+        };
+        assert_eq!(one, other);
     }
 
     /// The committed fixtures, and the entry each one selects. The multi-entry
