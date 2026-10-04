@@ -984,7 +984,33 @@ instead. So there is no traversal to remove here, which is exactly why `hdr` and
 `tga` were fixable and this is not: **their gap was memory and this one is
 arithmetic.**
 
-Closing it means making the block arithmetic faster, which means comparing this
+**The comparison was made, and the answer is not the arithmetic.** `image`'s DXT
+decoder is `src/codecs/dxt.rs`, and its `read_image` is
+
+```rust
+for chunk in buf.chunks_mut(self.scanline_bytes().max(1) as usize) {
+    self.read_scanline(chunk)?;
+}
+```
+
+-- **it decodes straight into the buffer the caller hands it.** This tree's `dds.rs`
+returns a `Vec<u8>` of the whole picture from `blocks()` and hands it back as
+`Pixels::Interleaved`, which means the plugin then copies those 4.3 MB into the
+frame. That is a whole extra traversal of the picture, which is the same shape as
+the two fixes that worked: `hdr`'s three buffers and `tga`'s redundant copy.
+
+So `blocks` at 3.94 ms is not proof that the block arithmetic is the cost -- it is
+the cost of *building a buffer*, which the other decoder does not do.
+
+The mechanism to remove it is already in this tree and documented for exactly
+this: [`decoder::RowStream`], "a decode that hands each row to the frame it
+belongs in and therefore has no buffer of its own". `png.rs` uses it. A dds
+`RowStream` decodes a row of blocks per call and writes that row, and the 4.3 MB
+intermediate disappears. That is the next step for this format, and it is a
+change of the kind that has worked twice rather than a fifth attempt at arranging
+the same traversal.
+
+Closing it by making the block arithmetic faster would mean comparing this
 `dxt5_block` against the one in `image` line by line -- `image`'s is still in the
 vendored source and is the thing being 1.12x faster. That is a real task rather
 than another edit, and it is the right next step rather than a fifth guess at the
