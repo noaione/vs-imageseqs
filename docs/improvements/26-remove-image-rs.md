@@ -1221,6 +1221,40 @@ vendored source and is the thing being 1.12x faster. That is a real task rather
 than another edit, and it is the right next step rather than a fifth guess at the
 same shape.
 
+**The third attempt: copy whole lines instead of pixels. Also worse.** `image`'s
+`dxt.rs` writes a decoded block with four copies of a whole line
+(`dest[offset..offset + 16].copy_from_slice(&decoded_block[line * 16..])`) where
+this tree did sixteen copies of four bytes, and that was the one structural
+difference left once the arithmetic had been compared line by line -- `widen`,
+`from_565`, `colour_block` and `alpha_levels` are already the same algorithm. The
+block decoders were made to return flat arrays (48 bytes and 64) so a line is
+contiguous, and `blocks` copies twelve or sixteen bytes at a time. Pixels
+byte-identical, and **57.7 against 55.3** -- worse again, so it was reverted.
+Four bytes at a time was already what the compiler wanted.
+
+**The measurement itself was the thing to fix, and doing so changes the answer.**
+Every figure above comes from seven or so repetitions compared as *medians*,
+which is not the same as comparing the two builds on the same run: this
+machine's throughput drifts enough that the pre-step-5 build measured 51.5,
+52.1, 55.4, 60.7 and 52.5 across these rounds while this tree measured 57.5,
+63.9, 60.7, 55.3 and 60.7. Interleaving the two builds inside each repetition
+and comparing the *paired* ratio is the measurement that settles it:
+
+| | median | min | max |
+| --- | --- | --- | --- |
+| pre-step-5 | 52.5 | 49.8 | 68.4 |
+| this tree | 60.7 | 54.9 | 66.5 |
+
+Fifteen interleaved pairs give a **median ratio of 1.124**, and this tree is
+faster in only 3 of the 15. So the regression is real and about 1.12x -- not the
+artifact `ppm` turned out to be, and not the 1.23x one unpaired round suggested
+either. The interleaved paired design is what the harness should have used from
+the start, and its absence is why the same question was answered three different
+ways across these rounds.
+
+That is the dds budget spent: four attempts, all measured, all reverted, and the
+block arithmetic shown to be equivalent to the reference. Whatever the 12% is, it
+is not in the code this page has looked at.
 **`dds` remains the one open regression**, at 1.12x where `tga` was 1.34x and is
 now 1.13x.
 
