@@ -3,6 +3,15 @@
 ## unreleased
 ### changed
 
+- A cmyk tiff is read here again, and a cmyk tiff with an alpha channel is read
+  for the first time. Removing `image` dropped the first: its tiff reader mapped
+  the separated colour type onto rgb and converted it, and no fixture covered
+  one, so nothing caught it. Both are handed out as the rgb a frame holds, by
+  the same `(maximum - ink) * (maximum - k) / maximum` in `f32` and with the
+  same truncation the old reader used, so a file reads as it always did -- which
+  is why a black-only pixel of 128 comes out 126 rather than 127. The ink model
+  is still the `ImgSeqOriginalColorType` label, `Cmyk8` or `Cmyk16`, and a
+  fifth sample becomes the alpha clip.
 - The `image` crate is gone. Every format this plugin reads has a reader of its
   own, so the last two things it was still linked for -- the probe of a webp,
   and the probe and decode of an avif -- are handled by those modules' own

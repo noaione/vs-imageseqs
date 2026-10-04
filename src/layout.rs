@@ -128,6 +128,8 @@ pub enum SourceColorType {
     Rgba32F,
     /// Eight-bit cmyk.
     Cmyk8,
+    /// Sixteen-bit cmyk.
+    Cmyk16,
 }
 
 impl SourceColorType {
@@ -157,6 +159,7 @@ impl SourceColorType {
             Self::Rgb32F => "Rgb32F",
             Self::Rgba32F => "Rgba32F",
             Self::Cmyk8 => "Cmyk8",
+            Self::Cmyk16 => "Cmyk16",
         }
     }
 
@@ -286,8 +289,9 @@ mod tests {
             (SourceColorType::Rgb32F, "Rgb32F"),
             (SourceColorType::Rgba32F, "Rgba32F"),
             (SourceColorType::Cmyk8, "Cmyk8"),
+            (SourceColorType::Cmyk16, "Cmyk16"),
         ];
-        assert_eq!(labels.len(), 15);
+        assert_eq!(labels.len(), 16);
         for (value, label) in labels {
             assert_eq!(value.label(), label);
         }

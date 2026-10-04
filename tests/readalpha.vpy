@@ -1807,6 +1807,91 @@ def test_png_feature_sets() -> None:
             f"{name} names the grey it widens to",
         )
 
+def test_separated_inks() -> None:
+    """A cmyk tiff is the colour its four inks state, converted by this reader.
+ 
+    The inks are the ones `make-tiff-cmyk-fixtures.py` writes and the expected
+    samples are `(255 - ink) * (255 - k) / 255` worked out by hand. The fifth
+    pixel is the one worth reading twice: its `k` is 128 and every other ink is
+    zero, so the colour is exactly 127, and the plugin answers 126, because the
+    factor is computed in `f32` and lands a hair below the value that truncates
+    to 127. That is the arithmetic the reader this tree replaced used, so it is
+    the sample such a file has always produced, and it is precisely what an
+    implementation doing exact arithmetic would get wrong.
+    """
+    clip, alpha = read_alpha(files=[fixture("tiff-cmyk8.tiff")])
+    check(clip.format.name == "RGB24", f"cmyk8: colour clip is RGB24 (got {clip.format.name})")
+    check(
+        (clip.width, clip.height) == (4, 2),
+        f"cmyk8: size is 4x2 (got {clip.width}x{clip.height})",
+    )
+    check(alpha.format.name == "Gray8", f"cmyk8: alpha clip is Gray8 (got {alpha.format.name})")
+    frame = clip.get_frame(0)
+    check(
+        samples(frame, 0) == [255, 0, 0, 127, 126, 119, 0, 206],
+        f"cmyk8: red is the ink it states (got {samples(frame, 0)})",
+    )
+    check(
+        samples(frame, 1) == [255, 0, 0, 255, 126, 179, 255, 198],
+        f"cmyk8: green is the ink it states (got {samples(frame, 1)})",
+    )
+    check(
+        samples(frame, 2) == [255, 0, 0, 255, 126, 209, 255, 189],
+        f"cmyk8: blue is the ink it states (got {samples(frame, 2)})",
+    )
+    label = frame.props["ImgSeqOriginalColorType"]
+    check(label == "Cmyk8", f"cmyk8: the label names the ink model (got {label})")
+    check(
+        samples(alpha.get_frame(0)) == [255] * 8,
+        "cmyk8: four inks and no alpha is an opaque clip",
+    )
+ 
+    # The same inks at sixteen bits, so the conversion scales with the sample
+    # rather than reusing the byte one. The fifth pixel is the same truncation
+    # one word up: 32638 where the exact product is 32639.
+    wide, _ = read_alpha(files=[fixture("tiff-cmyk16.tiff")])
+    check(wide.format.name == "RGB48", f"cmyk16: colour clip is RGB48 (got {wide.format.name})")
+    wframe = wide.get_frame(0)
+    check(
+        samples(wframe, 0) == [65535, 0, 0, 32639, 32638, 30591, 0, 53088],
+        f"cmyk16: red is the ink it states (got {samples(wframe, 0)})",
+    )
+    check(
+        samples(wframe, 2) == [65535, 0, 0, 65535, 32638, 53715, 65535, 48754],
+        f"cmyk16: blue is the ink it states (got {samples(wframe, 2)})",
+    )
+    wide_label = wframe.props["ImgSeqOriginalColorType"]
+    check(
+        wide_label == "Cmyk16",
+        f"cmyk16: the label names the ink model (got {wide_label})",
+    )
+ 
+    # A planar file is the same picture as the chunky one, which is what says
+    # the four links were reordered: every sample is present either way, so only
+    # their order tells the two apart.
+    planar, _ = read_alpha(files=[fixture("tiff-cmyk8-planar.tiff")])
+    planar_frame = planar.get_frame(0)
+    for plane in range(3):
+        check(
+            samples(planar_frame, plane) == samples(frame, plane),
+            f"cmyk8 planar: plane {plane} is the chunky file's",
+        )
+ 
+    # A fifth sample is alpha and not a fifth ink: the colour of every pixel is
+    # the four ink file's, so the sample never reached the conversion.
+    five, five_alpha = read_alpha(files=[fixture("tiff-cmyka8.tiff")])
+    five_frame = five.get_frame(0)
+    for plane in range(3):
+        check(
+            samples(five_frame, plane) == samples(frame, plane),
+            f"cmyka8: plane {plane} is the four ink file's",
+        )
+    check(
+        samples(five_alpha.get_frame(0)) == [0, 255, 128, 1, 254, 64, 192, 32],
+        f"cmyka8: the fifth sample is the alpha clip (got {samples(five_alpha.get_frame(0))})",
+    )
+
+
 def main() -> None:
     for test in (
         test_rgba8,
@@ -1841,6 +1926,7 @@ def main() -> None:
         test_animation,
         test_gif_stills,
         test_png_feature_sets,
+        test_separated_inks,
     ):
         print(f"--- {test.__name__}")
         test()

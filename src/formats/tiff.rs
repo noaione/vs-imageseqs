@@ -50,7 +50,8 @@ use crate::{
 
 /// What a header's colour type says the samples are.
 struct Layout {
-    /// Channels one pixel holds.
+    /// Channels one pixel holds in the buffer the decoder fills, which is not
+    /// the frame's own count when the samples are separated inks.
     channels: usize,
     /// Bytes one sample occupies.
     sample_bytes: usize,
@@ -60,6 +61,9 @@ struct Layout {
     source: SourceColorType,
     /// Whether the samples are floats rather than integers.
     float: bool,
+    /// Whether the samples are separated inks rather than channels, which a
+    /// frame holds as rgb and, when there is a fifth sample, as alpha.
+    separated: bool,
 }
 
 /// Whether this module reads `path`.
@@ -82,13 +86,13 @@ fn layout(kind: tiff::ColorType) -> Result<Layout> {
     use tiff::ColorType as Tiff;
     // The sample width is the number the colour type carries, and it is the only
     // thing that decides how wide a sample is.
-    let (bits, channels, color_type, source) = match kind {
+    let (bits, channels, color_type, source, separated) = match kind {
         Tiff::Gray(bits @ (8 | 16 | 32)) => {
             let (color, source) = match bits {
                 8 => (ColorType::L8, SourceColorType::L8),
                 _ => (ColorType::L16, SourceColorType::L16),
             };
-            (bits, 1, color, source)
+            (bits, 1, color, source, false)
         }
         Tiff::GrayA(bits @ (8 | 16)) => {
             let (color, source) = if bits == 8 {
@@ -96,7 +100,7 @@ fn layout(kind: tiff::ColorType) -> Result<Layout> {
             } else {
                 (ColorType::La16, SourceColorType::La16)
             };
-            (bits, 2, color, source)
+            (bits, 2, color, source, false)
         }
         Tiff::RGB(bits @ (8 | 16 | 32)) => {
             let (color, source) = match bits {
@@ -104,7 +108,7 @@ fn layout(kind: tiff::ColorType) -> Result<Layout> {
                 16 => (ColorType::Rgb16, SourceColorType::Rgb16),
                 _ => (ColorType::Rgb32F, SourceColorType::Rgb32F),
             };
-            (bits, 3, color, source)
+            (bits, 3, color, source, false)
         }
         Tiff::RGBA(bits @ (8 | 16 | 32)) => {
             let (color, source) = match bits {
@@ -112,7 +116,27 @@ fn layout(kind: tiff::ColorType) -> Result<Layout> {
                 16 => (ColorType::Rgba16, SourceColorType::Rgba16),
                 _ => (ColorType::Rgba32F, SourceColorType::Rgba32F),
             };
-            (bits, 4, color, source)
+            (bits, 4, color, source, false)
+        }
+        // Separated inks: c, m, y and k, which a frame holds as three channels.
+        // The label is the ink model either way, because that is the encoding the
+        // file holds; the alpha of a five sample file is a plane of its own and
+        // not part of the label.
+        Tiff::CMYK(bits @ (8 | 16)) => {
+            let (color, source) = if bits == 8 {
+                (ColorType::Rgb8, SourceColorType::Cmyk8)
+            } else {
+                (ColorType::Rgb16, SourceColorType::Cmyk16)
+            };
+            (bits, 4, color, source, true)
+        }
+        Tiff::CMYKA(bits @ (8 | 16)) => {
+            let (color, source) = if bits == 8 {
+                (ColorType::Rgba8, SourceColorType::Cmyk8)
+            } else {
+                (ColorType::Rgba16, SourceColorType::Cmyk16)
+            };
+            (bits, 5, color, source, true)
         }
         Tiff::Palette(_) => {
             return Err(ImgSeqError::new(
@@ -131,6 +155,7 @@ fn layout(kind: tiff::ColorType) -> Result<Layout> {
         color_type,
         source,
         float: bits == 32,
+        separated,
     })
 }
 
@@ -303,6 +328,14 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
         buffer = interleave(&buffer, &layout, stride)
             .map_err(|error| image_error("decode", &info.path, error))?;
     }
+    // The separated inks are four samples that a frame holds as three channels,
+    // or five as three plus the alpha plane. This conversion is the reader's
+    // rather than the container's, so it happens once over the whole picture and
+    // its cost belongs to the read.
+    if layout.separated {
+        buffer = inks_to_channels(&buffer, &layout)
+            .map_err(|error| image_error("decode", &info.path, error))?;
+    }
     let read = read_started.elapsed();
 
     Ok(DecodedImage {
@@ -395,6 +428,63 @@ fn interleave(buffer: &[u8], layout: &Layout, stride: usize) -> Result<Vec<u8>> 
         }
     }
     Ok(out)
+}
+
+/// Writes separated ink samples as the channels a frame holds.
+///
+/// This is the conversion the reader this tree replaced made, in the same `f32`
+/// arithmetic and with the same truncation, so a cmyk tiff that was read before
+/// that reader went reads the same now: `channel = (maximum - ink) * (maximum -
+/// k) / maximum`, where zero is paper and the maximum is all of the ink. A fifth
+/// sample is the alpha channel, which is a plane of its own and is copied rather
+/// than converted.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the buffer does not hold whole pixels.
+fn inks_to_channels(buffer: &[u8], layout: &Layout) -> Result<Vec<u8>> {
+    let inks = layout.channels;
+    let alpha = inks == 5;
+    let width = layout.sample_bytes;
+    let pixel = inks * width;
+    if !buffer.len().is_multiple_of(pixel) {
+        return Err(ImgSeqError::new(
+            "the separated samples do not hold whole pixels",
+        ));
+    }
+    let channels = if alpha { 4 } else { 3 };
+    let mut out = Vec::with_capacity(buffer.len() / pixel * channels * width);
+    for pixel in buffer.chunks_exact(pixel) {
+        // The samples are c, m, y, k and, when there is one, alpha.
+        let black = &pixel[3 * width..4 * width];
+        for channel in 0..3 {
+            let ink = &pixel[channel * width..(channel + 1) * width];
+            if width == 1 {
+                out.push(ink_to_byte(ink[0], black[0]));
+            } else {
+                let ink = u16::from_ne_bytes([ink[0], ink[1]]);
+                let black = u16::from_ne_bytes([black[0], black[1]]);
+                out.extend_from_slice(&ink_to_word(ink, black).to_ne_bytes());
+            }
+        }
+        if alpha {
+            out.extend_from_slice(&pixel[4 * width..5 * width]);
+        }
+    }
+    Ok(out)
+}
+
+/// `(255 - ink) * (255 - k) / 255`, truncated, which is what the reader this
+/// replaces wrote.
+fn ink_to_byte(ink: u8, black: u8) -> u8 {
+    let factor = 1. - f32::from(black) / 255.;
+    ((255. - f32::from(ink)) * factor) as u8
+}
+
+/// The same at sixteen bits, where the maximum is 65535.
+fn ink_to_word(ink: u16, black: u16) -> u16 {
+    let factor = 1. - f32::from(black) / 65535.;
+    ((65535. - f32::from(ink)) * factor) as u16
 }
 
 #[cfg(test)]
@@ -516,6 +606,37 @@ mod tests {
                 ColorType::Rgb8,
                 SourceColorType::Rgb8,
             ),
+            // The separated inks, which a frame holds as rgb whatever the
+            // file's own sample count is. A five sample file keeps its alpha
+            // plane, so its frame layout carries one.
+            (
+                "tiff-cmyk8.tiff",
+                4,
+                2,
+                ColorType::Rgb8,
+                SourceColorType::Cmyk8,
+            ),
+            (
+                "tiff-cmyk16.tiff",
+                4,
+                2,
+                ColorType::Rgb16,
+                SourceColorType::Cmyk16,
+            ),
+            (
+                "tiff-cmyka8.tiff",
+                4,
+                2,
+                ColorType::Rgba8,
+                SourceColorType::Cmyk8,
+            ),
+            (
+                "tiff-cmyk8-planar.tiff",
+                4,
+                2,
+                ColorType::Rgb8,
+                SourceColorType::Cmyk8,
+            ),
         ] {
             let info = image_info(&fixture(name), true)
                 .unwrap_or_else(|error| panic!("{name}: {error}"))
@@ -569,6 +690,108 @@ mod tests {
         );
     }
 
+    /// The separated inks become the colour the file states, by the arithmetic
+    /// the reader this tree replaced used, which is `f32` and truncates.
+    ///
+    /// The inks are the ones `tests/make-tiff-cmyk-fixtures.py` writes, and the
+    /// expected bytes are that arithmetic worked out by hand. One pixel is worth
+    /// reading twice: its `k` is 128 and every other ink is zero, so the colour
+    /// is `255 * (1 - 128 / 255)`, which is exactly 127, and in `f32` the factor
+    /// lands a hair below it and truncates to 126. An implementation using exact
+    /// rational arithmetic would answer 127 there and pass everything else here.
+    #[test]
+    fn the_separated_inks_become_the_colour_they_state() {
+        assert_eq!(
+            read("tiff-cmyk8.tiff"),
+            [
+                255, 255, 255, // no ink at all is paper
+                0, 0, 0, // all of it, and black alone, are both black
+                0, 0, 0, //
+                127, 255, 255, // cyan alone
+                126, 126, 126, // black alone, and the truncation above
+                119, 179, 209, // four different inks
+                0, 255, 255, // cyan and magenta
+                206, 198, 189, // and a little of everything
+            ]
+        );
+    }
+
+    /// The same inks at sixteen bits, so the conversion scales with the sample
+    /// rather than reusing the byte one.
+    #[test]
+    fn the_sixteen_bit_inks_scale_with_the_sample() {
+        let bytes = read("tiff-cmyk16.tiff");
+        let (samples, rest) = bytes.as_chunks::<2>();
+        assert!(rest.is_empty(), "a sixteen bit sample is two bytes");
+        let words: Vec<u16> = samples
+            .iter()
+            .map(|word| u16::from_ne_bytes(*word))
+            .collect();
+        assert_eq!(
+            words,
+            [
+                65535, 65535, 65535, //
+                0, 0, 0, //
+                0, 0, 0, //
+                32639, 65535, 65535, //
+                32638, 32638, 32638, // the same truncation, one word up
+                30591, 46007, 53715, //
+                0, 65535, 65535, //
+                53088, 50921, 48754,
+            ]
+        );
+    }
+
+    /// A planar separated file is the same picture as the chunky one. This is
+    /// the assertion that fails when four links are not reordered: every sample
+    /// is there either way, so only the order tells the two apart, and a picture
+    /// of the right size with the wrong colours passes every other check.
+    #[test]
+    fn a_planar_separated_file_reorders_to_the_same_picture() {
+        assert_eq!(read("tiff-cmyk8-planar.tiff"), read("tiff-cmyk8.tiff"));
+    }
+
+    /// A fifth sample is alpha rather than a fifth ink: the colour of every
+    /// pixel is the four ink file's, so the sample never reached the conversion.
+    #[test]
+    fn a_fifth_sample_is_alpha_and_not_an_ink() {
+        let four = read("tiff-cmyk8.tiff");
+        let five = read("tiff-cmyka8.tiff");
+        let (rgb, half) = four.as_chunks::<3>();
+        let (rgba, quarter) = five.as_chunks::<4>();
+        assert!(
+            half.is_empty() && quarter.is_empty(),
+            "both files hold whole pixels"
+        );
+        assert_eq!(
+            rgb.len(),
+            rgba.len(),
+            "one channel more, not one pixel more"
+        );
+        for (pixel, (three, four)) in rgb.iter().zip(rgba).enumerate() {
+            assert_eq!(&four[..3], three, "pixel {pixel}");
+        }
+    }
+
+    /// A buffer that is not whole pixels is refused rather than read past its
+    /// end, which is what a header disagreeing with its strips would ask for.
+    #[test]
+    fn separated_samples_that_are_not_whole_pixels_are_refused() {
+        let layout = Layout {
+            channels: 4,
+            sample_bytes: 1,
+            color_type: ColorType::Rgb8,
+            source: SourceColorType::Cmyk8,
+            float: false,
+            separated: true,
+        };
+        assert!(inks_to_channels(&[0; 7], &layout).is_err());
+        assert!(
+            inks_to_channels(&[], &layout).is_ok(),
+            "no pixels is not half a pixel"
+        );
+    }
+
     /// The reorder is a transpose of the sample grid, checked on a buffer whose
     /// answer can be written out by hand.
     #[test]
@@ -579,6 +802,7 @@ mod tests {
             color_type: ColorType::Rgb8,
             source: SourceColorType::Rgb8,
             float: false,
+            separated: false,
         };
         // Two pixels, three channels, held as three planes of two samples.
         let planes = [10u8, 11, 20, 21, 30, 31];
