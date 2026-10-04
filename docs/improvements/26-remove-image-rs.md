@@ -73,6 +73,36 @@ The commits, in order: `398cf4e` the shared types, `d2287ea` the route audit,
 webp canvas and blending, `380589b` the webp replay, `2de10de` the avif extent
 join, and `e08b621` the libheif fallback.
 
+### heif and avif without `image`, in progress
+
+A second goal takes the last two containers off the crate. The route is now:
+`avif.rs` decides which library owns an avif from the same walk the decode
+needs for the pixels, and everything that is not the yuv its own walk reads --
+an r,g,b container, a monochrome one, one the walk refuses -- goes to
+`heif.rs`, which reads it through libheif. The probe asks the same question the
+same way, so the two cannot disagree.
+
+- `61c6dba` gave `HeifHeader::format()` the `Rgb(C444)` arm it was missing.
+- `c4d17b8` taught `heif::decode` the r,g,b arrangement -- libheif fills the
+  red, green and blue channels for one and leaves the luma channel empty, which
+  is what made it fail with `has no luma plane` -- and routed those containers
+  to it. One property moved: a file with no alpha channel now reports
+  `ImgSeqOriginalColorType=rgb8` where the `image` decoder named `rgba8`.
+- `4555b4d` routed the monochrome avifs the same way, which removed the last
+  `image` call from the avif still path.
+
+What made the second step worth measuring rather than assuming: the plan
+expected `color_type` to move from `Rgba8` to `La8` for `mono-alpha.avif` and
+called that user-visible. It is not. `ImgSeqOriginalColorType` was already
+`La8` -- only the internal decode layout changed -- and a before/after check of
+the colour clip, the alpha clip and every property found **nothing** moved for
+any monochrome avif, so no changelog entry was written for it. The r,g,b step
+did move a property, and that one is in `CHANGELOG.md`.
+
+Left: delete the libheif hooks registered against `image` (`decoder.rs:23-24`),
+drop libheif-rs's `integration` feature, and remove the
+`Format::Heif => ImageFormat::Avif` hack in `src/still.rs`.
+
 Step 2 is done, in `398cf4e`. The shared representations exist
 (`src/layout.rs`), the identification does too (`src/format.rs`), and every
 remaining `image` call in production code is behind one adapter

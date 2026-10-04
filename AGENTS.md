@@ -148,8 +148,10 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   walks straight into the frame instead of buffering the picture whole — which
   includes expanding a palette page's indices itself — and
   `webp.rs` for the libwebp decode
-  and the lossy yuv format). a monochrome avif still goes through `image` and is
-  corrected to `Gray8` here. an avif alpha item is a coded item of its own and a
+  and the lossy yuv format). an avif this tree's walk decodes itself is the yuv
+  its container states, and everything else is `heif.rs`'s: an r,g,b container,
+  a monochrome one, and one the walk refuses. both readers name the same
+  library the probe did. an avif alpha item is a coded item of its own and a
   heif alpha plane is a buffer this module packs, so both readers take the
   `decoder::Demand` of the call and read only what a clip actually hands out: a
   call that hands out no alpha clip must not decode one, and a webp or a jxl is
@@ -174,9 +176,12 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   construction method it does not follow — is described and decoded by `libheif`
   instead, which reads both where the `image` decoder could not: it has no
   monochrome avif, so a grid of monochrome cells ended as `Invalid argument`.
-  `avif::refuses` is the one answer the probe and the decode both read, so they
-  cannot disagree about which library owns a file; a probe must never promise a
-  frame a decode would refuse to produce.
+  `avif.rs` is the one module that decides which library owns an avif, and it
+  decides it from the same walk the decode needs for the pixels: a container the
+  walk refuses, an r,g,b one and a monochrome one all go to `libheif`, and only
+  the yuv its own walk reads is decoded here. The probe asks the same question
+  the same way, so the two cannot disagree about which library owns a file; a
+  probe must never promise a frame a decode would refuse to produce.
 - `src/pixel.rs`: supported pixel formats, the format a nominal depth names, and
   planar frame writes, which move a wider word down to the frame's own depth.
 - `src/color.rs`: frame properties, the optional raw `ICCProfile`, and the
