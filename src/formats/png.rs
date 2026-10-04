@@ -342,9 +342,11 @@ fn expanded_type(color_type: ColorType) -> Option<(png::ColorType, png::BitDepth
 /// The header of a png this module will walk, or `None` for one it will not.
 ///
 /// The reads here are the metadata at the front of the file and no image data,
-/// so this is a header parse and not a decode; [`Rows::fill`] opens the file a
-/// second time to read the rows themselves.
-fn walkable(path: &Path, info: &ImageInfo) -> Option<Walkable> {
+/// so this is a header parse and not a decode. The reader it opens comes back
+/// with the answer, because it is already positioned where the rows start and
+/// [`Rows::fill`] would otherwise open the file a second time and parse the
+/// header again to reach the same place.
+fn walkable(path: &Path, info: &ImageInfo) -> Option<(Walkable, png::Reader<BufReader<File>>)> {
     let file = File::open(path).ok()?;
     let mut decoder = png::Decoder::new(BufReader::new(file));
     // The same transformation `image`'s own png decoder sets, so the samples
@@ -369,11 +371,23 @@ fn walkable(path: &Path, info: &ImageInfo) -> Option<Walkable> {
         && info.color_type == ColorType::Rgb8
         && let Some(palette) = header.palette.as_ref()
     {
-        return Some(Walkable {
-            width: header.width,
-            height: header.height,
-            source: Source::Indices(padded_palette(palette)),
-        });
+        // This page is expanded here rather than by the decoder, so the reader
+        // `fill` needs is one opened with `IDENTITY` -- the reader above is the
+        // `EXPAND` one this decision was made with, and it would hand over rgb,
+        // which `fill` refuses as a file that changed after probing. So a palette
+        // page opens the file twice and every other page once.
+        let file = File::open(path).ok()?;
+        let mut decoder = png::Decoder::new(BufReader::new(file));
+        decoder.set_transformations(png::Transformations::IDENTITY);
+        let indices = decoder.read_info().ok()?;
+        return Some((
+            Walkable {
+                width: header.width,
+                height: header.height,
+                source: Source::Indices(padded_palette(palette)),
+            },
+            indices,
+        ));
     }
     // Anything else has to arrive as the colour type the frame is, or the
     // frame the clip sized from the probe is not the frame these rows fit.
@@ -381,11 +395,14 @@ fn walkable(path: &Path, info: &ImageInfo) -> Option<Walkable> {
     if output != expanded_type(info.color_type)? {
         return None;
     }
-    Some(Walkable {
-        width: header.width,
-        height: header.height,
-        source: Source::Expanded(output),
-    })
+    Some((
+        Walkable {
+            width: header.width,
+            height: header.height,
+            source: Source::Expanded(output),
+        },
+        reader,
+    ))
 }
 
 /// A decode of a png that hands every row to the frame it belongs in.
@@ -400,7 +417,6 @@ fn walkable(path: &Path, info: &ImageInfo) -> Option<Walkable> {
 /// A png carries its alpha channel in the one stream the colour comes from, so
 /// the demand of the call changes nothing here: a colour-only read reads the
 /// alpha samples and drops them.
-#[derive(Debug)]
 struct Rows {
     path: PathBuf,
     width: u32,
@@ -411,6 +427,27 @@ struct Rows {
     has_alpha: bool,
     /// Where a row's samples come from, which is what the walk does with it.
     source: Source,
+    /// The reader the walk opened, already positioned on the rows. It is taken by
+    /// the first fill, and `None` on a stream that came from `duplicate`, which
+    /// opens its own on the way into a fill.
+    reader: Option<png::Reader<BufReader<File>>>,
+}
+
+/// `png::Reader` is not `Debug`, so a row stream prints what it was told rather
+/// than the crate's internals, and says whether it still holds the reader the
+/// walk opened.
+impl std::fmt::Debug for Rows {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("png::Rows")
+            .field("path", &self.path)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("color_type", &self.color_type)
+            .field("has_alpha", &self.has_alpha)
+            .field("source", &self.source)
+            .field("holds_reader", &self.reader.is_some())
+            .finish()
+    }
 }
 
 /// The decode a png this module can walk is answered with, or `None` for one
@@ -436,7 +473,7 @@ pub fn stream(info: &ImageInfo) -> Option<Pixels> {
     // The colour type has to be one this walk has a layout for, which is the
     // same set `expanded_type` answers for.
     let layout = Layout::of(info.color_type)?;
-    let header = walkable(&info.path, info)?;
+    let (header, reader) = walkable(&info.path, info)?;
     // The probe and this walk have to be describing the same picture, or the
     // frame the clip sized from the probe is not the frame these rows fit. The
     // colour type each source needs is checked by `walkable`, which is the only
@@ -451,6 +488,7 @@ pub fn stream(info: &ImageInfo) -> Option<Pixels> {
         color_type: info.color_type,
         has_alpha: layout.channels != layout.colour_channels,
         source: header.source,
+        reader: Some(reader),
     })))
 }
 
@@ -721,23 +759,34 @@ fn missing_colour_planes() -> ImgSeqError {
 impl RowStream for Rows {
     fn fill(&mut self, sink: RowSink<'_>) -> Result<DecodeTimings> {
         let open_started = Instant::now();
-        let file =
-            File::open(&self.path).map_err(|error| image_error("open", &self.path, error))?;
-        let mut decoder = png::Decoder::new(BufReader::new(file));
-        // A palette page is expanded here, so it is read as the indices it
-        // holds; everything else arrives as the colour type the frame is.
-        decoder.set_transformations(match self.source {
-            Source::Expanded(_) => png::Transformations::EXPAND,
-            Source::Indices(_) => png::Transformations::IDENTITY,
-        });
-        let mut reader = decoder
-            .read_info()
-            .map_err(|error| image_error("decode", &self.path, error))?;
+        // The walk that answered `stream` opened this file and is already holding the
+        // reader the rows come out of, so the common case opens nothing and parses no
+        // header a second time. A stream that came from `duplicate` has no reader of
+        // its own -- a reader is a position, and duplicating cannot share one -- so it
+        // opens the file here, the way the netpbm reader does.
+        let mut reader = match self.reader.take() {
+            Some(reader) => reader,
+            None => {
+                let file = File::open(&self.path)
+                    .map_err(|error| image_error("open", &self.path, error))?;
+                let mut decoder = png::Decoder::new(BufReader::new(file));
+                // A palette page is expanded here, so it is read as the indices it holds;
+                // everything else arrives as the colour type the frame is.
+                decoder.set_transformations(match self.source {
+                    Source::Expanded(_) => png::Transformations::EXPAND,
+                    Source::Indices(_) => png::Transformations::IDENTITY,
+                });
+                decoder
+                    .read_info()
+                    .map_err(|error| image_error("decode", &self.path, error))?
+            }
+        };
         let open = open_started.elapsed();
 
-        // The file was checked before this ran, so these reads are the same
-        // header read again rather than a decision; a file that changed between
-        // the two is refused rather than written into a frame it does not fit.
+        // Whether the reader came from the walk or was opened here, these reads
+        // are the same header rather than a decision; a file that changed
+        // between the walk and this fill is refused rather than written into a
+        // frame it does not fit.
         let metadata_started = Instant::now();
         let header = reader.info();
         let geometry = (
@@ -796,6 +845,9 @@ impl RowStream for Rows {
             )));
         }
 
+        // A stream is read once. Letting the reader go means a second fill starts
+        // from the header again rather than from where this one stopped.
+        self.reader = None;
         // There is no buffer, so the buffer stage is nothing; the read is the
         // decode and the placement together, because they are one pass.
         Ok(DecodeTimings {
@@ -818,6 +870,9 @@ impl RowStream for Rows {
             color_type: self.color_type,
             has_alpha: self.has_alpha,
             source: self.source.clone(),
+            // A reader is a position in one file, and two streams cannot share one,
+            // so the duplicate opens its own when it fills.
+            reader: None,
         })
     }
 }
@@ -931,5 +986,37 @@ mod tests {
         // nothing about it is still this module's. This is the case that was
         // described by the generic decoder and decoded here.
         assert!(owns(Path::new("tests/fixtures/cicp-rgb8.png")));
+    }
+
+    /// The reader the walk opened travels into the stream its fill reads from,
+    /// and a duplicate brings none: a reader is a position in one file, and two
+    /// streams cannot share one.
+    ///
+    /// This reads what the stream prints rather than reaching into the struct,
+    /// because `RowStream` is `Debug` for a decode's own reasons and that print
+    /// is the only view of this from outside the module. Whether the fill then
+    /// writes the right picture is the validator's question, not this one's.
+    #[test]
+    fn the_stream_carries_the_reader_the_walk_opened() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("alpha-rgb8.png");
+        let info = image_info(&path, true, None)
+            .expect("the header is read")
+            .expect("a png is taken over");
+        let Pixels::Stream(rows) = stream(&info).expect("this png is walked") else {
+            panic!("a png this module walks streams its rows");
+        };
+        assert!(
+            format!("{rows:?}").contains("holds_reader: true"),
+            "the walk's reader is in the stream: {rows:?}"
+        );
+
+        let duplicate = rows.duplicate();
+        assert!(
+            format!("{duplicate:?}").contains("holds_reader: false"),
+            "a duplicate opens its own reader: {duplicate:?}"
+        );
     }
 }
