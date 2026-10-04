@@ -543,6 +543,7 @@ fn header_states_animation(path: &Path) -> Result<bool> {
         _ => Ok(true),
     }
 }
+
 /// Reads an animated webp out of its bytes.
 /// Reads an animated webp out of its bytes, or `None` for a webp that is not
 /// animated.

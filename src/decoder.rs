@@ -253,6 +253,7 @@ impl RowSink<'_> {
         Some(())
     }
 }
+
 /// A decode that has not read its picture yet.
 ///
 /// A format answers with one of these when it can hand every decoded row to

@@ -124,6 +124,7 @@ fn container_end(riff: &[u8; 12], length: u64) -> Option<u64> {
     let end = 8_u64.checked_add(size)?;
     (end >= 12 && end <= length).then_some(end)
 }
+
 /// Walks the chunk headers of a webp file up to its first image chunk.
 ///
 /// Payloads are skipped by seeking, so an embedded icc profile or exif block
@@ -536,6 +537,7 @@ pub(crate) fn decode_rgba(data: &[u8]) -> std::result::Result<(u32, u32, Vec<u8>
     }
     Ok((width, height, buffer))
 }
+
 /// Decodes one webp image into an interleaved buffer.
 pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     let open_started = Instant::now();

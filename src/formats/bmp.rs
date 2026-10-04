@@ -672,6 +672,7 @@ pub fn stream(info: &ImageInfo) -> Result<Option<DecodedImage>> {
         },
     }))
 }
+
 /// The samples of one bitmap, decoded into `width * height * channels`.
 ///
 /// # Errors

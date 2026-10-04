@@ -1635,6 +1635,7 @@ fn read_range(file: &mut File, range: Range<usize>) -> std::io::Result<Vec<u8>> 
     file.read_exact(&mut buffer)?;
     Ok(buffer)
 }
+
 /// Builds the error a dav1d call reports for one image.
 fn decode_error(path: &Path, error: impl std::fmt::Display) -> ImgSeqError {
     image_error("decode", path, error)

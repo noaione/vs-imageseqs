@@ -838,6 +838,7 @@ pub fn stream(info: &ImageInfo) -> Result<Option<DecodedImage>> {
         },
     }))
 }
+
 /// What a netpbm states, when this module reads the file.
 ///
 /// # Errors

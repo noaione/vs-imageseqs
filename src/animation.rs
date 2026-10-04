@@ -87,6 +87,7 @@ mod timeline_read_tests {
         assert_eq!(timeline_reads(), 0);
     }
 }
+
 /// A rate as an exact rational: `num` units per `den` seconds.
 ///
 /// This is the same shape as `fpsnum`/`fpsden`, and it is used for two things

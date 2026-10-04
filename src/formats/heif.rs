@@ -76,6 +76,7 @@ pub fn image_info(
 pub fn owns(path: &Path) -> bool {
     crate::formats::identify::owns(crate::formats::identify::Format::Heif, path)
 }
+
 /// What libheif states about a file's primary image, whatever its extension.
 ///
 /// [`image_info`] is this plus the extension gate, and the extra entry point

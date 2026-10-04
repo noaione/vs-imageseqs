@@ -652,6 +652,7 @@ pub fn stream(info: &ImageInfo) -> Result<Option<DecodedImage>> {
         },
     }))
 }
+
 /// Decodes a targa into one interleaved buffer.
 ///
 /// # Errors

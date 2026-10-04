@@ -1372,6 +1372,7 @@ fn nearest_byte(value: f64) -> u8 {
         rounded as u8
     }
 }
+
 /// Writes separated ink samples as the channels a frame holds.
 ///
 /// This is the conversion the reader this tree replaced made, in the same `f32`
