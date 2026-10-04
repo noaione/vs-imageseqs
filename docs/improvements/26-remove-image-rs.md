@@ -557,6 +557,34 @@ What is left, in plan 27's order, with the fixtures each still needs:
     sixteen bit samples** -- it wrote eight from an eight bit source, and only a
     sixteen bit source produced `16 srgb`. Both were caught by the dump rather
     than by the file being wrong later.
+  - **Four bugs the first `tiff` module hit, recorded so the next attempt starts
+    from them rather than from the crate's front page.** All four were found by
+    the fixture parity diff, and none by the unit tests, which is the point of
+    running it:
+
+    1. **`default-features = false` drops the decompressors.** `tiff`'s default
+       features are what bring in LZW and Deflate, so `tiff-lzw.tiff`,
+       `tiff-deflate.tiff` and `tiff-tiled.tiff` all answered `unsupported
+       error`. The crate has to be taken with its defaults, or with the
+       compression features named explicitly.
+    2. **A four channel file must map to the format of its own depth.** The
+       first attempt sent every `RGBA` to `PixelFormat::Rgb32F`, and
+       `tiff-rgba8.tiff` then failed with "the frame holds 4 byte samples, but
+       the decoder returned 1 byte samples". `Rgba8` is `Rgb8`, `Rgba16` is
+       `Rgb16` and only `Rgba32F` is `Rgb32F`.
+    3. **`DecodingResult` is not the only arm to match.** The refusal for a
+       short read reported the sample count before it reported the type, and
+       `tiff-planar.tiff` is the case: the crate documents that `read_image`
+       "will currently only read the first sample's plane" and that it "will be
+       fixed in a future major version", so a planar file comes back as one
+       plane of three channels -- 851 samples where 2553 belong. Whatever
+       replaces `read_image` has to be the plane aware reader; the sample count
+       check is the guard that stops a wrong picture being handed out in the
+       meantime.
+    4. **A palette page is refused at *identify*, not at decode**, which keeps
+       the probe from promising a frame the decode would refuse. That part
+       worked.
+
   - **The four channel sources land as three channel colour plus an alpha clip**:
     `tiff-rgba8.tiff` is `RGB24 original=Rgba8` and every EXR RGBA is `RGBS
     original=Rgba32F`, with the alpha in `GrayS` on its own clip.
