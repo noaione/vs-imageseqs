@@ -252,6 +252,17 @@ impl HeifHeader {
                 self.cicp.filter(|cicp| usable_matrix(cicp.matrix))?;
                 yuv_format(chroma, self.depth)
             }
+            // A colour picture can be coded as full resolution r,g,b rather
+            // than as yuv, which is what this plugin hands one out as. The
+            // planar `C444` spelling is the one [`color_space_of`] asks for, so
+            // the planes libheif hands over are already one per channel and
+            // nothing has to be split. The interleaved and hdr variants are not
+            // what this module requests, so a file that reports one keeps the
+            // `image` decoder rather than being asked for in a spelling this
+            // module would then have to take apart.
+            ColorSpace::Rgb(RgbChroma::C444) => {
+                Some(PixelFormat::from_color_type(self.color_type)?.at_depth(self.depth.into()))
+            }
             _ => None,
         }
     }
@@ -1016,5 +1027,55 @@ mod tests {
         assert_eq!(ColorPrimaries::Unspecified.code(), UNSPECIFIED);
         assert_eq!(MatrixCoefficients::Unspecified.code(), UNSPECIFIED);
         assert_eq!(TransferCharacteristics::Unknown.code(), UNSPECIFIED);
+    }
+
+    /// The colours libheif reports, and the format each one is handed out as.
+    ///
+    /// An r,g,b container is the one this arm was added for: the samples are
+    /// already one per channel, and the planar `C444` spelling libheif hands
+    /// over is the layout a frame is written from, so nothing is converted.
+    #[test]
+    fn a_colorspace_is_handed_out_as_the_format_its_samples_are() {
+        let header = |color_space, depth, color_type| HeifHeader {
+            width: 1,
+            height: 1,
+            color_space,
+            depth,
+            color_type,
+            has_icc_profile: false,
+            icc_profile: None,
+            cicp: None,
+        };
+        // r,g,b, with and without an alpha channel. The format is the three
+        // channels either way: alpha is a plane of its own and a clip of its
+        // own, not part of this format.
+        assert_eq!(
+            header(ColorSpace::Rgb(RgbChroma::C444), 8, ColorType::Rgb8).format(),
+            Some(PixelFormat::Rgb8)
+        );
+        assert_eq!(
+            header(ColorSpace::Rgb(RgbChroma::C444), 8, ColorType::Rgba8).format(),
+            Some(PixelFormat::Rgb8)
+        );
+        assert_eq!(
+            header(ColorSpace::Rgb(RgbChroma::C444), 16, ColorType::Rgb16).format(),
+            Some(PixelFormat::Rgb16)
+        );
+        // A spelling this module never asks for is left to the `image`
+        // decoder rather than described as something it would have to take
+        // apart: the interleaved variant is not the layout it requests.
+        assert_eq!(
+            header(ColorSpace::Rgb(RgbChroma::Rgb), 8, ColorType::Rgb8).format(),
+            None
+        );
+        // And the arrangements that were already handled still are.
+        assert_eq!(
+            header(ColorSpace::Monochrome, 8, ColorType::L8).format(),
+            Some(PixelFormat::Gray8)
+        );
+        assert_eq!(
+            header(ColorSpace::Monochrome, 10, ColorType::L16).format(),
+            Some(PixelFormat::Gray10)
+        );
     }
 }
