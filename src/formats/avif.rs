@@ -58,21 +58,6 @@ const ALPHA_AUX_TYPES: [&[u8]; 2] = [
     b"urn:mpeg:hevc:2015:auxid:1",
 ];
 
-/// Whether this module decodes `info`.
-///
-/// Only a file the probe described as yuv is decoded here; a file whose samples
-/// the container does not name keeps the r,g,b the `image` decoder produces.
-pub fn handles(info: &ImageInfo) -> bool {
-    // Every `.avif` is this module's, because this module is the one that knows
-    // which library reads each container -- and it knows that from the same walk
-    // [`decode`] needs for the pixels, so the decision costs no second pass.
-    // [`refuses`] was the gate that asked here instead, and it walked the
-    // container once per frame request to answer a question the decode was about
-    // to answer again: a 6.8 MB fixture measured ~46 us a walk, and a frame
-    // request paid it twice.
-    has_avif_extension(&info.path)
-}
-
 /// What the container of an avif states about its image, when this module can
 /// describe the file from it.
 ///
@@ -1970,26 +1955,27 @@ mod tests {
         }
     }
 
+    /// Whether the tree routes a path to this module.
+    ///
+    /// `handles` was a second copy of that answer, one for the probe and one for
+    /// the decode, and [`identify::route`] is what answers both now.
+    fn claimed(path: &Path) -> bool {
+        crate::formats::identify::route(path) == Some(crate::formats::identify::Format::Avif)
+    }
+
+    /// Every `.avif` is this module's, whatever the probe made of its samples:
+    /// this module is the one that knows which library reads each container.
     #[test]
-    fn handles_takes_every_avif_and_leaves_other_containers_alone() {
-        // Every `.avif` is this module's, whatever the probe made of its
-        // samples: this module is the one that knows which library reads each
-        // container, and it decides that from the walk [`decode`] needs anyway.
-        for (format, color_type) in [
-            (PixelFormat::Yuv420P8, ColorType::Rgb8),
-            (PixelFormat::Yuv444P12, ColorType::Rgb16),
-            (PixelFormat::Rgb8, ColorType::Rgb8),
-            (PixelFormat::Gray8, ColorType::L8),
-        ] {
-            assert!(handles(&info("a.avif", format, color_type)), "{format:?}");
+    fn an_avif_container_routes_to_this_module() {
+        for path in ["a.avif", "a.AVIF", "a.AvIf"] {
+            assert!(claimed(Path::new(path)), "{path}");
         }
-        // Another container is not.
-        assert!(!handles(&info(
-            "a.heic",
-            PixelFormat::Yuv420P8,
-            ColorType::Rgb8
-        )));
-        assert!(!handles(&info("a.png", PixelFormat::Rgb8, ColorType::Rgb8)));
+        // Another container is not, and neither is a name that only looks like
+        // one.
+        assert!(!claimed(Path::new("a.heic")));
+        assert!(!claimed(Path::new("a.png")));
+        assert!(!claimed(Path::new("a.avifx")));
+        assert!(!claimed(Path::new("d")));
     }
 
     #[test]
@@ -2471,7 +2457,7 @@ mod tests {
         let info = crate::decoder::probe(path, true, false).expect("the container describes it");
         assert_eq!((info.width, info.height), (64, 48));
         assert_eq!(info.format, PixelFormat::Yuv420P8);
-        assert!(handles(&info), "the extents are joined here");
+        assert!(claimed(path), "the extents are joined here");
         let decoded =
             crate::decoder::decode(&info, Demand::ALL).expect("the decoder joins the extents");
         // The reader hands out its own planes now, so the picture is the yuv the
@@ -2510,7 +2496,7 @@ mod tests {
             let info = image_info(&path, true).expect("the container describes it");
             assert_eq!(info.format, format, "{name}");
             assert_eq!(info.color_type, color_type, "{name}");
-            assert!(handles(&info), "{name}");
+            assert!(claimed(&path), "{name}");
             // The codes of the bitstream, which no `colr` box repeats here.
             assert_eq!(
                 info.cicp,
@@ -2537,7 +2523,7 @@ mod tests {
         assert_eq!((info.width, info.height), (4, 4));
         assert_eq!(info.format, PixelFormat::Yuv420P8);
         assert_eq!(info.color_type, ColorType::Rgba8);
-        assert!(handles(&info));
+        assert!(claimed(path));
         assert_eq!(alpha_channel(info.color_type), Some(3));
         // The alpha item is decoded into the gray format of the same depth.
         assert_eq!(info.format.alpha_format(), PixelFormat::Gray8);
@@ -2556,7 +2542,7 @@ mod tests {
             // picture. That it is the same picture the `image` decoder read is
             // `heif`'s own test, which compares the planes of every r,g,b
             // container the two decoders can both read.
-            assert!(handles(&info), "{name}");
+            assert!(claimed(&path), "{name}");
             let decoded =
                 decode(&info, Demand::ALL).unwrap_or_else(|error| panic!("{name}: {error}"));
             assert_eq!(decoded.format, PixelFormat::Rgb8, "{name}");
@@ -2592,7 +2578,7 @@ mod tests {
         assert_eq!(alpha_channel(info.color_type), Some(1));
         // This module claims it and hands it to libheif, which reads the one
         // plane and its alpha; the hand-off has to be the same picture.
-        assert!(handles(&info));
+        assert!(claimed(path));
         let decoded = decode(&info, Demand::ALL).expect("libheif reads it");
         assert_eq!(decoded.format, PixelFormat::Gray8);
         let Pixels::Planar { alpha, .. } = &decoded.pixels else {
@@ -3231,7 +3217,7 @@ mod tests {
         let info = image_info(path, true).expect("the container describes it");
         assert_eq!((info.width, info.height), (3, 2));
         assert_eq!(info.format, PixelFormat::Yuv444P8);
-        assert!(handles(&info));
+        assert!(claimed(path));
         let error = decode(&info, Demand::ALL).expect_err("an item without a picture is an error");
         assert!(
             error.to_string().contains("the item holds no picture"),

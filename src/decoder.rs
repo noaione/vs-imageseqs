@@ -11,6 +11,7 @@ use crate::{
     color::Cicp,
     error::{ImgSeqError, Result},
     formats,
+    formats::identify::{self, Format},
     layout::{ColorType, Orientation, SourceColorType},
     pixel::{PixelFormat, Transform},
     still,
@@ -45,70 +46,45 @@ impl Demand {
 /// allocated and packed here. A webp or a jxl arrives with its alpha channel
 /// already in the buffer the decoder wrote, so there is nothing to skip.
 fn format_decoder(info: &ImageInfo, demand: Demand) -> Option<Result<DecodedImage>> {
-    if formats::avif::handles(info) {
-        return Some(formats::avif::decode(info, demand));
-    }
-    if formats::heif::handles(info) {
-        return Some(formats::heif::decode(info, demand));
-    }
-    if formats::webp::handles(info) {
-        return Some(formats::webp::decode(info));
-    }
-    if formats::jxl::handles(info) {
-        return Some(formats::jxl::decode(info));
-    }
-    if formats::jp2::handles(info) {
-        return Some(formats::jp2::decode(info));
-    }
-    if formats::jpeg::owns(&info.path) {
-        return Some(formats::jpeg::decode(info));
-    }
-    if formats::qoi::owns(&info.path) {
-        return Some(formats::qoi::decode(info));
-    }
-    if formats::farbfeld::owns(&info.path) {
-        return Some(formats::farbfeld::decode(info));
-    }
-    if formats::bmp::owns(&info.path) {
-        return Some(
-            formats::bmp::stream(info).and_then(|streamed| match streamed {
-                Some(ready) => Ok(ready),
-                None => formats::bmp::decode(info),
-            }),
-        );
-    }
-    if formats::ico::owns(&info.path) {
-        return Some(formats::ico::decode(info));
-    }
-    if formats::tga::owns(&info.path) {
-        return Some(
-            formats::tga::stream(info).and_then(|streamed| match streamed {
-                Some(ready) => Ok(ready),
-                None => formats::tga::decode(info),
-            }),
-        );
-    }
-    if formats::dds::owns(&info.path) {
-        return Some(formats::dds::decode(info));
-    }
-    if formats::pnm::owns(&info.path) {
-        return Some(
-            formats::pnm::stream(info).and_then(|streamed| match streamed {
-                Some(ready) => Ok(ready),
-                None => formats::pnm::decode(info),
-            }),
-        );
-    }
-    if formats::tiff::owns(&info.path) {
-        return Some(formats::tiff::decode(info));
-    }
-    if formats::hdr::owns(&info.path) {
-        return Some(formats::hdr::decode(info));
-    }
-    if formats::exr::owns(&info.path) {
-        return Some(formats::exr::decode(info));
-    }
-    None
+    // One read of the head answers which module owns this file, and it is the
+    // same call the probe makes -- see [`identify::route`]. This replaces a
+    // chain of sixteen `owns` calls, one open each, that had to agree with
+    // `describe` and could not be kept in agreement: a module answering from the
+    // name rather than from the bytes probed as one format and decoded as
+    // another.
+    Some(match identify::route(&info.path) {
+        Some(Format::Avif) => formats::avif::decode(info, demand),
+        Some(Format::Heif) => formats::heif::decode(info, demand),
+        Some(Format::Webp) => formats::webp::decode(info),
+        Some(Format::Jxl) => formats::jxl::decode(info),
+        Some(Format::Jp2) => formats::jp2::decode(info),
+        Some(Format::Jpeg) => formats::jpeg::decode(info),
+        Some(Format::Qoi) => formats::qoi::decode(info),
+        Some(Format::Farbfeld) => formats::farbfeld::decode(info),
+        // Three of these walk their own rows straight into the frame when they
+        // can, and fall back to the whole buffer when they cannot.
+        Some(Format::Bmp) => formats::bmp::stream(info).and_then(|streamed| match streamed {
+            Some(ready) => Ok(ready),
+            None => formats::bmp::decode(info),
+        }),
+        Some(Format::Ico) => formats::ico::decode(info),
+        Some(Format::Tga) => formats::tga::stream(info).and_then(|streamed| match streamed {
+            Some(ready) => Ok(ready),
+            None => formats::tga::decode(info),
+        }),
+        Some(Format::Dds) => formats::dds::decode(info),
+        Some(Format::Pnm) => formats::pnm::stream(info).and_then(|streamed| match streamed {
+            Some(ready) => Ok(ready),
+            None => formats::pnm::decode(info),
+        }),
+        Some(Format::Tiff) => formats::tiff::decode(info),
+        Some(Format::Hdr) => formats::hdr::decode(info),
+        Some(Format::Exr) => formats::exr::decode(info),
+        // A png and a gif are the two the tail of [`decode`] owns: the png row
+        // walk, and the generic decoder for both. No format here means the same
+        // thing, so a file no module claims keeps the path it had.
+        Some(Format::Png | Format::Gif) | None => return None,
+    })
 }
 
 /// Format a module decodes this file into, when it is not the one the probed
@@ -537,89 +513,69 @@ pub fn probe(path: &Path, apply_rotation: bool, export_icc_profile: bool) -> Res
 }
 
 fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
-    // A file a format module can describe from its container skips the decoder,
-    // which for an avif means skipping a decode of the whole picture; see
-    // [`crate::formats::avif::image_info`] and [`crate::formats::heif::image_info`].
-    if let Some(info) = formats::heif::image_info(path, apply_rotation) {
-        return Ok(info);
-    }
-    if let Some(info) = formats::avif::image_info(path, apply_rotation) {
-        return Ok(info);
-    }
-    // A jpeg xl is read here whether or not the `image` crate could reach a
-    // decoder for one, which it cannot: it has no jpeg xl format of its own, and
-    // the hook that taught it one is gone. See [`crate::formats::jxl`].
-    if formats::jxl::owns(path) {
-        return formats::jxl::image_info(path, apply_rotation);
-    }
-    if formats::jp2::owns(path) {
-        return formats::jp2::image_info(path, apply_rotation);
-    }
-    // A quite ok image states its size and its channel count in fourteen bytes,
-    // so reading the header here is cheaper than the `image` reader's own
-    // probe; see [`crate::formats::qoi::image_info`].
-    if let Some(info) = formats::qoi::image_info(path, apply_rotation)? {
-        return Ok(info);
-    }
-    // A farbfeld's header is the same shape and just as cheap: a magic and two
-    // numbers, read here rather than by the `image` reader; see
-    // [`crate::formats::farbfeld::image_info`].
-    if let Some(info) = formats::farbfeld::image_info(path, apply_rotation)? {
-        return Ok(info);
-    }
-    // A bitmap states its depth, its compression and its masks in a header this
-    // module reads without touching a sample, and the alpha decision is part of
-    // that header rather than of the samples; see [`crate::formats::bmp`].
-    if let Some(info) = formats::bmp::image_info(path, apply_rotation)? {
-        return Ok(info);
-    }
-    // An icon is a directory of payloads, and which one is read is decided by the
-    // directory rather than by the frame; see [crate::formats::ico].
-    if let Some(info) = formats::ico::image_info(path, apply_rotation)? {
-        return Ok(info);
-    }
-    // A targa states its layout in an eighteen byte header, and the two
-    // direction bits in that header decide where the pixels go rather than an
-    // orientation property; see [`crate::formats::tga`].
-    if let Some(info) = formats::tga::image_info(path, apply_rotation)? {
-        return Ok(info);
-    }
-    // A surface states its compression in a four character code or in a DXGI
-    // format number, and its size has to be a whole number of four by four
-    // blocks; see [`crate::formats::dds`].
-    if let Some(info) = formats::dds::image_info(path, apply_rotation)? {
-        return Ok(info);
-    }
-    // A netpbm states its magic, its size and its `MAXVAL` in a text preamble,
-    // and that preamble is also where a comment is legal; see
-    // [`crate::formats::pnm`].
-    if let Some(info) = formats::pnm::image_info(path, apply_rotation)? {
-        return Ok(info);
-    }
-    // A radiance picture states its layout in a resolution line and its samples
-    // as four bytes a pixel; see [`crate::formats::hdr`].
-    if let Some(info) = formats::tiff::image_info(path, apply_rotation)? {
-        return Ok(info);
-    }
-    if let Some(info) = formats::hdr::image_info(path, apply_rotation)? {
-        return Ok(info);
-    }
-    // An openexr states its layers, their channels and their sample types in
-    // its header, and the crate parses that header without decompressing a
-    // block; see [`crate::formats::exr`].
-    if let Some(info) = formats::exr::image_info(path, apply_rotation)? {
-        return Ok(info);
-    }
-    // A png is read here for the same reason a jpeg is, and one thing more:
-    // the `cICP` chunk is not something the `image` decoder exposes at all.
-    // See [`crate::formats::png::image_info`].
-    if let Some(info) = formats::png::image_info(path, apply_rotation)? {
-        return Ok(info);
-    }
-    // A jpeg is read here rather than through the generic decoder, whose
-    // reader would parse the file's headers four times for one probe; see
-    // [`crate::formats::jpeg`].
-    if let Some(info) = formats::jpeg::image_info(path, apply_rotation)? {
+    // One read of the head answers which module can describe this file, and it
+    // is the same call the decode makes: see [`identify::route`]. A module that
+    // declines a file its own bytes name -- an openexr whose every layer is deep
+    // or not r,g,b, say -- is then followed by the generic decoder below, which
+    // is what a chain of fifteen `owns` calls did before: with the content
+    // deciding, no other module could have claimed it anyway.
+    let described = match identify::route(path) {
+        // The two containers whose own reader answers a size without decoding
+        // the picture at all.
+        Some(Format::Heif) => formats::heif::image_info(path, apply_rotation),
+        Some(Format::Avif) => formats::avif::image_info(path, apply_rotation),
+        // A jpeg xl is read here whether or not the `image` crate could reach a
+        // decoder for one, which it cannot: it has no jpeg xl format of its own.
+        // These two answer with a description rather than with an option: the
+        // route above is the check that used to come before the call.
+        Some(Format::Jxl) => Some(formats::jxl::image_info(path, apply_rotation)?),
+        Some(Format::Jp2) => Some(formats::jp2::image_info(path, apply_rotation)?),
+        // A quite ok image states its size and its channel count in fourteen
+        // bytes, and a farbfeld's header is the same shape and just as cheap.
+        Some(Format::Qoi) => formats::qoi::image_info(path, apply_rotation)?,
+        Some(Format::Farbfeld) => formats::farbfeld::image_info(path, apply_rotation)?,
+        // A bitmap states its depth, its compression and its masks in a header
+        // this module reads without touching a sample, and the alpha decision is
+        // part of that header rather than of the samples.
+        Some(Format::Bmp) => formats::bmp::image_info(path, apply_rotation)?,
+        // An icon is a directory of payloads, and which one is read is decided
+        // by the directory rather than by the frame.
+        Some(Format::Ico) => formats::ico::image_info(path, apply_rotation)?,
+        // A targa states its layout in an eighteen byte header, and the two
+        // direction bits in that header decide where the pixels go rather than
+        // an orientation property.
+        Some(Format::Tga) => formats::tga::image_info(path, apply_rotation)?,
+        // A surface states its compression in a four character code or in a
+        // DXGI format number, and its size has to be a whole number of four by
+        // four blocks.
+        Some(Format::Dds) => formats::dds::image_info(path, apply_rotation)?,
+        // A netpbm states its magic, its size and its `MAXVAL` in a text
+        // preamble, and that preamble is also where a comment is legal.
+        Some(Format::Pnm) => formats::pnm::image_info(path, apply_rotation)?,
+        // A tagged format, whose directories this module walks without decoding
+        // a sample.
+        Some(Format::Tiff) => formats::tiff::image_info(path, apply_rotation)?,
+        // A radiance picture states its layout in a resolution line and its
+        // samples as four bytes a pixel.
+        Some(Format::Hdr) => formats::hdr::image_info(path, apply_rotation)?,
+        // An openexr states its layers, their channels and their sample types in
+        // its header, and the crate parses that header without decompressing a
+        // block.
+        Some(Format::Exr) => formats::exr::image_info(path, apply_rotation)?,
+        // A png is read here for the same reason a jpeg is, and one thing more:
+        // the `cICP` chunk is not something the `image` decoder exposes at all.
+        Some(Format::Png) => formats::png::image_info(path, apply_rotation)?,
+        // A jpeg is read here rather than through the generic decoder, whose
+        // reader would parse the file's headers four times for one probe.
+        Some(Format::Jpeg) => formats::jpeg::image_info(path, apply_rotation)?,
+        // A gif and a webp are the generic decoder's, which is where they have
+        // always been: the animation module composes a gif's timeline, but a one
+        // frame gif is a still and this reader has no gif module of its own, and
+        // a webp states its lossy yuv arrangement somewhere only `output_format`
+        // reads, which the path below already asks for.
+        Some(Format::Gif | Format::Webp) | None => None,
+    };
+    if let Some(info) = described {
         return Ok(info);
     }
 

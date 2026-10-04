@@ -45,25 +45,6 @@ use crate::{
 /// File extensions that hold a heif container.
 const HEIF_EXTENSIONS: [&str; 4] = ["heic", "heics", "heif", "hif"];
 
-/// Whether this module decodes `info`.
-///
-/// A file the probe described as r,g,b is decoded by the `image` integration
-/// through the libheif hook, which is where those files have always been read;
-/// every other file this module describes is read here, from libheif's planes.
-pub fn handles(info: &ImageInfo) -> bool {
-    // A heif is this module's, whatever colourscheme libheif reports. It was
-    // only the non-r,g,b ones while the r,g,b arrangement was the `image`
-    // decoder's; this module reads those planes itself now, so the exclusion
-    // is gone and with it the last heif a hook could take.
-    //
-    // An avif is not asked about here. This module still *reads* one whose
-    // container the avif walk refuses, or whose samples are r,g,b, but
-    // `avif::decode` is what hands it over, having already walked the
-    // container to find that out; asking again from here was a second walk per
-    // frame request for an answer already known.
-    owns(&info.path)
-}
-
 /// What the container of a heif states about its primary image, when this
 /// module can describe the file from it.
 ///
@@ -733,32 +714,19 @@ mod tests {
         }
     }
 
+    /// A heif is this module's, and the route is what says so now: a `handles`
+    /// here was a second copy of the rule, and asking it again cost a walk per
+    /// frame request to answer a question the decode already had the answer to.
     #[test]
-    fn handles_needs_a_heif_extension_and_a_non_rgb_probe() {
-        assert!(handles(&info(
-            "a.heic",
-            PixelFormat::Yuv420P8,
-            ColorType::Rgb8
-        )));
-        assert!(handles(&info(
-            "a.heic",
-            PixelFormat::Yuv420P10,
-            ColorType::Rgb16
-        )));
-        assert!(handles(&info("a.heic", PixelFormat::Gray8, ColorType::L8)));
-        // An r,g,b one too: this module reads those planes itself now, which
-        // is what took the last heif away from the hook.
-        assert!(handles(&info("a.heic", PixelFormat::Rgb8, ColorType::Rgb8)));
-        assert!(!handles(&info(
-            "a.png",
-            PixelFormat::Yuv420P8,
-            ColorType::Rgb8
-        )));
-        assert!(!handles(&info(
-            "a.avif",
-            PixelFormat::Yuv420P8,
-            ColorType::Rgb8
-        )));
+    fn a_heif_container_routes_to_this_module() {
+        let route = crate::formats::identify::route;
+        let heif = Some(crate::formats::identify::Format::Heif);
+        for path in ["a.heic", "a.HEIC", "a.heif", "a.hif", "a.avci"] {
+            assert_eq!(route(Path::new(path)), heif, "{path}");
+        }
+        // An avif shares the container and is the avif module's.
+        assert_ne!(route(Path::new("a.avif")), heif);
+        assert_ne!(route(Path::new("a.png")), heif);
     }
 
     #[test]

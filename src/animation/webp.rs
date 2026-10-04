@@ -56,6 +56,18 @@ pub fn owns(path: &Path) -> bool {
         })
 }
 
+/// Whether a webp bitstream holds an animation rather than one picture.
+///
+/// The still decoder needs this because libwebp's simple entry points read one
+/// image and refuse a container of them, and a file whose name does not say
+/// `webp` never reaches [`segment_info`]: it is a still to the probe, which
+/// picks this adapter by name, so the still decoder has to recognise the
+/// container it cannot read and hand it on.
+#[must_use]
+pub fn is_animated(data: &[u8], path: &Path) -> bool {
+    parse(data, path).is_ok_and(|parsed| parsed.is_some_and(|shown| shown.is_animated()))
+}
+
 /// One displayed frame's rectangle, timing and drawing rule.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Frame {

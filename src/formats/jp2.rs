@@ -65,24 +65,6 @@ struct SizHeader {
     components: Vec<ComponentHeader>,
 }
 
-pub fn owns(path: &Path) -> bool {
-    // Content first: a file whose bytes say it is something else is that
-    // something else however it is named, and the extension is the hint a
-    // format with no signature of its own has to fall back on. See
-    // [`identify::owns`](crate::formats::identify::owns).
-    crate::formats::identify::owns(crate::formats::identify::Format::Jp2, path)
-}
-
-/// Whether this module decodes the probed image.
-pub fn handles(info: &ImageInfo) -> bool {
-    // The same question the probe asks, asked the same way: `describe` routes
-    // this format through `owns`, so a `handles` answering from the extension
-    // here would promise a frame the decode then refused. That is the disagreement
-    // plan 34 is about, and it was live -- a renamed jxl passed the probe and fell
-    // through to `image` at decode.
-    owns(&info.path)
-}
-
 /// Probe one JPEG 2000 image without asking OpenJPEG to decode its pixels.
 pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<ImageInfo> {
     let data = std::fs::read(path).map_err(|error| image_error("open", path, error))?;
@@ -784,19 +766,23 @@ mod tests {
         assert_eq!(header.components[0].precision, 8);
     }
 
+    /// What this module answered for itself is [`identify::route`] now, so this
+    /// pins the rule every module routes by rather than a copy of it.
     #[test]
     fn accepts_the_supported_extensions_case_insensitively() {
+        let route = crate::formats::identify::route;
+        let jp2 = Some(crate::formats::identify::Format::Jp2);
         for extension in crate::formats::identify::Format::Jp2.extensions() {
-            assert!(owns(Path::new(&format!("page.{extension}"))));
-            assert!(owns(Path::new(&format!(
-                "page.{}",
-                extension.to_uppercase()
-            ))));
+            assert_eq!(route(Path::new(&format!("page.{extension}"))), jp2);
+            assert_eq!(
+                route(Path::new(&format!("page.{}", extension.to_uppercase()))),
+                jp2
+            );
         }
-        assert!(!owns(Path::new("page.jp2.zip")));
-        assert!(!owns(Path::new("page.png")));
+        // A name that only looks like one, and a name that is another format.
+        assert_eq!(route(Path::new("page.jp2.zip")), None);
+        assert_ne!(route(Path::new("page.png")), jp2);
     }
-
     #[test]
     fn maps_srgb_and_s_ycc_to_their_frame_formats() {
         let rgb = Header {

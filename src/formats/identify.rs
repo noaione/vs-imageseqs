@@ -250,22 +250,40 @@ fn head_of(path: &Path) -> Vec<u8> {
     head
 }
 
+/// The one format that owns a path, from one read of its leading bytes.
+///
+/// This is [`identify`] with [`from_extension`] as the fallback, which is the
+/// whole of the routing rule in one place. A caller that asks this asks the same
+/// question every other caller asks, so a probe and a decode cannot settle on
+/// different formats -- which a chain of `owns` calls could, because each module
+/// answered for itself and each answer cost an open.
+///
+/// `None` means no format here owns the file, which is what sends it to the
+/// generic decoder.
+#[must_use]
+pub fn route(path: &Path) -> Option<Format> {
+    route_from(&head_of(path), path)
+}
+
+/// [`route`] for a caller that has already read a file's leading bytes.
+#[must_use]
+pub fn route_from(head: &[u8], path: &Path) -> Option<Format> {
+    identify(head).or_else(|| from_extension(path))
+}
+
 /// Whether a format owns a file: the content decides, the extension is the hint.
 ///
 /// This is the rule plan 34 states in one place -- "strong signatures win over
-/// extensions" -- and it is what every still module's `owns` now delegates to. A
+/// extensions" -- and it is what every still module's `owns` delegates to. A
 /// format with a signature of its own claims a file only when that signature is
 /// there, however the file is named; a format without one falls back on the name,
 /// which is Targa and a bare DIB and nothing else.
 ///
-/// The read costs an open per question, which is deliberate for this phase: the
-/// plan asks for correctness first and consolidates the opens in its phase 3.
+/// It is [`route_from`] against one format, so the question has one answer here
+/// rather than two.
 #[must_use]
 pub fn owns(format: Format, path: &Path) -> bool {
-    match identify(&head_of(path)) {
-        Some(found) => found == format,
-        None => from_extension(path) == Some(format),
-    }
+    route_from(&head_of(path), path) == Some(format)
 }
 #[cfg(test)]
 mod tests {

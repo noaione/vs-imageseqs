@@ -50,16 +50,6 @@ struct BitstreamHeader {
     has_alpha: bool,
 }
 
-/// Whether this module decodes `info`.
-///
-/// Every webp file goes through libwebp. The decoder hooks registered in
-/// [`crate::decoder`] only ever report `Rgb8` or `Rgba8` for one, which is
-/// exactly what the entry points below hand back, so no webp color type is
-/// left for the `image` path to decode instead.
-pub fn handles(info: &ImageInfo) -> bool {
-    has_webp_extension(&info.path)
-}
-
 /// Format this module decodes the image into, when it is not the one the probed
 /// color type suggests.
 ///
@@ -313,6 +303,15 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     // below never goes back to the disk.
     let data = std::fs::read(&info.path).map_err(|error| image_error("open", &info.path, error))?;
     let open = open_started.elapsed();
+
+    // libwebp's simple entry points read one image and refuse a container of
+    // them. An animated webp only reaches this module when its name hid the
+    // animation from the probe, which picks the animation adapter by name; the
+    // decoder for it was the `image` path, so this hands the file back to that
+    // rather than failing with "libwebp rejected the bitstream".
+    if crate::animation::webp::is_animated(&data, &info.path) {
+        return crate::decoder::decode_through_image(info);
+    }
 
     let metadata_started = Instant::now();
     let (width, height) = header_dimensions(&data).ok_or_else(|| {
@@ -699,26 +698,18 @@ mod tests {
         assert!(!has_webp_extension(Path::new("a.png")));
     }
 
+    /// A webp is this module's whatever its frame holds. The gate this used to
+    /// be is [`identify::route`] now, which every module reads, so this pins
+    /// the route rather than a second copy of it.
     #[test]
-    fn handles_every_webp_file() {
-        assert!(handles(&info(
-            Path::new("page.webp"),
-            ColorType::Rgb8,
-            3,
-            2
-        )));
-        assert!(handles(&info(
-            Path::new("page.webp"),
-            ColorType::Rgba8,
-            3,
-            2
-        )));
-        assert!(!handles(&info(
-            Path::new("page.png"),
-            ColorType::Rgb8,
-            3,
-            2
-        )));
+    fn every_webp_file_routes_to_this_module() {
+        let route = crate::formats::identify::route;
+        let webp = Some(crate::formats::identify::Format::Webp);
+        for path in ["page.webp", "page.WEBP", "page.WebP"] {
+            assert_eq!(route(Path::new(path)), webp, "{path}");
+        }
+        assert_ne!(route(Path::new("page.png")), webp);
+        assert_ne!(route(Path::new("page.webpx")), webp);
     }
 
     #[test]

@@ -3,6 +3,19 @@
 ## unreleased
 ### changed
 
+- Creating a clip over a long list is faster. Describing 170 files went from a
+  median of 78 ms to 40 ms, over seven interleaved pairs. Every format module
+  answered "is this mine?" by opening the file, so one file was opened once per
+  module -- about fifteen times -- and the decode then asked all of it again
+  with a gate of its own. The content decides that question in one place now,
+  `identify::route`, and the probe and the decode each ask it once: sixteen
+  opens down to one in the decode, and fifteen down to two in the probe. A
+  renamed file also routes the same way in both halves now, which it did not --
+  webp, heif, jxl and jpeg 2000 answered the decode from the extension while
+  the probe answered from the bytes, so a file whose name lied about it could
+  be described as one format and decoded as another. An animated webp under a
+  name that does not say `webp` keeps the single-frame read it had, because
+  libwebp's simple entry points read one image and refuse a container of them
 - An OpenEXR whose first part holds no colour channel now decodes. The probe and
   the decode were asking different questions: the probe took the first part that
   states `R`, `G` and `B`, and the decode took the first part it could read at

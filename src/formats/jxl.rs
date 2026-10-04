@@ -73,19 +73,6 @@ pub fn owns(path: &Path) -> bool {
     crate::formats::identify::owns(crate::formats::identify::Format::Jxl, path)
 }
 
-/// Whether this module decodes `info`.
-///
-/// Every jpeg xl file goes through this module: the `image` integration has no
-/// decoder to keep a color type back for.
-pub fn handles(info: &ImageInfo) -> bool {
-    // The same question the probe asks, asked the same way: `describe` routes
-    // this format through `owns`, so a `handles` answering from the extension
-    // here would promise a frame the decode then refused. That is the disagreement
-    // plan 34 is about, and it was live -- a renamed jxl passed the probe and fell
-    // through to `image` at decode.
-    owns(&info.path)
-}
-
 /// What the codestream of a jpeg xl file states about its image.
 ///
 /// Shared with the animation adapter, which reads the same header from its own
