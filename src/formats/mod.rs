@@ -28,6 +28,7 @@ pub mod avif;
 pub mod bmp;
 pub mod farbfeld;
 pub mod heif;
+pub mod ico;
 pub mod jp2;
 pub mod jpeg;
 pub mod jxl;

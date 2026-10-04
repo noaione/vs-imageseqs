@@ -72,6 +72,9 @@ fn format_decoder(info: &ImageInfo, demand: Demand) -> Option<Result<DecodedImag
     if formats::bmp::owns(&info.path) {
         return Some(formats::bmp::decode(info));
     }
+    if formats::ico::owns(&info.path) {
+        return Some(formats::ico::decode(info));
+    }
     None
 }
 
@@ -453,6 +456,11 @@ fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
     // module reads without touching a sample, and the alpha decision is part of
     // that header rather than of the samples; see [`crate::formats::bmp`].
     if let Some(info) = formats::bmp::image_info(path, apply_rotation)? {
+        return Ok(info);
+    }
+    // An icon is a directory of payloads, and which one is read is decided by the
+    // directory rather than by the frame; see [crate::formats::ico].
+    if let Some(info) = formats::ico::image_info(path, apply_rotation)? {
         return Ok(info);
     }
     // A png is read here for the same reason a jpeg is, and one thing more:

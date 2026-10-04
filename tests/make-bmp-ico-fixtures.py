@@ -363,7 +363,7 @@ def main() -> int:
 
     def emit(name: str, **options: object) -> None:
         target = fixture(name)
-        write_bmp(target, pixels, **options)
+        write_bmp(target, pixels, **options)  # pyright: ignore[reportArgumentType]
         print(f"  + {name} ({os.path.getsize(target)} bytes)")
 
     # ---- One file per palette depth. These exercise the palette expansion and

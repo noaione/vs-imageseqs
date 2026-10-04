@@ -24,11 +24,9 @@ vapoursynth4-rs = { version = "0.5.1", default-features = false, features = [
 image = { version = "0.25.10", default-features = false, features = [
     # formats
     "avif-native",
-    "bmp",
     "dds",
     "exr",
     "gif",
-    "ico",
     "jpeg",
     "png",
     "pnm",

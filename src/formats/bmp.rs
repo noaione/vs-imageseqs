@@ -449,6 +449,38 @@ pub fn header(data: &[u8], start: usize, file_header: bool) -> Result<Header> {
     }
 }
 
+/// The header of the bare DIB an icon holds.
+///
+/// Two adjustments are what make an icon's bitmap different from a `.bmp`, and
+/// both are the format's rather than this reader's:
+///
+/// - The stored height is **halved**. An icon states twice the real height to
+///   account for the AND mask that follows the pixels, whether or not one is
+///   there, so a 32 by 32 icon holds a DIB that says 64.
+/// - The alpha channel is **added**, so a thirty-two bit `BI_RGB` payload keeps
+///   its fourth byte. That is the opposite of the rule for a `.bmp`, where the
+///   same bytes have the same fourth byte dropped, and it is the difference the
+///   plan names.
+///
+/// A payload that is not thirty-two bits deep is refused here rather than
+/// deeper in, so the probe and the decode cannot disagree about whether a file
+/// is readable.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the DIB is malformed or too shallow.
+pub(crate) fn header_ico(data: &[u8], start: usize) -> Result<Header> {
+    let mut header = header(data, start, false)?;
+    if !matches!(header.image_type, ImageType::Rgb32 | ImageType::Bitfields32) {
+        return Err(ImgSeqError::new(format!(
+            "an icon DIB payload of {} bits is not supported",
+            header.bit_count
+        )));
+    }
+    header.height /= 2;
+    header.has_alpha = true;
+    Ok(header)
+}
 fn truncated() -> ImgSeqError {
     ImgSeqError::new("the bitmap is truncated")
 }
@@ -467,6 +499,13 @@ pub fn pixels(header: &Header, data: &[u8]) -> Result<Vec<u8>> {
         .and_then(|count| count.checked_mul(channels))
         .ok_or_else(|| ImgSeqError::new("the bitmap is too large"))?;
     let mut out = vec![0u8; size];
+    if channels == 4 {
+        // A four channel buffer starts opaque, so a payload that states no alpha --
+        // the palette case an icon forces one onto -- is not handed out transparent.
+        for alpha in out.iter_mut().skip(3).step_by(4) {
+            *alpha = 255;
+        }
+    }
 
     match header.image_type {
         ImageType::Rle4 | ImageType::Rle8 => {
