@@ -381,7 +381,25 @@ What is left, in plan 27's order, with the fixtures each still needs:
     `bmp-bitfields32` (mask `0xFF000000`) is `Rgba8` with real alpha. The two
     no-alpha files share one identical alpha hash, which is what makes the rule
     a measurement rather than an assertion.
-- tga — **no fixtures**.
+- **tga** — fixtures **landed** in `490117f`, the port still to do. Twelve files from
+  [`tests/make-tga-fixtures.py`](../../tests/make-tga-fixtures.py) covering all six image
+  types the format uses in practice (the three raw ones and their three
+  run-length forms), the four depths that change the outcome, and the two
+  descriptor directions. Written out field by field rather than by ImageMagick,
+  for the reason the BMP fixtures are: `magick` does not honour the options that
+  select these subtypes, so a recipe asking for sixteen bits can quietly write
+  thirty-two. The writer had a bug on its first run worth recording, because it
+  is the kind that produces *plausible* files: the colour map entry size is a
+  single byte at offset seven, and writing it as a word shifted the origin,
+  width, height, depth and descriptor each by one, so all twelve files were
+  refused. The header is checked back against the plugin now, and the survey
+  prints every field.
+  The rule the plan names is confirmed rather than assumed: `tga-rgb32-attr0.tga`
+  is a thirty-two bit image whose descriptor states **zero** attribute bits, and
+  it is handed out as `Rgba8` -- the opposite of what the same fourth byte does
+  in a BMP. The other baselines are `Rgb5x1` for the sixteen bit file, `La8` for
+  the grayscale-with-alpha one, `L8` for plain grayscale, and `Rgb8` for the
+  rest.
 - dds — `alpha-dds.dds` exists.
 - pnm — `gray.pgm` and `rgb.ppm` exist.
 - hdr — **no fixtures**.
