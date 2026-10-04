@@ -3,6 +3,22 @@
 ## unreleased
 ### changed
 
+- A ycbcr tiff is read here for the first time. The pinned decoder refuses a
+  subsampled page unless its compression is JPEG and upsamples the chroma of the
+  ones it does take, so the raster is read from the strips here and handed out
+  as the file's own planes: `YUV444P8`, `YUV422P8` and `YUV420P8` for the three
+  samplings the format defines, one coding unit holding every luma sample it
+  covers and then one chroma pair. `_Matrix` comes from `YCbCrCoefficients` and
+  `_Range` from `ReferenceBlackWhite`, with the specification's own defaults --
+  bt.601 at full range -- for a page that states neither, and a page whose
+  coefficients name no matrix VapourSynth has a code for is refused rather than
+  labelled with a guess. Eight bit samples of three samples a pixel in one image
+  plane, uncompressed: a page of any other shape, a page whose coefficients
+  cannot be named, and a compressed page are all refused at identify, so the
+  probe cannot promise a frame the decode would refuse to produce. The fixtures
+  are written by hand, because no encoder here writes a subsampled ycbcr page at
+  all, and libtiff's own `tiff2rgba` reads each of them to neutral greys at
+  exactly the luma levels they were written with.
 - A palette tiff is read here now rather than refused. `tiff-palette.tiff` is
   the fixture that used to answer `failed to identify` and now hands out its
   picture, and the widths that were never read at all -- one, two and eight bits

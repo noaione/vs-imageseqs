@@ -42,6 +42,7 @@
 use std::path::Path;
 
 use crate::{
+    color::Cicp,
     decoder::{DecodeTimings, DecodedImage, ImageInfo, Pixels, image_error},
     error::{ImgSeqError, Result},
     layout::{ColorType, Orientation, SourceColorType},
@@ -68,6 +69,14 @@ struct Layout {
     /// rather than colours. The pinned decoder refuses this photometric before it
     /// will name a colour type, so the reader expands the table itself.
     palette: Option<u8>,
+    /// The chroma sampling of a ycbcr page, as the two numbers the file states:
+    /// how many pixels share one chroma pair. The pinned decoder refuses a
+    /// subsampled page and upsamples the ones it does take, so the raster is read
+    /// here and handed out at the sampling the file holds.
+    ycbcr: Option<(u8, u8)>,
+    /// The colour description a ycbcr page's coefficients and reference levels
+    /// state, which is what `_Matrix` and `_Range` come from.
+    cicp: Option<Cicp>,
 }
 
 /// Whether this module reads `path`.
@@ -161,6 +170,8 @@ fn layout(kind: tiff::ColorType) -> Result<Layout> {
         float: bits == 32,
         separated,
         palette: None,
+        ycbcr: None,
+        cicp: None,
     })
 }
 
@@ -179,11 +190,18 @@ fn layout_of<R: std::io::Read + std::io::Seek>(
     action: &str,
 ) -> Result<Layout> {
     // 3 is `RGBPalette`; see `tiff::tags::PhotometricInterpretation`.
-    let palette = decoder
+    // 3 is `RGBPalette` and 6 is `YCbCr`; see
+    // `tiff::tags::PhotometricInterpretation`. Neither is described by a colour
+    // type the pinned decoder names for the shapes read here: it refuses a
+    // palette outright, and it refuses a subsampled ycbcr page or upsamples the
+    // ones it does take.
+    match decoder
         .get_tag_unsigned::<u16>(tiff::tags::Tag::PhotometricInterpretation)
-        .is_ok_and(|code| code == 3);
-    if palette {
-        return layout_palette(decoder, path, action);
+        .ok()
+    {
+        Some(3) => return layout_palette(decoder, path, action),
+        Some(6) => return layout_ycbcr(decoder, path, action),
+        _ => {}
     }
     layout(
         decoder
@@ -248,6 +266,8 @@ fn layout_palette<R: std::io::Read + std::io::Seek>(
         float: false,
         separated: false,
         palette: Some(bits),
+        ycbcr: None,
+        cicp: None,
     })
 }
 
@@ -268,6 +288,248 @@ fn layout_palette<R: std::io::Read + std::io::Seek>(
 /// at.
 fn palette_supported(bits: u8) -> bool {
     matches!(bits, 1 | 2 | 4 | 8)
+}
+
+/// The layout of a ycbcr page, from the tags that describe its raster.
+///
+/// A page states how many pixels share one chroma pair in `ChromaSubsampling`,
+/// and the specification's default when it states none is two by two. The pinned
+/// decoder refuses a subsampled page unless its compression is JPEG and upsamples
+/// the chroma of the ones it does take, so a page is read here at the sampling it
+/// holds rather than at the sampling a decoder would leave behind.
+fn layout_ycbcr<R: std::io::Read + std::io::Seek>(
+    decoder: &mut tiff::decoder::Decoder<R>,
+    path: &Path,
+    action: &str,
+) -> Result<Layout> {
+    // A page states the width of each of its three samples, or one width for all
+    // of them, so this is a list rather than a single number.
+    let bits = decoder
+        .find_tag_unsigned_vec::<u16>(tiff::tags::Tag::BitsPerSample)
+        .map_err(|error| image_error(action, path, error))?
+        .unwrap_or_default();
+    let samples = decoder
+        .get_tag_unsigned::<u16>(tiff::tags::Tag::SamplesPerPixel)
+        .map_err(|error| image_error(action, path, error))?;
+    // One sample a byte and three samples a pixel. A page of any other shape is
+    // one this reader has not been taught and will not guess at.
+    if bits.is_empty() || bits.iter().any(|width| *width != 8) || samples != 3 {
+        return Err(image_error(
+            action,
+            path,
+            format!(
+                "a ycbcr page of {samples} samples at {bits:?} bits is not one this reader takes"
+            ),
+        ));
+    }
+    // The specification requires one image plane for ycbcr, so a page that says
+    // otherwise is not one this reader has to walk.
+    let planar = decoder
+        .get_tag_unsigned::<u16>(tiff::tags::Tag::PlanarConfiguration)
+        .unwrap_or(1);
+    if planar != 1 {
+        return Err(image_error(
+            action,
+            path,
+            "a planar ycbcr page is not one this reader takes",
+        ));
+    }
+    // An uncompressed page is the only kind this reader decodes: the crate's
+    // chunk reader goes through the colour type that refuses this photometric,
+    // so a compressed page would need a decompressor of its own. Refused here
+    // rather than at the decode, because a probe that described a page the
+    // decode would refuse is the one thing this reader must never do.
+    let compression = decoder
+        .get_tag_unsigned::<u16>(tiff::tags::Tag::Compression)
+        .unwrap_or(1);
+    if compression != 1 {
+        return Err(image_error(
+            action,
+            path,
+            format!("a ycbcr page compressed with {compression} is not one this reader decodes"),
+        ));
+    }
+    let subsampling = decoder
+        .find_tag_unsigned_vec::<u16>(tiff::tags::Tag::ChromaSubsampling)
+        .map_err(|error| image_error(action, path, error))?
+        .unwrap_or_default();
+    let subsampling = match subsampling.as_slice() {
+        // The specification's default for a page that states nothing.
+        [] => (2, 2),
+        [horiz, vert] => (
+            u8::try_from(*horiz).unwrap_or(0),
+            u8::try_from(*vert).unwrap_or(0),
+        ),
+        _ => {
+            return Err(image_error(
+                action,
+                path,
+                "the chroma subsampling of a ycbcr page is not two numbers",
+            ));
+        }
+    };
+    // One by one, two by one and two by two are the samplings the format
+    // defines. Anything else is a page this reader will not read.
+    if !matches!(subsampling, (1, 1) | (2, 1) | (2, 2)) {
+        return Err(image_error(
+            action,
+            path,
+            format!(
+                "a ycbcr page subsampled {}x{} is not one this reader takes",
+                subsampling.0, subsampling.1
+            ),
+        ));
+    }
+    // A subsampled format's chroma planes are the picture divided down, so a
+    // picture that is not a whole number of units is one whose last chroma
+    // column or row has nowhere to land: VapourSynth gives a thirty-seven wide
+    // yuv422p8 frame eighteen chroma samples a row while the raster stores a
+    // whole nineteenth unit. Refused rather than handed out at a size the frame
+    // does not have.
+    let (width, height) = decoder
+        .dimensions()
+        .map_err(|error| image_error(action, path, error))?;
+    let (across, down) = (u32::from(subsampling.0), u32::from(subsampling.1));
+    if width % across != 0 || height % down != 0 {
+        return Err(image_error(
+            action,
+            path,
+            format!(
+                "a ycbcr page of {width}x{height} is not a whole number of {across}x{down} units"
+            ),
+        ));
+    }
+    let cicp = ycbcr_cicp(decoder, path, action)?;
+    Ok(Layout {
+        channels: 3,
+        sample_bytes: 1,
+        // The label names the three channel arrangement the page holds rather
+        // than a colour space, which is what this tree's readers report for
+        // another container's planes too.
+        color_type: ColorType::Rgb8,
+        source: SourceColorType::Rgb8,
+        float: false,
+        separated: false,
+        palette: None,
+        ycbcr: Some(subsampling),
+        cicp: Some(cicp),
+    })
+}
+
+/// The colour description a ycbcr page's coefficients and reference levels state.
+///
+/// The specification gives a page that states neither the bt.601 coefficients nor
+/// the range of its reference levels the bt.601 pair and the full range, so an
+/// absent tag is that rather than an unknown. A page whose coefficients are not
+/// one VapourSynth names is refused here: this reader hands the frame out as its
+/// own planes, and a plane labelled with a matrix no graph can read would be a
+/// guess written into a property.
+fn ycbcr_cicp<R: std::io::Read + std::io::Seek>(
+    decoder: &mut tiff::decoder::Decoder<R>,
+    path: &Path,
+    action: &str,
+) -> Result<Cicp> {
+    // 529 is `YCbCrCoefficients` and 532 is `ReferenceBlackWhite`; the tag enum
+    // names neither, which is why `image_info` reads the profile by number too.
+    let coefficients = tag_fractions(decoder, 529, path, action)?;
+    let matrix = match coefficients.as_slice() {
+        // The specification's default is the bt.601 pair of equations.
+        [] => 5,
+        [(red, red_den), (green, green_den), (blue, blue_den)] => {
+            let (red, green, blue) = (
+                fraction(*red, *red_den),
+                fraction(*green, *green_den),
+                fraction(*blue, *blue_den),
+            );
+            // The rounded spellings of both sets are written by real encoders,
+            // so the comparison is to a thousandth rather than to equality.
+            if near(red, 0.299) && near(green, 0.587) && near(blue, 0.114) {
+                5
+            } else if near(red, 0.2126) && near(green, 0.7152) && near(blue, 0.0722) {
+                1
+            } else {
+                return Err(image_error(
+                    action,
+                    path,
+                    format!(
+                        "a ycbcr page states coefficients this reader cannot name: {red:.4} {green:.4} {blue:.4}"
+                    ),
+                ));
+            }
+        }
+        _ => {
+            return Err(image_error(
+                action,
+                path,
+                "the ycbcr coefficients of a page are not three numbers",
+            ));
+        }
+    };
+    let levels = tag_fractions(decoder, 532, path, action)?;
+    // The three pairs are luma, cb and cr, each a reference black and a
+    // reference white. A page that states nothing has no headroom at all, which
+    // is the specification's default pair of zero and the maximum sample.
+    let full_range = if levels.is_empty() {
+        true
+    } else if levels.len() == 6 {
+        fraction(levels[0].0, levels[0].1) == 0.0 && fraction(levels[1].0, levels[1].1) == 255.0
+    } else {
+        return Err(image_error(
+            action,
+            path,
+            "the reference levels of a ycbcr page are not three pairs",
+        ));
+    };
+    // Nothing here states primaries or a transfer function, so those are left
+    // for the graph to decide and the matrix is the one this page does state.
+    Ok(Cicp {
+        primaries: 2,
+        transfer: 2,
+        matrix,
+        full_range,
+    })
+}
+
+/// One rational tag value as the number it stands for.
+fn fraction(numerator: u32, denominator: u32) -> f64 {
+    if denominator == 0 {
+        return 0.0;
+    }
+    f64::from(numerator) / f64::from(denominator)
+}
+
+/// Whether a coefficient is the one a name is given for.
+fn near(value: f64, named: f64) -> bool {
+    (value - named).abs() < 0.005
+}
+
+/// One tag's values as fractions, for a tag whose type is rational.
+fn tag_fractions<R: std::io::Read + std::io::Seek>(
+    decoder: &mut tiff::decoder::Decoder<R>,
+    tag: u16,
+    path: &Path,
+    action: &str,
+) -> Result<Vec<(u32, u32)>> {
+    let value = decoder
+        .find_tag(tiff::tags::Tag::Unknown(tag))
+        .map_err(|error| image_error(action, path, error))?;
+    let mut fractions = Vec::new();
+    if let Some(value) = value {
+        collect_fractions(&value, &mut fractions);
+    }
+    Ok(fractions)
+}
+
+/// Every fraction inside one tag value, in the order the file wrote them.
+fn collect_fractions(value: &tiff::decoder::ifd::Value, out: &mut Vec<(u32, u32)>) {
+    use tiff::decoder::ifd::Value;
+    match value {
+        Value::Rational(numerator, denominator) => out.push((*numerator, *denominator)),
+        Value::List(items) => items.iter().for_each(|item| collect_fractions(item, out)),
+        // A tag of another type is not one of the two read here, and the caller
+        // sees the value it did not get.
+        _ => {}
+    }
 }
 
 /// The depth a palette of `bits`-wide indices is handed out at.
@@ -325,6 +587,17 @@ fn flatten(value: &tiff::decoder::ifd::Value, out: &mut Vec<u64>) {
 /// A four channel source is separated into a three channel frame and an alpha
 /// clip, so the alpha's existence does not make the colour frame a wider one.
 fn format(layout: &Layout) -> PixelFormat {
+    // A ycbcr page is handed out as its own planes at the sampling it holds,
+    // which is one of the three formats below rather than a combination of them.
+    if let Some((horiz, vert)) = layout.ycbcr {
+        return match (horiz, vert) {
+            // A unit of one pixel holds a chroma pair of its own, so all three
+            // planes are the size of the picture.
+            (1, _) => PixelFormat::Yuv444P8,
+            (2, 1) => PixelFormat::Yuv422P8,
+            _ => PixelFormat::Yuv420P8,
+        };
+    }
     let base = match (layout.color_type, layout.sample_bytes) {
         (ColorType::L8 | ColorType::La8, _) => PixelFormat::Gray8,
         (ColorType::L16 | ColorType::La16, 4) => PixelFormat::Gray32F,
@@ -424,7 +697,7 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Result<Option<ImageInfo>
         original_color_type: layout.source,
         has_icc_profile: icc_profile.is_some(),
         icc_profile,
-        cicp: None,
+        cicp: layout.cicp,
         chroma_location: None,
         orientation,
         transform: if apply_rotation {
@@ -464,6 +737,27 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     }
 
     let read_started = std::time::Instant::now();
+    // A ycbcr page is handed out as its own planes at the sampling it holds,
+    // which is a different shape of answer from the interleaved one below.
+    if let Some((horiz, vert)) = layout.ycbcr {
+        let planes = ycbcr_planes(&mut decoder, &data, &info.path, width, height, horiz, vert)?;
+        return Ok(DecodedImage {
+            width,
+            height,
+            format: info.format,
+            transform: info.transform,
+            pixels: Pixels::Planar {
+                planes,
+                alpha: None,
+            },
+            timings: DecodeTimings {
+                open,
+                metadata: std::time::Duration::ZERO,
+                buffer: std::time::Duration::ZERO,
+                read: read_started.elapsed(),
+            },
+        });
+    }
     let mut buffer = if let Some(bits) = layout.palette {
         // A palette is read here rather than by the decoder, which refuses the
         // photometric before it can describe a chunk.
@@ -773,6 +1067,129 @@ fn unpack_row(row: &[u8], width: usize, bits: u8, out: &mut Vec<u16>) {
         out.push(value);
     }
 }
+
+/// The three planes of a ycbcr page, at the sampling the file states.
+///
+/// A coding unit holds every luma sample it covers and then one chroma pair.
+/// The units of one unit row are walked left to right, and a unit that hangs off
+/// the right or bottom edge of the picture holds samples with no pixel to land in
+/// which are read and dropped rather than written out of a plane. The chroma
+/// planes are one horizontal factor and one vertical factor smaller than the luma
+/// one, one horizontal factor and one vertical factor down, which is the size a
+/// subsampled VapourSynth format gives a plane.
+///
+/// The raster is read here because the decoder refuses this shape of page, so
+/// only an uncompressed strip is read: a compression this reader does not decode
+/// is refused rather than read as though it were not compressed.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] for a compressed page, a strip that runs past the end
+/// of the file, and a raster with fewer unit rows than the image states.
+fn ycbcr_planes<R: std::io::Read + std::io::Seek>(
+    decoder: &mut tiff::decoder::Decoder<R>,
+    data: &[u8],
+    path: &Path,
+    width: u32,
+    height: u32,
+    horiz: u8,
+    vert: u8,
+) -> Result<Vec<Vec<u8>>> {
+    let offsets = tag_numbers(decoder, tiff::tags::Tag::StripOffsets, path, "decode")?;
+    let counts = tag_numbers(decoder, tiff::tags::Tag::StripByteCounts, path, "decode")?;
+    if offsets.is_empty() || offsets.len() != counts.len() {
+        return Err(image_error(
+            "decode",
+            path,
+            "the strip table does not hold one count for every offset",
+        ));
+    }
+    let rows_per_strip = decoder
+        .get_tag_unsigned::<u32>(tiff::tags::Tag::RowsPerStrip)
+        .unwrap_or(height)
+        .max(1) as usize;
+    let (picture_width, picture_height) = (width as usize, height as usize);
+    let (across, down) = (usize::from(horiz), usize::from(vert));
+    // The chroma planes are the picture divided down, which is what a subsampled
+    // VapourSynth format names, and the caller refuses a picture that is not a
+    // whole number of units so the two are the same size. A unit is `across *
+    // down` luma samples and a chroma pair, and every sample is one byte, so a
+    // unit row is already a whole number of bytes and needs no padding.
+    let chroma_width = picture_width.div_ceil(across);
+    let chroma_height = picture_height.div_ceil(down);
+    let unit = across * down + 2;
+    let rows_of_units = picture_height.div_ceil(down);
+    let unit_row_bytes = picture_width.div_ceil(across) * unit;
+    let mut luma = vec![0u8; picture_width * picture_height];
+    let mut blue = vec![0u8; chroma_width * chroma_height];
+    let mut red = vec![0u8; chroma_width * chroma_height];
+    let mut picture_row = 0usize;
+    let mut unit_row = 0usize;
+    for (offset, count) in offsets.iter().zip(&counts) {
+        if unit_row >= rows_of_units {
+            break;
+        }
+        let offset = usize::try_from(*offset).unwrap_or(usize::MAX);
+        let count = usize::try_from(*count).unwrap_or(usize::MAX);
+        let strip = data
+            .get(offset..offset.saturating_add(count))
+            .ok_or_else(|| image_error("decode", path, "a strip runs past the end of the file"))?;
+        let rows = rows_per_strip.min(picture_height - picture_row);
+        let units = rows.div_ceil(down).min(rows_of_units - unit_row);
+        let needed = units.checked_mul(unit_row_bytes).ok_or_else(|| {
+            image_error(
+                "decode",
+                path,
+                "a strip is larger than this platform can count",
+            )
+        })?;
+        if strip.len() < needed {
+            return Err(image_error(
+                "decode",
+                path,
+                "a strip holds fewer rows than the directory says it covers",
+            ));
+        }
+        let mut at = 0usize;
+        for _ in 0..units {
+            let top = unit_row * down;
+            for unit_x in 0..picture_width.div_ceil(across) {
+                let x0 = unit_x * across;
+                for dy in 0..down {
+                    for dx in 0..across {
+                        let sample = strip.get(at).copied().unwrap_or(0);
+                        at += 1;
+                        let (x, y) = (x0 + dx, top + dy);
+                        if x < picture_width && y < picture_height {
+                            luma[y * picture_width + x] = sample;
+                        }
+                    }
+                }
+                for plane in [&mut blue, &mut red] {
+                    let sample = strip.get(at).copied().unwrap_or(0);
+                    at += 1;
+                    let (x, y) = (unit_x, unit_row);
+                    if x < chroma_width && y < chroma_height {
+                        plane[y * chroma_width + x] = sample;
+                    }
+                }
+            }
+            unit_row += 1;
+            if unit_row >= rows_of_units {
+                break;
+            }
+        }
+        picture_row += rows;
+    }
+    if unit_row < rows_of_units {
+        return Err(image_error(
+            "decode",
+            path,
+            "the strips hold fewer rows than the image states",
+        ));
+    }
+    Ok(vec![luma, blue, red])
+}
 /// Writes separated ink samples as the channels a frame holds.
 ///
 /// This is the conversion the reader this tree replaced made, in the same `f32`
@@ -851,6 +1268,21 @@ mod tests {
         {
             Pixels::Interleaved { buffer, .. } => buffer,
             _ => panic!("{name} hands out one interleaved buffer"),
+        }
+    }
+
+    /// The planes a planar fixture hands out, with what its header says.
+    fn planes(name: &str) -> (ImageInfo, Vec<Vec<u8>>) {
+        let info = image_info(&fixture(name), true)
+            .unwrap_or_else(|error| panic!("{name}: {error}"))
+            .unwrap_or_else(|| panic!("{name} is taken over"));
+        let decoded = decode(&info).unwrap_or_else(|error| panic!("{name}: {error}"));
+        match decoded.pixels {
+            Pixels::Planar { planes, alpha } => {
+                assert!(alpha.is_none(), "{name} states no alpha of its own");
+                (info, planes)
+            }
+            _ => panic!("{name} hands out planes"),
         }
     }
 
@@ -1128,6 +1560,8 @@ mod tests {
             float: false,
             separated: true,
             palette: None,
+            ycbcr: None,
+            cicp: None,
         };
         assert!(inks_to_channels(&[0; 7], &layout).is_err());
         assert!(
@@ -1148,6 +1582,8 @@ mod tests {
             float: false,
             separated: false,
             palette: None,
+            ycbcr: None,
+            cicp: None,
         };
         // Two pixels, three channels, held as three planes of two samples.
         let planes = [10u8, 11, 20, 21, 30, 31];
@@ -1268,5 +1704,101 @@ mod tests {
             Transform::IDENTITY,
             "a quarter turn is applied when rotation is asked for"
         );
+    }
+
+    /// A ycbcr page is handed out as its own planes at the sampling it states.
+    ///
+    /// The three fixtures hold the same luma, stepping by eight across and
+    /// thirty-two down, and a flat chroma of 128. A unit read in the wrong order,
+    /// a unit row read at the wrong stride or a chroma plane of the wrong size
+    /// therefore shows up here as a sample where the file states another one.
+    /// libtiff reads the same three to neutral greys at exactly these levels,
+    /// which is what says the packing is the format's and not this reader's.
+    #[test]
+    fn a_ycbcr_page_is_handed_out_at_the_sampling_it_states() {
+        for (name, format, size, chroma) in [
+            (
+                "tiff-ycbcr-444.tiff",
+                PixelFormat::Yuv444P8,
+                (37, 23),
+                (37, 23),
+            ),
+            (
+                "tiff-ycbcr-422.tiff",
+                PixelFormat::Yuv422P8,
+                (36, 22),
+                (18, 22),
+            ),
+            (
+                "tiff-ycbcr-420.tiff",
+                PixelFormat::Yuv420P8,
+                (36, 22),
+                (18, 11),
+            ),
+        ] {
+            let (info, planes) = planes(name);
+            assert_eq!(info.format, format, "{name}");
+            assert_eq!((info.width, info.height), size, "{name}");
+            assert_eq!(planes.len(), 3, "{name} hands out three planes");
+            for (plane, samples) in planes.iter().enumerate() {
+                if plane == 0 {
+                    assert_eq!(
+                        samples.len(),
+                        size.0 as usize * size.1 as usize,
+                        "{name} luma plane"
+                    );
+                } else {
+                    assert_eq!(
+                        samples.len(),
+                        chroma.0 as usize * chroma.1 as usize,
+                        "{name} chroma plane {plane}"
+                    );
+                    assert!(
+                        samples.iter().all(|sample| *sample == 128),
+                        "{name} chroma plane {plane} is flat"
+                    );
+                }
+            }
+            // The first row of the luma, and the first sample of the second row,
+            // which is where a wrong unit order or a wrong stride moves one to.
+            assert_eq!(&planes[0][..8], [16, 24, 32, 40, 48, 56, 64, 72], "{name}");
+            assert_eq!(planes[0][info.width as usize], 48, "{name}");
+        }
+    }
+
+    /// The coefficients and the reference levels decide `_Matrix` and `_Range`.
+    ///
+    /// A page that states neither is bt.601 at full range, which is what the
+    /// specification gives it, so an absent tag is a value rather than an
+    /// unknown.
+    #[test]
+    fn a_ycbcr_page_states_its_matrix_and_range() {
+        for (name, matrix, full_range) in [
+            ("tiff-ycbcr-444.tiff", 5, true),
+            ("tiff-ycbcr-stated.tiff", 5, true),
+            ("tiff-ycbcr-709.tiff", 1, true),
+            ("tiff-ycbcr-limited.tiff", 5, false),
+        ] {
+            let (info, _) = planes(name);
+            let cicp = info
+                .cicp
+                .unwrap_or_else(|| panic!("{name} states a colour"));
+            assert_eq!(cicp.matrix, matrix, "{name}");
+            assert_eq!(cicp.full_range, full_range, "{name}");
+        }
+    }
+
+    /// A page this reader cannot take is refused by the *probe*, so the probe
+    /// cannot promise a frame the decode would refuse to produce.
+    #[test]
+    fn a_ycbcr_page_this_reader_cannot_take_is_refused_at_identify() {
+        for (name, said) in [
+            ("tiff-ycbcr-uncanny.tiff", "coefficients"),
+            ("tiff-ycbcr-16bit.tiff", "16"),
+            ("tiff-ycbcr-lzw.tiff", "compressed"),
+        ] {
+            let error = image_info(&fixture(name), true).expect_err("the page is refused");
+            assert!(error.to_string().contains(said), "{name}: {error}");
+        }
     }
 }

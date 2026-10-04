@@ -1953,6 +1953,99 @@ def test_palette_pages() -> None:
         )
 
 
+def test_ycbcr_pages() -> None:
+    """A ycbcr page is handed out as its own planes at the sampling it states.
+ 
+    The three fixtures hold the same luma, stepping by eight across and
+    thirty-two down, and a flat chroma of 128, so a unit read in the wrong
+    order, a unit row read at the wrong stride or a chroma plane of the wrong
+    size shows up as a sample the file does not state rather than as a picture
+    that merely looks off. libtiff's own tiff2rgba reads the same three to
+    neutral greys at exactly these levels, which is what says the packing is
+    the format's and not this reader's.
+ 
+    The coefficients and the reference levels decide `_Matrix` and `_Range`, and
+    a page that states neither is bt.601 at full range, which is what the
+    specification gives it: an absent tag is a value rather than an unknown.
+    """
+    luma = [16, 24, 32, 40, 48, 56, 64, 72]
+    for name, format_name, size, chroma in [
+        ("tiff-ycbcr-444.tiff", "YUV444P8", (37, 23), (37, 23)),
+        ("tiff-ycbcr-422.tiff", "YUV422P8", (36, 22), (18, 22)),
+        ("tiff-ycbcr-420.tiff", "YUV420P8", (36, 22), (18, 11)),
+    ]:
+        clip, alpha = read_alpha(files=[fixture(name)])
+        check(
+            clip.format.name == format_name,
+            f"{name}: the sampling is handed out (got {clip.format.name})",
+        )
+        check(
+            (clip.width, clip.height) == size,
+            f"{name}: the size is the one the header states",
+        )
+        frame = clip.get_frame(0)
+        luma_samples = samples(frame, 0)
+        check(
+            len(luma_samples) == size[0] * size[1],
+            f"{name}: the luma plane is the size of the picture (got {len(luma_samples)})",
+        )
+        check(
+            luma_samples[:8] == luma,
+            f"{name}: the luma is the one written (got {luma_samples[:8]})",
+        )
+        check(
+            luma_samples[clip.width] == 48,
+            f"{name}: the second row starts a step down (got {luma_samples[clip.width]})",
+        )
+        for plane in (1, 2):
+            chroma_samples = samples(frame, plane)
+            check(
+                len(chroma_samples) == chroma[0] * chroma[1],
+                f"{name}: chroma plane {plane} is the subsampled size (got {len(chroma_samples)})",
+            )
+            check(
+                set(chroma_samples) == {128},
+                f"{name}: chroma plane {plane} is flat, so the file states no colour",
+            )
+        check(frame.props["_Matrix"] == 5, f"{name}: the matrix is bt.601")
+        check(frame.props["_Range"] == 1, f"{name}: the range is full")
+        check(
+            samples(alpha.get_frame(0)) == [255] * (size[0] * size[1]),
+            f"{name}: a ycbcr page has no alpha, so the clip is opaque",
+        )
+ 
+    # A page whose coefficients name another matrix, and one whose reference
+    # levels leave headroom, which is the only thing that moves these two.
+    for name, matrix, full_range in [
+        ("tiff-ycbcr-709.tiff", 1, True),
+        ("tiff-ycbcr-stated.tiff", 5, True),
+        ("tiff-ycbcr-limited.tiff", 5, False),
+    ]:
+        frame = read_alpha(files=[fixture(name)])[0].get_frame(0)
+        check(
+            frame.props["_Matrix"] == matrix,
+            f"{name}: _Matrix is {matrix} (got {frame.props['_Matrix']})",
+        )
+        check(
+            frame.props["_Range"] == (1 if full_range else 0),
+            f"{name}: _Range is {full_range} (got {frame.props['_Range']})",
+        )
+ 
+    # Every page this reader cannot take is refused by the *probe*, so the
+    # probe never promises a frame the decode would not produce.
+    for name, said in [
+        ("tiff-ycbcr-uncanny.tiff", "coefficients"),
+        ("tiff-ycbcr-16bit.tiff", "16"),
+        ("tiff-ycbcr-lzw.tiff", "compressed"),
+    ]:
+        try:
+            read_alpha(files=[fixture(name)])
+            check(False, f"ycbcr: {name} is refused")
+        except Exception as error:  # noqa: BLE001 - the refusal is the check
+            check(
+                said in str(error),
+                f"ycbcr: {name} names why (got {error})",
+            )
 
 def main() -> None:
     for test in (
@@ -1990,6 +2083,7 @@ def main() -> None:
         test_png_feature_sets,
         test_separated_inks,
         test_palette_pages,
+        test_ycbcr_pages,
     ):
         print(f"--- {test.__name__}")
         test()
