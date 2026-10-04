@@ -823,6 +823,30 @@ separate pass that the compiler can vectorise. The saving would be one traversal
 and the cost would be a worse inner loop, and which wins is not something reading
 the code can say.
 
+**It was written and measured, and it did not pay.** The single pass was built:
+`expand` exchanged blue and red as it wrote, in all three branches, and the
+separate `reverse_encoding` walk was deleted. Pixels byte-identical, 266 tests,
+clippy clean. Then seven paired repetitions of the decode stage, median:
+
+| build | median | all seven |
+| --- | --- | --- |
+| pre-step-5 (the reader replaced) | **43.6** | 40.7 43.2 43.2 43.6 48.0 48.3 50.5 |
+| before the fusion | 58.9 | 54.8 55.5 58.8 58.9 60.6 61.1 62.3 |
+| after the fusion | 58.3 | 54.2 56.4 56.9 58.3 60.9 61.6 73.8 |
+
+0.6 ms of 59, about one percent, and inside the spread. So the fusion was
+**reverted**: more code for no measurable gain, and a change that adds a branch
+to every branch to save nothing is worse than the two passes it replaced.
+
+That is the prediction above confirmed rather than assumed, and it is the first
+of these five attempts where the reasoning held up under measurement -- even
+though the answer was "no". **`tga` therefore has a measured profile and no
+fix.**
+
+The parity check also caught one real bug on the way: the first fused version
+left the fifteen bit branch exchanging red and blue, and `tga-rgb16.tga` came
+back with planes nought and two swapped. The pixel diff found it immediately;
+the unit tests did not.
 So `tga` is three passes over the picture where one might do, and whether
 collapsing them helps is itself unmeasured. The honest state is that `tga` has a
 **measured profile** and **no measured fix**, and the next step is to write the
