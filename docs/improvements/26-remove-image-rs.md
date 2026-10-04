@@ -1287,6 +1287,28 @@ the same properties as its source. `ImgSeqPath` is excluded, because a renamed
 file's path differs by construction and is not a routing fact -- including it made
 the first run report 51 phantom property failures.
 
+### the silent one: a word-wide sample with no tuple type
+
+Plan 34 calls this the silent case, and it earned the name. A `P7` that states a
+`MAXVAL` above a byte but names no `TUPLTYPE` was read one byte a sample, because
+`arbitrary_tuple`'s empty-tuple arm chose from the depth alone -- its comment said
+so, "and only at a byte". The specification says a sample occupies one or two bytes
+according to `MAXVAL` whether or not the tuple is named.
+
+Nothing failed. A raster of `[1023, 512]` under a `MAXVAL` of 1023 came back as
+`[1, 64]`: the right number of samples, the wrong picture, no error. `[3, 255]`
+read as two bytes and rescaled as eight gives exactly those two numbers, which is
+how the cause was pinned rather than guessed.
+
+The fix is the arm reading `(depth, wide)` instead of `depth` alone. The same
+raster now comes back `Gray16` with `[65535, 32800]`, which is `1023` and `512`
+against a `MAXVAL` of 1023 at the sixteen bit container the plugin hands out.
+`tests/fixtures/pnm-p7-notuple16.pam` is the reproduction and
+`a_word_wide_sample_is_a_word_even_without_a_tuple_type` pins it; it is in
+`CHANGELOG.md` because it is a picture a user can see change.
+
+Verified: no existing frame differs, the validator is at `all checks passed`, the
+routing check is still 0 of 76, and all four request orders agree.
 ### the routing half of phase 1 is green
 
 `heif` was the last module answering from its name, and it was at least honest

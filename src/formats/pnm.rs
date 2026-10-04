@@ -412,12 +412,21 @@ fn arbitrary_tuple(tupltype: &str, depth: u32, maxval: u32) -> Result<Tuple> {
         ))
     };
     match tupltype {
-        // No tuple type at all falls back on the depth, and only at a byte.
-        "" => match depth {
-            1 => Ok(Tuple::GrayU8),
-            2 => Ok(Tuple::GrayAlphaU8),
-            3 => Ok(Tuple::RgbU8),
-            4 => Ok(Tuple::RgbAlphaU8),
+        // No tuple type at all falls back on the depth for the channels and on
+        // `MAXVAL` for the word, because the specification says a sample occupies
+        // one or two bytes according to `MAXVAL` whether or not the tuple is
+        // named. Reading a `MAXVAL` 1023 raster a byte at a time does not fail --
+        // it returns the wrong samples, which is why the plan calls this the
+        // silent one: [1023, 512] came back as [1, 64].
+        "" => match (depth, wide) {
+            (1, false) => Ok(Tuple::GrayU8),
+            (1, true) => Ok(Tuple::GrayU16),
+            (2, false) => Ok(Tuple::GrayAlphaU8),
+            (2, true) => Ok(Tuple::GrayAlphaU16),
+            (3, false) => Ok(Tuple::RgbU8),
+            (3, true) => Ok(Tuple::RgbU16),
+            (4, false) => Ok(Tuple::RgbAlphaU8),
+            (4, true) => Ok(Tuple::RgbAlphaU16),
             _ => Err(bad()),
         },
         "BLACKANDWHITE" => {
@@ -982,5 +991,27 @@ mod tests {
                 .expect("a png is not ours")
                 .is_none()
         );
+    }
+
+    /// A `MAXVAL` above a byte means two bytes a sample, tuple type or not.
+    ///
+    /// Plan 34 records this as the silent one: the raster of a `P7` that names no
+    /// `TUPLTYPE` was read a byte at a time however wide `MAXVAL` said it was, so
+    /// words `[1023, 512]` came back as `[1, 64]` -- the right number of samples,
+    /// the wrong picture, and no error to say so. `[3, 255]` read as two bytes and
+    /// rescaled as eight gives exactly those two numbers, which is how the cause
+    /// was pinned.
+    #[test]
+    fn a_word_wide_sample_is_a_word_even_without_a_tuple_type() {
+        let buffer = decoded("pnm-p7-notuple16.pam");
+        let words: Vec<u16> = buffer
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_ne_bytes(*pair))
+            .collect();
+        // The frame is a sixteen bit container, so a `MAXVAL` of 1023 lands at
+        // full and at 1023/1023 and 512/1023 of it.
+        assert_eq!(words, vec![65535, 32800]);
     }
 }

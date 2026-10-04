@@ -3,6 +3,14 @@
 ## unreleased
 ### changed
 
+- A PAM that states a `MAXVAL` above a byte but names no `TUPLTYPE` is now read at
+  the width its `MAXVAL` states instead of a byte a sample. Such a file was read
+  without an error and with the wrong samples: a raster of `[1023, 512]` under a
+  `MAXVAL` of 1023 came back as `[1, 64]`, because the bytes were taken one at a
+  time and rescaled as eight bit. It now reads as `[65535, 32800]`, which is the
+  same picture at the sixteen bit container the plugin hands out. A file that
+  names its tuple, or whose `MAXVAL` fits a byte, is unchanged.
+
 - A TIFF compressed with zstd now decodes. Its decompressor is not one of the
   `tiff` crate's default features, so it is named by hand here, and libzstd is a
   native dependency the plugin links as a result -- see `LICENSES/zstd-COPYING.txt`.
