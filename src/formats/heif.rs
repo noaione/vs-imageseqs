@@ -61,7 +61,7 @@ pub fn handles(info: &ImageInfo) -> bool {
     // `avif::decode` is what hands it over, having already walked the
     // container to find that out; asking again from here was a second walk per
     // frame request for an answer already known.
-    has_heif_extension(&info.path)
+    owns(&info.path)
 }
 
 /// What the container of a heif states about its primary image, when this
@@ -72,12 +72,26 @@ pub fn handles(info: &ImageInfo) -> bool {
 /// format for. Those files keep the hook, and the properties they are probed
 /// with are the ones the hook reports.
 pub fn image_info(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
-    if !has_heif_extension(path) {
+    if !owns(path) {
         return None;
     }
     describe(path, apply_rotation)
 }
 
+/// Whether this module owns a file: the container says heif, the name is a hint.
+///
+/// The brand in the `ftyp` box is what separates a heif from an avif, and both
+/// containers state one, so the bytes answer this without the name -- which is
+/// what lets a renamed `heic` still be read. See [`crate::formats::identify`].
+///
+/// # Panics
+///
+/// Never: it is a read of the file's opening bytes that answers `false` when the
+/// file cannot be opened at all.
+#[must_use]
+pub fn owns(path: &Path) -> bool {
+    crate::formats::identify::owns(crate::formats::identify::Format::Heif, path)
+}
 /// What libheif states about a file's primary image, whatever its extension.
 ///
 /// [`image_info`] is this plus the extension gate, and the extra entry point

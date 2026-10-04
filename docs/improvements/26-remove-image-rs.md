@@ -1287,6 +1287,28 @@ the same properties as its source. `ImgSeqPath` is excluded, because a renamed
 file's path differs by construction and is not a routing fact -- including it made
 the first run report 51 phantom property failures.
 
+### the routing half of phase 1 is green
+
+`heif` was the last module answering from its name, and it was at least honest
+about it: `image_info` and `handles` both called `has_heif_extension`, so the probe
+and the decode agreed with each other and both ignored the container. The brand in
+the `ftyp` box separates a heif from an avif and `identify` already read it, so
+`heif` gained an `owns` and the two call sites moved to it.
+
+**Renamed copies read wrong: 0 of 76.** `tests/routing.py` is green for the first
+time, and the whole run is unchanged where it must be: no frame differs from the
+recorded baseline, the validator is at `all checks passed`, all four request orders
+agree, 272 tests pass, clippy and fmt are clean.
+
+So the dispatch half of phase 1 is done. What phase 1 still lists and this does not
+cover is the *other* half of "one saved decoder plan": two files can route
+correctly to the right backend and still have the probe and the decode pick
+different things inside it -- an EXR part, a TIFF directory, a PAM sample type.
+Those are disagreements about content rather than about ownership, they are
+invisible to a check built on extensions, and they are where the next slice goes.
+The PAM case is the worst of them, because it is silent: `MAXVAL` 1023 with depth 1
+and no `TUPLTYPE` is accepted as gray8 and returns the wrong samples rather than
+refusing.
 ### probe and decode were answering from different places
 
 The 12 that survived the content rule were three formats content cannot name --
