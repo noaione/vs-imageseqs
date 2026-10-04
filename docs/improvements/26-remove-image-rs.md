@@ -1039,6 +1039,31 @@ in `blocks()`; what changes is where the sixteen pixels go, from a `Vec` to four
 row slices. The 4.3 MB intermediate then does not exist and the traversal that
 this section is about is gone.
 
+**It was written, measured, and reverted.** The stream was built exactly as
+described: `Rows { path, alpha }`, `has_alpha` from the variant, `duplicate`
+re-opening, and `fill` walking block rows and decoding each block into a band of
+four pixel rows before writing them to the sink's planes. Pixels byte-identical,
+266 tests, clippy clean. Then seven paired repetitions of the decode stage,
+median:
+
+| build | median | all seven |
+| --- | --- | --- |
+| pre-step-5 | **52.1** | 49.9 49.9 51.4 52.1 52.6 53.6 62.0 |
+| buffered (before) | 63.9 | 59.0 59.4 60.3 63.9 64.4 66.9 69.1 |
+| streamed | **67.1** | 64.7 65.3 65.5 67.1 70.7 71.1 76.2 |
+
+**Worse by 3.2 ms**, so it was reverted. The 4.3 MB copy it removed cost less than
+the scatter it added: the sink is one entry per plane, so writing an interleaved
+band to it is three or four passes over every row, and `png.rs` says as much in
+its own `place` -- "walking the row once per plane reads it three times and
+multiplies for every byte it writes". The lesson it took a specialised `place` to
+learn is the one this attempt ignored.
+
+So the stream is the right *shape* and this was the wrong *implementation* of it:
+the transpose has to happen inside the block decode -- each block's four pixels
+writing their four bytes per plane as they are decoded, rather than into a band
+that is then scattered -- and that is the next attempt rather than this one.
+
 The mechanism to remove it is already in this tree and documented for exactly
 this: [`decoder::RowStream`], "a decode that hands each row to the frame it
 belongs in and therefore has no buffer of its own". `png.rs` uses it. A dds
