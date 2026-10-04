@@ -19,6 +19,46 @@
 //! budget. Everything else keeps the interleaved layout the `image` path
 //! produced, because lossless webp is rgb by definition and a file with an
 //! alpha channel needs the buffer its alpha plane is read from.
+//!
+//! # What a probe still needs, and why it is not written yet
+//!
+//! Every webp is *described* by the `image` crate today and *decoded* here: the
+//! probe is the last thing that keeps `webp` in `Cargo.toml`. The four facts it
+//! has to report, and where each one lives, so that this does not have to be
+//! worked out again:
+//!
+//! - **The size.** A `VP8X` payload is ten bytes: `[0]` is the flags byte, whose
+//!   `VP8X_ALPHA_FLAG` bit is already read below, then three reserved bytes, then
+//!   the canvas width and height each less one, three bytes apiece, little
+//!   endian, at `[4..7]` and `[7..10]`. A file with no `VP8X` keeps its size in
+//!   the image chunk instead: `VP8 ` states a fourteen bit width and height at
+//!   payload bytes 6..8 and 8..10, and `VP8L` states them less one in one little
+//!   endian `u32` at 1..5, width in bits 0..13, height in 14..27, with
+//!   **`alpha_is_used` in bit 28**.
+//! - **The colour type**, `Rgb8` or `Rgba8`, from the alpha flag or an `ALPH`
+//!   chunk, which [`BitstreamHeader`] already answers.
+//! - **The profile**, the `ICCP` chunk payload. This is the `ImgSeqHasICC` fact
+//!   and the `ICCProfile` property, and it is the branch a probe is most likely
+//!   to miss because it is a chunk the walk has to *find*, not a number it can
+//!   read where it stands.
+//! - **The orientation**, the `EXIF` chunk payload through
+//!   [`crate::exif::orientation_of`], as `png.rs` does. The reported size is the
+//!   *stored* one and the transform does the swap, so `orientation-6` is stated
+//!   16x12 and handed out 12x16.
+//!
+//! [`BitstreamHeader`] cannot be the basis for it as it stands. It returns as soon
+//! as it reaches a `VP8 ` or `VP8L` chunk, without reading that chunk's payload,
+//! and it returns `None` for `ANIM` or `ANMF`. Both are deliberate -- `None` is how
+//! [`output_format`] learns a file is not a plain still -- but `probe_segment`
+//! calls `describe` *before* it asks the animation adapter, so an animated webp
+//! has to be describable from its `VP8X` too. A probe therefore needs either a
+//! flag on that walk or a walk of its own, and `output_format`'s reading of `None`
+//! is the reason not to simply delete the refusal.
+//!
+//! The size, colour type and orientation branches all have fixtures.
+//! `webp-icc.webp`, `webp-icc-lossless.webp` and `webp-icc-alpha.webp` were added
+//! for the profile branch, which had none at all, and `tests/readalpha.vpy`
+//! asserts all of them end to end.
 
 use std::{
     fs::File,
