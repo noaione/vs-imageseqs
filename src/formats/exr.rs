@@ -322,8 +322,8 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
             .map_err(|error| image_error("decode", &info.path, error))?;
     }
     if alpha {
-        let channel = find(ALPHA_CHANNEL)
-            .ok_or_else(|| ImgSeqError::new("the file states no A channel"))?;
+        let channel =
+            find(ALPHA_CHANNEL).ok_or_else(|| ImgSeqError::new("the file states no A channel"))?;
         interleave(&channel.sample_data, 3, channels, pixels, &mut buffer)
             .map_err(|error| image_error("decode", &info.path, error))?;
     }
@@ -380,8 +380,16 @@ mod tests {
     #[test]
     fn the_fixtures_state_the_layout_they_hold() {
         for (name, color_type, source) in [
-            ("exr-half-rgb.exr", ColorType::Rgb32F, SourceColorType::Rgb32F),
-            ("exr-half-rgba.exr", ColorType::Rgba32F, SourceColorType::Rgba32F),
+            (
+                "exr-half-rgb.exr",
+                ColorType::Rgb32F,
+                SourceColorType::Rgb32F,
+            ),
+            (
+                "exr-half-rgba.exr",
+                ColorType::Rgba32F,
+                SourceColorType::Rgba32F,
+            ),
             (
                 "exr-float-rgba.exr",
                 ColorType::Rgba32F,
@@ -425,12 +433,7 @@ mod tests {
     #[test]
     fn every_compression_decodes_to_the_same_picture() {
         let (_, _, expected) = read("exr-none.exr");
-        for name in [
-            "exr-rle.exr",
-            "exr-zip.exr",
-            "exr-zips.exr",
-            "exr-piz.exr",
-        ] {
+        for name in ["exr-rle.exr", "exr-zip.exr", "exr-zips.exr", "exr-piz.exr"] {
             let (_, _, got) = read(name);
             assert_eq!(got.len(), expected.len(), "{name}");
             assert_eq!(got, expected, "{name} is the same picture as exr-none.exr");

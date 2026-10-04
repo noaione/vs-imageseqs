@@ -165,6 +165,9 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   a frame,
   `pnm.rs` for the netpbm family, whose seven subtypes, ASCII and binary rasters
   and MAXVAL rescale are a port,
+  `exr.rs` for OpenEXR, read through the `exr` crate, whose channels are
+  selected by name rather than position and whose header is read without the
+  picture,
   `qoi.rs` for the quite
   ok image, whose fourteen byte header is read without a
   sample and whose decoder is the `qoi` crate's, `farbfeld.rs` for the format

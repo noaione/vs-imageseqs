@@ -540,7 +540,13 @@ What is left, in plan 27's order, with the fixtures each still needs:
   create decoder`), and both refuse it before a frame is promised. The five bugs
   the attempts found are listed below and each is a real trap rather than a typo.
 
-- **exr** — fixtures **landed** in `2205e87`, the module still to do. The crate's
+- **exr** — **done**, module in `bf8e172`, and `image`'s `exr` feature is off.
+  All eight fixtures are byte-identical in probe facts, colour planes and both
+  clips, including the two alpha hashes the baseline pinned: `b748099f3030ff76`
+  for the two files with an alpha channel and `883aa43aebbbe3be` for the six
+  without, so the channel selection by name agrees with the one by position that
+  it replaced. `read_first_flat_layer_from_file` and `MetaData::read_from_file`
+  are the two calls, as the research above said. Fixtures from `2205e87`. The crate's
   API is researched, so the next attempt starts from a shape rather than a
   search:
 
