@@ -95,6 +95,11 @@
   buffer the size of the file: a 3000x3000 image of each holds 48 MiB rather
   than 74 MiB while it decodes, and decodes 7 to 14% faster
 
+- A netpbm whose header is longer than the window it was read through is read.
+  A comment is legal anywhere in the preamble and may be arbitrarily long, so a
+  `P6` with a 70,000-byte comment failed to identify with "the header states no
+  width"; the header is now read as far as the parse needs, to a megabyte
+
 - A DirectDraw surface whose width or height is not a multiple of four is read
   instead of refused. Its last block of a row and of a column is in the file in
   full, and the pixels that hang over the edge are dropped: a 7x24 DXT1 or DXT5

@@ -28,7 +28,7 @@ This documentation update implements no decoder changes.
 | 1. Consistent routing, saved plan and sample/subimage invariants | **Content-routing slice landed, and the route is saved and threaded.** `2b02f64` routes stills by content, `c206944` does the same for animation, and the saved-route slices record what the router named on `ImageInfo` and pass it to every module's probe entry, so a file is identified with one read. EXR selection, PAM word width and TIFF metadata/sample handling have also received fixes. | The saved route names the container and nothing more: the backend and the selected subimage are still decided inside each adapter, and the broader error/sample invariants need separate completion checks. |
 | 2. Combine metadata passes | **Partly landed: the front of the file answers, and a timeline is not rendered to describe it.** PNG, GIF and WebP no longer require image-rs for metadata or fallback pixels; a webp's or jpeg xl's animation adapter answers from the file header, a jpeg 2000 probe reads a window over the front that grows only while the header is incomplete, an avif or heif sequence walk seeks over media data rather than reading it, and an animated png's delays come from its own `fcTL` chunks instead of a rendered frame each. | One shared probe reader is not implemented. |
 | 3. Retain initialized readers and preserve planes | **Mostly landed.** Eligible PNG, binary RGB8 PNM/PAM, TGA and BMP have row sinks; TIFF has a native YCbCr plane path (`8cf7b06`) and hands a planar RGB page over as the planes it already is rather than interleaving it; and the netpbm, targa and bitmap sinks keep the reader their preparation opened and read one row at a time instead of buffering the file. | PNG initializes a reader again in `fill`. True farbfeld/PNM row reads, direct EXR planes and shared initialized decode state remain open, and the planes a planar page is split into could still be read in place rather than copied. |
-| 4. Timing and selected subtype repairs | **Partly complete, and the timing repairs plus one subtype have landed.** BigTIFF/RGBE recognition, PAM MAXVAL interpretation, TIFF orientation/ICC and EXR flat-RGB part selection have landed; an APNG's timeline is placed on the lowest common denominator of the fractions it states rather than on rounded milliseconds; an animation segment contributes the output sample instants before its end rather than the whole output ticks it covers; and a DirectDraw surface whose size is not a whole number of blocks is read with the pixels that hang over its edge clipped. Palette and CMYK(A)/YCbCr TIFF coverage has since expanded too. | Core BMP and variable-length headers still have the inspected restrictions. Other coverage candidates require individual decisions and evidence. |
+| 4. Timing and selected subtype repairs | **Partly complete, and the timing repairs plus two subtypes have landed.** BigTIFF/RGBE recognition, PAM MAXVAL interpretation, TIFF orientation/ICC and EXR flat-RGB part selection have landed; an APNG's timeline is placed on the lowest common denominator of the fractions it states rather than on rounded milliseconds; an animation segment contributes the output sample instants before its end rather than the whole output ticks it covers; a DirectDraw surface whose size is not a whole number of blocks is read with the pixels that hang over its edge clipped; and a netpbm whose header outruns the window it was read through is read, growing that window while the parse needs more. Palette and CMYK(A)/YCbCr TIFF coverage has since expanded too. | Core BMP still has its inspected restriction. Other coverage candidates require individual decisions and evidence. |
 | 5. Remove image-rs | **Landed.** `d431764` removes `image`, `8682c2f` removes leftover layout helpers, and `src/still.rs` is deleted. Cargo.toml and Cargo.lock contain no `image` dependency. | This does not finish phases 1–4. Ported code's notices remain applicable; codec dependencies such as libwebp are independent of image-rs. |
 
 `identify::route` has one production caller in each direction now: `describe`
@@ -238,6 +238,26 @@ is the shape that can actually win, with the scalar path kept for every other
 target. The acceptance is byte equality against the scalar kernel over the
 fixtures and a run of synthetic blocks, and the measurement needs a quiet
 machine: repeated runs of one unchanged binary swung threefold while this was written.
+
+What the references say, now that DirectXTex is available: this reader's colour
+decode differs from `texconv`'s and from Pillow's by at most one channel step,
+and those two differ from each other as well (`target/bench/dds-rounding.txt`).
+There is no bit-exact BC1 to match -- each implementation rounds its own way,
+and this reader expands the five and six bit endpoints before interpolating,
+which is image-rs's rule and is kept. So the acceptance for any SIMD kernel is
+byte equality with this reader's scalar path, never equality with a reference
+decoder. `texconv` also warns that Direct3D requires a block compressed surface
+to be a multiple of four in each direction, so reading an odd one is a permissive
+extra rather than a promise, and `target/bench/make-dds-corpus.py` writes real
+odd BC1, BC2 and BC3 surfaces -- and their DX10 spellings -- for that check.
+
+The variable-length header limit went the same way as the odd surface: a `P6`
+whose comment is 70,000 bytes long failed to identify on the previous build with
+`the header states no width` and decodes now. A comment is legal anywhere in the
+preamble and has no length limit, so the probe and the row sink's preparation now
+read as far as the parse needs -- doubling a window from 64 KiB, and giving up at
+a megabyte so a malformed file cannot make the reader allocate without bound --
+and `decode` already read the whole file, which is why only those two said no.
 
 Artifacts: `target/bench/route-time.py`, `target/bench/accepted.py`,
 `target/bench/route-pair-fixtures.txt`, `target/bench/route-pair-common.txt`,

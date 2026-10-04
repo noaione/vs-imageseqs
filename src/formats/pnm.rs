@@ -36,9 +36,7 @@ use std::{
 };
 
 use crate::{
-    decoder::{
-        DecodeTimings, DecodedImage, ImageInfo, Pixels, RowSink, RowStream, image_error, image_head,
-    },
+    decoder::{DecodeTimings, DecodedImage, ImageInfo, Pixels, RowSink, RowStream, image_error},
     error::{ImgSeqError, Result},
     layout::{ColorType, Orientation, SourceColorType},
     pixel::{PixelFormat, Transform},
@@ -648,12 +646,59 @@ fn raster(header: &Header, data: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// A window the header of a netpbm is read through.
+/// The window the header of a netpbm is read through, and how far it is grown.
 ///
-/// The preamble is text and every real one is a line or two. A file whose header
-/// is larger than this is refused by the parse rather than read further, which is
-/// what reading a head through [`image_head`] did for it.
+/// The preamble is text and a comment may be arbitrarily long, so a fixed prefix
+/// is a false limit on the format rather than a rule of it. The parse says when
+/// it needs more; [`HEAD_LIMIT`] is where a file that never parses stops being
+/// read, and it bounds what a malformed one can make this reader allocate.
 const HEAD_WINDOW: usize = 64 * 1024;
+const HEAD_LIMIT: usize = 1024 * 1024;
+
+/// Reads the header of `path`, growing the window while the parse needs more.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the file cannot be read or its header cannot be
+/// parsed within [`HEAD_LIMIT`].
+fn head(path: &Path) -> Result<Vec<u8>> {
+    let mut reader = BufReader::new(File::open(path).map_err(|e| image_error("open", path, e))?);
+    head_from(&mut reader, path)
+}
+
+/// The same, from an open reader, which is left after the window it read.
+///
+/// # Errors
+///
+/// As [`head`].
+fn head_from(reader: &mut BufReader<File>, path: &Path) -> Result<Vec<u8>> {
+    reader
+        .seek(SeekFrom::Start(0))
+        .map_err(|e| image_error("open", path, e))?;
+    let mut window = HEAD_WINDOW;
+    loop {
+        let mut data = vec![0u8; window];
+        let read = reader
+            .read(&mut data)
+            .map_err(|e| image_error("open", path, e))?;
+        data.truncate(read);
+        if let Err(error) = header(&data) {
+            // Only a window that ran out of bytes can be grown: one the parse
+            // had in full has already said what it has to say.
+            if read < window || window >= HEAD_LIMIT {
+                return Err(error);
+            }
+            window = (window * 2).min(HEAD_LIMIT);
+            // The next window starts at the file again rather than where the
+            // one that was too small ended.
+            reader
+                .seek(SeekFrom::Start(0))
+                .map_err(|e| image_error("open", path, e))?;
+            continue;
+        }
+        return Ok(data);
+    }
+}
 
 /// Opens `path` and reads its header, leaving the reader at the raster.
 ///
@@ -666,11 +711,7 @@ const HEAD_WINDOW: usize = 64 * 1024;
 /// parsed.
 fn prepare(path: &Path) -> Result<Option<(Header, BufReader<File>)>> {
     let mut reader = BufReader::new(File::open(path).map_err(|e| image_error("open", path, e))?);
-    let mut window = vec![0u8; HEAD_WINDOW];
-    let read = reader
-        .read(&mut window)
-        .map_err(|e| image_error("open", path, e))?;
-    window.truncate(read);
+    let window = head_from(&mut reader, path)?;
     let header = header(&window).map_err(|e| image_error("decode", path, e))?;
     if header.ascii || header.tuple != Tuple::RgbU8 || header.maxval != 0xFF {
         return Ok(None);
@@ -813,7 +854,7 @@ pub fn image_info(
     ) {
         return Ok(None);
     }
-    let data = image_head(path).map_err(|error| image_error("open", path, error))?;
+    let data = head(path).map_err(|error| image_error("open", path, error))?;
     // A file whose magic is not one of the seven is declined rather than
     // refused, so something else may still read it.
     if data.get(..2).and_then(magic).is_none() {
@@ -910,6 +951,36 @@ mod tests {
         }
         let file = std::fs::read(&path).expect("the fixture");
         assert_eq!(rows, file[header.data_offset..], "the rows are the raster");
+    }
+
+    /// A comment is legal anywhere in the preamble and may be arbitrarily long,
+    /// so a fixed prefix is a false limit: a `P6` whose comment is longer than
+    /// the first window still names its size, and every way into it reads the
+    /// whole header rather than the window.
+    #[test]
+    fn a_header_longer_than_the_window_is_still_read() {
+        let path = std::env::temp_dir().join("pnm-long-comment.ppm");
+        let mut data = b"P6\n#".to_vec();
+        data.extend_from_slice(&vec![b'x'; 70_000]);
+        data.extend_from_slice(b"\n37 23\n255\n");
+        data.extend_from_slice(&vec![0u8; 37 * 23 * 3]);
+        std::fs::write(&path, &data).expect("the file is written");
+
+        let (header, _) = prepare(&path)
+            .expect("the file is readable")
+            .expect("a P6 at MAXVAL 255 is a row sink");
+        assert_eq!((header.width, header.height), (37, 23));
+
+        let info = image_info(&path, true, None)
+            .expect("the file is readable")
+            .expect("a P6 at MAXVAL 255 is ours");
+        assert_eq!((info.width, info.height), (37, 23));
+
+        let decoded = decode(&info).expect("it decodes");
+        let Pixels::Interleaved { buffer, .. } = decoded.pixels else {
+            panic!("a P6 decodes to one interleaved buffer");
+        };
+        assert_eq!(buffer.len(), 37 * 23 * 3);
     }
 
     fn decoded(name: &str) -> Vec<u8> {
