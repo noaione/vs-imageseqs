@@ -579,12 +579,13 @@ fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
         // A gif is read here: the container states the logical screen and its one
         // frame draws a rectangle onto it, so a still gif has a reader of its own.
         Some(Format::Gif) => formats::gif::image_info(path, apply_rotation)?,
-        // A webp is the generic decoder's, which is where it has always been: the
-        // animation module composes a webp's timeline, but a one frame webp is a
-        // still and this reader has no webp module of its own, and a webp states
-        // its lossy yuv arrangement somewhere only `output_format` reads, which
-        // the path below already asks for.
-        Some(Format::Webp) | None => None,
+        // A webp is read here too: the container states the canvas, the alpha
+        // flag, the orientation and the profile, so describing one no longer
+        // costs a decode of the whole picture.
+        Some(Format::Webp) => formats::webp::image_info(path, apply_rotation)?,
+        // A file no format here names is the generic decoder's, which is where
+        // it has always gone.
+        None => None,
     };
     if let Some(info) = described {
         return Ok(info);

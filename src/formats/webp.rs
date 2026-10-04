@@ -6,11 +6,11 @@
 //! and its decode entry points write into a buffer and a stride the caller
 //! picks, so this path drops the canvas and the copy along with it.
 //!
-//! Only the pixel decode moves here. The probe, the color type, the exif
-//! orientation and the icc profile still come from [`crate::decoder::probe`],
-//! so a webp file keeps exactly the metadata it had while `image` decoded it,
-//! and the size libwebp reads from the bitstream is checked against the probe
-//! the way the `image` path checks its own decoder.
+//! The probe lives here too: [`image_info`] reads the same container this module
+//! already walks and reports the canvas, the alpha flag, the exif orientation and
+//! the icc profile the reader being replaced reported. The size libwebp reads
+//! from the bitstream is still checked against it at decode time, the way the
+//! `image` path checked its own decoder.
 //!
 //! Lossy webp is yuv 4:2:0 and libwebp decodes it either way. A file with no
 //! alpha channel is decoded into its own planes and comes out as `YUV420P8`:
@@ -20,12 +20,10 @@
 //! produced, because lossless webp is rgb by definition and a file with an
 //! alpha channel needs the buffer its alpha plane is read from.
 //!
-//! # What a probe still needs, and why it is not written yet
+//! # Where the four facts a probe reports live
 //!
-//! Every webp is *described* by the `image` crate today and *decoded* here: the
-//! probe is the last thing that keeps `webp` in `Cargo.toml`. The four facts it
-//! has to report, and where each one lives, so that this does not have to be
-//! worked out again:
+//! The container states all four of them, in a chunk rather than in the image
+//! header, which is why a probe has to walk it:
 //!
 //! - **The size.** A `VP8X` payload is ten bytes: `[0]` is the flags byte, whose
 //!   `VP8X_ALPHA_FLAG` bit is already read below, then three reserved bytes, then
@@ -46,14 +44,15 @@
 //!   *stored* one and the transform does the swap, so `orientation-6` is stated
 //!   16x12 and handed out 12x16.
 //!
-//! [`BitstreamHeader`] cannot be the basis for it as it stands. It returns as soon
-//! as it reaches a `VP8 ` or `VP8L` chunk, without reading that chunk's payload,
-//! and it returns `None` for `ANIM` or `ANMF`. Both are deliberate -- `None` is how
-//! [`output_format`] learns a file is not a plain still -- but `probe_segment`
-//! calls `describe` *before* it asks the animation adapter, so an animated webp
-//! has to be describable from its `VP8X` too. A probe therefore needs either a
-//! flag on that walk or a walk of its own, and `output_format`'s reading of `None`
-//! is the reason not to simply delete the refusal.
+//! That is why there are two walks rather than one. [`BitstreamHeader`] returns as
+//! soon as it reaches a `VP8 ` or `VP8L` chunk, without reading that chunk's
+//! payload, and it returns `None` for `ANIM` or `ANMF`. Both are deliberate,
+//! because `None` is how [`output_format`] learns a file is not a plain still.
+//! `probe_segment` calls `describe` *before* it asks the animation adapter, so an
+//! animated webp has to be describable from its `VP8X` too, and deleting the
+//! refusal would take `output_format`'s answer away. [`probe_header`] walks the
+//! whole container instead. The two read the same chunks and answer different
+//! questions, so neither can become the other's copy of a decision.
 //!
 //! The size, colour type and orientation branches all have fixtures.
 //! `webp-icc.webp`, `webp-icc-lossless.webp` and `webp-icc-alpha.webp` were added
@@ -64,15 +63,18 @@ use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
     path::Path,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
-use crate::layout::ColorType;
+use crate::layout::{ColorType, Orientation, SourceColorType};
 
 use crate::{
     decoder::{DecodeTimings, DecodedImage, ImageInfo, Pixels, image_error},
     error::{ImgSeqError, Result},
-    pixel::PixelFormat,
+    exif::orientation_of,
+    formats::identify,
+    pixel::{PixelFormat, Transform},
 };
 
 /// File extension that holds a webp image.
@@ -107,6 +109,21 @@ pub fn output_format(path: &Path, color_type: ColorType) -> Option<PixelFormat> 
     (!header.lossless && !header.has_alpha).then_some(PixelFormat::Yuv420P8)
 }
 
+/// The byte a webp container's chunk walk ends at, from its `RIFF` header.
+///
+/// The size field counts the body and the four byte form type, so the container
+/// ends eight bytes in. Both walks below bound themselves by it rather than by
+/// the file: a file that does not hold everything its header declares is cut
+/// short, and a chunk that is not there is not something to describe or to read
+/// a coding out of.
+fn container_end(riff: &[u8; 12], length: u64) -> Option<u64> {
+    if &riff[..4] != b"RIFF" || &riff[8..] != b"WEBP" {
+        return None;
+    }
+    let size = u64::from(u32::from_le_bytes(riff[4..8].try_into().ok()?));
+    let end = 8_u64.checked_add(size)?;
+    (end >= 12 && end <= length).then_some(end)
+}
 /// Walks the chunk headers of a webp file up to its first image chunk.
 ///
 /// Payloads are skipped by seeking, so an embedded icc profile or exif block
@@ -118,9 +135,7 @@ fn bitstream_header(path: &Path) -> Option<BitstreamHeader> {
     let length = file.metadata().ok()?.len();
     let mut riff = [0; 12];
     file.read_exact(&mut riff).ok()?;
-    if &riff[..4] != b"RIFF" || &riff[8..] != b"WEBP" {
-        return None;
-    }
+    let end = container_end(&riff, length)?;
 
     let mut header = BitstreamHeader {
         lossless: false,
@@ -131,7 +146,7 @@ fn bitstream_header(path: &Path) -> Option<BitstreamHeader> {
     let mut offset = 12_u64;
     let mut chunk = [0; 8];
     loop {
-        if offset + 8 > length {
+        if offset + 8 > end {
             return None;
         }
         file.read_exact(&mut chunk).ok()?;
@@ -140,7 +155,7 @@ fn bitstream_header(path: &Path) -> Option<BitstreamHeader> {
         let size = u64::from(u32::from_le_bytes(chunk[4..].try_into().ok()?));
         // Every chunk payload is padded to an even size.
         let padded = size + (size & 1);
-        if offset + padded > length {
+        if offset + padded > end {
             return None;
         }
         match id {
@@ -157,19 +172,196 @@ fn bitstream_header(path: &Path) -> Option<BitstreamHeader> {
                 });
             }
             b"VP8X" => {
-                let mut payload = [0; 10];
-                file.read_exact(&mut payload).ok()?;
-                offset += 10;
-                header.has_alpha = payload[0] & VP8X_ALPHA_FLAG != 0;
-                continue;
+                // Only the flags byte is this walk's question; a payload too
+                // short to hold one is a container that is not chunked the way
+                // the format says it is.
+                if size < 10 {
+                    return None;
+                }
+                let mut flags = [0; 10];
+                file.read_exact(&mut flags).ok()?;
+                header.has_alpha = flags[0] & VP8X_ALPHA_FLAG != 0;
             }
             b"ALPH" => header.has_alpha = true,
             b"ANIM" | b"ANMF" => return None,
             _ => {}
         }
-        file.seek(SeekFrom::Current(padded as i64)).ok()?;
+        file.seek(SeekFrom::Start(offset + padded)).ok()?;
         offset += padded;
     }
+}
+
+/// Whether this module reads `path`.
+#[must_use]
+pub fn owns(path: &Path) -> bool {
+    identify::owns(identify::Format::Webp, path)
+}
+
+/// What a webp's container says about its first image.
+///
+/// Separate from [`BitstreamHeader`], which answers a different question: that one
+/// stops at the first image chunk and refuses an animated file, because
+/// [`output_format`] reads its `None` as "not a plain still". A probe has to
+/// describe an animated webp as well -- `probe_segment` asks `describe` before it
+/// asks the animation adapter -- so this walks the whole container instead and
+/// answers what a description needs.
+#[derive(Clone, Debug, Default)]
+struct ProbeHeader {
+    width: u32,
+    height: u32,
+    has_alpha: bool,
+    icc_profile: Option<Vec<u8>>,
+    exif: Option<Vec<u8>>,
+}
+
+/// Three bytes of little endian, which is how `VP8X` states a canvas.
+fn u24(bytes: &[u8]) -> u32 {
+    u32::from(bytes[0]) | (u32::from(bytes[1]) << 8) | (u32::from(bytes[2]) << 16)
+}
+
+/// One chunk payload, which the caller has already checked fits in the file.
+fn payload(file: &mut File, size: u64) -> Option<Vec<u8>> {
+    let mut bytes = vec![0; usize::try_from(size).ok()?];
+    file.read_exact(&mut bytes).ok()?;
+    Some(bytes)
+}
+
+/// Reads a webp's container to its end, or `None` when it states no size.
+///
+/// The size is the stored one, so an oriented file reports the size it holds and
+/// hands out the swap through its transform.
+fn probe_header(path: &Path) -> Option<ProbeHeader> {
+    let mut file = File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    let mut riff = [0; 12];
+    file.read_exact(&mut riff).ok()?;
+    let end = container_end(&riff, length)?;
+
+    let mut header = ProbeHeader::default();
+    let mut offset = 12_u64;
+    let mut chunk = [0; 8];
+    while offset + 8 <= end {
+        file.read_exact(&mut chunk).ok()?;
+        offset += 8;
+        let size = u64::from(u32::from_le_bytes(chunk[4..].try_into().ok()?));
+        // Every chunk payload is padded to an even size, and every size has to
+        // fit in the file: one that does not is not something to guess at.
+        let padded = size + (size & 1);
+        if offset + padded > end {
+            return None;
+        }
+        match &chunk[..4] {
+            // The canvas, which is the size of an animated file and of any
+            // extended one. Width and height are each stated less one.
+            b"VP8X" => {
+                if size < 10 {
+                    return None;
+                }
+                let mut flags = [0; 10];
+                file.read_exact(&mut flags).ok()?;
+                header.has_alpha = flags[0] & VP8X_ALPHA_FLAG != 0;
+                header.width = u24(&flags[4..7]) + 1;
+                header.height = u24(&flags[7..10]) + 1;
+            }
+            // A file with no `VP8X` keeps its size in the image chunk: fourteen
+            // bits each, after the three byte frame tag and the start code.
+            b"VP8 " => {
+                if size < 10 {
+                    return None;
+                }
+                let mut head = [0; 10];
+                file.read_exact(&mut head).ok()?;
+                if header.width == 0 {
+                    header.width = u32::from(u16::from_le_bytes([head[6], head[7]]) & 0x3fff);
+                    header.height = u32::from(u16::from_le_bytes([head[8], head[9]]) & 0x3fff);
+                }
+            }
+            // Lossless states both less one in one word, with the alpha flag
+            // beside them rather than in a container header.
+            b"VP8L" => {
+                if size < 5 {
+                    return None;
+                }
+                let mut head = [0; 5];
+                file.read_exact(&mut head).ok()?;
+                let word = u32::from_le_bytes([head[1], head[2], head[3], head[4]]);
+                if header.width == 0 {
+                    header.width = (word & 0x3fff) + 1;
+                    header.height = ((word >> 14) & 0x3fff) + 1;
+                }
+                if word & (1 << 28) != 0 {
+                    header.has_alpha = true;
+                }
+            }
+            b"ALPH" => header.has_alpha = true,
+            b"ICCP" => header.icc_profile = payload(&mut file, size),
+            b"EXIF" => header.exif = payload(&mut file, size),
+            _ => {}
+        }
+        // Absolute rather than relative: a chunk whose payload was read is
+        // already past it, and one that was not is not.
+        file.seek(SeekFrom::Start(offset + padded)).ok()?;
+        offset += padded;
+    }
+    // An animated file nests its frames inside `ANMF`, so a walk that reached the
+    // end without a size at the top level has nothing to describe.
+    (header.width != 0 && header.height != 0).then_some(header)
+}
+
+/// What a webp states, when this module reads the file.
+///
+/// The facts are the container's own chunks: the size from `VP8X` or from the
+/// image chunk when there is none, the colour type from the alpha flag, and the
+/// profile and the orientation from `ICCP` and `EXIF`. The reader being replaced
+/// took them from the same places.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the file is one of ours and cannot be read.
+pub fn image_info(path: &Path, apply_rotation: bool) -> Result<Option<ImageInfo>> {
+    if !owns(path) {
+        return Ok(None);
+    }
+    let Some(header) = probe_header(path) else {
+        return Ok(None);
+    };
+    let color_type = if header.has_alpha {
+        ColorType::Rgba8
+    } else {
+        ColorType::Rgb8
+    };
+    let orientation = header
+        .exif
+        .as_deref()
+        .and_then(orientation_of)
+        .unwrap_or(Orientation::NoTransforms);
+    Ok(Some(ImageInfo {
+        path: path.to_path_buf(),
+        width: header.width,
+        height: header.height,
+        color_type,
+        original_color_type: SourceColorType::from(color_type),
+        has_icc_profile: header.icc_profile.is_some(),
+        icc_profile: header.icc_profile.map(Arc::from),
+        // A webp states no colour code of its own: a lossy one is bt.601 yuv,
+        // which the frame's format says rather than a container field.
+        cicp: None,
+        chroma_location: None,
+        orientation,
+        transform: if apply_rotation {
+            Transform::from_orientation(orientation)
+        } else {
+            Transform::IDENTITY
+        },
+        format: output_format(path, color_type)
+            .or_else(|| PixelFormat::from_color_type(color_type))
+            .ok_or_else(|| {
+                ImgSeqError::new(format!(
+                    "image '{}' has a colour type this plugin has no format for",
+                    path.display()
+                ))
+            })?,
+    }))
 }
 
 fn has_webp_extension(path: &Path) -> bool {
@@ -693,7 +885,11 @@ mod tests {
             }
         }
         let mut file = Vec::from(*b"RIFF");
-        file.extend_from_slice(&u32::try_from(body.len()).unwrap().to_le_bytes());
+        // The size field counts the body *and* the four byte form type, which
+        // is what a real container writes and what [`container_end`] reads
+        // back. A helper that wrote the body alone would build files no reader
+        // has to accept.
+        file.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_le_bytes());
         file.extend_from_slice(b"WEBP");
         file.extend_from_slice(&body);
         file
@@ -750,6 +946,79 @@ mod tests {
         }
         assert_ne!(route(Path::new("page.png")), webp);
         assert_ne!(route(Path::new("page.webpx")), webp);
+    }
+
+    /// The probe answers from the container, and it carries four facts: the
+    /// size, the alpha flag, the profile and the orientation. Each lives in a
+    /// different chunk, so each is written alone here -- a fact read from the
+    /// wrong place would come back absent or zero and this would catch it.
+    #[test]
+    fn the_probe_reads_its_four_facts_out_of_the_container() {
+        // The canvas, with an odd sized profile and exif block in front of the
+        // image data the walk has to step over.
+        let path = write_temp(
+            "probe-extended.webp",
+            &riff(&[
+                (b"VP8X", vp8x(0x10)),
+                (b"ICCP", vec![1, 2, 3]),
+                (b"EXIF", vec![4, 5]),
+                (b"ANIM", vec![0; 6]),
+            ]),
+        );
+        let header = probe_header(&path).expect("an extended container to describe");
+        assert_eq!((header.width, header.height), (16, 16));
+        assert!(header.has_alpha, "the VP8X alpha bit");
+        assert_eq!(header.icc_profile.as_deref(), Some(&[1, 2, 3][..]));
+        assert_eq!(header.exif.as_deref(), Some(&[4, 5][..]));
+        let _ = std::fs::remove_file(&path);
+
+        // A file with no `VP8X` keeps its size in the image chunk: fourteen
+        // bits each, after the three byte frame tag and the start code.
+        let mut lossy = vec![0_u8; 10];
+        lossy[6..8].copy_from_slice(&20_u16.to_le_bytes());
+        lossy[8..10].copy_from_slice(&12_u16.to_le_bytes());
+        let path = write_temp("probe-lossy.webp", &riff(&[(b"VP8 ", lossy)]));
+        let header = probe_header(&path).expect("a plain lossy still to describe");
+        assert_eq!((header.width, header.height), (20, 12));
+        assert!(!header.has_alpha);
+        assert!(header.icc_profile.is_none() && header.exif.is_none());
+        let _ = std::fs::remove_file(&path);
+
+        // Lossless states both less one in one word, with the alpha flag
+        // beside them rather than in a container header.
+        let word = 4_u32 | (6_u32 << 14) | (1 << 28);
+        let mut lossless = vec![0x2f];
+        lossless.extend_from_slice(&word.to_le_bytes());
+        let path = write_temp("probe-lossless.webp", &riff(&[(b"VP8L", lossless)]));
+        let header = probe_header(&path).expect("a plain lossless still to describe");
+        assert_eq!((header.width, header.height), (5, 7));
+        assert!(header.has_alpha, "the VP8L alpha bit");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_container_that_states_no_canvas_is_not_described() {
+        // Every cut of a container, so a walk that reads past its own end has
+        // nowhere to hide.
+        let full = riff(&[
+            (b"VP8X", vp8x(0)),
+            (b"ICCP", vec![0; 5]),
+            (b"VP8 ", vec![0; 10]),
+        ]);
+        for length in 0..full.len() {
+            let path = write_temp("probe-truncated.webp", &full[..length]);
+            assert!(
+                probe_header(&path).is_none(),
+                "a cut at {length} bytes still describes"
+            );
+            let _ = std::fs::remove_file(&path);
+        }
+
+        // An animated file nests its frames, so the only canvas is inside an
+        // `ANMF` payload this walk does not descend into.
+        let path = write_temp("probe-animated.webp", &riff(&[(b"ANIM", vec![0; 6])]));
+        assert!(probe_header(&path).is_none());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
