@@ -496,7 +496,6 @@ type EntryPoint = unsafe extern "C" fn(
 ///
 /// Returns a message naming what libwebp refused, for the caller to qualify
 /// with the path it was reading.
-#[allow(dead_code, reason = "the animated webp compositor calls this next")]
 pub(crate) fn decode_rgba(data: &[u8]) -> std::result::Result<(u32, u32, Vec<u8>), String> {
     let mut width: std::ffi::c_int = 0;
     let mut height: std::ffi::c_int = 0;
@@ -537,12 +536,15 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     let open = open_started.elapsed();
 
     // libwebp's simple entry points read one image and refuse a container of
-    // them. An animated webp only reaches this module when its name hid the
-    // animation from the probe, which picks the animation adapter by name; the
-    // decoder for it was the `image` path, so this hands the file back to that
-    // rather than failing with "libwebp rejected the bitstream".
-    if crate::animation::webp::is_animated(&data, &info.path) {
-        return crate::decoder::decode_through_image(info);
+    // them, so a webp that holds an animation is answered with the picture its
+    // timeline starts with. One reaches this module only when its name hid the
+    // animation from `probe_segment`, which picks an animation adapter from the
+    // file's route, and the timeline is read here rather than by a decoder of
+    // its own.
+    if let Some(first) =
+        crate::animation::webp::first_picture(&info.path, &data, info.transform, info.format)?
+    {
+        return Ok(first);
     }
 
     let metadata_started = Instant::now();
@@ -1328,6 +1330,40 @@ mod tests {
 
         let error = decode(&info(&path, ColorType::Rgb8, 3, 2)).expect_err("an error");
         assert!(error.to_string().contains("did not recognise"), "{error}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A webp whose name hid its animation from the probe is still read as a
+    /// still, and what it contributes is the picture its timeline starts with.
+    /// `image`'s webp reader used to answer this and the `webp` feature is gone
+    /// from `Cargo.toml`, so this is the only reader such a file has: if the
+    /// branch that finds the animation went away, this would fail with libwebp
+    /// refusing a container of frames rather than with a wrong picture.
+    #[test]
+    fn a_webp_that_hides_its_animation_is_read_as_the_picture_it_starts_with() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("animation.webp");
+        let bytes = std::fs::read(&fixture).expect("the animation fixture");
+        // The name is what makes it a still: `probe_segment` picks the
+        // animation adapter from the route, and the route is the bytes.
+        let path = write_temp("hides-its-animation.png", &bytes);
+
+        let probed = probe(&path, true, false).expect("the renamed fixture to probe");
+        assert_eq!((probed.width, probed.height), (16, 12));
+        assert_eq!(probed.color_type, ColorType::Rgba8);
+
+        let decoded = decode(&probed).expect("the timeline's first picture");
+        assert_eq!((decoded.width, decoded.height), (16, 12));
+        assert_eq!(decoded.format, PixelFormat::Rgb8);
+        // The same picture the timeline hands a segment, which is the one the
+        // `image` reader handed back for a file like this.
+        let expected =
+            crate::animation::webp::first_picture(&path, &bytes, probed.transform, probed.format)
+                .expect("the container to be readable")
+                .expect("an animated container to be found");
+        assert_eq!(decoded.pixels, expected.pixels);
         let _ = std::fs::remove_file(&path);
     }
 }

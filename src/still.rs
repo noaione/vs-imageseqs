@@ -6,17 +6,19 @@
 //! A caller here never names an `image` type: [`Metadata`] and [`ColorType`] are
 //! the plugin's own, and the crate's enums are translated at this boundary.
 //!
-//! Two formats used to be on this list and are not any more. Gif is read by
+//! Three formats used to be on this list and are not any more. Gif is read by
 //! `src/formats/gif.rs`, onto the same compositor `animation::gif` composes its
-//! presentations with, and png is read by `src/formats/png.rs` -- the row walk for
-//! the files whose rows can be placed as they are read, and a whole-frame read for
-//! the two shapes whose cannot be, Adam7 and an orientation.
+//! presentations with. Png is read by `src/formats/png.rs` -- the row walk for
+//! the files whose rows can be placed as they are read, and a whole-frame read
+//! for the two shapes whose cannot be, Adam7 and an orientation. Webp is read
+//! by `src/formats/webp.rs`, which is libwebp for the pixels and its own
+//! container walk for the probe, and by `animation/webp.rs` for the picture a
+//! renamed animated webp starts with.
+//!
+//! What is left of the crate here is the avif reader below and the last resort
+//! for a file no format names.
 //!
 //! What still reaches it, and what would have to exist before it could go:
-//!
-//! - **webp** — the probe of every webp, because the header read is the
-//!   crate's, and a renamed animated webp, whose simple libwebp entry points
-//!   refuse a container of frames. The feature is `webp`.
 //! - **avif** — one [`crate::formats::avif`] will not describe from its own
 //!   boxes. The feature is `avif-native`, which is the crate's own av1 reading:
 //!   `dav1d`, the same decoder [`crate::formats::avif`] calls directly, plus

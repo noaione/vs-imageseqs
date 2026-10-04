@@ -27,7 +27,7 @@ use crate::{
     decoder::{DecodeTimings, DecodedImage, Pixels, image_error},
     error::{ImgSeqError, Result},
     layout::ColorType,
-    pixel::PixelFormat,
+    pixel::{PixelFormat, Transform},
 };
 
 use super::{AnimationDecoder, AnimationSource, Presentation, Rate, SegmentInfo};
@@ -56,16 +56,45 @@ pub fn owns(path: &Path) -> bool {
         })
 }
 
-/// Whether a webp bitstream holds an animation rather than one picture.
+/// Whether `data` opens with the form a container walk can be asked about.
 ///
-/// The still decoder needs this because libwebp's simple entry points read one
-/// image and refuse a container of them, and a file whose name does not say
-/// `webp` never reaches [`segment_info`]: it is a still to the probe, which
-/// picks this adapter by name, so the still decoder has to recognise the
-/// container it cannot read and hand it on.
-#[must_use]
-pub fn is_animated(data: &[u8], path: &Path) -> bool {
-    parse(data, path).is_ok_and(|parsed| parsed.is_some_and(|shown| shown.is_animated()))
+/// A webp is a RIFF file whose form type is `WEBP`, which is the whole of what
+/// this module's walks require before reading a chunk. One check, so neither
+/// walk can disagree with the other about what it is looking at.
+fn is_container(data: &[u8]) -> bool {
+    data.len() >= 12 && &data[..4] == b"RIFF" && &data[8..12] == b"WEBP"
+}
+
+/// The first picture an animated webp displays, for a file read as a still.
+///
+/// libwebp's simple entry points read one image and refuse a container of them,
+/// so a webp that holds an animation has to be answered from its timeline. One
+/// reaches the still decoder only when its name hid the animation from
+/// `probe_segment`, which picks an animation adapter from the file's route: a
+/// file called `webp` is an animated segment and never arrives here.
+///
+/// What it contributes as a still is the picture the timeline starts with,
+/// which is what the reader being replaced handed back for such a file. A file
+/// that is not a webp container at all is declined rather than refused, so that
+/// the caller's own decoder is what reports it and names libwebp.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the container is a webp that cannot be read.
+pub fn first_picture(
+    path: &Path,
+    data: &[u8],
+    transform: Transform,
+    format: PixelFormat,
+) -> Result<Option<DecodedImage>> {
+    if !is_container(data) {
+        return Ok(None);
+    }
+    let Some(animation) = parse(data, path)? else {
+        return Ok(None);
+    };
+    let mut source = Source::new(path, &animation, transform, format);
+    source.presentation(0).map(Some)
 }
 
 /// One displayed frame's rectangle, timing and drawing rule.
@@ -494,7 +523,7 @@ fn parse(data: &[u8], path: &Path) -> Result<Option<Animation>> {
         ))
     };
 
-    if data.len() < 12 || &data[..4] != b"RIFF" || &data[8..12] != b"WEBP" {
+    if !is_container(data) {
         return Err(bad("is not a RIFF/WEBP file"));
     }
     // The RIFF size counts everything after the two size fields, so a file that
@@ -1005,5 +1034,20 @@ mod tests {
         let composed = canvas.draw(1, 1, &patch, 4, 4, false);
         assert_eq!(composed.len(), 2 * 2 * 4, "the canvas did not grow");
         assert_eq!(&composed[12..16], &[1, 2, 3, 255], "the corner was drawn");
+    }
+
+    /// A file that is not a webp container at all is declined rather than
+    /// refused, because the caller's own decoder is what names libwebp in the
+    /// error it reports for such a file.
+    #[test]
+    fn a_file_that_is_not_a_container_is_declined() {
+        let declined = first_picture(
+            Path::new("not-a-webp.png"),
+            b"not a webp image",
+            Transform::IDENTITY,
+            PixelFormat::Rgb8,
+        )
+        .expect("a decline rather than a refusal");
+        assert!(declined.is_none());
     }
 }
