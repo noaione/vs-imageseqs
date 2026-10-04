@@ -567,6 +567,19 @@ What is left, in plan 27's order, with the fixtures each still needs:
     float `Rgb32F` and is exactly the shape `hdr.rs` already hands over as
     `Pixels::Interleaved`, so that arm is both the proven one and the correct
     one. Interleaving three float channels is a copy per sample, not a transpose.
+  - **The probe reads the header alone.** The `image` hook uses
+    `read_first_flat_layer_from_file` for both jobs, which decodes the picture
+    just to describe it. `exr::meta::MetaData::read_from_file(path, pedantic)`
+    reads only what a probe needs -- `MetaData { requirements, headers }` -- so
+    the two jobs can ask different questions of the same file without
+    disagreeing. Still to look up: the field names on `Header` for its size and
+    its channel list, which are not in `meta/mod.rs`.
+  - **The intermediate shapes are settled.** `Image { attributes, layer_data }`,
+    `Layer { channel_data, size: Vec2<usize>, encoding }`,
+    `AnyChannels { list }` and `AnyChannel { name: Text, sample_data }`, with
+    `FlatSamples` as `F16(Vec<f16>) | F32(Vec<f32>) | U32(Vec<u32>)`. `list` is
+    a `SmallVec`, which is iterated rather than named, so the module needs no
+    dependency on it.
   Eight EXR files and thirteen TIFF files from
   [`tests/make-tiff-exr-fixtures.py`](../../tests/make-tiff-exr-fixtures.py).
   Every EXR reads (`RGBS` with `original=Rgb32F` or `Rgba32F`) across all five
