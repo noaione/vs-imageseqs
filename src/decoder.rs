@@ -70,7 +70,12 @@ fn format_decoder(info: &ImageInfo, demand: Demand) -> Option<Result<DecodedImag
         return Some(formats::farbfeld::decode(info));
     }
     if formats::bmp::owns(&info.path) {
-        return Some(formats::bmp::decode(info));
+        return Some(
+            formats::bmp::stream(info).and_then(|streamed| match streamed {
+                Some(ready) => Ok(ready),
+                None => formats::bmp::decode(info),
+            }),
+        );
     }
     if formats::ico::owns(&info.path) {
         return Some(formats::ico::decode(info));

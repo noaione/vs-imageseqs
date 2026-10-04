@@ -1255,6 +1255,34 @@ ways across these rounds.
 That is the dds budget spent: four attempts, all measured, all reverted, and the
 block arithmetic shown to be equivalent to the reference. Whatever the 12% is, it
 is not in the code this page has looked at.
+### bmp, and the reversal that is not a transpose
+
+A bitmap's rows are the frame's rows, only possibly in the other order: stored
+top-down they are already right, and stored bottom-up they are the same rows
+reversed, which is a choice of target row rather than a transpose. The stream
+covers every uncompressed form without alpha and hands each row to
+`RowSink::place_rgb8` -- but unlike `tga` it does not reimplement the row, it
+reuses `unpack_row` into one scratch row that is reused for every row, so the
+palette lookup, the bit expansion and the blue-first exchange all still happen in
+the one place that already did them. That is what keeps it a saving rather than a
+second decoder.
+
+Fifteen interleaved pairs:
+
+| | median | min | max |
+| --- | --- | --- | --- |
+| buffered | 51.7 | 49.4 | 66.5 |
+| streamed | **43.8** | 42.3 | 64.2 |
+
+**A paired ratio median of 0.859 -- 14% off -- faster in 14 of 15.** Against the
+pre-step-5 build it is **0.514**: this reader is now about twice as fast as the one
+it replaced, where the buffered version was already well ahead. The run-length and
+four channel forms keep the buffered path; a run's packets cross rows, and a four
+channel row needs an alpha placer this does not have.
+
+Every bmp and ico fixture is byte-identical -- ico reads its DIB payloads through
+this same module -- the validator is at `all checks passed`, no file that both
+builds read differs in any property, and all four request orders agree.
 ### tga, and the regression it was carrying
 
 The same shape works far better here, because `tga`'s stored row is the frame's

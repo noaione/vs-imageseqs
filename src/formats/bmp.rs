@@ -32,7 +32,9 @@
 use std::path::Path;
 
 use crate::{
-    decoder::{DecodeTimings, DecodedImage, ImageInfo, Pixels, image_error, image_head},
+    decoder::{
+        DecodeTimings, DecodedImage, ImageInfo, Pixels, RowSink, RowStream, image_error, image_head,
+    },
     error::{ImgSeqError, Result},
     layout::{ColorType, Orientation, SourceColorType},
     pixel::{PixelFormat, Transform},
@@ -485,6 +487,110 @@ fn truncated() -> ImgSeqError {
     ImgSeqError::new("the bitmap is truncated")
 }
 
+/// A bitmap whose rows can be written straight into the frames.
+///
+/// The rows are the frame's rows, only possibly in the other order: a bitmap
+/// stored top-down is already right, and one stored bottom-up is the same rows
+/// reversed, which is a choice of target row rather than a transpose. So the
+/// whole-picture buffer that [`pixels`] builds for `pixels` to be copied out of
+/// is not needed here.
+///
+/// `unpack_row` still does the work a row needs -- the palette lookup, the bit
+/// expansion, the blue-first exchange -- into one scratch row that is reused,
+/// which is what keeps this a saving rather than a second decoder. The forms it
+/// does not cover keep the buffered path: a run-length encoded payload, whose
+/// runs cross rows, and a four channel one, whose alpha plane needs a placer
+/// this does not have.
+#[derive(Debug)]
+pub struct Rows {
+    path: std::path::PathBuf,
+}
+
+impl RowStream for Rows {
+    fn has_alpha(&self) -> bool {
+        false
+    }
+
+    fn fill(&mut self, mut sink: RowSink<'_>) -> Result<DecodeTimings> {
+        let open_started = std::time::Instant::now();
+        let data = std::fs::read(&self.path).map_err(|e| image_error("open", &self.path, e))?;
+        let open = open_started.elapsed();
+        let header = header(&data, 0, true).map_err(|e| image_error("decode", &self.path, e))?;
+
+        let read_started = std::time::Instant::now();
+        let width = header.width as usize;
+        let height = header.height as usize;
+        // Every uncompressed row is padded to a multiple of four bytes.
+        let row_bytes = (width * header.bit_count as usize).div_ceil(32) * 4;
+        let needed = row_bytes
+            .checked_mul(height)
+            .ok_or_else(|| ImgSeqError::new("the bitmap is too large"))?;
+        let body = data
+            .get(header.data_offset..header.data_offset + needed)
+            .ok_or_else(|| {
+                ImgSeqError::new(format!(
+                    "the file holds {} bytes of pixels where the header states {needed}",
+                    data.len().saturating_sub(header.data_offset)
+                ))
+            })?;
+        let mut line = vec![0u8; width * 3];
+        for row in 0..height {
+            let source = &body[row * row_bytes..(row + 1) * row_bytes];
+            let target_row = if header.top_down {
+                row
+            } else {
+                height - 1 - row
+            };
+            unpack_row(&header, source, &mut line, width, 3);
+            sink.place_rgb8(&line, target_row)
+                .ok_or_else(|| ImgSeqError::new("the frame holds no three colour planes"))?;
+        }
+        let read = read_started.elapsed();
+        Ok(DecodeTimings {
+            open,
+            metadata: std::time::Duration::ZERO,
+            buffer: std::time::Duration::ZERO,
+            read,
+        })
+    }
+
+    fn duplicate(&self) -> Box<dyn RowStream> {
+        Box::new(Self {
+            path: self.path.clone(),
+        })
+    }
+}
+
+/// Prepares a bitmap whose rows will be written straight into the frames.
+///
+/// Answers `None` for every shape the stream does not cover, so the caller falls
+/// back to [`decode`].
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the header cannot be read back.
+pub fn stream(info: &ImageInfo) -> Result<Option<DecodedImage>> {
+    let data = image_head(&info.path).map_err(|e| image_error("open", &info.path, e))?;
+    let header = header(&data, 0, true).map_err(|e| image_error("decode", &info.path, e))?;
+    if header.has_alpha || matches!(header.image_type, ImageType::Rle4 | ImageType::Rle8) {
+        return Ok(None);
+    }
+    Ok(Some(DecodedImage {
+        width: info.width,
+        height: info.height,
+        format: info.format,
+        transform: info.transform,
+        pixels: Pixels::Stream(Box::new(Rows {
+            path: info.path.clone(),
+        })),
+        timings: DecodeTimings {
+            open: std::time::Duration::ZERO,
+            metadata: std::time::Duration::ZERO,
+            buffer: std::time::Duration::ZERO,
+            read: std::time::Duration::ZERO,
+        },
+    }))
+}
 /// The samples of one bitmap, decoded into `width * height * channels`.
 ///
 /// # Errors
