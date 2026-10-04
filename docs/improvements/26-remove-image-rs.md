@@ -755,6 +755,26 @@ what a probe reads, it is why `bmp` went from 0.61 to 0.56 and `ff` from 0.41 to
 0.38, and a probe that reads megabytes to look at a few hundred bytes is wrong on
 its own terms.
 
+**`hdr` is fixed; the cause was the full-picture buffers, not the per-row ones.**
+The rewrite keeps one allocation -- the frame -- and one reusable scanline, where
+the reader built three whole-picture buffers: a 4 byte scanline buffer, a 12 byte
+float buffer and a 12 byte byte buffer. On 1200x900 that is 4, 13 and 13 MB of
+zeroed memory traffic to produce 13 MB of output.
+
+| format | before | after the rewrite |
+| --- | --- | --- |
+| `hdr` | 1.15 1.17 1.16 1.15 1.18 | **0.85 0.95 0.92 0.99 0.98 0.97** |
+
+Every round is now at or below 1.0, so `hdr` is faster than the reader it
+replaced rather than 1.16x slower. This also explains why the earlier per-row
+flattening did nothing: it removed the *per-row* allocations and left all three
+whole-picture ones, which were the cost. Two guesses were wrong for the same
+reason -- each fixed something real that was not the thing being measured.
+
+`dds`, `ppm` and `tga` are the same shape and are next: one output allocation and
+a reusable row, `dds` being the one with the stable ratio (1.30 this round, 1.2
+before, so it needs the profile this method just supplied for `hdr`).
+
 The first attempt at this section guessed per-row allocation and flattened
 `hdr.rs`'s `Vec<Vec<[u8; 4]>>` into one buffer. That is kept -- it is 900 fewer
 allocations on a 900 row picture, the pixels are unchanged, and it cost nothing --

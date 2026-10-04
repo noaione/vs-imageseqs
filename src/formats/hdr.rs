@@ -382,22 +382,22 @@ fn raster(header: &Header, data: &[u8]) -> Result<Vec<u8>> {
     let layout = &header.layout;
     let stored_width = layout.stored_width as usize;
     let stored_height = layout.stored_height as usize;
-    let mut cursor = header.data_offset;
-    // One buffer, sliced per scanline. A `Vec` of `Vec`s is one heap allocation
-    // per row, which on a 900 row picture is 900 of them, and this reader was
-    // measured 1.33x slower than the one it replaced before it was flattened.
-    let mut scanlines = vec![[0u8; 4]; stored_width * stored_height];
-    for row in 0..stored_height {
-        let line = &mut scanlines[row * stored_width..(row + 1) * stored_width];
-        scanline(data, &mut cursor, stored_width, line)?;
-    }
-
-    // The signs move the pixels and the transpose turns the axes round, so the
-    // picture handed out is the one the resolution describes.
     let (out_width, out_height) = header.layout.output();
-    let mut floats = vec![0f32; out_width as usize * out_height as usize * 3];
-    for (stored_row, line) in scanlines.chunks_exact(stored_width).enumerate() {
+    let (out_width, out_height) = (out_width as usize, out_height as usize);
+    let mut cursor = header.data_offset;
+
+    // **One** allocation, the frame itself, and one reusable row. This used to
+    // build three -- a scanline buffer, a float buffer and a byte buffer -- each
+    // zeroed and each a whole picture. On a 1200x900 file that is 4, 13 and
+    // 13 MB of memory traffic to produce 13 MB of output, and it measured 1.16x
+    // slower than the reader it replaced. See `docs/improvements/26`.
+    let mut out = vec![0u8; out_width * out_height * 12];
+    let mut line = vec![[0u8; 4]; stored_width];
+    for stored_row in 0..stored_height {
+        scanline(data, &mut cursor, stored_width, &mut line)?;
         for (stored_column, value) in line.iter().enumerate() {
+            // The signs move the pixels and the transpose turns the axes round,
+            // so the picture handed out is the one the resolution describes.
             let row = if layout.flip_rows {
                 stored_height - 1 - stored_row
             } else {
@@ -413,14 +413,17 @@ fn raster(header: &Header, data: &[u8]) -> Result<Vec<u8>> {
             } else {
                 (column, row)
             };
-            let at = (y * out_width as usize + x) * 3;
-            floats[at..at + 3].copy_from_slice(&radiance([value[0], value[1], value[2]], value[3]));
+            let at = (y * out_width + x) * 12;
+            let samples = radiance([value[0], value[1], value[2]], value[3]);
+            for (slot, sample) in out[at..at + 12]
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(samples)
+            {
+                slot.copy_from_slice(&sample.to_ne_bytes());
+            }
         }
-    }
-
-    let mut out = vec![0u8; floats.len() * 4];
-    for (slot, value) in out.as_chunks_mut::<4>().0.iter_mut().zip(floats) {
-        slot.copy_from_slice(&value.to_ne_bytes());
     }
     Ok(out)
 }
