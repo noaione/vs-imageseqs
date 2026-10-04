@@ -1287,6 +1287,36 @@ the same properties as its source. `ImgSeqPath` is excluded, because a renamed
 file's path differs by construction and is not a routing fact -- including it made
 the first run report 51 phantom property failures.
 
+### probe and decode were answering from different places
+
+The 12 that survived the content rule were three formats content cannot name --
+`jp2`/`j2k`, `heic` and `jxl` -- and the first two turned out to be a bug of their
+own rather than a missing signature.
+
+**`jxl` and `jp2` disagreed with themselves.** `describe` routed them through
+`owns`, which had just been made content-first, but `format_decoder` routed them
+through `handles`, and `handles` answered from its own extension helper:
+
+```rust
+pub fn handles(info: &ImageInfo) -> bool {
+    has_jxl_extension(&info.path)
+}
+```
+
+So a renamed jxl **passed the probe and fell through to `image` at decode, which
+refused it on the extension** -- exactly what the plan forbids, "a probe must never
+promise a frame a decode would refuse to produce", live in the tree and invisible
+while both halves agreed. The two now call `owns`, and the extension helpers and
+their constants are gone; the tests that named them ask `owns` instead, because
+that is what ships.
+
+**A separate constant is a separate answer**, which is why the halves could drift
+at all: each module kept its own extension list. `identify` is now the only one,
+so the drift is unrepresentable rather than merely repaired.
+
+**Renamed copies read wrong: 3 of 76, all `heic`.** Everything else in the tree
+routes by its bytes. No frame differs from the recorded baseline, the validator is
+at `all checks passed`, and all four request orders agree.
 ### the routing fix: `owns` becomes content-first
 
 The content check was already inside every module's `image_info`, and its own
