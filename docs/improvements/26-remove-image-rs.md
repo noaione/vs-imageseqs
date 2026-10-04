@@ -1084,6 +1084,19 @@ have, and it is a different claim from the one that failed -- the previous one w
 correct that the 4.3 MB copy is worth removing and wrong about what removing it
 would cost.
 
+**It was written a second time with that correction, and it still does not pay.**
+The one-pass version holds the three plane rows together and reads the band once;
+parity is byte-identical and the three-pass cost is gone (67.1 ms down to 62.5).
+But seven paired repetitions put it at 62.5 against the buffered 60.7, with the
+ranges overlapping -- before 56.5 58.9 60.6 60.7 64.3 64.9 77.9 and after 60.3
+61.2 61.5 62.5 62.7 64.1 64.5. That is no better, and it is more code, so it was
+reverted too.
+
+**That closes the question.** The extra copy is real, and removing it by streaming
+into the frame does not recover the 1.12x: two implementations were built to the
+right shape, measured, and neither beat the buffer. `dds` is left as it is, at
+1.12x, with the cause understood and the remedy tried rather than assumed.
+
 So the stream is the right *shape* and this was the wrong *implementation* of it:
 the transpose has to happen inside the block decode -- each block's four pixels
 writing their four bytes per plane as they are decoded, rather than into a band
