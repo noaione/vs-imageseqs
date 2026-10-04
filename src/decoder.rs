@@ -82,7 +82,12 @@ fn format_decoder(info: &ImageInfo, demand: Demand) -> Option<Result<DecodedImag
         return Some(formats::dds::decode(info));
     }
     if formats::pnm::owns(&info.path) {
-        return Some(formats::pnm::decode(info));
+        return Some(
+            formats::pnm::stream(info).and_then(|streamed| match streamed {
+                Some(ready) => Ok(ready),
+                None => formats::pnm::decode(info),
+            }),
+        );
     }
     if formats::tiff::owns(&info.path) {
         return Some(formats::tiff::decode(info));

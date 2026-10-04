@@ -1255,6 +1255,46 @@ ways across these rounds.
 That is the dds budget spent: four attempts, all measured, all reverted, and the
 block arithmetic shown to be equivalent to the reference. Whatever the 12% is, it
 is not in the code this page has looked at.
+### the stream that paid: ppm
+
+The row placer gets its first result, and it is the result the dds attempts were
+looking for. `pnm.rs` now answers `Pixels::Stream` for the one netpbm shape that
+needs nothing between the file and the frame -- a packed `P6` at `MAXVAL` 255,
+whose rows are `width * 3` bytes of the file and nothing else, so each is a slice
+handed to `RowSink::place_rgb8`. Every other form (ASCII, a word a sample, a
+`MAXVAL` that rescales, `P4`, `P5`, `P7`) keeps the buffered path, which is the
+rule that a stream is only answered with when it can fill every frame of a call.
+
+Fifteen interleaved pairs on the `.ppm` corpus, against the buffered build:
+
+| | median | min | max |
+| --- | --- | --- | --- |
+| buffered | 38.2 | 36.9 | 43.6 |
+| streamed | **30.8** | 29.4 | 62.8 |
+
+**A paired ratio median of 0.789 -- 21% off -- faster in 14 of the 15.** Against
+the pre-step-5 build it is **0.921**: the reader this replaced is now itself
+beaten by 8%, where the buffered version only matched it.
+
+Everything else is unchanged: every pnm fixture byte-identical, `all checks
+passed`, 0 of the 160 files that both builds read differ in any frame property,
+and all four request orders agree at both prefetch settings.
+
+**Why this one worked and the dds streams did not** is the whole finding, and it
+is two things rather than one. `place_rgb8` walks the planes with a `zip`, so
+there is no index and no bound check per byte -- the dds streams indexed a plane
+per pixel with `get_mut`. And a `P6` row is already the layout the frame wants,
+where a dds block is sixteen pixels that must be transposed out of a block. So
+streaming pays when the decoder's own output order matches the frame's, and the
+saving is a whole traversal; it loses when the stream has to transpose, because
+then it trades a bulk copy for per-pixel work. That is the same split the earlier
+attempts found from the other side, now with a case that lands on the winning
+side.
+
+The next formats to try are the ones whose rows are already the frame's: `tga`'s
+uncompressed rows and `bmp`'s bottom-up rows. `qoi` decodes to a buffer by
+construction and `hdr` transposes for three of its eight orientations, so both
+would need their own argument.
 ### the row placer, lifted out of png.rs
 
 The dds attempts failed for a reason that reading `png.rs` explains. Its
