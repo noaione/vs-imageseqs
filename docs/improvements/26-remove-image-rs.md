@@ -908,6 +908,27 @@ keep the per-row work in that buffer, which is the shape `png.rs` already uses.
 That is the next action, and this corpus and this harness are what will say
 whether it worked.
 
+### the licence obligation, checked against the modules
+
+The constraint is that "a ported decoder keeps image-rs's `LICENSE-*` text and a
+`THIRD_PARTY_NOTICES` entry naming the files it came from". Asserted when the
+notices were written, and checked here by asking the modules rather than the
+notices:
+
+| module | what its head says it came from |
+| --- | --- |
+| `bmp.rs`, `ico.rs`, `tga.rs`, `dds.rs`, `pnm.rs` | **ported**, from `image` |
+| `hdr.rs` | written here |
+| `tiff.rs`, `exr.rs`, `qoi.rs`, `farbfeld.rs`, `jp2.rs`, `jpeg.rs`, `jxl.rs`, `heif.rs`, `webp.rs` | a crate, called directly |
+| `png.rs` | written here -- the `cICP` chunk and a row walk over the `png` crate |
+| `avif.rs` | written here -- its own box walker over dav1d |
+
+**Five modules say ported and the notices name those same five**, so the list is
+complete rather than a guess: a sixth port would show up as a module whose head
+says so and a notice that does not mention it. `LICENSES/image-LICENSE-MIT.txt`
+and `image-LICENSE-APACHE.txt` are both present, which is what makes the
+`MIT OR Apache-2.0` choice coverable from either.
+
 ### the probe never promises what a decode refuses
 
 Also checked directly for the first time, rather than read off each slice by hand.
