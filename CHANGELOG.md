@@ -3,6 +3,18 @@
 ## unreleased
 ### changed
 
+- A webp is described here now rather than by `image`, which drops that reader
+  from the dependency: `image-webp` is out of `Cargo.lock`. The container walk
+  the decode already used answers the probe's four facts -- the canvas, the
+  alpha flag, the exif orientation and the `ICCP` chunk -- so a webp's
+  `ImgSeqOrientation` and `ImgSeqHasICC` come from the file's own chunks. The
+  size is still the stored one and the transform still does the swap, so the
+  fixtures describe and decode byte for byte as they did. An animated webp under
+  a name that does not say `webp` keeps the single-frame read it had: what it
+  contributes is the picture its timeline starts with, read from the timeline
+  now rather than by a decoder of its own. A webp that does not hold the
+  container its `RIFF` header declares -- a file cut short -- is refused rather
+  than described.
 - An interlaced png is read here now rather than by `image`, and so is one that
   states an orientation. Both are shapes the row walk cannot place: it writes each
   row into the frame as it reads it, and Adam7 hands the file over one *pass* at a
@@ -52,8 +64,8 @@
   webp, heif, jxl and jpeg 2000 answered the decode from the extension while
   the probe answered from the bytes, so a file whose name lied about it could
   be described as one format and decoded as another. An animated webp under a
-  name that does not say `webp` keeps the single-frame read it had, because
-  libwebp's simple entry points read one image and refuse a container of them
+  name that does not say `webp` keeps the single-frame read it had; what that
+  frame comes from is the entry above.
 - An OpenEXR whose first part holds no colour channel now decodes. The probe and
   the decode were asking different questions: the probe took the first part that
   states `R`, `G` and `B`, and the decode took the first part it could read at
