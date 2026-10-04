@@ -532,7 +532,15 @@ What is left, in plan 27's order, with the fixtures each still needs:
   deliberate decision rather than a default. Deciding this after writing the
   reader would mean discovering it from a failing fixture, so it is recorded
   here first.
-- **tiff and exr** — fixtures **landed** in `2205e87`, the modules still to do.
+- **tiff** — **done**, module in `725b97a`, and `image`'s `tiff` feature is off.
+  Twelve of the thirteen fixtures are byte-identical in probe facts, colour planes and
+  both clips, including the **planar** one, which is the file three attempts went
+  into. The thirteenth is `tiff-palette.tiff`, which both readers refuse -- only
+  the wording differs (`failed to identify` where the old one said `failed to
+  create decoder`), and both refuse it before a frame is promised. The five bugs
+  the attempts found are listed below and each is a real trap rather than a typo.
+
+- **exr** — fixtures **landed** in `2205e87`, the module still to do.
   Eight EXR files and thirteen TIFF files from
   [`tests/make-tiff-exr-fixtures.py`](../../tests/make-tiff-exr-fixtures.py).
   Every EXR reads (`RGBS` with `original=Rgb32F` or `Rgba32F`) across all five

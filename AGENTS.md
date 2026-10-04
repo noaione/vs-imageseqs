@@ -160,6 +160,9 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   `hdr.rs` for Radiance pictures, whose three scanline encodings and eight
   resolution spellings are written here rather than ported, because the reader
   this replaces accepted only one spelling of the resolution line,
+  `tiff.rs` for the tagged format, whose decompressors are the crate's default
+  features and whose planar files arrive as planes that have to be reordered into
+  a frame,
   `pnm.rs` for the netpbm family, whose seven subtypes, ASCII and binary rasters
   and MAXVAL rescale are a port,
   `qoi.rs` for the quite
