@@ -1,7 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use vapoursynth4_rs::ffi;
@@ -14,7 +14,6 @@ use crate::{
     formats::identify::{self, Format},
     layout::{ColorType, Orientation, SourceColorType},
     pixel::{PixelFormat, Transform},
-    still,
 };
 
 /// What one decode has to produce.
@@ -88,18 +87,11 @@ fn format_decoder(info: &ImageInfo, demand: Demand) -> Option<Result<DecodedImag
         // picture rather than the crate handing a sub-rectangle back as the whole
         // image.
         Some(Format::Gif) => formats::gif::decode(info),
-        // A png is the tail of [`decode`]'s: the row walk, and the generic
-        // decoder for a file the walk will not take. No format here means the
-        // same thing, so a file no module claims keeps the path it had.
+        // A png is [`decode`]'s tail rather than one decode here: the row walk,
+        // and then the whole-frame read for the shapes the walk will not take.
+        // A file no module here claims is one no reader in this tree knows.
         Some(Format::Png) | None => return None,
     })
-}
-
-/// Format a module decodes this file into, when it is not the one the probed
-/// color type suggests; see [`crate::formats`].
-fn format_override(path: &Path, color_type: ColorType) -> Option<PixelFormat> {
-    formats::webp::output_format(path, color_type)
-        .or_else(|| formats::avif::output_format(path, color_type))
 }
 
 #[derive(Clone, Debug)]
@@ -392,13 +384,6 @@ pub const fn orientation_size(transform: Transform, width: u32, height: u32) -> 
     }
 }
 
-fn open_decoder(path: &Path) -> Result<still::Decoder> {
-    // No hooks are registered here any more. Every container this plugin reads
-    // is read by the module that owns it, and the libheif integration that
-    // taught `image` to read an avif or a heif is gone with them.
-    still::Decoder::open(path).map_err(|error| image_error(error.action, path, error.detail))
-}
-
 /// Builds the error every decoder path reports, so the format modules in
 /// [`crate::formats`] word theirs the same way.
 pub(crate) fn image_error(action: &str, path: &Path, error: impl std::fmt::Display) -> ImgSeqError {
@@ -582,75 +567,25 @@ fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
         // flag, the orientation and the profile, so describing one no longer
         // costs a decode of the whole picture.
         Some(Format::Webp) => formats::webp::image_info(path, apply_rotation)?,
-        // A file no format here names is the generic decoder's, which is where
-        // it has always gone.
+        // A file no format here names is a file this plugin does not read. It
+        // used to be the generic decoder's, which was the last thing `image`
+        // was linked for; there is no generic decoder any more.
         None => None,
     };
-    if let Some(info) = described {
-        return Ok(info);
-    }
-
-    let decoder = open_decoder(path)?;
-    let metadata = decoder.metadata();
-    let (width, height) = (metadata.width, metadata.height);
-    let color_type = metadata.color_type;
-    let original_color_type = metadata.original_color_type;
-    let icc_profile = decoder.icc_profile().map(Arc::<[u8]>::from);
-    // The containers that state a colour description do it somewhere the `image`
-    // decoder has no accessor for: a heif item property inside a `libheif`
-    // handle, or a chunk beside the data of a png. Both are read from the file
-    // rather than from the decoder, and both decline a file of another kind
-    // without opening it.
-    let cicp = formats::heif::cicp(path).or_else(|| formats::png::cicp(path));
-    let orientation = metadata.orientation;
-    let format = format_override(path, color_type)
-        .or_else(|| PixelFormat::from_color_type(color_type))
-        .ok_or_else(|| {
-            ImgSeqError::new(format!(
-                "unsupported color type {color_type:?} in image '{}'",
-                path.display()
-            ))
-        })?;
-
-    Ok(ImageInfo {
-        path: path.to_path_buf(),
-        width,
-        height,
-        color_type,
-        original_color_type,
-        has_icc_profile: icc_profile.is_some(),
-        icc_profile,
-        cicp,
-        // The `image` decoders have no accessor for a chroma sample position,
-        // and the containers that state one are read by the modules that know
-        // how to read it out of their own boxes.
-        chroma_location: None,
-        orientation,
-        transform: if apply_rotation {
-            Transform::from_orientation(orientation)
-        } else {
-            Transform::IDENTITY
-        },
-        format,
+    described.ok_or_else(|| {
+        ImgSeqError::new(format!(
+            "failed to identify image '{}': no reader here knows its format",
+            path.display()
+        ))
     })
 }
 
-/// Decodes `info` with the `image` crate.
-///
-/// This is the adapter every format module hands a file to when it is not one
-/// that module reads itself. It is a function rather than the tail of [`decode`]
-/// because a module can be the one that *knows* a file is not its own -- an
-/// avif whose container the walk refuses is libheif's, and one whose samples
-/// have no planar yuv format is this path's -- and the alternative is for every
-/// such module to re-walk the container to find that out a second time.
 /// Decodes `info`.
 ///
-/// The format modules go first, then the png row walk, then the `image` crate;
-/// see [`decode_through_image`] for the last of those.
-///
-/// # Errors
-///
-/// Returns [`ImgSeqError`] when no path produces the frame.
+/// The format modules go first, and then the two png paths the row walk cannot
+/// take. A file none of them answers is one no reader here knows, which is an
+/// error rather than a last resort: every format this plugin supports has a
+/// reader of its own.
 pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
     if let Some(decoded) = format_decoder(info, demand) {
         return decoded;
@@ -677,75 +612,10 @@ pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
     if let Some(decoded) = formats::png::decode(info)? {
         return Ok(decoded);
     }
-    decode_through_image(info)
-}
-
-/// Decodes `info` with the `image` crate.
-///
-/// This is the adapter every format module hands a file to when it is not one
-/// that module reads itself. It is a function rather than the tail of [`decode`]
-/// because a module can be the one that *knows* a file is not its own -- an
-/// avif whose container the walk refuses is libheif's, and one whose samples
-/// have no planar yuv format is this path's -- and the alternative is for every
-/// such module to re-walk the container to find that out a second time.
-///
-/// # Errors
-///
-/// Returns [`ImgSeqError`] when the file cannot be read, or when it changed
-/// between the probe and this read.
-pub(crate) fn decode_through_image(info: &ImageInfo) -> Result<DecodedImage> {
-    let open_started = Instant::now();
-    let decoder = open_decoder(&info.path)?;
-    let open = open_started.elapsed();
-
-    let metadata_started = Instant::now();
-    let probed = decoder.metadata();
-    let (width, height, color_type) = (probed.width, probed.height, probed.color_type);
-    let metadata = metadata_started.elapsed();
-    if (width, height, color_type) != (info.width, info.height, info.color_type) {
-        return Err(ImgSeqError::new(format!(
-            "image '{}' changed after probing (was {old_width}x{old_height} {old:?}, now {new_width}x{new_height} {new:?})",
-            info.path.display(),
-            old_width = info.width,
-            old_height = info.height,
-            old = info.color_type,
-            new_width = width,
-            new_height = height,
-            new = color_type,
-        )));
-    }
-
-    let size = usize::try_from(probed.total_bytes).map_err(|_| {
-        ImgSeqError::new(format!(
-            "decoded image '{}' is too large for this platform",
-            info.path.display()
-        ))
-    })?;
-    let buffer_started = Instant::now();
-    let mut pixels = vec![0; size];
-    let buffer = buffer_started.elapsed();
-    let read_started = Instant::now();
-    decoder
-        .read(&mut pixels)
-        .map_err(|error| image_error(error.action, &info.path, error.detail))?;
-    let read = read_started.elapsed();
-
-    Ok(DecodedImage {
-        width,
-        height,
-        format: info.format,
-        transform: info.transform,
-        pixels: Pixels::Interleaved {
-            color_type,
-            buffer: pixels,
-        },
-        timings: DecodeTimings {
-            open,
-            metadata,
-            buffer,
-            read,
-        },
-    })
+    Err(ImgSeqError::new(format!(
+        "failed to decode image '{}': no reader here knows its format",
+        info.path.display()
+    )))
 }
 
 #[cfg(test)]

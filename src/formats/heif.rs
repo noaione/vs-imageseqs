@@ -42,16 +42,12 @@ use crate::{
     pixel::{PixelFormat, Transform, inverse_orientation},
 };
 
-/// File extensions that hold a heif container.
-const HEIF_EXTENSIONS: [&str; 4] = ["heic", "heics", "heif", "hif"];
-
 /// What the container of a heif states about its primary image, when this
 /// module can describe the file from it.
 ///
-/// `None` means "let the `image` decoder describe this file": another container,
-/// or one whose image libheif reports in a shape this probe will not state a
-/// format for. Those files keep the hook, and the properties they are probed
-/// with are the ones the hook reports.
+/// `None` means this module cannot describe the file: another container, or one
+/// whose image libheif reports in a shape this probe will not state a format
+/// for. No reader here reads such a file.
 pub fn image_info(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
     if !owns(path) {
         return None;
@@ -123,28 +119,6 @@ pub fn describe(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
             Transform::from_orientation(inverse_orientation(orientation))
         },
         format: header.format()?,
-    })
-}
-
-/// The colour description a heif file states about its primary image, read
-/// through `libheif` itself.
-///
-/// The `nclx` profile of a heif item is an item property, so reading it means
-/// resolving which item is the primary one and which properties are associated
-/// with it. `libheif` does that for the containers it handles, and the box walk
-/// [`crate::formats::avif`] reads an avif with does not have to be taught `pitm`
-/// and `ipma` for the files another library already parses. The cost is opening
-/// the container and reading its metadata, which decodes nothing.
-pub fn cicp(path: &Path) -> Option<Cicp> {
-    if !has_heif_extension(path) {
-        return None;
-    }
-    let profile = heif_handle(path)?.color_profile_nclx()?;
-    Some(Cicp {
-        primaries: profile.color_primaries().code(),
-        transfer: profile.transfer_characteristics().code(),
-        matrix: profile.matrix_coefficients().code(),
-        full_range: profile.full_range_flag() != 0,
     })
 }
 
@@ -644,16 +618,6 @@ fn pack_plane(
     Ok(())
 }
 
-fn has_heif_extension(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            HEIF_EXTENSIONS
-                .iter()
-                .any(|known| extension.eq_ignore_ascii_case(known))
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -696,16 +660,6 @@ mod tests {
             stride,
             bits_per_pixel: storage,
             storage_bits_per_pixel: storage,
-        }
-    }
-
-    #[test]
-    fn only_heif_extensions_are_taken_over() {
-        for path in ["a.heic", "b.heics", "c.heif", "d.HIF"] {
-            assert!(has_heif_extension(Path::new(path)), "{path}");
-        }
-        for path in ["a.jpg", "b.png", "c.avif", "d"] {
-            assert!(!has_heif_extension(Path::new(path)), "{path}");
         }
     }
 
@@ -772,33 +726,6 @@ mod tests {
         // nothing or "unspecified" would have to be labelled with a guess.
         assert!(!usable_matrix(0));
         assert!(!usable_matrix(UNSPECIFIED));
-    }
-
-    #[test]
-    fn a_heif_file_states_the_colour_its_handle_carries() {
-        // The rgba fixture states primaries 1, transfer 13 and matrix 6 with the
-        // full range flag, which is the item property libheif resolves for the
-        // primary image. A colour box is an item property, so this is the one
-        // source of colour metadata that is not read out of the boxes.
-        let stated = cicp(Path::new("tests/fixtures/alpha-rgba8.heic")).expect("a stated colour");
-        assert_eq!(
-            stated,
-            Cicp {
-                primaries: 1,
-                transfer: 13,
-                matrix: 6,
-                full_range: true
-            }
-        );
-    }
-
-    #[test]
-    fn only_heif_extensions_are_read_for_colour() {
-        // Nothing else is opened: an avif is described from its boxes by
-        // `formats::avif`, and no other container holds a heif colour box.
-        for path in ["a.avif", "b.png", "c.jxl", "d.jpg", "e"] {
-            assert!(cicp(Path::new(path)).is_none(), "{path}");
-        }
     }
 
     #[test]
@@ -1090,27 +1017,25 @@ mod tests {
         }
     }
 
-    /// An r,g,b container is read here now, and it has to be the same picture
-    /// the `image` decoder read from it before.
+    /// An r,g,b container is read here, and every one of them still decodes.
     ///
     /// Every r,g,b fixture is checked, because the arrangement this module had
     /// to be taught is the one all of them take: libheif fills the red, green
     /// and blue channels for these and leaves the luma channel empty, which is
     /// what made this path fail before. The alpha channel is a picture of its
-    /// own and is compared as one.
+    /// own and is decoded as one.
+    ///
+    /// The pictures themselves are pinned byte for byte elsewhere: by
+    /// `tests/readalpha.vpy`, which checks these fixtures against the values
+    /// they hold, and by `target/bench/hash-frames.py`, whose baseline is every
+    /// plane of every fixture. The `image` decoder this used to compare against
+    /// is gone from the tree, and so is the comparison.
     #[test]
-    fn an_rgb_container_is_the_picture_the_image_decoder_reads() {
+    fn every_rgb_container_still_decodes_here() {
         for name in [
-            // The avif ones. The one container with a rotation is checked by
-            // the test below, because the two decoders disagree about where the
-            // rotation is applied and that is not a difference in the picture.
-            //
-            // `animation.heic` is not here any more, and cannot be: the `image`
-            // crate reads an avif itself (`avif-native`) but has no heif of its
-            // own, so `register_heic_decoding_hook` was the only thing that let
-            // it read one. That hook is gone, which is the point of the step
-            // that removed it -- there is no second decoder left to compare
-            // against, and the fixture's own test is what covers it now.
+            // The one container with a rotation is checked by the test below,
+            // because the transform is applied where this reader applies it and
+            // that is not a difference in the picture.
             "cicp-rgb8.avif",
             "alpha-rgba8.avif",
             "animation.avif",
@@ -1124,27 +1049,16 @@ mod tests {
             );
             let ours = decode(&info, crate::decoder::Demand::ALL)
                 .unwrap_or_else(|error| panic!("{name}: {error}"));
-            // The `image` decoder labels an r,g,b avif as r,g,b,a even when the
-            // file carries no alpha, because its avif hook always reports four
-            // channels; libheif says `Rgb8`, which is what the file holds. The
-            // comparison spells the colour type that decoder expects so that it
-            // will read the picture at all, and compares the three channels the
-            // format names either way.
-            let mut via_image = info.clone();
-            if crate::pixel::alpha_channel(via_image.color_type).is_none() {
-                via_image.color_type = crate::layout::ColorType::Rgba8;
-            }
-            let theirs = crate::decoder::decode_through_image(&via_image)
-                .unwrap_or_else(|error| panic!("{name}: {error}"));
             assert_eq!(
                 (ours.width, ours.height),
-                (theirs.width, theirs.height),
+                (info.width, info.height),
                 "{name}"
             );
             for plane in 0..info.format.plane_count() {
                 assert_eq!(
-                    plane_of(&ours, plane),
-                    plane_of(&theirs, plane),
+                    plane_of(&ours, plane).len(),
+                    info.format
+                        .plane_bytes(plane, info.width as usize, info.height as usize),
                     "{name} plane {plane}"
                 );
             }

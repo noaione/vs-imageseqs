@@ -104,32 +104,6 @@ impl ColorType {
     pub const fn has_alpha(self) -> bool {
         self.alpha_channel().is_some()
     }
-
-    /// The decoded layout a backend's own color type names.
-    ///
-    /// This is the one place a backend's enum is translated, and it answers
-    /// `None` for a layout this build does not know rather than choosing a
-    /// convenient default that would misdescribe the buffer.
-    #[must_use]
-    #[allow(
-        dead_code,
-        reason = "the still adapter names the layout the decoder read"
-    )]
-    pub fn from_image(value: image::ColorType) -> Option<Self> {
-        Some(match value {
-            image::ColorType::L8 => Self::L8,
-            image::ColorType::La8 => Self::La8,
-            image::ColorType::Rgb8 => Self::Rgb8,
-            image::ColorType::Rgba8 => Self::Rgba8,
-            image::ColorType::L16 => Self::L16,
-            image::ColorType::La16 => Self::La16,
-            image::ColorType::Rgb16 => Self::Rgb16,
-            image::ColorType::Rgba16 => Self::Rgba16,
-            image::ColorType::Rgb32F => Self::Rgb32F,
-            image::ColorType::Rgba32F => Self::Rgba32F,
-            _ => return None,
-        })
-    }
 }
 
 /// The encoding a file holds, which is not always the layout it decodes to.
@@ -145,26 +119,6 @@ pub enum SourceColorType {
     L1,
     /// One-bit luminance with alpha.
     La1,
-    /// One-bit rgb.
-    Rgb1,
-    /// One-bit rgba.
-    Rgba1,
-    /// Two-bit luminance.
-    L2,
-    /// Two-bit luminance with alpha.
-    La2,
-    /// Two-bit rgb.
-    Rgb2,
-    /// Two-bit rgba.
-    Rgba2,
-    /// Four-bit luminance.
-    L4,
-    /// Four-bit luminance with alpha.
-    La4,
-    /// Four-bit rgb.
-    Rgb4,
-    /// Four-bit rgba.
-    Rgba4,
     /// Three five-bit channels packed into sixteen bits.
     Rgb5x1,
     /// Eight-bit luminance.
@@ -183,48 +137,29 @@ pub enum SourceColorType {
     Rgb16,
     /// Sixteen-bit rgba.
     Rgba16,
-    /// Eight-bit bgr.
-    Bgr8,
-    /// Eight-bit bgra.
-    Bgra8,
     /// Three `f32` channels.
     Rgb32F,
     /// Three `f32` channels and an `f32` alpha channel.
     Rgba32F,
     /// Eight-bit cmyk.
     Cmyk8,
-    /// Sixteen-bit cmyk.
-    Cmyk16,
-    /// A source encoding this build does not name.
-    ///
-    /// It is reported rather than guessed at: a backend that grows a layout
-    /// the pin does not have must not have it described as rgb.
-    Unknown,
 }
 
 impl SourceColorType {
     /// The name `ImgSeqOriginalColorType` reports for this encoding.
     ///
-    /// The spelling is the one the `image` crate's own `Debug` wrote, and it is
+    /// The spelling is the one this property has always reported, which is the
+    /// name the `image` crate's own `Debug` wrote while it was the reader. It is
     /// public behavior: a graph that matched on `Rgb8` has to keep matching on
     /// it. It is written out rather than derived so that renaming a variant here
-    /// cannot silently rename a frame property.
+    /// cannot silently rename a frame property, which is why `color.rs` writes
+    /// the property out of this table rather than out of `Debug`.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::A8 => "A8",
             Self::L1 => "L1",
             Self::La1 => "La1",
-            Self::Rgb1 => "Rgb1",
-            Self::Rgba1 => "Rgba1",
-            Self::L2 => "L2",
-            Self::La2 => "La2",
-            Self::Rgb2 => "Rgb2",
-            Self::Rgba2 => "Rgba2",
-            Self::L4 => "L4",
-            Self::La4 => "La4",
-            Self::Rgb4 => "Rgb4",
-            Self::Rgba4 => "Rgba4",
             Self::Rgb5x1 => "Rgb5x1",
             Self::L8 => "L8",
             Self::La8 => "La8",
@@ -234,13 +169,9 @@ impl SourceColorType {
             Self::La16 => "La16",
             Self::Rgb16 => "Rgb16",
             Self::Rgba16 => "Rgba16",
-            Self::Bgr8 => "Bgr8",
-            Self::Bgra8 => "Bgra8",
             Self::Rgb32F => "Rgb32F",
             Self::Rgba32F => "Rgba32F",
             Self::Cmyk8 => "Cmyk8",
-            Self::Cmyk16 => "Cmyk16",
-            Self::Unknown => "Unknown",
         }
     }
 
@@ -358,16 +289,6 @@ mod tests {
             (SourceColorType::A8, "A8"),
             (SourceColorType::L1, "L1"),
             (SourceColorType::La1, "La1"),
-            (SourceColorType::Rgb1, "Rgb1"),
-            (SourceColorType::Rgba1, "Rgba1"),
-            (SourceColorType::L2, "L2"),
-            (SourceColorType::La2, "La2"),
-            (SourceColorType::Rgb2, "Rgb2"),
-            (SourceColorType::Rgba2, "Rgba2"),
-            (SourceColorType::L4, "L4"),
-            (SourceColorType::La4, "La4"),
-            (SourceColorType::Rgb4, "Rgb4"),
-            (SourceColorType::Rgba4, "Rgba4"),
             (SourceColorType::Rgb5x1, "Rgb5x1"),
             (SourceColorType::L8, "L8"),
             (SourceColorType::La8, "La8"),
@@ -377,18 +298,11 @@ mod tests {
             (SourceColorType::La16, "La16"),
             (SourceColorType::Rgb16, "Rgb16"),
             (SourceColorType::Rgba16, "Rgba16"),
-            (SourceColorType::Bgr8, "Bgr8"),
-            (SourceColorType::Bgra8, "Bgra8"),
             (SourceColorType::Rgb32F, "Rgb32F"),
             (SourceColorType::Rgba32F, "Rgba32F"),
             (SourceColorType::Cmyk8, "Cmyk8"),
-            (SourceColorType::Cmyk16, "Cmyk16"),
-            // The catch-all is part of the type, so the label table names it
-            // too: a backend that grows a layout must still get a label
-            // rather than a panic.
-            (SourceColorType::Unknown, "Unknown"),
         ];
-        assert_eq!(labels.len(), 29);
+        assert_eq!(labels.len(), 15);
         for (value, label) in labels {
             assert_eq!(value.label(), label);
         }

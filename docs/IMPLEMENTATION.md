@@ -445,8 +445,9 @@ alongside the rotation and which is a crop rather than an orientation.
 
 Monochrome HEIF/HEIC asks for `ColorSpace::Monochrome` and writes the single
 plane into a `Gray8`/`Gray10`/`Gray16` frame. `src/formats/` holds one module per
-container that the `image` crate cannot express; `decoder::decode` asks each
-module whether it handles the image before falling back to `image-rs`.
+container; `decoder::format_decoder` asks `identify::route` which one owns a
+file and that module decodes it. There is no decoder behind them to fall back
+to any more.
 
 ### AVIF
 

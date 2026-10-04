@@ -148,8 +148,7 @@ pub fn set_frame_properties(
     let path = image.path.to_string_lossy();
     let index = i64::try_from(index)
         .map_err(|_| ImgSeqError::new("frame index does not fit in an Int property"))?;
-    let original_color_type = format!("{:?}", image.original_color_type);
-
+    let original_color_type = image.original_color_type.label();
     properties
         .set(key!(c"ImgSeqPath"), Value::Utf8(&path), AppendMode::Replace)
         .map_err(ImgSeqError::from_display)?;
@@ -159,7 +158,7 @@ pub fn set_frame_properties(
     properties
         .set(
             key!(c"ImgSeqOriginalColorType"),
-            Value::Utf8(&original_color_type),
+            Value::Utf8(original_color_type),
             AppendMode::Replace,
         )
         .map_err(ImgSeqError::from_display)?;

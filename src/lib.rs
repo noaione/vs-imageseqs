@@ -10,7 +10,6 @@ mod layout;
 mod pixel;
 mod prefetch;
 mod source;
-mod still;
 
 use source::{Read, ReadAlpha};
 

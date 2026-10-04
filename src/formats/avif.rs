@@ -41,9 +41,6 @@ use crate::{
     pixel::{PixelFormat, Transform},
 };
 
-/// File extensions that hold an avif container.
-const AVIF_EXTENSIONS: [&str; 1] = ["avif"];
-
 /// Size limit for the leading boxes of an avif. The metadata of a real file is
 /// orders of magnitude smaller, and a file past it is left to the decoder.
 const HEADER_LIMIT: usize = 1024 * 1024;
@@ -155,36 +152,6 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
     })
 }
 
-/// Format a file this module describes is handed out as, for a file whose
-/// decode is left to the `image` decoder.
-///
-/// This reads the same boxes as [`image_info`] but without asking for the brand,
-/// because the files it matters for are exactly the ones [`image_info`] declines:
-/// a monochrome item in a container whose major brand is not `avif` is described
-/// by whichever decoder `image` picks, which reports the four channels it always
-/// reports, and its single plane is still the format it should be handed out as.
-/// For such a bitstream the conversion `image` performs has no chroma to mix in,
-/// so every channel of the decoded picture holds the same sample.
-pub fn output_format(path: &Path, color_type: ColorType) -> Option<PixelFormat> {
-    // A decoder that already reports one of the monochrome color types maps to
-    // the gray format on its own, and a file that is not one of these is handed
-    // out as the format its probe describes.
-    let decoded = PixelFormat::from_color_type(color_type)?;
-    if decoded.color_family() != ColorFamily::RGB || !has_avif_extension(path) {
-        return None;
-    }
-    let mut file = File::open(path).ok()?;
-    let file_len = file_length(&file).ok()?;
-    let boxes = leading_boxes(&mut file)?;
-    let meta = Meta::read(&boxes, file_len)?;
-    let header = AvifHeader::read(&meta.primary_properties()?)?;
-    header
-        .monochrome
-        .then(|| PixelFormat::from_color_type(header.file_color_type(meta.has_alpha())))
-        .flatten()
-        .map(|format| format.at_depth(header.depth.into()))
-}
-
 /// Decodes one avif item into the planes of the format its probe recorded.
 ///
 /// The alpha item is a coded item of its own, so a call that hands out no alpha
@@ -218,16 +185,21 @@ pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
     if !meta.native_eligible() {
         return super::heif::decode(info, demand);
     }
-    // A file that is not an avif at all, whatever its extension says. The probe
-    // left it to the `image` decoder, which is where it stays.
+    // A file that is not an avif at all, whatever its extension says. The route
+    // sent it here from the extension alone, which is the one case where a file
+    // this reader cannot read is not libheif's either: there is no picture here
+    // and no reader in this tree that knows the file.
     if !has_avif_brand(&boxes) {
-        return crate::decoder::decode_through_image(info);
+        return Err(image_error(
+            "decode",
+            &info.path,
+            "the container is not an avif",
+        ));
     }
     // An avif whose samples are not yuv is libheif's: an r,g,b one has no
     // planar format to be handed out as, and a monochrome one is a single
     // plane this reader has no avif path for. The probe left both to libheif,
-    // so this is the same library the description named, and the only thing
-    // left on the `image` path is a file that is not an avif at all.
+    // so this is the same library the description named.
     if info.format.color_family() != ColorFamily::YUV {
         return super::heif::decode(info, demand);
     }
@@ -789,22 +761,6 @@ impl AvifHeader {
             cicp,
             orientation: orientation_of(properties),
         })
-    }
-    /// The color type of the samples the file holds: three channels for a colour
-    /// image, and a fourth when an alpha item exists. A monochrome image holds
-    /// the one sample the container says it does, beside the alpha item when
-    /// there is one.
-    const fn file_color_type(&self, has_alpha: bool) -> ColorType {
-        match (self.monochrome, self.depth > 8, has_alpha) {
-            (true, false, false) => ColorType::L8,
-            (true, false, true) => ColorType::La8,
-            (true, true, false) => ColorType::L16,
-            (true, true, true) => ColorType::La16,
-            (false, false, false) => ColorType::Rgb8,
-            (false, false, true) => ColorType::Rgba8,
-            (false, true, false) => ColorType::Rgb16,
-            (false, true, true) => ColorType::Rgba16,
-        }
     }
 
     /// Color type a colour image of this depth is probed as, which is what the
@@ -1677,22 +1633,10 @@ fn read_range(file: &mut File, range: Range<usize>) -> std::io::Result<Vec<u8>> 
     file.read_exact(&mut buffer)?;
     Ok(buffer)
 }
-
 /// Builds the error a dav1d call reports for one image.
 fn decode_error(path: &Path, error: impl std::fmt::Display) -> ImgSeqError {
     image_error("decode", path, error)
 }
-
-fn has_avif_extension(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            AVIF_EXTENSIONS
-                .iter()
-                .any(|known| extension.eq_ignore_ascii_case(known))
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1938,16 +1882,6 @@ mod tests {
         payload.push(u8::try_from(header.len()).unwrap());
         payload.extend_from_slice(header);
         payload
-    }
-
-    #[test]
-    fn only_avif_extensions_are_taken_over() {
-        for path in ["a.avif", "b.AVIF", "c.AvIf"] {
-            assert!(has_avif_extension(Path::new(path)), "{path}");
-        }
-        for path in ["a.heic", "b.png", "c.avifx", "d"] {
-            assert!(!has_avif_extension(Path::new(path)), "{path}");
-        }
     }
 
     /// Whether the tree routes a path to this module.
@@ -2580,13 +2514,6 @@ mod tests {
             panic!("libheif hands out planes");
         };
         assert!(alpha.is_some(), "the alpha plane came too");
-        assert_eq!(
-            output_format(path, ColorType::Rgba8),
-            Some(PixelFormat::Gray8)
-        );
-        // A decoder that reports the gray color type needs no correction.
-        assert_eq!(output_format(path, ColorType::La8), None);
-        assert_eq!(output_format(Path::new("a.avif"), ColorType::Rgba8), None);
     }
 
     #[test]

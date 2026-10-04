@@ -120,7 +120,7 @@ fn open_stream(path: &Path) -> Result<Stream> {
 /// Probes `path` without decoding its picture.
 ///
 /// Returns `None` for a file this module does not read, which is what leaves a
-/// path of another extension to the generic still path.
+/// path of another extension to whatever format its bytes name.
 ///
 /// # Errors
 ///

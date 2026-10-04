@@ -374,8 +374,8 @@ impl Transform {
 
     /// Transform that hands out `orientation` the way a viewer shows it.
     ///
-    /// [`Orientation`](image::metadata::Orientation) names the same eight
-    /// transformations the exif tag does, so this is a rename and not a
+    /// [`Orientation`]'s eight codes name the same eight transformations an
+    /// exif tag does, so this is a rename and not a
     /// conversion, down to the order of the composed ones: `Rotate90FlipH`
     /// rotates the stored picture 90 degrees clockwise and then mirrors it,
     /// which comes out as the plain transpose, while `Rotate90` on its own does

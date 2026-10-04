@@ -3,6 +3,15 @@
 ## unreleased
 ### changed
 
+- The `image` crate is gone. Every format this plugin reads has a reader of its
+  own, so the last two things it was still linked for -- the probe of a webp,
+  and the probe and decode of an avif -- are handled by those modules' own
+  container walks, and the generic decoder that remained as a last resort is
+  gone with them. A file whose bytes name no format here, and whose extension
+  names none either, is refused with `no reader here knows its format` rather
+  than sent to it. The plugin is about 435 KB smaller, and several modules
+  under `src/formats/` are ports of that crate's readers, so its licence texts
+  and notices stay where they were.
 - Whether a file plays a timeline is decided by its bytes now, like its format
   already was. `Read` picked the animation adapter by extension while the probe
   and the decode picked the format by content, so an animated gif, webp, avif or

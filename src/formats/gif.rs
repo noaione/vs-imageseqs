@@ -7,7 +7,7 @@
 //! [`crate::animation::gif`], because the animation path needs it for every
 //! presentation it hands out; this module is the still path onto the same canvas,
 //! and it exists so that a one frame gif is read here rather than by the `image`
-//! crate -- see the note at the head of `src/still.rs`.
+//! crate's own reader, which this tree no longer links.
 //!
 //! What a still gif is *described* as is the `gif` crate's own header read, which
 //! is also where `image`'s gif reader took it:
