@@ -24,8 +24,8 @@ These files are copied verbatim from the dependency sources used by the build:
 - `openjpeg-COPYING.txt` — the OpenJPEG sources vendored by `openjpeg-sys`
   1.0.12, BSD 2-Clause.
 - `zstd-COPYING.txt` — zstd 1.5.7, BSD 3-Clause, compiled from the sources
-  zstd-sys vendors and linked into the plugin. The 	iff reader''s zstd feature
-  is what selects it.
+  `zstd-sys` vendors it and links it into the plugin. The `tiff` reader's
+  `zstd` feature is what selects it.
 - `gcc-runtime-COPYING.txt` — the FSF's GCC Runtime Library Exception, version
   3.1, the additional permission libstdc++ and libgcc_s are governed by. It is
   the `COPYING.RUNTIME` a GCC installation ships: that runtime is part of the

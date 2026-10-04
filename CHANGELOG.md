@@ -3,6 +3,9 @@
 ## unreleased
 ### changed
 
+- A TIFF compressed with zstd now decodes. Its decompressor is not one of the
+  `tiff` crate's default features, so it is named by hand here, and libzstd is a
+  native dependency the plugin links as a result -- see `LICENSES/zstd-COPYING.txt`.
 - A Radiance HDR whose resolution line states an orientation other than the
   common `-Y ... +X` now decodes instead of being refused. The `image` decoder
   accepted only that one spelling and answered "does not support the format
