@@ -66,6 +66,12 @@
   sequences decode instead of failing with `NoMatchingDecoderInstalled`.
   libheif's default features stay disabled, and no additional codec is selected.
 
+- An animated png's delays are placed exactly. A frame that states a delay whose
+  denominator a thousand does not divide -- a third of a second, say -- had its
+  delay rounded to whole milliseconds before it was added to the timeline, so a
+  long animation drifted; the timeline now runs at the lowest common denominator
+  of the delays the file states
+
 ### performance
 
 - Creating a clip over a long list reads the front of each file instead of the

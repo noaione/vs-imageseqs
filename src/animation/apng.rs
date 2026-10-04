@@ -41,6 +41,10 @@ const CHUNK_CRC: u64 = 4;
 /// the two operation bytes.
 const FRAME_CONTROL: u64 = 26;
 
+/// Largest timebase a segment is placed on, in ticks a second. A file asking
+/// for more than this is placed on milliseconds instead; see [`common_timebase`].
+const TIMEBASE_LIMIT: u32 = 1 << 31;
+
 #[cfg(test)]
 thread_local! {
     /// Frames this thread has rendered, which is how a description is checked
@@ -126,13 +130,12 @@ fn timing(path: &Path, expected: usize) -> Result<(Rate, Vec<Presentation>)> {
     let length = file
         .seek(SeekFrom::End(0))
         .map_err(|error| image_error("read", path, error))?;
-    let mut presentations: Vec<Presentation> = Vec::with_capacity(expected);
-    let mut timestamp = 0i64;
+    let mut delays: Vec<(u16, u16)> = Vec::with_capacity(expected);
     // The chunks follow the signature, each a length, a kind, its payload and a
     // checksum this does not check: the walk needs the two fields that place it
     // at the next one, and the delay of the frames it passes.
     let mut at = SIGNATURE;
-    while presentations.len() < expected {
+    while delays.len() < expected {
         if at + CHUNK_HEADER > length {
             break;
         }
@@ -167,29 +170,86 @@ fn timing(path: &Path, expected: usize) -> Result<(Rate, Vec<Presentation>)> {
                 .map_err(|error| image_error("read", path, error))?;
             let numerator = u16::from_be_bytes([control[20], control[21]]);
             let denominator = u16::from_be_bytes([control[22], control[23]]);
-            let duration = delay_ms(numerator, denominator_of(denominator));
-            presentations.push(Presentation {
-                timestamp,
-                duration: Some(duration),
-            });
-            timestamp = timestamp.checked_add(duration).ok_or_else(|| {
-                ImgSeqError::new(format!("the timeline of '{}' overflows", path.display()))
-            })?;
+            delays.push((numerator, denominator));
         }
         if &kind == b"IEND" {
             break;
         }
         at = next;
     }
-    if presentations.len() < expected {
+    if delays.len() < expected {
         return Err(ImgSeqError::new(format!(
             "animated image '{}' ended after {} of its {expected} frames",
             path.display(),
-            presentations.len()
+            delays.len()
         )));
     }
-    // The timeline counts milliseconds, which is a rate of 1000 ticks a second.
-    Ok((Rate::new(1000, 1), presentations))
+    timeline(&delays, path)
+}
+
+/// Places frames whose delays are the fractions `delays` states on a timeline.
+///
+/// A delay is a fraction of a second and a segment has one rate, so the
+/// fractions go on the lowest common denominator of the ones a file states:
+/// every delay is then a whole number of ticks and none of them is rounded
+/// before it is accumulated, which is what keeps a long timeline from drifting.
+/// An APNG may state any denominator, not only the hundredth the specification
+/// defaults to.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the timeline's ticks overflow.
+fn timeline(delays: &[(u16, u16)], path: &Path) -> Result<(Rate, Vec<Presentation>)> {
+    let timebase = common_timebase(delays);
+    let mut presentations = Vec::with_capacity(delays.len());
+    let mut timestamp = 0i64;
+    for (numerator, denominator) in delays {
+        let denominator = denominator_of(*denominator);
+        let duration = match timebase {
+            // Exact: the timebase is a multiple of every denominator here.
+            Some(timebase) => i64::from(*numerator) * i64::from(timebase / u32::from(denominator)),
+            // A millisecond a tick, which is where every delay was placed
+            // before there was a timebase to work out.
+            None => delay_ms(*numerator, denominator),
+        };
+        presentations.push(Presentation {
+            timestamp,
+            duration: Some(duration),
+        });
+        timestamp = timestamp.checked_add(duration).ok_or_else(|| {
+            ImgSeqError::new(format!("the timeline of '{}' overflows", path.display()))
+        })?;
+    }
+    let ticks = timebase.unwrap_or(1000);
+    Ok((Rate::new(i64::from(ticks), 1), presentations))
+}
+
+/// The lowest common denominator of `delays`, when one that holds them all is
+/// worth using.
+///
+/// A file stating several coprime denominators asks for a timebase as large as
+/// their product, which is billions of ticks a second for a handful of frames.
+/// `None` means the caller places the delays on milliseconds instead, which is
+/// what it did for every file before this.
+fn common_timebase(delays: &[(u16, u16)]) -> Option<u32> {
+    let mut timebase = 1u32;
+    for (_, denominator) in delays {
+        let denominator = u32::from(denominator_of(*denominator));
+        let divisor = gcd(timebase, denominator);
+        timebase = timebase.checked_div(divisor)?.checked_mul(denominator)?;
+        if timebase > TIMEBASE_LIMIT {
+            return None;
+        }
+    }
+    Some(timebase)
+}
+
+/// Greatest common divisor, by Euclid.
+fn gcd(mut left: u32, mut right: u32) -> u32 {
+    while right != 0 {
+        (left, right) = (right, left % right);
+    }
+    left
 }
 
 fn denominator_of(delay_den: u16) -> u16 {
@@ -673,5 +733,45 @@ impl AnimationDecoder for PngDecoder {
             .next_presentation(&mut self.reader, &mut self.buffer)?;
         self.next += 1;
         Ok(image)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A delay a millisecond timebase cannot hold is placed exactly: the rate is
+    /// the lowest common denominator of the delays the file states.
+    #[test]
+    fn a_delay_is_placed_on_a_timebase_that_holds_it() {
+        let (rate, presentations) =
+            timeline(&[(1, 3), (1, 3), (1, 3)], Path::new("a.png")).expect("a timeline");
+        assert_eq!(rate, Rate::new(3, 1), "a third of a second a tick");
+        assert_eq!(presentations[0].duration, Some(1));
+        assert_eq!(
+            presentations[2].timestamp, 2,
+            "nothing was rounded before it was added"
+        );
+
+        // A thousandth and a third share three thousand ticks a second, where
+        // the third was placed as 333 ms before.
+        let (rate, presentations) =
+            timeline(&[(1, 1000), (1, 3)], Path::new("a.png")).expect("a timeline");
+        assert_eq!(rate, Rate::new(3000, 1));
+        assert_eq!(presentations[0].duration, Some(3));
+        assert_eq!(presentations[1].timestamp, 3);
+    }
+
+    /// Denominators no timebase worth using can hold are placed on milliseconds,
+    /// which is where every delay was placed before.
+    #[test]
+    fn denominators_no_timebase_holds_are_milliseconds() {
+        // Two large coprime denominators ask for four billion ticks a second
+        // between them.
+        let (rate, presentations) =
+            timeline(&[(1, 65521), (1, 65519)], Path::new("a.png")).expect("a timeline");
+        assert_eq!(rate, Rate::new(1000, 1));
+        assert_eq!(presentations[0].duration, Some(0));
+        assert_eq!(presentations[0].timestamp, 0);
     }
 }
