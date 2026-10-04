@@ -163,17 +163,29 @@ pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo
     if !owns(path) {
         return Ok(None);
     }
-    let data = std::fs::read(path).map_err(|error| image_error("open", path, error))?;
-    // The signature is what decides, not the extension, so a `.tiff` that is not
-    // one is declined rather than refused.
-    let signature = data.get(..4);
-    let little = matches!(signature, Some([0x49, 0x49, 0x2a, 0x00]));
-    let big = matches!(signature, Some([0x4d, 0x4d, 0x00, 0x2a]));
+    // The file itself, not a header buffer: a tiff's IFD can sit anywhere in the
+    // file and the crate seeks to it, so a truncated head reads as "failed to
+    // fill whole buffer". Handing it the file means the crate reads only the
+    // directory and the tags it needs, which is less work than a whole-file read
+    // and less than this module could work out for itself.
+    let mut file = std::fs::File::open(path).map_err(|error| image_error("open", path, error))?;
+    let mut signature = [0u8; 4];
+    {
+        use std::io::Read;
+        let _ = file.read(&mut signature);
+    }
+    use std::io::Seek;
+    file.rewind()
+        .map_err(|error| image_error("open", path, error))?;
+    // The signature is what decides, not the extension, so a `.tiff` that is
+    // not one is declined rather than refused.
+    let little = signature == [0x49, 0x49, 0x2a, 0x00];
+    let big = signature == [0x4d, 0x4d, 0x00, 0x2a];
     if !little && !big {
         return Ok(None);
     }
 
-    let mut decoder = tiff::decoder::Decoder::new(std::io::Cursor::new(&data))
+    let mut decoder = tiff::decoder::Decoder::new(std::io::BufReader::new(file))
         .map_err(|error| image_error("identify", path, error))?;
     let (width, height) = decoder
         .dimensions()

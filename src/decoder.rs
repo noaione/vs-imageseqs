@@ -354,6 +354,33 @@ pub(crate) fn image_error(action: &str, path: &Path, error: impl std::fmt::Displ
     ))
 }
 
+/// How much of a file a probe may read. A header is never close to this: the
+/// largest one here is a bitmap's palette or a netpbm's comments, both measured
+/// in kilobytes, and this is deliberately far above either so a format that
+/// grew a longer preamble could not start failing as a truncated file.
+pub(crate) const PROBE_HEAD_BYTES: u64 = 64 * 1024;
+
+/// Reads the beginning of a file, which is all a probe needs.
+///
+/// Reading the whole file to parse a header was measured as the one regression
+/// in this tree's own readers: the probe went from 1.5 to 5 ms to 8 to 24 ms on
+/// an eight file set, because every module was pulling in megabytes to look at a
+/// few hundred bytes. The decode still reads the file it is given; this is for
+/// the pass that only describes it. See [`crate::formats`].
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the file cannot be opened or read.
+pub(crate) fn image_head(path: &Path) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|error| image_error("open", path, error))?;
+    let mut data = Vec::new();
+    file.take(PROBE_HEAD_BYTES)
+        .read_to_end(&mut data)
+        .map_err(|error| image_error("open", path, error))?;
+    Ok(data)
+}
+
 /// Describes one file without decoding it, for a call that may or may not want
 /// its embedded ICC bytes.
 ///

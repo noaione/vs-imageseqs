@@ -204,6 +204,10 @@ pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo
     if !owns(path) {
         return Ok(None);
     }
+    // The whole file, not a header: an icon's directory indexes payloads anywhere
+    // in it and `entries` checks every offset against the buffer it was given, so a
+    // truncated head reads as an icon shorter than its directory says. An icon is at
+    // most 256x256, so there is nothing to save by reading less.
     let data = std::fs::read(path).map_err(|error| image_error("open", path, error))?;
     // An icon directory starts with a zero word and a type of one or two. A
     // file that does not is not an icon however it is named.

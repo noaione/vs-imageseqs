@@ -28,7 +28,7 @@
 use std::path::Path;
 
 use crate::{
-    decoder::{DecodeTimings, DecodedImage, ImageInfo, Pixels, image_error},
+    decoder::{DecodeTimings, DecodedImage, ImageInfo, Pixels, image_error, image_head},
     error::{ImgSeqError, Result},
     formats::bmp,
     layout::{ColorType, Orientation, SourceColorType},
@@ -461,7 +461,7 @@ pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo
     if !owns(path) {
         return Ok(None);
     }
-    let data = std::fs::read(path).map_err(|error| image_error("open", path, error))?;
+    let data = image_head(path).map_err(|error| image_error("open", path, error))?;
     // A targa has no magic number to sniff, so a file whose header does not
     // parse is declined rather than refused, and something else may read it.
     let Ok(header) = header(&data) else {

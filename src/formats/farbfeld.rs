@@ -26,7 +26,7 @@
 use std::path::Path;
 
 use crate::{
-    decoder::{DecodeTimings, DecodedImage, ImageInfo, Pixels, image_error},
+    decoder::{DecodeTimings, DecodedImage, ImageInfo, Pixels, image_error, image_head},
     error::{ImgSeqError, Result},
     layout::{ColorType, Orientation, SourceColorType},
     pixel::{PixelFormat, Transform},
@@ -109,7 +109,7 @@ pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo
     if !owns(path) {
         return Ok(None);
     }
-    let data = std::fs::read(path).map_err(|error| image_error("open", path, error))?;
+    let data = image_head(path).map_err(|error| image_error("open", path, error))?;
     let Some((width, height)) = dimensions(&data) else {
         return Ok(None);
     };

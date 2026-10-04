@@ -729,6 +729,32 @@ what the `image` decoder did and what `png.rs` in this tree already does. Every
 module listed above has its own `std::fs::read(path)` in `image_info` and each one
 is the whole file.
 
+**The probe fix is in, and it did not close the gap.** `image_head` reads at most
+64 KB and every one of these modules now probes through it, which is the right
+shape and is parity neutral -- no pixel and no probe fact moved, and the
+validator still passes. But re-measuring after it, `dds`, `hdr`, `ppm` and `tga`
+are still 1.17x to 1.28x, so the probe was **not** the whole of it either:
+
+| format | per-round after/before, after the probe fix |
+| --- | --- |
+| `dds` | 1.16 1.25 1.33 1.24 1.18 |
+| `hdr` | 1.15 1.17 1.16 1.15 1.18 |
+| `ppm` | 1.25 1.16 1.20 1.23 1.30 |
+| `tga` | 1.24 1.29 1.29 1.21 1.27 |
+
+Two of the four now have a *stable* ratio across every round (`hdr` at 1.16 and
+`dds` at 1.2), which the earlier runs did not -- those are the two to look at
+first, because a stable 1.16 is a cost and not drift. Three things were tried
+against this and two were wrong: per-row allocation (flattened `hdr.rs`, no
+effect) and the whole-file probe (fixed, no effect on these four). The next step
+is a profile of `hdr` and `dds` specifically rather than another guess, since two
+guesses have now been measured and both were wrong.
+
+The probe reading is still worth keeping regardless: it is a 10x to 16x cut in
+what a probe reads, it is why `bmp` went from 0.61 to 0.56 and `ff` from 0.41 to
+0.38, and a probe that reads megabytes to look at a few hundred bytes is wrong on
+its own terms.
+
 The first attempt at this section guessed per-row allocation and flattened
 `hdr.rs`'s `Vec<Vec<[u8; 4]>>` into one buffer. That is kept -- it is 900 fewer
 allocations on a 900 row picture, the pixels are unchanged, and it cost nothing --
