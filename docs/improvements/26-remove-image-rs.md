@@ -1287,6 +1287,43 @@ the same properties as its source. `ImgSeqPath` is excluded, because a renamed
 file's path differs by construction and is not a routing fact -- including it made
 the first run report 51 phantom property failures.
 
+### the routing fix: `owns` becomes content-first
+
+The content check was already inside every module's `image_info`, and its own
+comment said so -- "the extension is only a hint". `owns` was what stood in front
+of it and returned early. So the fix is one function per module, delegating to a
+new `identify::owns(format, path, head)` that applies the plan's rule in one
+place: a signature decides, and a format with none of its own falls back on the
+name. No caller and no signature moved, and the unit tests inside each module pass
+paths that do not exist, so they read as no content and answer from the extension
+exactly as before.
+
+**Renamed copies read wrong: 59 of 84, now 15 of 80.**
+
+Two formats had to be taken back out of the content rule, and both are real
+findings rather than exceptions granted for convenience.
+
+**Targa has no leading signature**, so it was never eligible -- the plan says its
+extension "is not a hint but the whole answer". But the first pass left it in the
+content rule and broke it in the other direction: a Targa type 2 header begins
+`00 00 02 00`, which is CUR's magic, so identifying content handed every such
+Targa to the icon reader and 4 tests plus every Targa fixture failed with "the
+icon holds no entries". The pixel diff caught it, not the routing check.
+
+**The icon family is the same collision from the other side.** `\0\0\1\0` and
+`\0\0\2\0` are an icon or cursor *and* a Targa type 1 or 2 header, and those four
+bytes are the whole of the leading signature there is. So `Format::has_signature`
+is false for `Tga` and `Ico`, `identify` declines to claim either, and both decide
+by name. The plan asks to "extend the table for BigTIFF, CUR and RGBE": BigTIFF and
+RGBE are extended and working, and CUR is the one that cannot be, for the reason
+above.
+
+The 15 that remain are three formats content cannot currently name -- `jp2`/`j2k`,
+`heic` and `jxl`, each renamed to `.bmp`, `.jpg` and `.dat` -- and they are the
+next slice. Everything else is routed by its bytes.
+
+Verified unchanged: no frame differs from the recorded baseline, the validator is
+at `all checks passed`, and all four request orders agree.
 ### the routing check, committed
 
 `tests/routing.py` is plan 34 phase 1's acceptance check, moved out of the

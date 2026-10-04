@@ -40,9 +40,6 @@ use crate::{
     pixel::{PixelFormat, Transform},
 };
 
-/// File extensions that hold a netpbm.
-const EXTENSIONS: [&str; 5] = ["pbm", "pgm", "ppm", "pam", "pnm"];
-
 /// The magic numbers, and whether they are an ASCII raster.
 fn magic(value: &[u8]) -> Option<(u8, bool)> {
     match value {
@@ -176,13 +173,11 @@ impl Header {
 /// Whether this module reads `path`.
 #[must_use]
 pub fn owns(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            EXTENSIONS
-                .iter()
-                .any(|known| extension.eq_ignore_ascii_case(known))
-        })
+    // Content first: a file whose bytes say it is something else is that
+    // something else however it is named, and the extension is the hint a
+    // format with no signature of its own has to fall back on. See
+    // [`identify::owns`](crate::formats::identify::owns).
+    crate::formats::identify::owns(crate::formats::identify::Format::Pnm, path)
 }
 
 /// Whether a byte separates two header fields.

@@ -21,11 +21,6 @@
 //! and `format_decoder` is the next slice; this one exists to be tested against
 //! every fixture on its own.
 
-// The table lands one slice ahead of its wiring, which is what plan 34's "do not
-// combine all phases into an unreviewable backend rewrite" asks for: the
-// identification half is testable against every fixture on its own, and the
-// routing change that reads it is a separate review. Remove this allow in that
-// slice -- it exists so that this one can be read by itself.
 #![allow(dead_code)]
 
 use std::path::Path;
@@ -91,13 +86,16 @@ impl Format {
 
     /// Whether a leading signature can name this format at all.
     ///
-    /// Targa is the one that cannot: it has no leading magic, only an optional
-    /// footer, so its extension is not a hint but the whole answer. A bare DIB is
-    /// the other, and the plan gives it "a distinct extension-assisted structural
-    /// probe" rather than a signature, so it is not identified here either.
+    /// Targa is one: it has no leading magic, only an optional footer, so its
+    /// extension is not a hint but the whole answer. The icon family is the other,
+    /// and not for want of magic -- `\0\0\1\0` and `\0\0\2\0` are a Targa type 1
+    /// or type 2 header as much as they are an icon, so the two collide and the
+    /// extension is what separates them. A bare DIB is the third, and the plan
+    /// gives it "a distinct extension-assisted structural probe" rather than a
+    /// signature.
     #[must_use]
     pub const fn has_signature(self) -> bool {
-        !matches!(self, Self::Tga | Self::Bmp)
+        !matches!(self, Self::Tga | Self::Ico)
     }
 }
 
@@ -196,12 +194,12 @@ pub fn identify(head: &[u8]) -> Option<Format> {
     if starts(b"BM") {
         return Some(Format::Bmp);
     }
-    if starts(b"\x00\x00\x01\x00") {
-        return Some(Format::Ico);
-    }
-    if starts(b"\x00\x00\x02\x00") {
-        return Some(Format::Ico);
-    }
+    // The icon and cursor magic is deliberately **not** identified here. Both
+    // `\0\0\1\0` and `\0\0\2\0` are also the first four bytes of a Targa whose
+    // image type is 1 or 2, which is most of them, so a content-first rule that
+    // claimed them would take every such Targa away from the reader that owns it.
+    // Those two bytes are the whole of the leading signature there is, so the
+    // extension has to arbitrate; see `Format::has_signature`.
     // EXR's magic is a version-bearing word, and every version starts the same.
     if starts(b"\x76\x2f\x31\x01") {
         return Some(Format::Exr);
@@ -237,6 +235,38 @@ pub fn identify(head: &[u8]) -> Option<Format> {
     None
 }
 
+/// Reads the leading bytes of a file, or nothing when it cannot be read.
+///
+/// A file that cannot be opened reads as no content rather than as an error: a
+/// caller asking whether a format owns a path is asking a question that a missing
+/// file answers, and the format that ends up declining it reports the reason.
+fn head_of(path: &Path) -> Vec<u8> {
+    use std::io::Read;
+    let Ok(file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let mut head = Vec::with_capacity(HEAD_BYTES);
+    let _ = file.take(HEAD_BYTES as u64).read_to_end(&mut head);
+    head
+}
+
+/// Whether a format owns a file: the content decides, the extension is the hint.
+///
+/// This is the rule plan 34 states in one place -- "strong signatures win over
+/// extensions" -- and it is what every still module's `owns` now delegates to. A
+/// format with a signature of its own claims a file only when that signature is
+/// there, however the file is named; a format without one falls back on the name,
+/// which is Targa and a bare DIB and nothing else.
+///
+/// The read costs an open per question, which is deliberate for this phase: the
+/// plan asks for correctness first and consolidates the opens in its phase 3.
+#[must_use]
+pub fn owns(format: Format, path: &Path) -> bool {
+    match identify(&head_of(path)) {
+        Some(found) => found == format,
+        None => from_extension(path) == Some(format),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,10 +315,9 @@ mod tests {
         }
         assert!(checked > 100, "only {checked} fixtures were identified");
         assert!(
-            skipped.is_empty()
-                || skipped.iter().all(|name| name.ends_with(".tga")
-                    || name.ends_with(".dib")
-                    || name.ends_with(".bmp")),
+            skipped.iter().all(|name| [".tga", ".ico", ".cur", ".dib"]
+                .iter()
+                .any(|known| name.to_lowercase().ends_with(known))),
             "a format without a signature turned up that was not expected: {skipped:?}"
         );
     }

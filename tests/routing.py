@@ -61,12 +61,19 @@ SCRATCH = pathlib.Path("target/routing-scratch")
 # check taking minutes. A format with no fixture here is a gap in the set, not
 # a pass, so the count is reported.
 SOURCES = []
+# A format content cannot name is not a routing failure when it is renamed,
+# because there is nothing in the bytes to route by. Targa has no leading
+# signature at all, and the icon family shares its first four bytes with a Targa
+# type 1 or 2 header, so neither can be identified without the name; `.icc` is
+# not an image at all and is skipped for that reason.
+SKIP = {".tga", ".targa", ".icb", ".vda", ".vst", ".ico", ".cur", ".icc"}
 _seen: set[str] = set()
 for _entry in sorted(FIXTURES.iterdir()):
     if not _entry.is_file() or _entry.suffix.lower() in _seen:
         continue
     _seen.add(_entry.suffix.lower())
-    SOURCES.append(_entry.name)
+    if _entry.suffix.lower() not in SKIP:
+        SOURCES.append(_entry.name)
 
 # Extensions that belong to some other format this tree owns, plus one it does
 # not know at all, plus the source's own in the other case.

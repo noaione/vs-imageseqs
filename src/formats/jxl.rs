@@ -69,7 +69,11 @@ const CONTAINER_SIGNATURE: [u8; 12] = [
 /// the two signatures below are what the hook this module replaces used to
 /// register with it.
 pub fn owns(path: &Path) -> bool {
-    has_jxl_extension(path)
+    // Content first: a file whose bytes say it is something else is that
+    // something else however it is named, and the extension is the hint a
+    // format with no signature of its own has to fall back on. See
+    // [`identify::owns`](crate::formats::identify::owns).
+    crate::formats::identify::owns(crate::formats::identify::Format::Jxl, path)
 }
 
 /// Whether this module decodes `info`.

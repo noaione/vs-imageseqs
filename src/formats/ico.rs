@@ -43,9 +43,6 @@ use crate::{
     pixel::{PixelFormat, Transform},
 };
 
-/// File extensions that hold an icon.
-const EXTENSIONS: [&str; 1] = ["ico"];
-
 /// The eight bytes that start a PNG.
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 
@@ -58,13 +55,9 @@ const ENTRY: usize = 16;
 /// Whether this module reads `path`.
 #[must_use]
 pub fn owns(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            EXTENSIONS
-                .iter()
-                .any(|known| extension.eq_ignore_ascii_case(known))
-        })
+    // The icon magic is four bytes that a Targa header shares, so content cannot
+    // separate the two and this decides by name; see `identify::has_signature`.
+    crate::formats::identify::from_extension(path) == Some(crate::formats::identify::Format::Ico)
 }
 
 /// One entry of the icon directory.

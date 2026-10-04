@@ -37,9 +37,6 @@ use crate::{
     pixel::{PixelFormat, Transform},
 };
 
-/// File extensions that hold a targa.
-const EXTENSIONS: [&str; 2] = ["tga", "targa"];
-
 /// Bytes of the fixed header, before the image id and the colour map.
 const HEADER: usize = 18;
 
@@ -161,13 +158,11 @@ impl Header {
 /// Whether this module reads `path`.
 #[must_use]
 pub fn owns(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            EXTENSIONS
-                .iter()
-                .any(|known| extension.eq_ignore_ascii_case(known))
-        })
+    // Targa has no leading signature -- only an optional footer -- so its
+    // extension is not a hint that content can override but the whole answer.
+    // A type 2 header begins `00 00 02 00`, which is exactly CUR's magic, so a
+    // content-first rule would hand every such Targa to the icon reader.
+    crate::formats::identify::from_extension(path) == Some(crate::formats::identify::Format::Tga)
 }
 
 /// Parses the header, the image id and the colour map.

@@ -40,9 +40,6 @@ use crate::{
     pixel::{PixelFormat, Transform},
 };
 
-/// File extensions that hold a bitmap.
-const EXTENSIONS: [&str; 2] = ["bmp", "dib"];
-
 /// Byte counts that name a DIB header, from the size field inside it.
 const CORE_HEADER: u32 = 12;
 const INFO_HEADER: u32 = 40;
@@ -73,13 +70,11 @@ const MAX_SIDE: i32 = 0xFFFF;
 /// Whether this module reads `path`.
 #[must_use]
 pub fn owns(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            EXTENSIONS
-                .iter()
-                .any(|known| extension.eq_ignore_ascii_case(known))
-        })
+    // Content first: a file whose bytes say it is something else is that
+    // something else however it is named, and the extension is the hint a
+    // format with no signature of its own has to fall back on. See
+    // [`identify::owns`](crate::formats::identify::owns).
+    crate::formats::identify::owns(crate::formats::identify::Format::Bmp, path)
 }
 
 /// One channel of a bitfield: where its bits start and how many there are.

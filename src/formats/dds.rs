@@ -41,9 +41,6 @@ use crate::{
     pixel::{PixelFormat, Transform},
 };
 
-/// File extensions that hold a surface.
-const EXTENSIONS: [&str; 1] = ["dds"];
-
 /// The four bytes every file starts with.
 const MAGIC: &[u8; 4] = b"DDS ";
 
@@ -149,13 +146,11 @@ impl Header {
 /// Whether this module reads `path`.
 #[must_use]
 pub fn owns(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            EXTENSIONS
-                .iter()
-                .any(|known| extension.eq_ignore_ascii_case(known))
-        })
+    // Content first: a file whose bytes say it is something else is that
+    // something else however it is named, and the extension is the hint a
+    // format with no signature of its own has to fall back on. See
+    // [`identify::owns`](crate::formats::identify::owns).
+    crate::formats::identify::owns(crate::formats::identify::Format::Dds, path)
 }
 
 /// Reads a little-endian `u32` at `offset`.

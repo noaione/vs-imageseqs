@@ -51,8 +51,11 @@ const CHUNK_LIMIT: usize = 1024 * 1024;
 /// still-image `cICp` reader and the animation adapter above it.
 #[must_use]
 pub fn owns(path: &Path) -> bool {
-    path.extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+    // Content first: a file whose bytes say it is something else is that
+    // something else however it is named, and the extension is the hint a
+    // format with no signature of its own has to fall back on. See
+    // [`identify::owns`](crate::formats::identify::owns).
+    crate::formats::identify::owns(crate::formats::identify::Format::Png, path)
 }
 
 /// The colour description a png states with a `cICP` chunk, or `None` when it

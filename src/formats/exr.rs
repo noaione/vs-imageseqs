@@ -39,9 +39,6 @@ use crate::{
     pixel::{PixelFormat, Transform},
 };
 
-/// File extensions that hold an openexr picture.
-const EXTENSIONS: [&str; 1] = ["exr"];
-
 /// The four bytes every openexr picture starts with, which is the magic number
 /// 20000630 written little-endian.
 const MAGIC: [u8; 4] = [0x76, 0x2f, 0x31, 0x01];
@@ -100,13 +97,11 @@ impl Header {
 /// Whether this module reads `path`.
 #[must_use]
 pub fn owns(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            EXTENSIONS
-                .iter()
-                .any(|known| extension.eq_ignore_ascii_case(known))
-        })
+    // Content first: a file whose bytes say it is something else is that
+    // something else however it is named, and the extension is the hint a
+    // format with no signature of its own has to fall back on. See
+    // [`identify::owns`](crate::formats::identify::owns).
+    crate::formats::identify::owns(crate::formats::identify::Format::Exr, path)
 }
 
 /// Whether the file starts with the format's magic number.

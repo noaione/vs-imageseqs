@@ -30,9 +30,6 @@ use crate::{
 const JP2_SIGNATURE: [u8; 12] = [0, 0, 0, 12, b'j', b'P', b' ', b' ', 0x0d, 0x0a, 0x87, 0x0a];
 const J2K_SIGNATURE: [u8; 4] = [0xff, 0x4f, 0xff, 0x51];
 
-/// Extensions whose contents this module owns.
-const EXTENSIONS: [&str; 5] = ["jp2", "j2k", "jpf", "jpx", "j2c"];
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum EnumeratedColor {
     Srgb,
@@ -70,8 +67,15 @@ struct SizHeader {
 
 /// Whether a path has a JPEG 2000 extension and should be validated by this
 /// module before the general image decoder gets a chance to identify it.
+/// The extensions a JPEG 2000 file is named with.
+const EXTENSIONS: [&str; 5] = ["jp2", "j2k", "jpf", "jpx", "j2c"];
+
 pub fn owns(path: &Path) -> bool {
-    has_extension(path)
+    // Content first: a file whose bytes say it is something else is that
+    // something else however it is named, and the extension is the hint a
+    // format with no signature of its own has to fall back on. See
+    // [`identify::owns`](crate::formats::identify::owns).
+    crate::formats::identify::owns(crate::formats::identify::Format::Jp2, path)
 }
 
 /// Whether this module decodes the probed image.
