@@ -143,17 +143,38 @@ open plus frames to 4.99 s.
 
 ## plans
 
+### wpd WebP decoder — 2026-10-04
+
+[35 wpd WebP decoder](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/35-wpd-webp-decoder.md)
+is research complete, with no plugin implementation. The selected scope is
+wpd for ordinary stills and the existing libwebp path for animated containers,
+including those with one presentation. Both libraries coexist in the research
+executable. Local still decode plus planar transfer was 1.4–1.6× faster; the
+user accepts the measured RGB/RGBA memory increase. Adoption requires integrated
+speed, correctness and wheel checks. WebP's first-party probe remains, and an
+all-wpd animation path is optional future work.
+
+### input routing and planar decoding — 2026-10-04
+
+[34 input routing and planar decoding](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/34-input-routing-and-planar-decode.md)
+is partly implemented and remains open. Content-based still/animation routing
+and image-rs removal have landed; current checks pass 0 of 76 renamed copies
+and 0 of 7 renamed timelines. Its status table separates those results from
+the historical 59-of-84 cohort and lists the remaining saved-plan, shared-reader,
+planar-output and timing work. PNM/TGA/BMP row sinks do not yet mean incremental
+file reads. The original inventory and benchmarks are labeled historical.
+
 ### image-rs removal goal — 2026-10-03
 
-These four plans are research only. The goal is to replace the integration for
-every supported format and fallback case, then remove `image`; the underlying
-codec libraries can remain. Each future implementation must be benchmarked
-against an image-rs baseline to prove any claimed speed or memory improvement
-and catch significant regressions. The current code confirms GIF/WebP timeline
-discovery decodes presentations before playback decodes them again; other paths
-need separate accounting for header reads, buffers and copies.
+These four plans record the research that preceded image-rs removal. The
+dependency is now removed; plan 34's current-status table records that landed
+work separately from the remaining input and planar work. The table below
+retains the original research scopes and statuses. Its earlier GIF/WebP
+discovery findings and benchmark requirements describe those snapshots, not
+the current implementation inventory. Future performance changes still need
+a matched baseline, correctness checks and memory measurements.
 
-| plan | scope | status |
+| plan | scope | original research status |
 | --- | --- | --- |
 | [26 remove image-rs](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/26-remove-image-rs.md) | staged goal, complete-coverage removal gate, required baseline protocol and current baseline attempts/results | proposed, no implementation |
 | [27 direct still decoders](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/27-direct-still-decoders.md) | every still format's decoder selected, the candidate rejections and their reproductions, the parity rules a first-party reader inherits and the order to implement them in | **selected, not implemented**: 12 formats keep or promote a crate, 5 get a first-party reader, 2 zune candidates and the DDS pair are rejected on reproduced defects |
