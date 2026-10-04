@@ -563,13 +563,20 @@ fn raster(header: &Header, data: &[u8]) -> Result<Vec<u8>> {
         .checked_mul(channels)
         .and_then(|count| count.checked_mul(sample_bytes))
         .ok_or_else(|| ImgSeqError::new("the image is too large"))?;
-    let mut out = vec![0u8; size];
+    // The buffer is allocated by the arm that needs one. The binary raster is
+    // the file's own bytes and only has to be copied, so it takes the payload
+    // directly: `vec![0u8; size]` followed by a full overwrite zeroes the whole
+    // picture for nothing, and the allocator has to re-zero a reused block every
+    // file. This reader measured 1.19x slower than the one it replaced before
+    // the two were separated. See `docs/improvements/26`.
+    let mut out;
     let body = data
         .get(header.data_offset..)
         .ok_or_else(|| ImgSeqError::new("the raster is truncated"))?;
     let mut cursor = 0usize;
 
     if header.tuple == Tuple::PbmBit && !header.ascii {
+        out = vec![0u8; size];
         // One bit a sample, most significant first, each row padded to a whole
         // byte, and a set bit is black so the expansion is inverted.
         let width = header.width as usize;
@@ -586,6 +593,7 @@ fn raster(header: &Header, data: &[u8]) -> Result<Vec<u8>> {
             }
         }
     } else if header.ascii {
+        out = vec![0u8; size];
         if header.tuple == Tuple::PbmBit {
             // One bit a sample, and the format calls a set bit black, so
             // the ASCII digit maps the opposite way to its own value: a nought
@@ -616,7 +624,7 @@ fn raster(header: &Header, data: &[u8]) -> Result<Vec<u8>> {
         let raw = body
             .get(..size)
             .ok_or_else(|| ImgSeqError::new("the raster is truncated"))?;
-        out.copy_from_slice(raw);
+        out = raw.to_vec();
         if sample_bytes == 2 {
             // The file is big-endian; a frame is written from the native word.
             for chunk in out.as_chunks_mut::<2>().0.iter_mut() {

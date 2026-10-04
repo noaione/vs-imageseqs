@@ -780,7 +780,34 @@ unchanged and 266 tests pass. But the per-round ratios are still 0.92 1.33 1.36
 resolve, and a wider corpus of that format is what a conclusion needs. Recording
 that as unresolved rather than calling 1.135 a fix.
 
-`ppm` and `tga` are next, and they are the same shape as `hdr` was: one output allocation and
+**`ppm` and `tga` are decode, and three guesses have now missed them.** Splitting
+the stages again with the probe fixed, one measurement each, milliseconds:
+
+| format | probe before -> after | decode before -> after |
+| --- | --- | --- |
+| `ppm` | 1.2 -> 1.2 | 32.2 -> **38.4** (+19%) |
+| `tga` | 1.2 -> 1.4 | 43.0 -> **56.6** (+32%) |
+| `bmp` | 1.5 -> 1.1 | 92.4 -> **54.9** (-41%) |
+| `hdr` | 1.3 -> 1.2 | 149.4 -> 143.9 |
+
+So the probe is behind every one of them now, and `ppm` and `tga` are slower in
+the **decode** by a fifth to a third. `pnm`'s decode was handing `vec![0u8; size]`
+to a path that overwrites every byte of it, so the buffer is now allocated by the
+arm that needs one and the binary raster takes the payload directly. That is a
+real saving and the pixels are identical -- but **it did not move the ratio**
+(1.184 against 1.19 before it), so it is not the cause either.
+
+Three attempts at these two formats have now been measured and three were wrong:
+per-row allocation, the whole-file probe, and the zeroed output buffer. The
+common thread is that each was found by reading the code and reasoning about what
+*should* cost something, and each time the thing that does cost something is
+somewhere else. The next step for `ppm` and `tga` is a real profile -- a sampling
+profiler or instrumented stage timings inside the module -- and not a fourth
+reading of the source. Every one of these changes is kept because each is right
+on its own terms and leaves the pixels identical, but none of them is a fix and
+none should be counted as one.
+
+`tga` is next, and it is the same shape as `hdr` was: one output allocation and
 a reusable row, `dds` being the one with the stable ratio (1.30 this round, 1.2
 before, so it needs the profile this method just supplied for `hdr`).
 
