@@ -33,7 +33,7 @@ path then reads with its own reader.
 | qoi | `qoi 0.4.1` | `decode_header`, 14 bytes | `Decoder::decode_to_buf` | `Pixels::Interleaved` | **landed** in [`formats/qoi.rs`](../../src/formats/qoi.rs), and `image`'s qoi feature is off |
 | bmp | image-rs's BMP decoder, ported | header | the port | `Pixels::Interleaved` | **landed** in [`formats/bmp.rs`](../../src/formats/bmp.rs); `image`'s `bmp` feature is off |
 | ico | ported directory, then the BMP port or `png` | directory | the payload reader | the payload's route | **landed** in [`formats/ico.rs`](../../src/formats/ico.rs); `image`'s `ico` feature is off |
-| dds | ported header and DXT | header | the port | `Pixels::Interleaved` | `ddsfile` adds a proc-macro to the build graph and `bcdec_rs` changes samples and panics on a truncated block |
+| dds | ported header and DXT | header | the port | `Pixels::Interleaved` | **landed** in [`formats/dds.rs`](../../src/formats/dds.rs); `image`'s `dds` feature is off |
 | farbfeld | written here | header | here | `Pixels::Interleaved` | **landed** in [`formats/farbfeld.rs`](../../src/formats/farbfeld.rs), and `image`'s `ff` feature is off |
 | hdr | written here | header | here | `Pixels::Interleaved` | the candidate gets the exponent and the orientations wrong; the ported decoder is 687 lines, so writing it is the cheaper half |
 | pnm | ported | header | the port | `Pixels::Interleaved` | the candidate has no `decode_into`, no `MAXVAL` rescale and no P1 to P4 |
