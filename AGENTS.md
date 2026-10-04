@@ -157,6 +157,9 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   DirectDraw surfaces, whose DXT1, DXT3 and DXT5 blocks and their DX10
   equivalents are a port, and whose five and six bit channels widen by
   truncating division where the bitmap and targa readers round to nearest,
+  `hdr.rs` for Radiance pictures, whose three scanline encodings and eight
+  resolution spellings are written here rather than ported, because the reader
+  this replaces accepted only one spelling of the resolution line,
   `pnm.rs` for the netpbm family, whose seven subtypes, ASCII and binary rasters
   and MAXVAL rescale are a port,
   `qoi.rs` for the quite

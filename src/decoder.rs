@@ -84,6 +84,9 @@ fn format_decoder(info: &ImageInfo, demand: Demand) -> Option<Result<DecodedImag
     if formats::pnm::owns(&info.path) {
         return Some(formats::pnm::decode(info));
     }
+    if formats::hdr::owns(&info.path) {
+        return Some(formats::hdr::decode(info));
+    }
     None
 }
 
@@ -488,6 +491,11 @@ fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
     // and that preamble is also where a comment is legal; see
     // [`crate::formats::pnm`].
     if let Some(info) = formats::pnm::image_info(path, apply_rotation)? {
+        return Ok(info);
+    }
+    // A radiance picture states its layout in a resolution line and its samples
+    // as four bytes a pixel; see [`crate::formats::hdr`].
+    if let Some(info) = formats::hdr::image_info(path, apply_rotation)? {
         return Ok(info);
     }
     // A png is read here for the same reason a jpeg is, and one thing more:

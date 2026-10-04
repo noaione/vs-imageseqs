@@ -494,7 +494,15 @@ What is left, in plan 27's order, with the fixtures each still needs:
     `1 - bit` so that a set bit (black in the format) becomes `0`. Working
     backwards is what lets the packed bytes be expanded into the same buffer
     without a second allocation.
-- **hdr** — fixtures **landed** in `09684f9`, the port still to do. Ten files from
+- **hdr** — **done**. Fixtures in `09684f9`, the port in the commit that follows, and
+  `image`'s `hdr` feature is off.
+
+  The decision recorded above was taken the way the plan asks: **every** resolution
+  spelling reads, and the three that used to be refused now decode. The change is in
+  `CHANGELOG.md`. The evidence that the signs are applied rather than ignored is
+  that five files storing one picture five different ways -- `hdr-rle.hdr` and the
+  four `hdr-orient-*` -- all report the identical plane hash `45fd135aa555e6b2`.
+  The six files that already read are byte-identical to the `pnm` build. Ten files from
   [`tests/make-hdr-fixtures.py`](../../tests/make-hdr-fixtures.py): the three scanline
   encodings (flat, the new per-component run-length form, and the old
   repeat-marker form), an exponent sweep, a header with an unknown field, and the

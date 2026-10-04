@@ -31,7 +31,6 @@ image = { version = "0.25.10", default-features = false, features = [
     "tiff",
     "webp",
     # other
-    "hdr",
     "rayon"
 ] }
 libheif-rs = { version = "3.0.0", default-features = false, features = [

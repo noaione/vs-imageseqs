@@ -3,6 +3,14 @@
 ## unreleased
 ### changed
 
+- A Radiance HDR whose resolution line states an orientation other than the
+  common `-Y ... +X` now decodes instead of being refused. The `image` decoder
+  accepted only that one spelling and answered "does not support the format
+  features Orientation ..." for every other, so a file that stored its scanlines
+  bottom to top, or its pixels right to left, or stated the axes the other way
+  round, could not be read at all. Four files that hold the same picture four
+  different ways now come out as that one picture. Every file that already read
+  is byte for byte identical.
 - An AVIF or HEIF whose samples are stored as r,g,b is now read by `libheif`
   rather than by the `image` decoder, which is one library for every such
   container instead of two. The frames are byte for byte identical. One

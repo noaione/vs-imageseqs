@@ -234,7 +234,7 @@ checklist a replacement has to answer.
 | ICO | decoder internal to image-rs using its PNG/BMP decoders | port the directory over the BMP port and `png`; `zune-bmp` has no DIB entry point | existing entry selection/ties, PNG payload, DIB payload, doubled DIB height, AND mask and alpha precedence |
 | DDS | internal DDS headers and DXT decoder in image-rs | port it; `ddsfile` + `bcdec_rs` is rejected | DXT1/3/5, accepted DX10 forms, edge blocks, alpha rounding, first surface/mip and invalid headers |
 | farbfeld | decoder internal to image-rs (`ff` feature) | write it here; `zune-farbfeld`'s decode path is broken | big-endian RGBA16, exact samples, opaque/color-only handling and truncation |
-| HDR | RGBE/RLE decoder internal to image-rs | write it here; `zune-hdr` is rejected | scanline and legacy RLE, exponent conversion, axis signs/order and header/error behavior |
+| HDR — **landed** in [ormats/hdr.rs](../../src/formats/hdr.rs); `image`'s `hdr` feature is off | RGBE/RLE decoder internal to image-rs | write it here; `zune-hdr` is rejected | scanline and legacy RLE, exponent conversion, axis signs/order and header/error behavior |
 | PNM | PBM/PGM/PPM/PAM parser internal to image-rs | port it; `zune-ppm` covers P5 to P7 only | ASCII/binary forms, comments, PBM polarity/packing, `MAXVAL` expansion, tuple types and PAM alpha |
 | TGA | raw/RLE and palette decoder internal to image-rs | port it | palette offsets, gray/RGB/alpha, RLE across rows, packed pixels and both origin axes |
 
