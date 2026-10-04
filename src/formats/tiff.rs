@@ -833,13 +833,40 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
         let expected = (width as usize) * (height as usize) * layout.channels;
         let mut buffer = to_bytes(result, &layout, expected)
             .map_err(|error| image_error("decode", &info.path, error))?;
-        // The planes arrive one after another, and a frame is interleaved. This
-        // is the step that separates a correct picture from one of the right
-        // size.
         if preference.planes > 1 {
             let stride = preference
                 .plane_stride
                 .map_or(0, std::num::NonZeroUsize::get);
+            // A frame is written from either planes or one interleaved buffer.
+            // The planes the decoder laid out are already one per channel, so a
+            // three channel file is handed over as planes: that is a linear copy
+            // each, where interleaving them and letting the frame writer separate
+            // the channels again is a transpose either way. The separated inks of
+            // a four channel file are not three channels and still take that
+            // route.
+            if layout.channels == 3 && !layout.separated {
+                let planes = split_planes(&buffer, &layout, stride)
+                    .map_err(|error| image_error("decode", &info.path, error))?;
+                return Ok(DecodedImage {
+                    width,
+                    height,
+                    format: info.format,
+                    transform: info.transform,
+                    pixels: Pixels::Planar {
+                        planes,
+                        alpha: None,
+                    },
+                    timings: DecodeTimings {
+                        open,
+                        metadata: std::time::Duration::ZERO,
+                        buffer: std::time::Duration::ZERO,
+                        read: read_started.elapsed(),
+                    },
+                });
+            }
+            // The planes arrive one after another, and a frame is interleaved.
+            // This is the step that separates a correct picture from one of the
+            // right size.
             buffer = interleave(&buffer, &layout, stride)
                 .map_err(|error| image_error("decode", &info.path, error))?;
         }
@@ -945,6 +972,31 @@ fn interleave(buffer: &[u8], layout: &Layout, stride: usize) -> Result<Vec<u8>> 
         }
     }
     Ok(out)
+}
+
+/// Splits the decoder's plane-major buffer into one buffer a plane.
+///
+/// This is [`interleave`]'s inverse, and it is the shape a three channel frame
+/// wants: the planes are already one per channel, so each is one linear copy
+/// into the frame it belongs in. The stride is the decoder's own, which is the
+/// size of a plane when the planes it laid out are contiguous.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when a plane does not hold a whole picture, which
+/// means the stride and the header disagree.
+fn split_planes(buffer: &[u8], layout: &Layout, stride: usize) -> Result<Vec<Vec<u8>>> {
+    let sample_bytes = layout.sample_bytes;
+    let samples = buffer.len() / (layout.channels * sample_bytes);
+    let plane_bytes = samples * sample_bytes;
+    if stride < plane_bytes || stride * layout.channels > buffer.len() {
+        return Err(ImgSeqError::new(
+            "a plane does not hold a whole picture, so the stride and the header disagree",
+        ));
+    }
+    Ok((0..layout.channels)
+        .map(|channel| buffer[channel * stride..channel * stride + plane_bytes].to_vec())
+        .collect())
 }
 
 /// Expands a palette page's indices into the channels a frame holds.
@@ -1387,16 +1439,35 @@ mod tests {
             .join(name)
     }
 
+    /// The picture one fixture decodes to, in one buffer. A decode hands over
+    /// either that buffer or the planes it already was, and the tests here
+    /// compare pictures rather than the shape a format chose.
     fn read(name: &str) -> Vec<u8> {
         let info = image_info(&fixture(name), true, None)
             .unwrap_or_else(|error| panic!("{name}: {error}"))
             .unwrap_or_else(|| panic!("{name} is taken over"));
+        let sample_bytes = info.format.bytes_per_sample();
         match decode(&info)
             .unwrap_or_else(|error| panic!("{name}: {error}"))
             .pixels
         {
             Pixels::Interleaved { buffer, .. } => buffer,
-            _ => panic!("{name} hands out one interleaved buffer"),
+            Pixels::Planar { planes, alpha } => {
+                assert!(alpha.is_none(), "{name} states no alpha of its own");
+                let channels = planes.len();
+                let samples = planes.first().map_or(0, Vec::len) / sample_bytes;
+                let mut joined = vec![0u8; samples * channels * sample_bytes];
+                for (channel, plane) in planes.iter().enumerate() {
+                    for sample in 0..samples {
+                        let from = sample * sample_bytes;
+                        let to = (sample * channels + channel) * sample_bytes;
+                        joined[to..to + sample_bytes]
+                            .copy_from_slice(&plane[from..from + sample_bytes]);
+                    }
+                }
+                joined
+            }
+            _ => panic!("{name} hands out pixels"),
         }
     }
 

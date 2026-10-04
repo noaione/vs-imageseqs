@@ -95,6 +95,10 @@
   buffer the size of the file: a 3000x3000 image of each holds 48 MiB rather
   than 74 MiB while it decodes, and decodes 7 to 14% faster
 
+- A planar tiff is handed to the frame as the planes it already is rather than
+  interleaved and separated again: a 3000x3000 eight bit page decodes in 43 ms
+  rather than 139 ms, which is the chunky spelling's own time
+
 - PNG decoding hands each decoded row to the frame it belongs in instead of
   building the whole picture in a buffer the plugin then copies, which is one
   pass over the image rather than two: 1.2x on the decoded side of every PNG set

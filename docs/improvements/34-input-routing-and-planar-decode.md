@@ -186,7 +186,12 @@ same picture is the control and is unchanged over eight interleaved pairs, three
 of which favour the old build, at 41.5 against 40.1 ms by median
 (`target/bench/decode-planar-tiff.txt`). Peak memory is unchanged, because
 splitting the decoder's buffer into planes is still a copy of it, which the
-leftover below records how to remove.
+note below records how to remove.
+
+Leftover: the split is still a copy, so peak memory does not move. `Pixels` could
+carry the decoder's plane stride instead -- a variant that says this buffer holds
+`planes` planes `stride` bytes apart -- and let the frame writer copy each plane
+out of it, which would drop the second buffer and perhaps a quarter of the work.
 
 Coverage note: neither the validator nor the routing check reads a netpbm, a
 targa or a bitmap, so the pixel side of these slices rests on two things. A unit
