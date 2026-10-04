@@ -813,6 +813,23 @@ its way to the wider one. Fusing them is one loop instead of two and is worth th
 harness measures. That is the identified next step for `tga` and it is a
 measurement rather than a reading: the pass is named and timed, not inferred.
 
+**But the fusion is not obviously a win and this note corrects the claim above
+before it was acted on.** Reading the two functions: `reverse_encoding` is
+`chunks_exact_mut(channels)` and a `swap(0, 2)` per pixel, which is 0.64 ms for
+3.24 MB or about 5 GB/s -- already at memory bandwidth. And `expand`'s raw branch
+is a `copy_from_slice`, a memcpy. Fusing them means replacing that memcpy with a
+per-pixel three byte swap loop, which is slower per byte than a memcpy plus a
+separate pass that the compiler can vectorise. The saving would be one traversal
+and the cost would be a worse inner loop, and which wins is not something reading
+the code can say.
+
+So `tga` is three passes over the picture where one might do, and whether
+collapsing them helps is itself unmeasured. The honest state is that `tga` has a
+**measured profile** and **no measured fix**, and the next step is to write the
+single pass and measure it, reverting it if it is not faster -- not to assume the
+fusion pays because the pass it removes is named. That is the same mistake as the
+three before it, one level up: a cost that is real and a saving that is assumed.
+
 The read is 1.95 of the 3.95, as it was for `pnm`, so the ceiling on what any of
 this can win is bounded by the file read -- which is also why `ppm` turned out not
 to be a regression at all.
