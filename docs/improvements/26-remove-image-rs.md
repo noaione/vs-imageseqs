@@ -447,6 +447,32 @@ What is left, in plan 27's order, with the fixtures each still needs:
   handed out as `Gray8`; eight bit files keep their word; sixteen bit ones are
   `Gray16` or `RGB48`; and the tagged container's alpha spellings are `La8` and
   `Rgba8`.
+
+  Reading the source turned three things up before the port itself:
+
+  - **`autobreak.rs` is not a decoder concern.** The plan lists it as one of the
+    three parts to port, and it is an *encoder* helper: it inserts line breaks
+    when writing a PNM so a token is never split. This plugin never writes one,
+    so it has nothing to port. The reader is the parser and the header, and the
+    header is smaller than the plan's 366 lines suggest because a good part of
+    it is the same encoder's field formatting.
+  - **The `f32` rescale, in full.** After a raster is read,
+    `target_sample_max` is 255 for a one byte sample and 65535 for a two byte
+    one, `current_sample_max` is the file's `MAXVAL`, and when they differ the
+    samples are multiplied by `target / current` as **`f32`** and rounded. Two
+    details are easy to miss: the multiplication is floating point rather than
+    an integer ratio, and which of the two sizes a file uses is decided by
+    `MAXVAL` itself -- `<= 0xFF` is one byte, `<= 0xFFFF` two -- so a file whose
+    `MAXVAL` is 1023 reads two byte samples and is still rescaled.
+  - **A cross-fixture diagnostic worth keeping.** `pnm-p6-16.ppm` states 65535
+    and `pnm-p7-rgb16.pam` states 1023, and both hold the same picture. Their
+    red and green planes hash *differently*, because one file's samples are
+    exact and the other's have been through the rescale's rounding, but their
+    **blue planes hash identically** -- blue is only ever 0 or 255 there, so it
+    saturates to the same word either way. A port that drops the rescale, or
+    does it in integer arithmetic, will therefore show a partial match: planes
+    nought and one wrong, plane two right. That signature points at the rescale
+    rather than at the raster reader.
 - hdr — **no fixtures**.
 - tiff and exr — `alpha-rgba32f.tiff` exists; **no exr**.
 
