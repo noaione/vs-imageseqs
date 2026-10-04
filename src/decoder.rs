@@ -76,7 +76,12 @@ fn format_decoder(info: &ImageInfo, demand: Demand) -> Option<Result<DecodedImag
         return Some(formats::ico::decode(info));
     }
     if formats::tga::owns(&info.path) {
-        return Some(formats::tga::decode(info));
+        return Some(
+            formats::tga::stream(info).and_then(|streamed| match streamed {
+                Some(ready) => Ok(ready),
+                None => formats::tga::decode(info),
+            }),
+        );
     }
     if formats::dds::owns(&info.path) {
         return Some(formats::dds::decode(info));
@@ -227,6 +232,29 @@ impl RowSink<'_> {
             *red_byte = pixel[0];
             *green_byte = pixel[1];
             *blue_byte = pixel[2];
+        }
+        Some(())
+    }
+    /// As [`Self::place_rgb8`], for a source that stores blue first.
+    ///
+    /// Targa does. The swap is the one thing this does that the other does not,
+    /// and it is folded into the same walk rather than run as a pass of its own
+    /// over the picture afterwards.
+    pub fn place_bgr8(&mut self, source: &[u8], row: usize) -> Option<()> {
+        let (red, rest) = self.colour.split_first_mut()?;
+        let (green, rest) = rest.split_first_mut()?;
+        let (blue, _) = rest.split_first_mut()?;
+        let planes = red
+            .row(row)
+            .iter_mut()
+            .zip(green.row(row).iter_mut())
+            .zip(blue.row(row).iter_mut());
+        for (pixel, ((red_byte, green_byte), blue_byte)) in
+            source.as_chunks::<3>().0.iter().zip(planes)
+        {
+            *red_byte = pixel[2];
+            *green_byte = pixel[1];
+            *blue_byte = pixel[0];
         }
         Some(())
     }

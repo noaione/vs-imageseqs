@@ -28,7 +28,9 @@
 use std::path::Path;
 
 use crate::{
-    decoder::{DecodeTimings, DecodedImage, ImageInfo, Pixels, image_error, image_head},
+    decoder::{
+        DecodeTimings, DecodedImage, ImageInfo, Pixels, RowSink, RowStream, image_error, image_head,
+    },
     error::{ImgSeqError, Result},
     formats::bmp,
     layout::{ColorType, Orientation, SourceColorType},
@@ -486,6 +488,93 @@ pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo
     }))
 }
 
+/// A targa whose rows are already the frame's rows.
+///
+/// The shape is narrow on purpose: nothing run-length encoded, nothing to move
+/// in either direction, and three bytes a pixel in the decoded layout, so the
+/// file's row is the frame's row with blue and red exchanged and nothing else.
+/// The corpus file is exactly this. Everything else -- a palette, a stored
+/// sixteen bit word, a bottom-up image, an encoded one -- keeps the buffered
+/// path, which is the rule that a stream is only answered with when it can fill
+/// every frame of a call.
+#[derive(Debug)]
+pub struct Rows {
+    path: std::path::PathBuf,
+}
+
+impl RowStream for Rows {
+    fn has_alpha(&self) -> bool {
+        false
+    }
+
+    fn fill(&mut self, mut sink: RowSink<'_>) -> Result<DecodeTimings> {
+        let open_started = std::time::Instant::now();
+        let data = std::fs::read(&self.path).map_err(|e| image_error("open", &self.path, e))?;
+        let open = open_started.elapsed();
+        let header = header(&data).map_err(|e| image_error("decode", &self.path, e))?;
+
+        let read_started = std::time::Instant::now();
+        let row_bytes = header.width as usize * 3;
+        for row in 0..header.height as usize {
+            let at = header.data_offset + row * row_bytes;
+            let line = data
+                .get(at..at + row_bytes)
+                .ok_or_else(|| ImgSeqError::new(format!("the targa ends in row {row}")))?;
+            sink.place_bgr8(line, row)
+                .ok_or_else(|| ImgSeqError::new("the frame holds no three colour planes"))?;
+        }
+        let read = read_started.elapsed();
+        Ok(DecodeTimings {
+            open,
+            metadata: std::time::Duration::ZERO,
+            buffer: std::time::Duration::ZERO,
+            read,
+        })
+    }
+
+    fn duplicate(&self) -> Box<dyn RowStream> {
+        Box::new(Self {
+            path: self.path.clone(),
+        })
+    }
+}
+
+/// Prepares a targa whose rows will be written straight into the frames.
+///
+/// Answers `None` for every shape the stream does not cover, so the caller falls
+/// back to [`decode`].
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the header cannot be read back.
+pub fn stream(info: &ImageInfo) -> Result<Option<DecodedImage>> {
+    let data = image_head(&info.path).map_err(|e| image_error("open", &info.path, e))?;
+    let header = header(&data).map_err(|e| image_error("decode", &info.path, e))?;
+    if header.encoded
+        || header.color_map.is_some()
+        || header.raw_bytes_per_pixel != 3
+        || header.color_type != ColorType::Rgb8
+        || header.descriptor & TOP_TO_BOTTOM == 0
+        || header.descriptor & RIGHT_TO_LEFT != 0
+    {
+        return Ok(None);
+    }
+    Ok(Some(DecodedImage {
+        width: info.width,
+        height: info.height,
+        format: info.format,
+        transform: info.transform,
+        pixels: Pixels::Stream(Box::new(Rows {
+            path: info.path.clone(),
+        })),
+        timings: DecodeTimings {
+            open: std::time::Duration::ZERO,
+            metadata: std::time::Duration::ZERO,
+            buffer: std::time::Duration::ZERO,
+            read: std::time::Duration::ZERO,
+        },
+    }))
+}
 /// Decodes a targa into one interleaved buffer.
 ///
 /// # Errors

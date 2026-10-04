@@ -1255,6 +1255,30 @@ ways across these rounds.
 That is the dds budget spent: four attempts, all measured, all reverted, and the
 block arithmetic shown to be equivalent to the reference. Whatever the 12% is, it
 is not in the code this page has looked at.
+### tga, and the regression it was carrying
+
+The same shape works far better here, because `tga`'s stored row is the frame's
+row with two bytes exchanged and nothing else. The stream takes an uncompressed,
+top-to-bottom, left-to-right, three-bytes-a-pixel image -- the corpus file -- and
+hands each of the file's own rows to `RowSink::place_bgr8`, a placer that is
+`place_rgb8` with `pixel[2]` written first. Targa stores blue first, so the swap
+is required; folding it into the placement walk is what keeps this a saving rather
+than a trade.
+
+Fifteen interleaved pairs:
+
+| | median | min | max |
+| --- | --- | --- | --- |
+| buffered | 51.0 | 45.6 | 77.7 |
+| streamed | **30.7** | 28.4 | 35.3 |
+
+**A paired ratio median of 0.602 -- 40% off -- faster in 15 of 15.** Against the
+pre-step-5 build it is **0.761**, so this format's 1.13x regression is not closed
+but inverted: it is now 24% faster than the reader it replaced. That was the last
+open regression from step 5.
+
+Everything else unchanged: every tga fixture byte-identical, `all checks passed`,
+the same frame properties, all four request orders agreeing.
 ### the stream that paid: ppm
 
 The row placer gets its first result, and it is the result the dds attempts were
