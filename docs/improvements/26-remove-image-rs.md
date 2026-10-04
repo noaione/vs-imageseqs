@@ -944,7 +944,35 @@ picture only cost something when the pass is a whole extra traversal of memory
 that another pass could have done instead -- not when two traversals can be
 fused into one slower one.
 
-**One measured regression remains open and it has no fix:** `dds`.
+**`dds`: profiled, two attempts, still open.** The stage timing puts everything in
+one place -- on a 1.08 MB file over twenty rounds, `read` 0.41 ms, `header`
+0.001 ms, **`blocks` 3.94 ms** -- so unlike `tga` there is no copy to remove and
+the block loop is the whole cost.
+
+The inner loop did `index / 4` and `index % 4` for each of the sixteen pixels of
+every block, which is 1.08M divisions, so it was rewritten as nested loops that
+step the target instead. Seven paired repetitions, median:
+
+| build | median | all seven |
+| --- | --- | --- |
+| pre-step-5 | **51.5** | 44.4 49.2 49.5 51.5 56.6 57.5 61.7 |
+| before | 57.5 | 56.5 56.6 56.8 57.5 58.5 60.5 66.6 |
+| nested loops | **66.1** | 63.1 64.3 64.5 66.1 67.4 71.0 73.0 |
+
+It is **worse by 8.6 ms** and was reverted. The division was not the cost, and
+the nested form defeated something the compiler was already doing with the flat
+one -- an enumerate over a fixed sixteen element array is unrolled well, and
+telling it how to walk the output did not help. Pixels were identical either way,
+so only the measurement could say this.
+
+That is the fourth attempt at these two formats to be measured and the third to be
+wrong, and the split is clean: `hdr` and `tga` were fixed by removing whole
+traversals of memory, and every attempt to make an *existing* traversal cheaper
+has failed. `dds` has no such traversal to remove -- `blocks` is the picture being
+written once, which is the minimum -- so the next attempt should look for work
+that is not happening at all rather than for work that could be arranged better.
+
+**`dds` remains the one open regression.**
 
 | format | before | after | state |
 | --- | --- | --- | --- |
