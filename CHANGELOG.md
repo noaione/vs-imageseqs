@@ -74,6 +74,10 @@
   99 ms to 6 ms, 35 jpeg xl of 174 MiB from 157 ms to 5 ms, 35 jpeg 2000 of
   251 MiB from 159 ms to 4 ms, and 35 avif plus 35 heic of 362 MiB from 84 and
   170 ms to 6 and 13 ms
+- Describing an animated png reads the frame delays its `fcTL` chunks state
+  rather than rendering every frame to reach them: five 1024x1024 files of eight
+  frames each went from a median of 49 ms to 3 ms, and 35 still pngs of 65.8 MiB
+  are unchanged over the same protocol
 
 - PNG decoding hands each decoded row to the frame it belongs in instead of
   building the whole picture in a buffer the plugin then copies, which is one

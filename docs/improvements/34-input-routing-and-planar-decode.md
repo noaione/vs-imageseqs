@@ -26,7 +26,7 @@ This documentation update implements no decoder changes.
 | original phase | current status | remaining work |
 | --- | --- | --- |
 | 1. Consistent routing, saved plan and sample/subimage invariants | **Content-routing slice landed, and the route is saved and threaded.** `2b02f64` routes stills by content, `c206944` does the same for animation, and the saved-route slices record what the router named on `ImageInfo` and pass it to every module's probe entry, so a file is identified with one read. EXR selection, PAM word width and TIFF metadata/sample handling have also received fixes. | The saved route names the container and nothing more: the backend and the selected subimage are still decided inside each adapter, and the broader error/sample invariants need separate completion checks. |
-| 2. Combine metadata passes | **Partly landed: the front of the file answers.** PNG, GIF and WebP no longer require image-rs for metadata or fallback pixels; a webp's or jpeg xl's animation adapter answers from the file header, a jpeg 2000 probe reads a window over the front that grows only while the header is incomplete, and an avif or heif sequence walk seeks over media data rather than reading it. | One shared probe reader is not implemented, and APNG timing still calls `next_frame`. |
+| 2. Combine metadata passes | **Partly landed: the front of the file answers, and a timeline is not rendered to describe it.** PNG, GIF and WebP no longer require image-rs for metadata or fallback pixels; a webp's or jpeg xl's animation adapter answers from the file header, a jpeg 2000 probe reads a window over the front that grows only while the header is incomplete, an avif or heif sequence walk seeks over media data rather than reading it, and an animated png's delays come from its own `fcTL` chunks instead of a rendered frame each. | One shared probe reader is not implemented. |
 | 3. Retain initialized readers and preserve planes | **Partly complete.** Eligible PNG, binary RGB8 PNM/PAM, TGA and BMP have row sinks. TIFF now also has a native YCbCr plane path (`8cf7b06`). | PNM/TGA/BMP row sinks still read the whole file during filling after a separate preparation read. PNG initializes a reader again in `fill`. True farbfeld/PNM row reads, direct separate-planar RGB TIFF, direct EXR planes and shared initialized decode state remain open. |
 | 4. Timing and selected subtype repairs | **Partly complete.** BigTIFF/RGBE recognition, PAM MAXVAL interpretation, TIFF orientation/ICC and EXR flat-RGB part selection have landed. Palette and CMYK(A)/YCbCr TIFF coverage has since expanded too. | Exact APNG rational delays and the total-frame-count discrepancy remain. Core BMP, odd DDS edge blocks and variable-length headers still have the inspected restrictions. Other coverage candidates require individual decisions and evidence. |
 | 5. Remove image-rs | **Landed.** `d431764` removes `image`, `8682c2f` removes leftover layout helpers, and `src/still.rs` is deleted. Cargo.toml and Cargo.lock contain no `image` dependency. | This does not finish phases 1–4. Ported code's notices remain applicable; codec dependencies such as libwebp are independent of image-rs. |
@@ -151,6 +151,15 @@ does not read instead, which finds a `moov` on either side of an `mdat`: 35 avif
 files of 126 MiB went from 84 ms to 6 ms, and 35 heic files of 236 MiB from
 170 ms to 13 ms, one-sided in every block
 (`target/bench/clip-avif-seekwalk.txt`, `target/bench/clip-heic-seekwalk.txt`).
+
+An animated png states its delays in its `fcTL` chunks and they were read by
+rendering every frame: five 1024x1024 files of eight frames went from 49 ms to
+3 ms, 19x, one-sided in every block (`target/bench/clip-apng-chunks.txt`). The
+still png corpus is the control -- 35 files of 65.8 MiB, none of them holding an
+`acTL` chunk -- and it is unchanged over the same protocol: 5.53 ms against
+5.60 ms, with 13 of 28 samples favouring the new build
+(`target/bench/clip-png-apng-check.txt`). The apng corpus is synthetic and
+`target/bench/make-apng-corpus.py` writes it.
 
 Artifacts: `target/bench/route-time.py`, `target/bench/accepted.py`,
 `target/bench/route-pair-fixtures.txt`, `target/bench/route-pair-common.txt`,

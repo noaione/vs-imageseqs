@@ -13,7 +13,7 @@
 
 use std::{
     fs::File,
-    io::BufReader,
+    io::{BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
@@ -26,6 +26,39 @@ use crate::{
 };
 
 use super::{AnimationDecoder, AnimationSource, Presentation, Rate, SegmentInfo};
+
+/// Bytes of the png signature, which the first chunk follows.
+const SIGNATURE: u64 = 8;
+
+/// Bytes of a chunk header: a length, which counts the payload alone, and a
+/// kind.
+const CHUNK_HEADER: u64 = 8;
+
+/// Bytes of the checksum that follows every chunk payload.
+const CHUNK_CRC: u64 = 4;
+
+/// Bytes of an `fcTL` payload: a sequence number, the rectangle, the delay and
+/// the two operation bytes.
+const FRAME_CONTROL: u64 = 26;
+
+#[cfg(test)]
+thread_local! {
+    /// Frames this thread has rendered, which is how a description is checked
+    /// not to render the timeline it describes.
+    static FRAMES_DECODED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Frames rendered on this thread.
+#[cfg(test)]
+pub(crate) fn frames_decoded() -> usize {
+    FRAMES_DECODED.with(std::cell::Cell::get)
+}
+
+/// Starts [`frames_decoded`] from zero.
+#[cfg(test)]
+pub(crate) fn reset_frames_decoded() {
+    FRAMES_DECODED.with(|count| count.set(0));
+}
 
 /// Describes an animated png's timeline without rendering its frames.
 ///
@@ -59,7 +92,7 @@ pub fn segment_info(
         )));
     }
 
-    let (rate, presentations) = timing(path)?;
+    let (rate, presentations) = timing(path, animation.num_frames as usize)?;
     let canvas = reader.info().size();
     let source = std::sync::Arc::new(AnimationSource::new(
         path.to_path_buf(),
@@ -74,51 +107,85 @@ pub fn segment_info(
     }))
 }
 
-/// Reads every frame's control data and the delay it states, without rendering.
+/// The delays a file's frames state, in the order they are written.
 ///
-/// A delay is a fraction of a second; a denominator of zero means one hundredth,
-/// as the specification says. Both are kept as they are, so a denominator that
-/// divides 1000 stays exact and one that does not is placed on the timeline by
-/// the cross multiplication in [`super::Segment::animated`].
-fn timing(path: &Path) -> Result<(Rate, Vec<Presentation>)> {
-    let mut reader = open(path)?;
-    let mut buffer = vec![0u8; canvas_bytes(&reader, path)?];
-    let mut presentations = Vec::new();
+/// A frame's delay is its `fcTL` chunk, and the `png` crate hands that chunk
+/// out only from a reader that has just decoded the frame. The chunks are a
+/// list of headers, so this walks them and reads the `fcTL` payloads alone: a
+/// description costs twenty-six bytes a frame rather than a decoded canvas
+/// each.
+///
+/// `expected` is the frame count the file's own animation control chunk states.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the file cannot be read or states fewer frames
+/// than that chunk counted.
+fn timing(path: &Path, expected: usize) -> Result<(Rate, Vec<Presentation>)> {
+    let mut file = File::open(path).map_err(|error| image_error("open", path, error))?;
+    let length = file
+        .seek(SeekFrom::End(0))
+        .map_err(|error| image_error("read", path, error))?;
+    let mut presentations: Vec<Presentation> = Vec::with_capacity(expected);
     let mut timestamp = 0i64;
-
-    // The frame count is known up front, so the pass stops there rather than
-    // relying on the reader's end-of-image error, which is not distinguishable
-    // from the other parsing errors it shares a variant with.
-    let expected = reader
-        .info()
-        .animation_control()
-        .map_or(0, |animation| animation.num_frames) as usize;
-
+    // The chunks follow the signature, each a length, a kind, its payload and a
+    // checksum this does not check: the walk needs the two fields that place it
+    // at the next one, and the delay of the frames it passes.
+    let mut at = SIGNATURE;
     while presentations.len() < expected {
-        if reader.next_frame(&mut buffer).is_err() {
-            return Err(ImgSeqError::new(format!(
-                "animated image '{}' ended after {} of its {expected} frames",
-                path.display(),
-                presentations.len()
-            )));
+        if at + CHUNK_HEADER > length {
+            break;
         }
-        let Some(control) = reader.info().frame_control().copied() else {
-            continue;
+        file.seek(SeekFrom::Start(at))
+            .map_err(|error| image_error("read", path, error))?;
+        let mut header = [0u8; CHUNK_HEADER as usize];
+        file.read_exact(&mut header)
+            .map_err(|error| image_error("read", path, error))?;
+        let size = u64::from(u32::from_be_bytes([
+            header[0], header[1], header[2], header[3],
+        ]));
+        let kind = [header[4], header[5], header[6], header[7]];
+        let payload = at + CHUNK_HEADER;
+        let Some(next) = payload
+            .checked_add(size)
+            .and_then(|end| end.checked_add(CHUNK_CRC))
+        else {
+            break;
         };
-        let duration = delay_ms(control.delay_num, denominator_of(control.delay_den));
-        presentations.push(Presentation {
-            timestamp,
-            duration: Some(duration),
-        });
-        timestamp = timestamp.checked_add(duration).ok_or_else(|| {
-            ImgSeqError::new(format!("the timeline of '{}' overflows", path.display()))
-        })?;
+        if next > length {
+            break;
+        }
+        if &kind == b"fcTL" {
+            // A payload too short to hold a delay is a frame the file does not
+            // finish stating, which ends the timeline the way a missing frame
+            // does.
+            if size < FRAME_CONTROL {
+                break;
+            }
+            let mut control = [0u8; FRAME_CONTROL as usize];
+            file.read_exact(&mut control)
+                .map_err(|error| image_error("read", path, error))?;
+            let numerator = u16::from_be_bytes([control[20], control[21]]);
+            let denominator = u16::from_be_bytes([control[22], control[23]]);
+            let duration = delay_ms(numerator, denominator_of(denominator));
+            presentations.push(Presentation {
+                timestamp,
+                duration: Some(duration),
+            });
+            timestamp = timestamp.checked_add(duration).ok_or_else(|| {
+                ImgSeqError::new(format!("the timeline of '{}' overflows", path.display()))
+            })?;
+        }
+        if &kind == b"IEND" {
+            break;
+        }
+        at = next;
     }
-
-    if presentations.is_empty() {
+    if presentations.len() < expected {
         return Err(ImgSeqError::new(format!(
-            "animated image '{}' states no frames",
-            path.display()
+            "animated image '{}' ended after {} of its {expected} frames",
+            path.display(),
+            presentations.len()
         )));
     }
     // The timeline counts milliseconds, which is a rate of 1000 ticks a second.
@@ -235,6 +302,8 @@ impl PngSource {
         buffer: &mut [u8],
     ) -> Result<DecodedImage> {
         loop {
+            #[cfg(test)]
+            FRAMES_DECODED.with(|count| count.set(count.get() + 1));
             reader
                 .next_frame(buffer)
                 .map_err(|error| crate::decoder::image_error("decode", &self.path, error))?;

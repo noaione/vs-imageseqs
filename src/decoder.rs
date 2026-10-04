@@ -791,6 +791,26 @@ mod tests {
         }
     }
 
+    /// A description reads an animated png's delays from its own chunks: it
+    /// renders no frame to do it.
+    #[test]
+    fn describing_an_apng_renders_no_frame() {
+        crate::animation::apng::reset_frames_decoded();
+        let segment = probe_segment(
+            &fixture("animation.png"),
+            Rate::from_fps(24, 1),
+            true,
+            false,
+        )
+        .expect("the fixture probes");
+        assert!(segment.animated);
+        assert_eq!(
+            crate::animation::apng::frames_decoded(),
+            0,
+            "a description renders no frame"
+        );
+    }
+
     /// A 16-bit APNG keeps its depth, which the `image` compositor cannot do.
     #[test]
     fn a_sixteen_bit_apng_keeps_its_depth() {
