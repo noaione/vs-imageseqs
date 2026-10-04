@@ -563,7 +563,6 @@ dependencies = [
  "moxcms",
  "mp4parse",
  "num-traits",
- "png",
  "ravif",
  "rayon",
 ]

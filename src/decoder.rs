@@ -670,6 +670,13 @@ pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
             timings: DecodeTimings::default(),
         });
     }
+    // An interlaced png is the one shape the row walk refuses: Adam7 hands the file
+    // over one pass at a time rather than one picture row at a time. It is decoded
+    // whole here, with the same crate call the generic decoder would have made, so
+    // the picture is the same and the dependency is not asked for it.
+    if let Some(decoded) = formats::png::decode(info)? {
+        return Ok(decoded);
+    }
     decode_through_image(info)
 }
 

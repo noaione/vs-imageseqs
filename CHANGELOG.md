@@ -3,6 +3,22 @@
 ## unreleased
 ### changed
 
+- An interlaced png is read here now rather than by `image`, and so is one that
+  states an orientation. Both are shapes the row walk cannot place: it writes each
+  row into the frame as it reads it, and Adam7 hands the file over one *pass* at a
+  time rather than one picture row at a time. Those files are decoded whole
+  instead, by the same crate call the `image` decoder made with the same
+  transformation, so the samples are the samples it produced; the fixtures for
+  four interlaced shapes and eight orientations are byte for byte identical.
+  `image`'s png reader is no longer linked as a result.
+
+- A png is identified by its bytes on the *probe* side too. `png::image_info` and
+  `png::cicp` asked the file's extension while the decode next door asked its
+  content, so a page under a name that said nothing about it was described by one
+  reader and decoded by another. That only ever worked because the generic decoder
+  could also describe it, and it stopped the moment `image`'s png reader went --
+  which is how the split was found. A file whose name lies about it now gets the
+  same description and the same `cICP` properties as one whose name does not.
 - A one frame gif is read here now rather than by `image`, which drops that
   reader from the dependency. The picture is unchanged, and the fixtures that
   pin it are new because this path had no coverage at all before. A gif is a

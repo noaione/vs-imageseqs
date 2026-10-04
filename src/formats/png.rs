@@ -26,7 +26,7 @@ use crate::layout::ColorType;
 
 use crate::{
     color::Cicp,
-    decoder::{DecodeTimings, ImageInfo, Pixels, RowSink, RowStream, image_error},
+    decoder::{DecodeTimings, DecodedImage, ImageInfo, Pixels, RowSink, RowStream, image_error},
     error::{ImgSeqError, Result},
     exif::orientation_of,
     layout::{Orientation, SourceColorType},
@@ -61,7 +61,10 @@ pub fn owns(path: &Path) -> bool {
 /// The colour description a png states with a `cICP` chunk, or `None` when it
 /// has none and when it is not a png at all.
 pub fn cicp(path: &Path) -> Option<Cicp> {
-    if !has_png_extension(path) {
+    // The content decides and not the name: a renamed page still carries its
+    // `cICP` chunk, so a caller with a file whose extension lies gets the same
+    // properties as one whose extension does not.
+    if !owns(path) {
         return None;
     }
     cicp_from(File::open(path).ok()?)
@@ -135,7 +138,11 @@ fn cicp_chunk(payload: &[u8]) -> Option<Cicp> {
 /// Returns [`ImgSeqError`] when the file cannot be read or its header cannot be
 /// parsed.
 pub fn image_info(path: &Path, apply_rotation: bool) -> Result<Option<ImageInfo>> {
-    if !has_png_extension(path) {
+    // The content decides, not the name. This asked the extension, which is the
+    // one thing plan 34 is about: the decode next door answered from the bytes, so
+    // a renamed page was *described* by one reader and *decoded* by another, and
+    // that only ever worked while the generic decoder could describe it too.
+    if !owns(path) {
         return Ok(None);
     }
     let file = File::open(path).map_err(|error| image_error("open", path, error))?;
@@ -212,12 +219,6 @@ fn expanded_color_type(output: (png::ColorType, png::BitDepth), path: &Path) -> 
             ));
         }
     })
-}
-
-fn has_png_extension(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
 }
 
 // ---------------------------------------------------------------------------
@@ -444,6 +445,83 @@ pub fn stream(info: &ImageInfo) -> Option<Pixels> {
         has_alpha: layout.channels != layout.colour_channels,
         source: header.source,
     })))
+}
+
+/// Decodes an interlaced png whole, which is the one shape the row walk refuses.
+///
+/// Adam7 hands the file over one *pass* at a time rather than one picture row at a
+/// time -- [`png::Reader::next_row`] is documented as "discarding `InterlaceInfo`"
+/// and does exactly that -- so a pass row cannot be placed in the frame as it is
+/// read, and [`walkable`] declines the file. The crate's own whole-frame read
+/// expands the passes, and it is the same call the `image` png decoder makes with
+/// the same `EXPAND` transformation, so the samples here are the samples that
+/// decoder produced; only the buffer is this module's.
+///
+/// Returns `None` for a png this is not about, which leaves it either to [`stream`]
+/// or to the generic decoder.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the file is interlaced and cannot be decoded.
+pub fn decode(info: &ImageInfo) -> Result<Option<DecodedImage>> {
+    if !owns(&info.path) {
+        return Ok(None);
+    }
+    let open_started = Instant::now();
+    let file = File::open(&info.path).map_err(|error| image_error("open", &info.path, error))?;
+    let mut decoder = png::Decoder::new(BufReader::new(file));
+    decoder.set_transformations(png::Transformations::EXPAND);
+    let mut reader = decoder
+        .read_info()
+        .map_err(|error| image_error("create decoder for", &info.path, error))?;
+    // The walk places a row in the frame as it reads it, so it needs the picture
+    // the file holds to be the picture the frame is: no Adam7 passes, nothing to
+    // rearrange afterwards, and no animation control chunk, because the walk reads
+    // one picture and an animated container states more than one. A file with any
+    // of those three is this path's, and this is the same whole-frame read the
+    // generic decoder made for it -- the buffer below carries `info.transform`,
+    // which is the rearrangement that buffer got. Everything the walk refuses for
+    // any *other* reason is still not this path's and is left alone.
+    if !reader.info().interlaced
+        && info.transform == Transform::IDENTITY
+        && reader.info().animation_control.is_none()
+    {
+        return Ok(None);
+    }
+    let color_type = expanded_color_type(reader.output_color_type(), &info.path)?;
+    // The probe and this read have to be describing the same picture, or the frame
+    // the clip sized from the probe is not the frame these samples fit. A
+    // disagreement is left to the generic path, which re-reads the file and
+    // reports it.
+    if color_type != info.color_type {
+        return Ok(None);
+    }
+    let open = open_started.elapsed();
+    let size = reader.output_buffer_size().ok_or_else(|| {
+        ImgSeqError::new(format!(
+            "image '{}' states a picture too large to hold",
+            info.path.display()
+        ))
+    })?;
+    let mut buffer = vec![0u8; size];
+    let read_started = Instant::now();
+    reader
+        .next_frame(&mut buffer)
+        .map_err(|error| image_error("decode", &info.path, error))?;
+    let read = read_started.elapsed();
+    Ok(Some(DecodedImage {
+        width: info.width,
+        height: info.height,
+        format: info.format,
+        transform: info.transform,
+        pixels: Pixels::Interleaved { color_type, buffer },
+        timings: DecodeTimings {
+            open,
+            metadata: Duration::ZERO,
+            buffer: Duration::ZERO,
+            read,
+        },
+    }))
 }
 
 /// Places one decoded row into the planes of the frames of the call.
@@ -831,12 +909,20 @@ mod tests {
     }
 
     #[test]
-    fn only_png_extensions_are_read() {
+    fn a_png_is_read_from_its_bytes_not_its_name() {
+        // The extension is the fallback for a path whose bytes say nothing.
         for path in ["a.png", "b.PNG"] {
-            assert!(has_png_extension(Path::new(path)), "{path}");
+            assert!(owns(Path::new(path)), "{path}");
         }
-        for path in ["a.jpg", "b.apng", "c", "d.pngx"] {
-            assert!(!has_png_extension(Path::new(path)), "{path}");
+        // `.apng` is one of this format's extensions, so it is a hint like any
+        // other.
+        assert!(owns(Path::new("b.apng")));
+        for path in ["a.jpg", "c", "d.pngx"] {
+            assert!(!owns(Path::new(path)), "{path}");
         }
+        // And the content wins when there is one: a page under a name that says
+        // nothing about it is still this module's. This is the case that was
+        // described by the generic decoder and decoded here.
+        assert!(owns(Path::new("tests/fixtures/cicp-rgb8.png")));
     }
 }
