@@ -154,7 +154,7 @@ fn format(layout: &Layout) -> PixelFormat {
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file is one of ours and cannot be read.
-pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo>> {
+pub fn image_info(path: &Path, apply_rotation: bool) -> Result<Option<ImageInfo>> {
     if !owns(path) {
         return Ok(None);
     }
@@ -174,9 +174,13 @@ pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo
         .map_err(|error| image_error("open", path, error))?;
     // The signature is what decides, not the extension, so a `.tiff` that is
     // not one is declined rather than refused.
-    let little = signature == [0x49, 0x49, 0x2a, 0x00];
-    let big = signature == [0x4d, 0x4d, 0x00, 0x2a];
-    if !little && !big {
+    // The central table, not a second copy of it: this gate accepted only the
+    // classic signature, so a BigTIFF -- which the pinned crate decodes -- was
+    // declined here however `identify` had routed it. A separate table is a
+    // separate answer, which is how a probe and a decode drift apart.
+    if crate::formats::identify::identify(&signature)
+        != Some(crate::formats::identify::Format::Tiff)
+    {
         return Ok(None);
     }
 
@@ -195,18 +199,52 @@ pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo
         return Err(ImgSeqError::new("the header states no pixels"));
     }
 
+    // The orientation tag and the ICC profile are already in the directory the
+    // crate read for the dimensions, so neither costs a second pass. Both were
+    // being dropped: the plan records a file that states orientation 6 and
+    // carries a profile coming out as orientation 1 with no profile.
+    let orientation = decoder
+        .get_tag_u32(tiff::tags::Tag::Orientation)
+        .ok()
+        .and_then(|code| u8::try_from(code).ok())
+        .and_then(Orientation::from_exif)
+        .unwrap_or(Orientation::NoTransforms);
+    // 34675 is `InterColorProfile`, which the tag enum does not name.
+    // The crate hands a byte array back as a list of single bytes, and a
+    // one-byte profile as the byte itself.
+    let icc_profile: Option<std::sync::Arc<[u8]>> = decoder
+        .get_tag(tiff::tags::Tag::Unknown(34675))
+        .ok()
+        .and_then(|value| match value {
+            tiff::decoder::ifd::Value::List(items) => items
+                .into_iter()
+                .map(|item| match item {
+                    tiff::decoder::ifd::Value::Byte(byte) => Some(byte),
+                    _ => None,
+                })
+                .collect::<Option<Vec<u8>>>(),
+            tiff::decoder::ifd::Value::Byte(byte) => Some(vec![byte]),
+            _ => None,
+        })
+        .filter(|bytes| !bytes.is_empty())
+        .map(std::sync::Arc::from);
+
     Ok(Some(ImageInfo {
         path: path.to_path_buf(),
         width,
         height,
         color_type: layout.color_type,
         original_color_type: layout.source,
-        has_icc_profile: false,
-        icc_profile: None,
+        has_icc_profile: icc_profile.is_some(),
+        icc_profile,
         cicp: None,
         chroma_location: None,
-        orientation: Orientation::NoTransforms,
-        transform: Transform::IDENTITY,
+        orientation,
+        transform: if apply_rotation {
+            Transform::from_orientation(orientation)
+        } else {
+            Transform::IDENTITY
+        },
         format: format(&layout),
     }))
 }
@@ -566,6 +604,31 @@ mod tests {
             image_info(&fixture("cicp-rgb8.png"), true)
                 .expect("a png is not ours")
                 .is_none()
+        );
+    }
+
+    /// A file that states orientation 6 and carries a profile keeps both.
+    ///
+    /// Plan 34 records the probe reporting "orientation 1, no ICC" for such a
+    /// file: the adapter built its `ImageInfo` with both hardcoded away, so a
+    /// picture that should be turned was handed out stored. The directory the
+    /// crate reads for the dimensions holds both tags, so neither costs a pass.
+    #[test]
+    fn the_orientation_and_the_profile_are_read_from_the_directory() {
+        let info = image_info(&fixture("tiff-orient6-icc.tiff"), true)
+            .expect("a tiff is ours")
+            .expect("the fixture is taken over");
+        assert_eq!(info.orientation, Orientation::Rotate90, "orientation 6");
+        assert!(info.has_icc_profile, "the file carries a profile");
+        let profile = info.icc_profile.expect("the bytes are kept");
+        assert_eq!(profile.len(), 588, "the same profile the fixture embeds");
+        // The probe reports the size the file stores and the transform carries the
+        // turn; the writer is what hands the stored 2x3 out as 3x2.
+        assert_eq!((info.width, info.height), (2, 3));
+        assert_ne!(
+            info.transform,
+            Transform::IDENTITY,
+            "a quarter turn is applied when rotation is asked for"
         );
     }
 }

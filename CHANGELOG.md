@@ -3,6 +3,16 @@
 ## unreleased
 ### changed
 
+- A TIFF that states an orientation and carries an embedded ICC profile now
+  reports both. The adapter had been building its description with the two
+  hardcoded away, so a file that states orientation 6 -- a quarter turn clockwise
+  -- was handed out stored, and `ImgSeqOrientation` said 1 where the file said 6.
+  The profile is now read too, so `ImgSeqHasICC` and the opt-in `ICCProfile`
+  property are right for a TIFF. A BigTIFF is no longer declined either: the
+  adapter's own four-byte signature check accepted only the classic version word,
+  so the crate's BigTIFF support could not be reached. Files that state neither
+  tag, and classic TIFFs, are byte for byte identical.
+
 - A PAM that states a `MAXVAL` above a byte but names no `TUPLTYPE` is now read at
   the width its `MAXVAL` states instead of a byte a sample. Such a file was read
   without an error and with the wrong samples: a raster of `[1023, 512]` under a

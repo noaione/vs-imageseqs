@@ -1287,6 +1287,50 @@ the same properties as its source. `ImgSeqPath` is excluded, because a renamed
 file's path differs by construction and is not a routing fact -- including it made
 the first run report 51 phantom property failures.
 
+### the tiff adapter was throwing its own metadata away
+
+Plan 34 records a TIFF stating orientation 6 and carrying an ICC profile coming out
+as "orientation 1, no ICC", and calls the two independently repairable. They were
+one cause: `image_info` built its `ImageInfo` with both hardcoded away.
+
+```rust
+has_icc_profile: false,
+icc_profile: None,
+orientation: Orientation::NoTransforms,
+transform: Transform::IDENTITY,
+```
+
+Both tags are in the directory the crate already reads for the dimensions, so
+neither costs a pass. The orientation goes through `Orientation::from_exif`, which
+is the same 1-to-8 code an exif tag uses, and the profile comes back from tag
+34675 -- as a `List` of single bytes, because the crate's `Value::Byte` holds one
+byte and a byte array is a list of them.
+
+**A third bug was sitting in the same function.** The gate below it accepted only
+the classic version word:
+
+```rust
+let little = signature == [0x49, 0x49, 0x2a, 0x00];
+let big = signature == [0x4d, 0x4d, 0x00, 0x2a];
+```
+
+So a BigTIFF was declined here however `identify` had routed it -- the plan's "local
+signature gate blocks it" line, and reachable only because the crate does decode
+BigTIFF. It now asks `identify` instead. That is the third time in this work that a
+module keeping its own copy of a table produced a disagreement, and the fix is the
+same each time: one table.
+
+`tests/fixtures/tiff-orient6-icc.tiff` is the reproduction -- a 2x3 picture that
+states orientation 6 and embeds the 588 byte profile the ICC fixtures already use
+-- and `the_orientation_and_the_profile_are_read_from_the_directory` pins it. The
+test asserts the *stored* size and a non-identity transform rather than the 3x2 a
+frame comes out as, because the probe reports what the file stores and the writer
+is what applies the turn; getting that backwards is what the first version of the
+test did.
+
+Verified: no existing frame differs, the validator is at `all checks passed`, the
+routing check is still 0 of 76, and all four request orders agree. In
+`CHANGELOG.md` because orientation and ICC are both visible.
 ### the silent one: a word-wide sample with no tuple type
 
 Plan 34 calls this the silent case, and it earned the name. A `P7` that states a
