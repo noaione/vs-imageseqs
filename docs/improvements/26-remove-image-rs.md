@@ -972,7 +972,26 @@ has failed. `dds` has no such traversal to remove -- `blocks` is the picture bei
 written once, which is the minimum -- so the next attempt should look for work
 that is not happening at all rather than for work that could be arranged better.
 
-**`dds` remains the one open regression.**
+**Why the method stops at `dds`, from the source rather than another guess.**
+`blocks` at 3.94 ms over 67,500 blocks is **58 ns, about 175 cycles, per block**,
+and reading it says that is the block *math*, not memory: the only writes are the
+4.3 MB of output (0.4 ms at 10 GB/s) and a 64 byte array on the stack, which is
+1.08M L1 accesses and rounds to nothing. `dxt5_block` calls
+`alpha_levels(source[0], source[1])` and `colour_block(&source[8..16], false)`
+once per block, which is required -- the endpoints are in the block, not in the
+file -- and there is no per-pixel work that a per-block result would serve
+instead. So there is no traversal to remove here, which is exactly why `hdr` and
+`tga` were fixable and this is not: **their gap was memory and this one is
+arithmetic.**
+
+Closing it means making the block arithmetic faster, which means comparing this
+`dxt5_block` against the one in `image` line by line -- `image`'s is still in the
+vendored source and is the thing being 1.12x faster. That is a real task rather
+than another edit, and it is the right next step rather than a fifth guess at the
+same shape.
+
+**`dds` remains the one open regression**, at 1.12x where `tga` was 1.34x and is
+now 1.13x.
 
 | format | before | after | state |
 | --- | --- | --- | --- |
