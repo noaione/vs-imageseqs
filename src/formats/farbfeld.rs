@@ -3,7 +3,7 @@
 //! Farbfeld is the smallest image format there is: the eight bytes `farbfeld`,
 //! the width and the height as big-endian `u32`, then one big-endian `u16` per
 //! channel per pixel, red first and alpha last. There is no compression, no
-//! palette and no metadata, which is why the whole reader is [`decode`] and a
+//! palette and no metadata, which is why the whole reader is [`stream`] and a
 //! header reader, and why a crate for it was rejected: the one candidate's
 //! `decode_into` is not usable, and the format is less code than the wrapper
 //! around it would be.
@@ -13,20 +13,25 @@
 //!
 //! - **The samples are big-endian on disk and native in memory.** A frame is
 //!   written from a `u16` cast, so the bytes have to be swapped as they are
-//!   read. `tests/fixtures/alpha-rgba16.ff` holds `1000, 2000, 3000, 100`
-//!   followed by `4000, 5000, 6000, 200`, which no byte order could read back
-//!   as anything else by accident.
+//!   read, and [`RowSink::place_rgba16`] swaps each one as it takes it apart
+//!   rather than in a pass over the whole picture first.
+//!   `tests/fixtures/alpha-rgba16.ff` holds `1000, 2000, 3000, 100` followed by
+//!   `4000, 5000, 6000, 200`, which no byte order could read back as anything
+//!   else by accident.
 //! - **Every farbfeld has four channels.** The format has no three-channel
 //!   spelling and no way to say "no alpha", so every file is `Rgba16` and every
-//!   file has an alpha plane, whatever its samples contain.
+//!   file has an alpha plane, whatever its samples contain. A call that hands out
+//!   no alpha clip still reads the fourth channel of every pixel and drops it.
 //!
 //! The provenance is [27](../../../docs/improvements/27-direct-still-decoders.md)'s
 //! row, which decided this one would be written here.
 
-use std::path::Path;
+use std::{fs::File, io::Read, path::Path};
 
 use crate::{
-    decoder::{DecodeTimings, DecodedImage, ImageInfo, Pixels, image_error, image_head},
+    decoder::{
+        DecodeTimings, DecodedImage, ImageInfo, Pixels, RowSink, RowStream, image_error, image_head,
+    },
     error::{ImgSeqError, Result},
     layout::{ColorType, Orientation, SourceColorType},
     pixel::{PixelFormat, Transform},
@@ -71,28 +76,6 @@ fn pixel_bytes(width: u32, height: u32) -> Result<usize> {
         .checked_mul(height as usize)
         .and_then(|pixels| pixels.checked_mul(CHANNELS * 2))
         .ok_or_else(|| ImgSeqError::new("the farbfeld is too large to read"))
-}
-
-/// The pixel bytes of a farbfeld, checked against the size its header states.
-///
-/// Kept apart from [`decode`] so the bounds can be checked without a file on
-/// disk: a header is a claim about a length, and the claim is what has to be
-/// verified before anything is allocated from it.
-fn pixel_data<'a>(data: &'a [u8], width: u32, height: u32, path: &Path) -> Result<&'a [u8]> {
-    let expected = pixel_bytes(width, height)?;
-    let end = HEADER
-        .checked_add(expected)
-        .ok_or_else(|| ImgSeqError::new("the farbfeld is too large to read"))?;
-    data.get(HEADER..end).ok_or_else(|| {
-        image_error(
-            "decode",
-            path,
-            format!(
-                "the file holds {} bytes of pixels where the header states {expected}",
-                data.len().saturating_sub(HEADER)
-            ),
-        )
-    })
 }
 
 /// What a farbfeld states, when this module reads the file.
@@ -140,59 +123,166 @@ pub fn image_info(
     }))
 }
 
-/// Decodes a farbfeld into one interleaved buffer.
+/// What a farbfeld's header states.
+#[derive(Clone, Copy, Debug)]
+struct Header {
+    width: u32,
+    height: u32,
+}
+
+/// Opens `path`, checks it against its own header and leaves the reader on the
+/// first byte of the raster.
 ///
-/// The alpha plane is the fourth channel of every pixel, so a call that hands
-/// out no alpha clip needs no second pass.
+/// Every farbfeld is eligible: the format has one spelling, one depth and no
+/// compression, so there is nothing a buffered fallback would still be needed
+/// for. The header is read again here rather than trusted, because a stream that
+/// opens the file at fill time has to answer the same questions a probe did.
 ///
 /// # Errors
 ///
-/// Returns [`ImgSeqError`] when the file cannot be read, when it is not a
-/// farbfeld, or when it is too short to hold the pixels it states.
-pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
-    let open_started = std::time::Instant::now();
-    let data = std::fs::read(&info.path).map_err(|error| image_error("open", &info.path, error))?;
-    let open = open_started.elapsed();
-
+/// Returns [`ImgSeqError`] when the file cannot be read, is not a farbfeld, or
+/// is too short to hold the pixels its header states.
+fn prepare(path: &Path) -> Result<(Header, File)> {
+    let mut file = File::open(path).map_err(|error| image_error("open", path, error))?;
+    let mut head = [0u8; HEADER];
+    file.read_exact(&mut head)
+        .map_err(|error| image_error("open", path, error))?;
     let (width, height) =
-        dimensions(&data).ok_or_else(|| image_error("decode", &info.path, "not a farbfeld"))?;
-    if (width, height) != (info.width, info.height) {
+        dimensions(&head).ok_or_else(|| image_error("decode", path, "not a farbfeld"))?;
+    if width == 0 || height == 0 {
+        return Err(image_error("decode", path, "the header states no pixels"));
+    }
+    // The header is a claim about a length, and the claim is what has to hold
+    // before a row is read into a frame.
+    let expected = pixel_bytes(width, height)?;
+    let held = file
+        .metadata()
+        .map_err(|error| image_error("open", path, error))?
+        .len();
+    if held < HEADER as u64 + expected as u64 {
+        return Err(image_error(
+            "decode",
+            path,
+            format!(
+                "the file holds {} bytes of pixels where the header states {expected}",
+                held.saturating_sub(HEADER as u64)
+            ),
+        ));
+    }
+    Ok((Header { width, height }, file))
+}
+
+/// A raster this reader walks a row at a time.
+///
+/// A row of a farbfeld is a row of the picture once its samples are swapped, so
+/// each one is read into a buffer one row wide, taken apart by
+/// [`RowSink::place_rgba16`] and written straight into the frame. Nothing holds the
+/// whole raster, where [`decode`] holds it twice: once as the bytes on disk and
+/// once as the native words the frame is written from.
+#[derive(Debug)]
+pub struct Rows {
+    path: std::path::PathBuf,
+    /// What the header states, kept so a read does not parse it again.
+    header: Option<Header>,
+    /// The reader positioned at the first byte of the raster. `None` is a stream
+    /// that came from [`RowStream::duplicate`], which prepares itself on its way into
+    /// a fill: duplicating cannot report the failure that opening the file can.
+    raster: Option<File>,
+}
+
+impl Rows {
+    /// The header and the reader positioned at the raster, prepared here when this
+    /// stream is a duplicate that has not read anything yet.
+    fn raster(&mut self) -> Result<(Header, &mut File)> {
+        if self.raster.is_none() {
+            let (header, file) = prepare(&self.path)?;
+            self.header = Some(header);
+            self.raster = Some(file);
+        }
+        let header = self
+            .header
+            .ok_or_else(|| ImgSeqError::new("the raster header is missing"))?;
+        let file = self
+            .raster
+            .as_mut()
+            .ok_or_else(|| ImgSeqError::new("the raster reader is missing"))?;
+        Ok((header, file))
+    }
+}
+
+impl RowStream for Rows {
+    fn has_alpha(&self) -> bool {
+        // Every farbfeld is four channels and the fourth is the alpha clip, so a
+        // call that asks for no alpha clip still reads the channel and drops it.
+        true
+    }
+
+    fn fill(&mut self, mut sink: RowSink<'_>) -> Result<DecodeTimings> {
+        let read_started = std::time::Instant::now();
+        let (header, file) = self.raster()?;
+        let width = header.width as usize;
+        let height = header.height as usize;
+        let row_bytes = width
+            .checked_mul(CHANNELS * 2)
+            .ok_or_else(|| ImgSeqError::new("a farbfeld row does not fit in memory"))?;
+        let mut row = vec![0u8; row_bytes];
+        for line in 0..height {
+            file.read_exact(&mut row)
+                .map_err(|_| ImgSeqError::new(format!("the raster ends in row {line}")))?;
+            sink.place_rgba16(&row, line)
+                .ok_or_else(|| ImgSeqError::new("the frame holds no three colour planes"))?;
+        }
+        // A stream is read once. Letting the reader go here means a second fill
+        // starts from the raster again rather than from where this one stopped.
+        self.raster = None;
+        Ok(DecodeTimings {
+            open: std::time::Duration::ZERO,
+            metadata: std::time::Duration::ZERO,
+            buffer: std::time::Duration::ZERO,
+            read: read_started.elapsed(),
+        })
+    }
+
+    fn duplicate(&self) -> Box<dyn RowStream> {
+        Box::new(Self {
+            path: self.path.clone(),
+            header: None,
+            raster: None,
+        })
+    }
+}
+
+/// A farbfeld that hands its rows to the frame as it reads them.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the file cannot be opened or read.
+pub fn stream(info: &ImageInfo) -> Result<DecodedImage> {
+    let (header, file) = prepare(&info.path)?;
+    if (header.width, header.height) != (info.width, info.height) {
         return Err(ImgSeqError::new(format!(
-            "image '{}' changed after probing (was {}x{}, now {width}x{height})",
+            "image '{}' changed after probing (was {}x{}, now {}x{})",
             info.path.display(),
             info.width,
             info.height,
+            header.width,
+            header.height,
         )));
     }
-    let pixels_in = pixel_data(&data, width, height, &info.path)?;
-
-    let buffer_started = std::time::Instant::now();
-    let mut pixels = vec![0u8; pixels_in.len()];
-    // Big-endian on disk, native in memory: a frame is written from a `u16`
-    // cast, so the swap happens here rather than in the writer.
-    for (sample, target) in pixels_in
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .zip(pixels.as_chunks_mut::<2>().0.iter_mut())
-    {
-        *target = u16::from_be_bytes(*sample).to_ne_bytes();
-    }
-    let buffer = buffer_started.elapsed();
-
     Ok(DecodedImage {
-        width,
-        height,
+        width: info.width,
+        height: info.height,
         format: info.format,
         transform: info.transform,
-        pixels: Pixels::Interleaved {
-            color_type: ColorType::Rgba16,
-            buffer: pixels,
-        },
+        pixels: Pixels::Stream(Box::new(Rows {
+            path: info.path.clone(),
+            header: Some(header),
+            raster: Some(file),
+        })),
         timings: DecodeTimings {
-            open,
+            open: std::time::Duration::ZERO,
             metadata: std::time::Duration::ZERO,
-            buffer,
+            buffer: std::time::Duration::ZERO,
             read: std::time::Duration::ZERO,
         },
     })
@@ -202,11 +292,93 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
 mod tests {
     use super::*;
 
+    use crate::decoder::PlaneRows;
+
     fn fixture(name: &str) -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests")
             .join("fixtures")
             .join(name)
+    }
+
+    /// Writes bytes to a temp file named for this test process.
+    fn write_temp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("imgseqs-farbfeld-{}-{name}", std::process::id()));
+        std::fs::write(&path, bytes).expect("a writable image");
+        path
+    }
+
+    /// The frame a stream writes into: three colour planes and, for a call that
+    /// asks for one, an alpha plane.
+    ///
+    /// The planes are a row's samples with no padding between them, which is
+    /// the tightest row a VapourSynth frame can hand out; a frame with padding is
+    /// what the validator reads.
+    struct Frame {
+        colour: Vec<Vec<u8>>,
+        alpha: Option<Vec<u8>>,
+        row_bytes: usize,
+    }
+
+    impl Frame {
+        fn new(width: usize, height: usize, with_alpha: bool) -> Self {
+            let row_bytes = width * 2;
+            let plane = || vec![0u8; row_bytes * height];
+            Self {
+                colour: vec![plane(), plane(), plane()],
+                alpha: with_alpha.then(plane),
+                row_bytes,
+            }
+        }
+
+        /// This frame's planes, borrowed for one fill.
+        fn sink(&mut self) -> RowSink<'_> {
+            let row_bytes = self.row_bytes;
+            let colour = self
+                .colour
+                .iter_mut()
+                .map(|plane| PlaneRows {
+                    bytes: plane.as_mut_slice(),
+                    stride: row_bytes,
+                    row_bytes,
+                })
+                .collect();
+            let alpha = self.alpha.as_mut().map(|plane| {
+                vec![PlaneRows {
+                    bytes: plane.as_mut_slice(),
+                    stride: row_bytes,
+                    row_bytes,
+                }]
+            });
+            RowSink { colour, alpha }
+        }
+    }
+
+    /// The samples of one plane, in the byte order a frame holds them.
+    fn samples(plane: &[u8]) -> Vec<u16> {
+        plane
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_ne_bytes(*pair))
+            .collect()
+    }
+
+    /// The committed fixture, streamed into a frame of the given shape.
+    fn fill(width: usize, height: usize, with_alpha: bool) -> Frame {
+        let info = image_info(&fixture("alpha-rgba16.ff"), true, None)
+            .expect("the header is read")
+            .expect("a farbfeld is taken over");
+        assert_eq!((info.width as usize, info.height as usize), (width, height));
+        let decoded = stream(&info).expect("the file streams");
+        let Pixels::Stream(mut rows) = decoded.pixels else {
+            panic!("a farbfeld hands its rows to the frame");
+        };
+        assert!(rows.has_alpha(), "the fourth channel is the alpha clip");
+        let mut frame = Frame::new(width, height, with_alpha);
+        rows.fill(frame.sink()).expect("the rows are written");
+        frame
     }
 
     /// The committed fixture: two by two, four channels of sixteen bits.
@@ -223,69 +395,69 @@ mod tests {
         assert!(!info.has_icc_profile);
     }
 
-    /// Every channel of every pixel, in the order the format stores them and in
-    /// the byte order a frame needs: `R, G, B, A` per pixel, native-endian
-    /// `u16`. Wrong byte order would read these back as 6144 or 13312 rather
-    /// than 1000.
+    /// Every channel of every pixel, where the stream puts it: `R, G, B` in the
+    /// colour planes and `A` in the alpha plane, each as a native-endian `u16`.
+    /// Wrong byte order would read these back as 6144 or 13312 rather than 1000.
     #[test]
     fn the_samples_are_big_endian_on_disk_and_native_in_memory() {
-        let info = image_info(&fixture("alpha-rgba16.ff"), true, None)
-            .expect("the header is read")
-            .expect("taken over");
-        let decoded = decode(&info).expect("the file decodes");
-        let Pixels::Interleaved {
-            color_type, buffer, ..
-        } = decoded.pixels
-        else {
-            panic!("a farbfeld hands out one interleaved buffer");
-        };
-        assert_eq!(color_type, ColorType::Rgba16);
-        // Two by two pixels, four channels, two bytes a sample.
-        assert_eq!(buffer.len(), 2 * 2 * 4 * 2);
-        let samples: Vec<u16> = buffer
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| u16::from_ne_bytes(*pair))
-            .collect();
+        let frame = fill(2, 2, true);
         assert_eq!(
-            samples,
-            vec![
-                1000, 2000, 3000, 100, //
-                4000, 5000, 6000, 200, //
-                7000, 8000, 9000, 300, //
-                10000, 11000, 12000, 400,
-            ]
+            samples(&frame.colour[0]),
+            vec![1000, 4000, 7000, 10000],
+            "red is the red channel of every pixel"
+        );
+        assert_eq!(
+            samples(&frame.colour[1]),
+            vec![2000, 5000, 8000, 11000],
+            "green is the green channel of every pixel"
+        );
+        assert_eq!(
+            samples(&frame.colour[2]),
+            vec![3000, 6000, 9000, 12000],
+            "blue is the blue channel of every pixel"
+        );
+        let alpha = frame.alpha.as_ref().expect("the alpha plane");
+        assert_eq!(
+            samples(alpha),
+            vec![100, 200, 300, 400],
+            "the fourth channel is the alpha clip"
         );
     }
 
+    /// A call that hands out no alpha clip still reads the fourth channel of every
+    /// pixel and drops it: the format has no three channel spelling, so the colour
+    /// planes are the first three channels either way.
+    #[test]
+    fn a_call_with_no_alpha_clip_still_reads_the_picture() {
+        let frame = fill(2, 2, false);
+        assert!(frame.alpha.is_none(), "no alpha clip was asked for");
+        assert_eq!(samples(&frame.colour[0]), vec![1000, 4000, 7000, 10000]);
+        assert_eq!(samples(&frame.colour[1]), vec![2000, 5000, 8000, 11000]);
+        assert_eq!(samples(&frame.colour[2]), vec![3000, 6000, 9000, 12000]);
+    }
+
     /// A file that stops before the pixels it states is refused rather than
-    /// handed out short.
+    /// handed out short. The check is the file's own length against its header,
+    /// which is the only thing standing between a claim and a read past the end.
     #[test]
     fn a_truncated_file_is_refused() {
-        let path = fixture("alpha-rgba16.ff");
-        let data = std::fs::read(&path).expect("the fixture is read");
-        // The whole file reads, and every shorter prefix is refused: a header
-        // that states four pixels is a claim about forty eight bytes.
+        let data = std::fs::read(fixture("alpha-rgba16.ff")).expect("the fixture is read");
+        // The whole file reads, and every shorter prefix is refused: a header that
+        // states four pixels is a claim about forty eight bytes.
         assert_eq!(data.len(), 48);
-        assert_eq!(
-            pixel_data(&data, 2, 2, &path)
-                .expect("the whole file")
-                .len(),
-            32
-        );
+        prepare(&fixture("alpha-rgba16.ff")).expect("the whole file prepares");
         for missing in 1..=32 {
-            let cut = &data[..data.len() - missing];
-            let error = pixel_data(cut, 2, 2, &path)
-                .expect_err("a short file is refused, not handed out short");
+            let path = write_temp(
+                &format!("short-{missing}.ff"),
+                &data[..data.len() - missing],
+            );
+            let error = prepare(&path).expect_err("a short file is refused, not handed out short");
             assert!(
                 error.to_string().contains("where the header states"),
                 "{error}"
             );
+            let _ = std::fs::remove_file(&path);
         }
-        // And a header that states more than any file holds is refused before
-        // anything is allocated from it.
-        assert!(pixel_data(&data, u32::MAX, u32::MAX, &path).is_err());
     }
 
     /// A header that states no pixels, and one that is not a farbfeld at all.
@@ -324,7 +496,7 @@ mod tests {
             .expect("the header is read")
             .expect("taken over");
         info.height += 1;
-        let error = decode(&info).expect_err("the sizes disagree");
+        let error = stream(&info).expect_err("the sizes disagree");
         assert!(
             error.to_string().contains("changed after probing"),
             "{error}"

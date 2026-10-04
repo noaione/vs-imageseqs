@@ -61,7 +61,9 @@ fn format_decoder(info: &ImageInfo, demand: Demand) -> Option<Result<DecodedImag
         Some(Format::Jp2) => formats::jp2::decode(info),
         Some(Format::Jpeg) => formats::jpeg::decode(info),
         Some(Format::Qoi) => formats::qoi::decode(info),
-        Some(Format::Farbfeld) => formats::farbfeld::decode(info),
+        // Farbfeld has one spelling and no compression, so its rows
+        // go straight into the frame and there is no buffered shape left.
+        Some(Format::Farbfeld) => formats::farbfeld::stream(info),
         // Three of these walk their own rows straight into the frame when they
         // can, and fall back to the whole buffer when they cannot.
         Some(Format::Bmp) => formats::bmp::stream(info).and_then(|streamed| match streamed {
@@ -249,6 +251,64 @@ impl RowSink<'_> {
             *red_byte = pixel[2];
             *green_byte = pixel[1];
             *blue_byte = pixel[0];
+        }
+        Some(())
+    }
+
+    /// Writes one interleaved sixteen bit four channel row into the three
+    /// colour planes and, when the call hands one out, the alpha plane.
+    ///
+    /// Farbfeld is the caller: four big-endian `u16` a pixel and nothing else, so
+    /// the swap into the byte order a frame holds happens in the same walk that
+    /// takes the row apart rather than as a pass over the whole picture first.
+    ///
+    /// The alpha channel is written only when the call asked for an alpha clip.
+    /// A call that hands out none reads three channels and drops the fourth, and
+    /// that is the format's own choice: every farbfeld has four channels and
+    /// [`RowStream::has_alpha`] is what tells the caller the alpha clip is not
+    /// left to an opaque fill.
+    ///
+    /// Answers `None` when the sink does not hold three colour planes, which a
+    /// caller reports its own way.
+    pub fn place_rgba16(&mut self, source: &[u8], row: usize) -> Option<()> {
+        let (red, rest) = self.colour.split_first_mut()?;
+        let (green, rest) = rest.split_first_mut()?;
+        let (blue, _) = rest.split_first_mut()?;
+        let alpha = self.alpha.as_mut().and_then(|planes| planes.first_mut());
+        // One source row, read once. A pixel is four big-endian samples and each
+        // target takes one of them in the byte order the frame holds, which is what
+        // makes this the only pass over the row.
+        let sample = |pixel: &[u8], channel: usize| -> [u8; 2] {
+            u16::from_be_bytes([pixel[channel], pixel[channel + 1]]).to_ne_bytes()
+        };
+        let red_row = red.row(row);
+        let green_row = green.row(row);
+        let blue_row = blue.row(row);
+        let alpha_row = alpha.map(|plane| plane.row(row));
+        // A frame's row is a whole number of sixteen bit samples, so each plane
+        // splits into samples and the leftovers are the frame's own padding.
+        let (red_words, _) = red_row.as_chunks_mut::<2>();
+        let (green_words, _) = green_row.as_chunks_mut::<2>();
+        let (blue_words, _) = blue_row.as_chunks_mut::<2>();
+        let colour = red_words.iter_mut().zip(green_words).zip(blue_words);
+        let pixels = source.as_chunks::<8>().0.iter();
+        match alpha_row {
+            Some(alpha_row) => {
+                let (alpha_words, _) = alpha_row.as_chunks_mut::<2>();
+                for ((((r, g), b), a), pixel) in colour.zip(alpha_words.iter_mut()).zip(pixels) {
+                    r.copy_from_slice(&sample(pixel, 0));
+                    g.copy_from_slice(&sample(pixel, 2));
+                    b.copy_from_slice(&sample(pixel, 4));
+                    a.copy_from_slice(&sample(pixel, 6));
+                }
+            }
+            None => {
+                for (((r, g), b), pixel) in colour.zip(pixels) {
+                    r.copy_from_slice(&sample(pixel, 0));
+                    g.copy_from_slice(&sample(pixel, 2));
+                    b.copy_from_slice(&sample(pixel, 4));
+                }
+            }
         }
         Some(())
     }

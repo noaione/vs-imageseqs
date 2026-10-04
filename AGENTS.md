@@ -173,7 +173,8 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   ok image, whose fourteen byte header is read without a
   sample and whose decoder is the `qoi` crate's, `farbfeld.rs` for the format
   that is a magic and a size and nothing else, whose samples are big-endian on
-  disk and native in the frame, and `webp.rs` for the libwebp decode
+  disk and native in the frame, read one row at a time straight into the frame,
+  and `webp.rs` for the libwebp decode
   and the lossy yuv format). an avif this tree's walk decodes itself is the yuv
   its container states, and everything else is `heif.rs`'s: an r,g,b container,
   a monochrome one, and one the walk refuses. both readers name the same
