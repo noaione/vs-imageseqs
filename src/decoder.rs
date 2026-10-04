@@ -69,6 +69,9 @@ fn format_decoder(info: &ImageInfo, demand: Demand) -> Option<Result<DecodedImag
     if formats::farbfeld::owns(&info.path) {
         return Some(formats::farbfeld::decode(info));
     }
+    if formats::bmp::owns(&info.path) {
+        return Some(formats::bmp::decode(info));
+    }
     None
 }
 
@@ -444,6 +447,12 @@ fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
     // numbers, read here rather than by the `image` reader; see
     // [`crate::formats::farbfeld::image_info`].
     if let Some(info) = formats::farbfeld::image_info(path, apply_rotation)? {
+        return Ok(info);
+    }
+    // A bitmap states its depth, its compression and its masks in a header this
+    // module reads without touching a sample, and the alpha decision is part of
+    // that header rather than of the samples; see [`crate::formats::bmp`].
+    if let Some(info) = formats::bmp::image_info(path, apply_rotation)? {
         return Ok(info);
     }
     // A png is read here for the same reason a jpeg is, and one thing more:

@@ -25,6 +25,7 @@
 //! time, which is a fifth entry point rather than one of the four above.
 
 pub mod avif;
+pub mod bmp;
 pub mod farbfeld;
 pub mod heif;
 pub mod jp2;
