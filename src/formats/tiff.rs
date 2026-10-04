@@ -399,7 +399,30 @@ fn layout_ycbcr<R: std::io::Read + std::io::Seek>(
             ),
         ));
     }
+    // A page whose coefficients name no matrix VapourSynth can name is handed
+    // out as rgb: `None` here is what says to convert, and it is the only thing
+    // that tells the two paths apart.
     let cicp = ycbcr_cicp(decoder, path, action)?;
+    // A page whose coefficients cannot be named is converted here, and that
+    // conversion is the coefficients applied to a full range byte. A page that
+    // leaves headroom would need a rescaling this reader has no reference for,
+    // so the pair is refused rather than converted at the wrong range.
+    if cicp.is_none() {
+        let levels = tag_fractions(decoder, 532, path, action)?;
+        let headroom = match levels.as_slice() {
+            [y_black, y_white, ..] => {
+                fraction(y_black.0, y_black.1) != 0.0 || fraction(y_white.0, y_white.1) != 255.0
+            }
+            _ => false,
+        };
+        if headroom {
+            return Err(image_error(
+                action,
+                path,
+                "a ycbcr page whose coefficients cannot be named and whose reference levels leave headroom is not one this reader converts",
+            ));
+        }
+    }
     Ok(Layout {
         channels: 3,
         sample_bytes: 1,
@@ -412,7 +435,7 @@ fn layout_ycbcr<R: std::io::Read + std::io::Seek>(
         separated: false,
         palette: None,
         ycbcr: Some(subsampling),
-        cicp: Some(cicp),
+        cicp,
     })
 }
 
@@ -428,7 +451,7 @@ fn ycbcr_cicp<R: std::io::Read + std::io::Seek>(
     decoder: &mut tiff::decoder::Decoder<R>,
     path: &Path,
     action: &str,
-) -> Result<Cicp> {
+) -> Result<Option<Cicp>> {
     // 529 is `YCbCrCoefficients` and 532 is `ReferenceBlackWhite`; the tag enum
     // names neither, which is why `image_info` reads the profile by number too.
     let coefficients = tag_fractions(decoder, 529, path, action)?;
@@ -448,13 +471,10 @@ fn ycbcr_cicp<R: std::io::Read + std::io::Seek>(
             } else if near(red, 0.2126) && near(green, 0.7152) && near(blue, 0.0722) {
                 1
             } else {
-                return Err(image_error(
-                    action,
-                    path,
-                    format!(
-                        "a ycbcr page states coefficients this reader cannot name: {red:.4} {green:.4} {blue:.4}"
-                    ),
-                ));
+                // No matrix VapourSynth names, so the caller converts the page
+                // to rgb with these coefficients rather than labelling planes
+                // nothing can read. `None` is what says so.
+                return Ok(None);
             }
         }
         _ => {
@@ -482,12 +502,12 @@ fn ycbcr_cicp<R: std::io::Read + std::io::Seek>(
     };
     // Nothing here states primaries or a transfer function, so those are left
     // for the graph to decide and the matrix is the one this page does state.
-    Ok(Cicp {
+    Ok(Some(Cicp {
         primaries: 2,
         transfer: 2,
         matrix,
         full_range,
-    })
+    }))
 }
 
 /// One rational tag value as the number it stands for.
@@ -589,7 +609,7 @@ fn flatten(value: &tiff::decoder::ifd::Value, out: &mut Vec<u64>) {
 fn format(layout: &Layout) -> PixelFormat {
     // A ycbcr page is handed out as its own planes at the sampling it holds,
     // which is one of the three formats below rather than a combination of them.
-    if let Some((horiz, vert)) = layout.ycbcr {
+    if let (Some((horiz, vert)), Some(_)) = (layout.ycbcr, layout.cicp) {
         return match (horiz, vert) {
             // A unit of one pixel holds a chroma pair of its own, so all three
             // planes are the size of the picture.
@@ -739,6 +759,36 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     let read_started = std::time::Instant::now();
     // A ycbcr page is handed out as its own planes at the sampling it holds,
     // which is a different shape of answer from the interleaved one below.
+    // A page whose coefficients name no matrix VapourSynth can name is converted
+    // to rgb here, because a frame of planes nothing can label is of no use.
+    if let (Some((horiz, vert)), None) = (layout.ycbcr, layout.cicp) {
+        let planes = ycbcr_planes(&mut decoder, &data, &info.path, width, height, horiz, vert)?;
+        let coefficients = tag_fractions(&mut decoder, 529, &info.path, "decode")?;
+        let buffer = ycbcr_to_rgb(
+            &planes,
+            width as usize,
+            height as usize,
+            usize::from(horiz),
+            usize::from(vert),
+            &coefficients,
+        );
+        return Ok(DecodedImage {
+            width,
+            height,
+            format: info.format,
+            transform: info.transform,
+            pixels: Pixels::Interleaved {
+                color_type: ColorType::Rgb8,
+                buffer,
+            },
+            timings: DecodeTimings {
+                open,
+                metadata: std::time::Duration::ZERO,
+                buffer: std::time::Duration::ZERO,
+                read: read_started.elapsed(),
+            },
+        });
+    }
     if let Some((horiz, vert)) = layout.ycbcr {
         let planes = ycbcr_planes(&mut decoder, &data, &info.path, width, height, horiz, vert)?;
         return Ok(DecodedImage {
@@ -1189,6 +1239,77 @@ fn ycbcr_planes<R: std::io::Read + std::io::Seek>(
         ));
     }
     Ok(vec![luma, blue, red])
+}
+
+/// One rgb frame from a ycbcr page whose matrix no VapourSynth code names.
+///
+/// The coefficients a page states are the pair of equations its samples are
+/// defined by, and the arithmetic below is the one libtiff uses: `tiff2rgba` on
+/// the same files reproduces it sample for sample, at all three samplings and for
+/// the coefficients of both named matrices alike. That is what says this is the
+/// format's own conversion rather than one that merely looks reasonable.
+///
+/// The chroma planes are smaller than the luma one, so every pixel of a unit
+/// takes that unit's chroma sample: the planes are widened by repeating a sample,
+/// which is also what libtiff does for these pages.
+fn ycbcr_to_rgb(
+    planes: &[Vec<u8>],
+    width: usize,
+    height: usize,
+    horiz: usize,
+    vert: usize,
+    coefficients: &[(u32, u32)],
+) -> Vec<u8> {
+    let (red_k, green_k, blue_k) = match coefficients {
+        [(red, red_den), (green, green_den), (blue, blue_den)] => (
+            fraction(*red, *red_den),
+            fraction(*green, *green_den),
+            fraction(*blue, *blue_den),
+        ),
+        // The caller converts only a page whose coefficients it could read, and
+        // a page that states none is bt.601, the specification's default.
+        _ => (0.299, 0.587, 0.114),
+    };
+    let chroma_width = width.div_ceil(horiz);
+    let chroma_height = height.div_ceil(vert);
+    let (luma, blue, red) = (&planes[0], &planes[1], &planes[2]);
+    let mut out = Vec::with_capacity(width * height * 3);
+    for y in 0..height {
+        for x in 0..width {
+            let at = (y / vert).min(chroma_height - 1) * chroma_width
+                + (x / horiz).min(chroma_width - 1);
+            let level = f64::from(luma[y * width + x]);
+            // The two chroma channels are centred on the middle of their range,
+            // which is what a luma of the same value means: no colour at all.
+            let cb = f64::from(blue[at]) - 128.0;
+            let cr = f64::from(red[at]) - 128.0;
+            let r = level + (2.0 - 2.0 * red_k) * cr;
+            let b = level + (2.0 - 2.0 * blue_k) * cb;
+            let g = level
+                - (2.0 - 2.0 * blue_k) * blue_k / green_k * cb
+                - (2.0 - 2.0 * red_k) * red_k / green_k * cr;
+            for channel in [r, g, b] {
+                out.push(nearest_byte(channel));
+            }
+        }
+    }
+    out
+}
+
+/// One channel computed from a ycbcr page, as the byte a frame holds.
+///
+/// The value is rounded to the nearest byte and held at either end of the range
+/// rather than wrapped, which is what libtiff's tables do: a channel computed
+/// past white is white rather than black.
+fn nearest_byte(value: f64) -> u8 {
+    let rounded = value.round();
+    if rounded <= 0.0 {
+        0
+    } else if rounded >= 255.0 {
+        255
+    } else {
+        rounded as u8
+    }
 }
 /// Writes separated ink samples as the channels a frame holds.
 ///
@@ -1793,12 +1914,44 @@ mod tests {
     #[test]
     fn a_ycbcr_page_this_reader_cannot_take_is_refused_at_identify() {
         for (name, said) in [
-            ("tiff-ycbcr-uncanny.tiff", "coefficients"),
             ("tiff-ycbcr-16bit.tiff", "16"),
             ("tiff-ycbcr-lzw.tiff", "compressed"),
         ] {
             let error = image_info(&fixture(name), true).expect_err("the page is refused");
             assert!(error.to_string().contains(said), "{name}: {error}");
         }
+    }
+
+    /// A page whose coefficients name no matrix VapourSynth can name is converted
+    /// to rgb rather than handed out as planes no graph can label.
+    ///
+    /// The conversion is the coefficients the page states applied to a full range
+    /// byte, with each chroma sample widened over the unit it covers. The expected
+    /// channels are libtiff's own output for the same file, sample for sample, so
+    /// this says the arithmetic is the format's rather than one that merely looks
+    /// reasonable.
+    #[test]
+    fn a_page_whose_coefficients_cannot_be_named_is_converted() {
+        let info = image_info(&fixture("tiff-ycbcr-rgb.tiff"), true)
+            .unwrap_or_else(|error| panic!("{error}"))
+            .unwrap_or_else(|| panic!("the page is taken over"));
+        assert_eq!(info.format, PixelFormat::Rgb8);
+        assert_eq!(info.color_type, ColorType::Rgb8);
+        // An rgb frame states no matrix of its own, whatever the page said.
+        assert!(info.cicp.is_none());
+        let buffer = read("tiff-ycbcr-rgb.tiff");
+        for (index, colour) in [
+            (0, [0, 184, 0]),
+            (1, [0, 150, 0]),
+            (2, [0, 116, 32]),
+            (3, [0, 82, 96]),
+        ] {
+            let at = index * 3;
+            assert_eq!(&buffer[at..at + 3], colour, "pixel {index}");
+        }
+        // The last pixel of the page, which is where a wrong chroma step or a
+        // wrong row stride lands.
+        let last = (37 * 23 - 1) * 3;
+        assert_eq!(&buffer[last..last + 3], [112, 196, 0], "the last pixel");
     }
 }

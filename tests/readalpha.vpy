@@ -2030,11 +2030,29 @@ def test_ycbcr_pages() -> None:
             frame.props["_Range"] == (1 if full_range else 0),
             f"{name}: _Range is {full_range} (got {frame.props['_Range']})",
         )
+
+    # A page whose coefficients name no matrix VapourSynth can name is converted
+    # to rgb with those coefficients rather than handed out as planes nothing can
+    # label. libtiff's own tiff2rgba gives these channels for the same file, so
+    # the arithmetic is checked against a reader rather than against itself.
+    clip, _ = read_alpha(files=[fixture("tiff-ycbcr-rgb.tiff")])
+    check(
+        clip.format.name == "RGB24",
+        f"ycbcr: a page whose coefficients cannot be named is rgb (got {clip.format.name})",
+    )
+    frame = clip.get_frame(0)
+    plains = [samples(frame, plane) for plane in range(3)]
+    for index, colour in enumerate([(0, 184, 0), (0, 150, 0), (0, 116, 32), (0, 82, 96)]):
+        check(
+            tuple(plane[index] for plane in plains) == colour,
+            f"ycbcr: rgb pixel {index} is {colour} (got {tuple(plane[index] for plane in plains)})",
+        )
+    check(frame.props["_Matrix"] == 0, "ycbcr: an rgb frame states no matrix")
+    check(frame.props["_Range"] == 1, "ycbcr: an rgb frame is full range")
  
     # Every page this reader cannot take is refused by the *probe*, so the
     # probe never promises a frame the decode would not produce.
     for name, said in [
-        ("tiff-ycbcr-uncanny.tiff", "coefficients"),
         ("tiff-ycbcr-16bit.tiff", "16"),
         ("tiff-ycbcr-lzw.tiff", "compressed"),
     ]:

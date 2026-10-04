@@ -11,10 +11,11 @@
   covers and then one chroma pair. `_Matrix` comes from `YCbCrCoefficients` and
   `_Range` from `ReferenceBlackWhite`, with the specification's own defaults --
   bt.601 at full range -- for a page that states neither, and a page whose
-  coefficients name no matrix VapourSynth has a code for is refused rather than
-  labelled with a guess. Eight bit samples of three samples a pixel in one image
-  plane, uncompressed: a page of any other shape, a page whose coefficients
-  cannot be named, and a compressed page are all refused at identify, so the
+  coefficients name no matrix VapourSynth has a code for is converted to rgb
+  with those coefficients rather than labelled with a guess, which is what
+  libtiff's own `tiff2rgba` gives for the same file sample for sample. Eight bit
+  plane, uncompressed: a page of any other shape and a compressed page are both
+  refused at identify rather than later, so the
   probe cannot promise a frame the decode would refuse to produce. The fixtures
   are written by hand, because no encoder here writes a subsampled ycbcr page at
   all, and libtiff's own `tiff2rgba` reads each of them to neutral greys at

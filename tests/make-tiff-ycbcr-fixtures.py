@@ -45,7 +45,7 @@ FULL = [(0, 1), (255, 1), (128, 1), (255, 1), (128, 1), (255, 1)]
 LIMITED = [(16, 1), (235, 1), (128, 1), (240, 1), (128, 1), (240, 1)]
 
 
-def raster(horiz: int, vert: int, width: int, height: int) -> bytes:
+def raster(horiz: int, vert: int, width: int, height: int, ramp: bool) -> bytes:
     """The strip of one subsampling, unit by unit, each unit row padded."""
     out = bytearray()
     for unit_y in range(0, height, vert):
@@ -54,12 +54,22 @@ def raster(horiz: int, vert: int, width: int, height: int) -> bytes:
             for y in range(unit_y, unit_y + vert):
                 for x in range(unit_x, unit_x + horiz):
                     row.append(16 + (x % 8) * 8 + (y % 4) * 32)
-            row += bytes([128, 128])
+            # A flat chroma states no colour at all, so a page with one decodes to
+            # neutral greys. The ramp is the chroma a matrix actually moves, and
+            # only the page that is converted rather than handed out uses it.
+            row += bytes(chroma(unit_x, unit_y, ramp))
         # No padding: a unit row of byte samples is already a whole number of
         # bytes, and libtiff reads an odd 4:4:4 row of thirty-seven pixels as
         # thirty-seven triples rather than as thirty-seven and a pad.
         out += row
     return bytes(out)
+
+
+def chroma(unit_x: int, unit_y: int, ramp: bool) -> list[int]:
+    """The chroma pair of one unit: flat, or a ramp a matrix shows through."""
+    if not ramp:
+        return [128, 128]
+    return [48 + (unit_x % 4) * 40, 48 + (unit_y % 4) * 40]
 
 
 def write(
@@ -73,8 +83,9 @@ def write(
     width: int = WIDTH,
     height: int = HEIGHT,
     levels: list[tuple[int, int]] | None = None,
+    ramp: bool = False,
 ) -> None:
-    strip = raster(horiz, vert, width, height)
+    strip = raster(horiz, vert, width, height, ramp)
     tags: list[tuple[int, int, list[int] | list[tuple[int, int]]]] = [
         (256, 4, [width]),
         (257, 4, [height]),
@@ -143,7 +154,7 @@ def main() -> None:
 
     # ---- The shapes this reader refuses. Each is refused at identify, so the
     # probe cannot promise a frame the decode would not produce.
-    write("tiff-ycbcr-uncanny.tiff", coefficients=UNCANNY)
+    write("tiff-ycbcr-rgb.tiff", coefficients=UNCANNY, ramp=True)
     write("tiff-ycbcr-16bit.tiff", bits=16)
     # LZW, whose strip is not a compressed one: the reader refuses the
     # compression before it looks at a sample, which is the point of the check.
