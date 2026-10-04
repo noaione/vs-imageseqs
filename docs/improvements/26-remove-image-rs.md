@@ -1287,6 +1287,34 @@ the same properties as its source. `ImgSeqPath` is excluded, because a renamed
 file's path differs by construction and is not a routing fact -- including it made
 the first run report 51 phantom property failures.
 
+### the identification table, landed before its wiring
+
+`src/formats/identify.rs` is the strong half of the plan's rule. It reads sixteen
+bytes and answers which format they are, or `None` when they say nothing --
+`identify` -- beside `from_extension` as the weak half, kept separate so a caller
+can tell which answered. The plan's table is extended where it asked: BigTIFF
+(`II+\0` and `MM\0+`), CUR (`\0\0\2\0`), and both Radiance spellings, so the
+`#?RGBE` form the plan flags as compared by the wrong prefix length is named.
+
+Its test is the one that matters: **every fixture whose format has a signature is
+identified as that format from its bytes alone**, asserted rather than compared,
+across more than a hundred files. The one contradiction that would fail it is
+exactly the class of bug phase 1 is about. `Tga` and `Bmp` are the two it cannot
+answer for, and the test records that rather than skipping them silently: Targa
+has no leading magic, and a bare DIB is the case the plan gives "a distinct
+extension-assisted structural probe".
+
+Two layering choices worth reviewing, because both are where a mistake would
+hide. `P6` with nothing after it **is** identified as netpbm -- the magic is
+there, and refusing a file that stops there belongs to the header check the plan
+asks for, not to identification. And an `ftyp` brand neither avif nor heif claims
+answers `None` rather than being guessed at.
+
+The module carries a module-level `#![allow(dead_code)]` with a comment saying
+why: it lands one slice ahead of the routing change that reads it, which is what
+"do not combine all phases into an unreviewable backend rewrite" asks for. The
+allow is to be removed in that slice. This is the one deliberate piece of unused
+code in the tree and it should not outlive the next commit.
 **The baseline is 59 of 84 copies wrong**, and they separate by suffix:
 
 | suffix | failures | what happens |

@@ -32,6 +32,7 @@ pub mod farbfeld;
 pub mod hdr;
 pub mod heif;
 pub mod ico;
+pub mod identify;
 pub mod jp2;
 pub mod jpeg;
 pub mod jxl;
