@@ -194,6 +194,38 @@ pub struct RowSink<'a> {
     pub alpha: Option<Vec<PlaneRows<'a>>>,
 }
 
+impl RowSink<'_> {
+    /// Writes one interleaved eight bit three channel row into three planes.
+    ///
+    /// The three plane rows are taken apart with `split_first_mut`, so they can
+    /// be held together, and the walk is a `zip` over the source's pixels and
+    /// the three rows at once. That is what makes it one pass: reading the row
+    /// once per plane reads every byte three times, and indexing a plane per
+    /// pixel carries a bound check per byte. `png.rs` learned this for palette
+    /// pages and it is here rather than there so a second format does not learn
+    /// it again.
+    ///
+    /// Answers `None` when the sink does not hold three colour planes, which a
+    /// caller reports its own way.
+    pub fn place_rgb8(&mut self, source: &[u8], row: usize) -> Option<()> {
+        let (red, rest) = self.colour.split_first_mut()?;
+        let (green, rest) = rest.split_first_mut()?;
+        let (blue, _) = rest.split_first_mut()?;
+        let planes = red
+            .row(row)
+            .iter_mut()
+            .zip(green.row(row).iter_mut())
+            .zip(blue.row(row).iter_mut());
+        for (pixel, ((red_byte, green_byte), blue_byte)) in
+            source.as_chunks::<3>().0.iter().zip(planes)
+        {
+            *red_byte = pixel[0];
+            *green_byte = pixel[1];
+            *blue_byte = pixel[2];
+        }
+        Some(())
+    }
+}
 /// A decode that has not read its picture yet.
 ///
 /// A format answers with one of these when it can hand every decoded row to

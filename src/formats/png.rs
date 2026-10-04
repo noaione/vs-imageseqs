@@ -543,26 +543,9 @@ impl<'a> Placer<'a> {
     /// Writes a three channel row into the three colour planes, reading it
     /// once.
     fn place_rgb(&mut self, data: &[u8], row: usize) -> Result<()> {
-        let (red, rest) = self
-            .sink
-            .colour
-            .split_first_mut()
-            .ok_or_else(missing_colour_planes)?;
-        let (green, rest) = rest.split_first_mut().ok_or_else(missing_colour_planes)?;
-        let (blue, _) = rest.split_first_mut().ok_or_else(missing_colour_planes)?;
-        let planes = red
-            .row(row)
-            .iter_mut()
-            .zip(green.row(row).iter_mut())
-            .zip(blue.row(row).iter_mut());
-        for (pixel, ((red_byte, green_byte), blue_byte)) in
-            data.as_chunks::<3>().0.iter().zip(planes)
-        {
-            *red_byte = pixel[0];
-            *green_byte = pixel[1];
-            *blue_byte = pixel[2];
-        }
-        Ok(())
+        self.sink
+            .place_rgb8(data, row)
+            .ok_or_else(missing_colour_planes)
     }
 
     /// Writes one row of palette indices into the three colour planes.
