@@ -43,9 +43,8 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from natsort import natsorted
-
 import vapoursynth as vs
+from natsort import natsorted
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PLUGIN = ROOT / "target" / "release" / "vs_imageseqs.dll"

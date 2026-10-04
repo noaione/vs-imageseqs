@@ -224,6 +224,73 @@ def test_dds_and_farbfeld() -> None:
     check(samples(frame) == [100, 200, 300, 400], "farbfeld: alpha plane")
 
 
+def test_qoi() -> None:
+    """QOI is read by the plugin now, and its colours flag stays informative."""
+    # Three channels: the file states no alpha, so the alpha clip is opaque
+    # whatever the samples are.
+    clip, alpha = read_alpha(files=[fixture("qoi-rgb8.qoi")])
+    color = clip.get_frame(0)
+    frame = alpha.get_frame(0)
+    check(
+        (clip.width, clip.height) == (8, 6),
+        f"qoi: the clip is 8x6 (got {clip.width}x{clip.height})",
+    )
+    check(color.format.name == "RGB24", f"qoi: colour clip is RGB24 (got {color.format.name})")
+    check(frame.format.name == "Gray8", f"qoi: alpha clip is Gray8 (got {frame.format.name})")
+    check(
+        clip.get_frame(0).props.get("ImgSeqOriginalColorType") == "Rgb8",
+        "qoi: a three channel file is labelled Rgb8 "
+        f"(got {clip.get_frame(0).props.get('ImgSeqOriginalColorType')})",
+    )
+    # The ramp: each column pair is one step, so red falls 255, 255, 191, 191
+    # and blue rises 0, 0, 64, 64; green steps by 40 a row, which is why the
+    # second row starts at 40. The first four samples of each plane are
+    # enough to show they are in r,g,b order and not rotated.
+    check(samples(color, 0)[:4] == [255, 255, 191, 191], "qoi: red plane")
+    check(samples(color, 1)[:4] == [0, 0, 0, 0], "qoi: green plane")
+    check(samples(color, 2)[:4] == [0, 0, 64, 64], "qoi: blue plane")
+    check(samples(color, 0)[8:10] == [255, 255], "qoi: and the ramp restarts")
+    check(samples(color, 1)[8:9] == [40], "qoi: one green step down")
+    check(samples(frame) == [255] * 48, "qoi: no alpha stated means an opaque clip")
+
+    # Four channels with alpha that varies, so the alpha clip is a picture.
+    clip, alpha = read_alpha(files=[fixture("qoi-rgba8.qoi")])
+    color = clip.get_frame(0)
+    frame = alpha.get_frame(0)
+    check(
+        clip.get_frame(0).props.get("ImgSeqOriginalColorType") == "Rgba8",
+        "qoi: a four channel file is labelled Rgba8 "
+        f"(got {clip.get_frame(0).props.get('ImgSeqOriginalColorType')})",
+    )
+    check(samples(color, 0)[:4] == [255, 255, 191, 191], "qoi: the same red plane")
+    check(samples(frame)[:4] == [40, 44, 48, 52], "qoi: the alpha plane is the file's")
+
+    # The colours flag is informative. This file sets it and holds the same
+    # picture, so every plane and every property has to match the plain one:
+    # a flag that reached a _Transfer property would show up here.
+    plain, plain_alpha = read_alpha(files=[fixture("qoi-rgb8.qoi")])
+    linear, linear_alpha = read_alpha(files=[fixture("qoi-linear.qoi")])
+    for plane in range(3):
+        check(
+            samples(linear.get_frame(0), plane) == samples(plain.get_frame(0), plane),
+            f"qoi: the colours flag changes no sample, plane {plane}",
+        )
+    check(
+        samples(linear_alpha.get_frame(0)) == samples(plain_alpha.get_frame(0)),
+        "qoi: nor the alpha plane",
+    )
+    check(
+        (linear.get_frame(0).props.get("ImgSeqOriginalColorType")
+         == plain.get_frame(0).props.get("ImgSeqOriginalColorType")),
+        "qoi: nor the source label",
+    )
+    for name in ("_Transfer", "_Primaries", "_Matrix"):
+        check(
+            linear.get_frame(0).props.get(name) == plain.get_frame(0).props.get(name),
+            f"qoi: the colours flag states no {name}",
+        )
+
+
 def test_jpeg2000() -> None:
     """JP2 and bare J2K files use the OpenJPEG path and keep their depth."""
     cases = [
@@ -882,6 +949,7 @@ def test_avif_extents() -> None:
         f"extents: as that one format (got {both.format.name})",
     )
 
+
 def test_avif_grid() -> None:
     """A 2x2 grid avif is joined by libheif, which is who decodes it now.
 
@@ -916,6 +984,7 @@ def test_avif_grid() -> None:
     for x, y, value in ((64, 64, 8), (192, 64, 10), (64, 192, 15), (192, 192, 17)):
         got = luma[y * clip.width + x]
         check(got == value, f"grid: the cell at {x},{y} is {value} (got {got})")
+
 
 def test_alpha_demand() -> None:
     """A colour-only read does not decode an alpha item it never hands out.
@@ -1602,6 +1671,7 @@ def main() -> None:
         test_la16,
         test_rgba16,
         test_dds_and_farbfeld,
+        test_qoi,
         test_jpeg2000,
         test_float,
         test_opaque_fill,

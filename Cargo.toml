@@ -33,7 +33,6 @@ image = { version = "0.25.10", default-features = false, features = [
     "jpeg",
     "png",
     "pnm",
-    "qoi",
     "tga",
     "tiff",
     "webp",
@@ -72,6 +71,9 @@ zune-jpeg = { version = "0.5.15", default-features = false, features = ["std"] }
 # the one this replaces and whose frame iterator decodes every picture to find
 # the timeline; see `src/animation/gif.rs`
 gif = { version = "0.14.2", default-features = false, features = ["std"] }
+# quite ok image is read here rather than by `image`, whose qoi adapter parses
+# the header a second time for every accessor; see `src/formats/qoi.rs`
+qoi = { version = "0.4.1", default-features = false, features = ["std"] }
 
 # native stuff: find libwebp, see build.rs
 [target.'cfg(windows)'.build-dependencies]

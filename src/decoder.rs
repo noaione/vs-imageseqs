@@ -63,6 +63,9 @@ fn format_decoder(info: &ImageInfo, demand: Demand) -> Option<Result<DecodedImag
     if formats::jpeg::owns(&info.path) {
         return Some(formats::jpeg::decode(info));
     }
+    if formats::qoi::owns(&info.path) {
+        return Some(formats::qoi::decode(info));
+    }
     None
 }
 
@@ -427,6 +430,12 @@ fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
     }
     if formats::jp2::owns(path) {
         return formats::jp2::image_info(path, apply_rotation);
+    }
+    // A quite ok image states its size and its channel count in fourteen bytes,
+    // so reading the header here is cheaper than the `image` reader's own
+    // probe; see [`crate::formats::qoi::image_info`].
+    if let Some(info) = formats::qoi::image_info(path, apply_rotation)? {
+        return Ok(info);
     }
     // A png is read here for the same reason a jpeg is, and one thing more:
     // the `cICP` chunk is not something the `image` decoder exposes at all.
