@@ -64,6 +64,10 @@ struct Layout {
     /// Whether the samples are separated inks rather than channels, which a
     /// frame holds as rgb and, when there is a fifth sample, as alpha.
     separated: bool,
+    /// The width of one index, when the samples are indices into a colour table
+    /// rather than colours. The pinned decoder refuses this photometric before it
+    /// will name a colour type, so the reader expands the table itself.
+    palette: Option<u8>,
 }
 
 /// Whether this module reads `path`.
@@ -156,7 +160,164 @@ fn layout(kind: tiff::ColorType) -> Result<Layout> {
         source,
         float: bits == 32,
         separated,
+        palette: None,
     })
+}
+
+/// The layout a directory states, whether or not the crate will name it.
+///
+/// A palette is the one photometric the pinned decoder refuses before it names a
+/// colour type, and its whole chunk reader goes through that name, so it is
+/// recognised from the tag and described here instead.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] for a directory this reader cannot describe.
+fn layout_of<R: std::io::Read + std::io::Seek>(
+    decoder: &mut tiff::decoder::Decoder<R>,
+    path: &Path,
+    action: &str,
+) -> Result<Layout> {
+    // 3 is `RGBPalette`; see `tiff::tags::PhotometricInterpretation`.
+    let palette = decoder
+        .get_tag_unsigned::<u16>(tiff::tags::Tag::PhotometricInterpretation)
+        .is_ok_and(|code| code == 3);
+    if palette {
+        return layout_palette(decoder, path, action);
+    }
+    layout(
+        decoder
+            .colortype()
+            .map_err(|error| image_error(action, path, error))?,
+    )
+    .map_err(|error| image_error(action, path, error))
+}
+
+/// The layout of a palette page, from the two tags that describe it.
+///
+/// `BitsPerSample` is the width of one index and `ColorMap` holds three tables
+/// of `2**bits` sixteen-bit entries, red first, so the table has to be exactly
+/// three times the entry count. A table of another length states an index that
+/// has no colour, which is refused rather than read as though the entries a file
+/// left out were black.
+fn layout_palette<R: std::io::Read + std::io::Seek>(
+    decoder: &mut tiff::decoder::Decoder<R>,
+    path: &Path,
+    action: &str,
+) -> Result<Layout> {
+    let bits = decoder
+        .get_tag_unsigned::<u16>(tiff::tags::Tag::BitsPerSample)
+        .map_err(|error| image_error(action, path, error))?;
+    let bits = u8::try_from(bits).unwrap_or(0);
+    if !palette_supported(bits) {
+        return Err(image_error(
+            action,
+            path,
+            format!("a palette of {bits} bit indices is not a width this reader takes"),
+        ));
+    }
+    let entries = 1usize << bits;
+    let colour_map = decoder
+        .get_tag_u16_vec(tiff::tags::Tag::ColorMap)
+        .map_err(|error| image_error(action, path, error))?;
+    if colour_map.len() != 3 * entries {
+        return Err(image_error(
+            action,
+            path,
+            format!(
+                "a palette of {entries} entries states {} colour values",
+                colour_map.len()
+            ),
+        ));
+    }
+    let depth = palette_depth(bits);
+    // The label is the layout the samples decode to rather than the indices the
+    // file holds, which is what a palette png already reports: the png reader this
+    // tree replaced did not override the type its samples expanded to either.
+    let (color_type, source) = if depth == 8 {
+        (ColorType::Rgb8, SourceColorType::Rgb8)
+    } else {
+        (ColorType::Rgb16, SourceColorType::Rgb16)
+    };
+    Ok(Layout {
+        // One index a pixel, which this reader expands itself.
+        channels: 1,
+        sample_bytes: 1,
+        color_type,
+        source,
+        float: false,
+        separated: false,
+        palette: Some(bits),
+    })
+}
+
+/// The widths of one index this reader takes.
+///
+/// One, two, four and eight are the widths a byte divides into and the widths
+/// libtiff reads a palette at, and every writer to hand produces one of them:
+/// `ImageMagick` writes one bit for two colours, two for four, four for sixteen
+/// and eight for anything larger. Three, five, six and seven are widths a byte
+/// does not divide into and no writer here produces.
+///
+/// Sixteen is a legal width and is refused too. No tool on hand writes one, and
+/// the one written by hand was refused by libtiff, so the byte order of a
+/// sixteen-bit index stream has no reference to be checked against and a wrong
+/// answer there would still look like a picture. The same goes for nine to
+/// fifteen. Widening this is what makes a wider palette readable, and
+/// [`palette_depth`] already names the depth each of those would be handed out
+/// at.
+fn palette_supported(bits: u8) -> bool {
+    matches!(bits, 1 | 2 | 4 | 8)
+}
+
+/// The depth a palette of `bits`-wide indices is handed out at.
+///
+/// The colormap holds sixteen-bit values whatever the width of an index is, so
+/// a frame is written at the narrowest depth that names the entries: eight for
+/// indices of eight bits or fewer, then ten, twelve and sixteen for the widths
+/// between. Only the first is reachable while [`palette_supported`] admits the
+/// widths a byte divides into, which is the point of keeping the answer here:
+/// admitting a width needs no other change.
+fn palette_depth(bits: u8) -> u32 {
+    match bits {
+        0..=8 => 8,
+        9..=10 => 10,
+        11..=12 => 12,
+        _ => 16,
+    }
+}
+
+/// One tag's values as numbers, at whichever width the file wrote them.
+///
+/// A tiff may state an offset or a count as a short or as a long, so the value
+/// is flattened rather than asked for at one width.
+fn tag_numbers<R: std::io::Read + std::io::Seek>(
+    decoder: &mut tiff::decoder::Decoder<R>,
+    tag: tiff::tags::Tag,
+    path: &Path,
+    action: &str,
+) -> Result<Vec<u64>> {
+    let value = decoder
+        .get_tag(tag)
+        .map_err(|error| image_error(action, path, error))?;
+    let mut numbers = Vec::new();
+    flatten(&value, &mut numbers);
+    Ok(numbers)
+}
+
+/// Every number inside one tag value, in the order the file wrote them.
+fn flatten(value: &tiff::decoder::ifd::Value, out: &mut Vec<u64>) {
+    use tiff::decoder::ifd::Value;
+    match value {
+        Value::Byte(number) => out.push(u64::from(*number)),
+        Value::Short(number) => out.push(u64::from(*number)),
+        Value::Unsigned(number) => out.push(u64::from(*number)),
+        Value::UnsignedBig(number) => out.push(*number),
+        Value::List(items) => items.iter().for_each(|item| flatten(item, out)),
+        // A rational or a float in a tag this reads is a directory that does not
+        // describe a raster, and the caller sees the value it did not get.
+        _ => {}
+    }
 }
 
 /// The format a frame is written from.
@@ -164,13 +325,19 @@ fn layout(kind: tiff::ColorType) -> Result<Layout> {
 /// A four channel source is separated into a three channel frame and an alpha
 /// clip, so the alpha's existence does not make the colour frame a wider one.
 fn format(layout: &Layout) -> PixelFormat {
-    match (layout.color_type, layout.sample_bytes) {
+    let base = match (layout.color_type, layout.sample_bytes) {
         (ColorType::L8 | ColorType::La8, _) => PixelFormat::Gray8,
         (ColorType::L16 | ColorType::La16, 4) => PixelFormat::Gray32F,
         (ColorType::L16 | ColorType::La16, _) => PixelFormat::Gray16,
         (ColorType::Rgb8 | ColorType::Rgba8, _) => PixelFormat::Rgb8,
         (ColorType::Rgb16 | ColorType::Rgba16, _) => PixelFormat::Rgb16,
         _ => PixelFormat::Rgb32F,
+    };
+    // A palette's indices are their own width whatever the table holds, so the
+    // depth a frame is written at comes from the table rather than the sample.
+    match layout.palette {
+        Some(bits) => base.at_depth(palette_depth(bits)),
+        None => base,
     }
 }
 
@@ -214,12 +381,7 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Result<Option<ImageInfo>
     let (width, height) = decoder
         .dimensions()
         .map_err(|error| image_error("identify", path, error))?;
-    let layout = layout(
-        decoder
-            .colortype()
-            .map_err(|error| image_error("identify", path, error))?,
-    )
-    .map_err(|error| image_error("identify", path, error))?;
+    let layout = layout_of(&mut decoder, path, "identify")?;
     if width == 0 || height == 0 {
         return Err(ImgSeqError::new("the header states no pixels"));
     }
@@ -289,12 +451,7 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     let (width, height) = decoder
         .dimensions()
         .map_err(|error| image_error("decode", &info.path, error))?;
-    let layout = layout(
-        decoder
-            .colortype()
-            .map_err(|error| image_error("decode", &info.path, error))?,
-    )
-    .map_err(|error| image_error("decode", &info.path, error))?;
+    let layout = layout_of(&mut decoder, &info.path, "decode")?;
     if (width, height) != (info.width, info.height) {
         return Err(ImgSeqError::new(format!(
             "image '{}' changed after probing (was {}x{}, now {}x{})",
@@ -307,27 +464,35 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     }
 
     let read_started = std::time::Instant::now();
-    // Every plane, not the first one: see the note at the head of the file.
-    let mut result = match (layout.sample_bytes, layout.float) {
-        (1, _) => tiff::decoder::DecodingResult::U8(Vec::new()),
-        (2, _) => tiff::decoder::DecodingResult::U16(Vec::new()),
-        _ => tiff::decoder::DecodingResult::F32(Vec::new()),
-    };
-    let preference = decoder
-        .read_image_to_buffer(&mut result)
-        .map_err(|error| image_error("decode", &info.path, error))?;
-    let expected = (width as usize) * (height as usize) * layout.channels;
-    let mut buffer = to_bytes(result, &layout, expected)
-        .map_err(|error| image_error("decode", &info.path, error))?;
-    // The planes arrive one after another, and a frame is interleaved. This is
-    // the step that separates a correct picture from one of the right size.
-    if preference.planes > 1 {
-        let stride = preference
-            .plane_stride
-            .map_or(0, std::num::NonZeroUsize::get);
-        buffer = interleave(&buffer, &layout, stride)
+    let mut buffer = if let Some(bits) = layout.palette {
+        // A palette is read here rather than by the decoder, which refuses the
+        // photometric before it can describe a chunk.
+        palette_buffer(&mut decoder, &data, &info.path, width, height, bits)?
+    } else {
+        // Every plane, not the first one: see the note at the head of the file.
+        let mut result = match (layout.sample_bytes, layout.float) {
+            (1, _) => tiff::decoder::DecodingResult::U8(Vec::new()),
+            (2, _) => tiff::decoder::DecodingResult::U16(Vec::new()),
+            _ => tiff::decoder::DecodingResult::F32(Vec::new()),
+        };
+        let preference = decoder
+            .read_image_to_buffer(&mut result)
             .map_err(|error| image_error("decode", &info.path, error))?;
-    }
+        let expected = (width as usize) * (height as usize) * layout.channels;
+        let mut buffer = to_bytes(result, &layout, expected)
+            .map_err(|error| image_error("decode", &info.path, error))?;
+        // The planes arrive one after another, and a frame is interleaved. This
+        // is the step that separates a correct picture from one of the right
+        // size.
+        if preference.planes > 1 {
+            let stride = preference
+                .plane_stride
+                .map_or(0, std::num::NonZeroUsize::get);
+            buffer = interleave(&buffer, &layout, stride)
+                .map_err(|error| image_error("decode", &info.path, error))?;
+        }
+        buffer
+    };
     // The separated inks are four samples that a frame holds as three channels,
     // or five as three plus the alpha plane. This conversion is the reader's
     // rather than the container's, so it happens once over the whole picture and
@@ -430,6 +595,184 @@ fn interleave(buffer: &[u8], layout: &Layout, stride: usize) -> Result<Vec<u8>> 
     Ok(out)
 }
 
+/// Expands a palette page's indices into the channels a frame holds.
+///
+/// The indices come from the strips here because the decoder refuses this
+/// photometric before it can describe a chunk. A row of them is padded to a byte
+/// boundary, and the colormap's entries are sixteen-bit values, so a frame at
+/// eight bits takes the high byte of each -- which is what libtiff hands out and
+/// what Pillow reads from the same file -- while a frame at a wider depth keeps
+/// the whole value for the frame writer to move down.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the raster cannot be read or the table does not
+/// describe every entry.
+fn palette_buffer<R: std::io::Read + std::io::Seek>(
+    decoder: &mut tiff::decoder::Decoder<R>,
+    data: &[u8],
+    path: &Path,
+    width: u32,
+    height: u32,
+    bits: u8,
+) -> Result<Vec<u8>> {
+    let indices = palette_indices(decoder, data, path, width, height, bits)?;
+    let colour_map = decoder
+        .get_tag_u16_vec(tiff::tags::Tag::ColorMap)
+        .map_err(|error| image_error("decode", path, error))?;
+    let entries = 1usize << bits;
+    if colour_map.len() != 3 * entries {
+        return Err(image_error(
+            "decode",
+            path,
+            "the colour table is not three times the entries the palette states",
+        ));
+    }
+    let depth = palette_depth(bits);
+    let sample_bytes = if depth == 8 { 1 } else { 2 };
+    // An entry is sixteen bits and the frame names the depth it is written at,
+    // so the bits at or above that depth are the ones a frame holds.
+    let shift = 16 - depth;
+    let mut out = Vec::with_capacity(indices.len() * 3 * sample_bytes);
+    for index in &indices {
+        // An index is `bits` wide and the table is three tables of `entries`,
+        // so both reads below are inside it.
+        let index = usize::from(*index);
+        for channel in 0..3 {
+            let value = colour_map[channel * entries + index] >> shift;
+            if sample_bytes == 1 {
+                out.push(u8::try_from(value).expect("eight bits of a sixteen bit entry"));
+            } else {
+                out.extend_from_slice(&value.to_ne_bytes());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// One index a pixel, in row order, from the strips of a palette page.
+///
+/// The raster is read here rather than by the decoder, which refuses this
+/// photometric, so only an uncompressed strip is read: a compression this
+/// reader does not decode is refused rather than read as though it were not
+/// compressed. The strips are walked in the order the directory lists them and
+/// the last one is not required to be full, which is what a file whose height
+/// does not divide by its rows a strip states looks like.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] for a compressed or tiled palette, a strip that runs
+/// past the end of the file, and a raster with fewer rows than the image states.
+fn palette_indices<R: std::io::Read + std::io::Seek>(
+    decoder: &mut tiff::decoder::Decoder<R>,
+    data: &[u8],
+    path: &Path,
+    width: u32,
+    height: u32,
+    bits: u8,
+) -> Result<Vec<u16>> {
+    let compression = decoder
+        .get_tag_unsigned::<u16>(tiff::tags::Tag::Compression)
+        .unwrap_or(1);
+    if compression != 1 {
+        return Err(image_error(
+            "decode",
+            path,
+            format!("a palette compressed with {compression} is not one this reader decodes"),
+        ));
+    }
+    let offsets = tag_numbers(decoder, tiff::tags::Tag::StripOffsets, path, "decode")?;
+    let counts = tag_numbers(decoder, tiff::tags::Tag::StripByteCounts, path, "decode")?;
+    if offsets.is_empty() || offsets.len() != counts.len() {
+        return Err(image_error(
+            "decode",
+            path,
+            "the strip table does not hold one count for every offset",
+        ));
+    }
+    let rows_per_strip = decoder
+        .get_tag_unsigned::<u32>(tiff::tags::Tag::RowsPerStrip)
+        .unwrap_or(height)
+        .max(1) as usize;
+    // A row of indices is padded to a byte boundary, however narrow an index is.
+    let row_bits = (width as usize)
+        .checked_mul(usize::from(bits))
+        .ok_or_else(|| {
+            image_error(
+                "decode",
+                path,
+                "a row of indices is wider than this platform can count",
+            )
+        })?;
+    let row_bytes = row_bits.div_ceil(8);
+    let mut indices = Vec::new();
+    let mut row = 0usize;
+    for (offset, count) in offsets.iter().zip(&counts) {
+        if row >= height as usize {
+            break;
+        }
+        let offset = usize::try_from(*offset).unwrap_or(usize::MAX);
+        let count = usize::try_from(*count).unwrap_or(usize::MAX);
+        let strip = data
+            .get(offset..offset.saturating_add(count))
+            .ok_or_else(|| image_error("decode", path, "a strip runs past the end of the file"))?;
+        let rows = rows_per_strip.min(height as usize - row);
+        let needed = rows.checked_mul(row_bytes).ok_or_else(|| {
+            image_error(
+                "decode",
+                path,
+                "a strip is larger than this platform can count",
+            )
+        })?;
+        if strip.len() < needed {
+            return Err(image_error(
+                "decode",
+                path,
+                "a strip holds fewer rows than the directory says it covers",
+            ));
+        }
+        for inside in 0..rows {
+            let start = inside * row_bytes;
+            unpack_row(
+                &strip[start..start + row_bytes],
+                width as usize,
+                bits,
+                &mut indices,
+            );
+            row += 1;
+        }
+    }
+    if row < height as usize {
+        return Err(image_error(
+            "decode",
+            path,
+            "the strips hold fewer rows than the image states",
+        ));
+    }
+    Ok(indices)
+}
+
+/// Appends one row of packed indices, most significant bit first.
+///
+/// An index narrower than a byte is packed into the bits above the one before
+/// it and the row is padded to a byte boundary, which is the order the
+/// specification gives a one bit fax. The caller sized the row to hold every
+/// index, so the reads below are inside it and a row that was shorter would read
+/// as zero rather than panicking.
+fn unpack_row(row: &[u8], width: usize, bits: u8, out: &mut Vec<u16>) {
+    let bits = u32::from(bits);
+    let mut at = 0usize;
+    for _ in 0..width {
+        let mut value = 0u16;
+        for _ in 0..bits {
+            let byte = row.get(at / 8).copied().unwrap_or(0);
+            let shift = 7 - (at % 8);
+            value = (value << 1) | u16::from((byte >> shift) & 1);
+            at += 1;
+        }
+        out.push(value);
+    }
+}
 /// Writes separated ink samples as the channels a frame holds.
 ///
 /// This is the conversion the reader this tree replaced made, in the same `f32`
@@ -784,6 +1127,7 @@ mod tests {
             source: SourceColorType::Cmyk8,
             float: false,
             separated: true,
+            palette: None,
         };
         assert!(inks_to_channels(&[0; 7], &layout).is_err());
         assert!(
@@ -803,6 +1147,7 @@ mod tests {
             source: SourceColorType::Rgb8,
             float: false,
             separated: false,
+            palette: None,
         };
         // Two pixels, three channels, held as three planes of two samples.
         let planes = [10u8, 11, 20, 21, 30, 31];
@@ -813,14 +1158,83 @@ mod tests {
         assert!(interleave(&planes, &layout, 4).is_err());
     }
 
-    /// A palette page is refused at identify, so the probe cannot promise a
-    /// frame the decode would refuse, and a file that is not a tiff is declined.
+    /// A palette page is expanded through its colour table, and the four widths a
+    /// byte divides into read the same way.
+    ///
+    /// The indices come from the strips here because the crate refuses this
+    /// photometric before it can describe a chunk, so the expansion is this
+    /// reader's own: a row of indices is padded to a byte boundary and an index
+    /// narrower than a byte is packed into the bits above the one before it. The
+    /// expected colours are what libtiff hands Pillow for the same files at the
+    /// same positions, which is what says the bit order and the padding are the
+    /// ones the format means rather than ones that happen to look plausible.
     #[test]
-    fn a_palette_page_is_refused_by_name() {
-        let error =
-            image_info(&fixture("tiff-palette.tiff"), true).expect_err("a palette tiff is refused");
-        assert!(error.to_string().contains("palette"), "{error}");
+    fn a_palette_page_is_expanded_through_its_colour_table() {
+        // (x, y, r, g, b), for each width, read out of the same file by Pillow.
+        for (name, samples) in [
+            (
+                "tiff-palette-1bit.tiff",
+                [(0, 0, 197, 0, 58), (1, 5, 197, 0, 58), (18, 11, 64, 0, 191)],
+            ),
+            (
+                "tiff-palette-2bit.tiff",
+                [
+                    (0, 0, 197, 0, 58),
+                    (1, 5, 197, 0, 58),
+                    (18, 11, 128, 0, 128),
+                ],
+            ),
+            (
+                "tiff-palette.tiff",
+                [
+                    (0, 0, 244, 0, 11),
+                    (1, 5, 209, 0, 46),
+                    (18, 11, 110, 0, 145),
+                ],
+            ),
+            (
+                "tiff-palette-8bit.tiff",
+                [(0, 0, 255, 0, 0), (1, 5, 197, 0, 58), (18, 11, 128, 0, 128)],
+            ),
+        ] {
+            let info = image_info(&fixture(name), true)
+                .unwrap_or_else(|error| panic!("{name}: {error}"))
+                .unwrap_or_else(|| panic!("{name} is taken over"));
+            assert_eq!((info.width, info.height), (37, 23), "{name}");
+            assert_eq!(info.color_type, ColorType::Rgb8, "{name}");
+            // The label is the layout the samples expand to rather than the
+            // indices the file holds, which is what a palette png reports.
+            assert_eq!(info.original_color_type, SourceColorType::Rgb8, "{name}");
+            assert_eq!(info.format, PixelFormat::Rgb8, "{name}");
+            // Every one of these is 37 samples wide and 23 rows tall.
+            let width = 37usize;
+            let buffer = read(name);
+            for (x, y, r, g, b) in samples {
+                let at = (y * width + x) * 3;
+                assert_eq!(&buffer[at..at + 3], [r, g, b], "{name} at ({x}, {y})");
+            }
+        }
+    }
 
+    /// A page whose indices are not a width this reader takes is refused by the
+    /// *probe*, so the probe cannot promise a frame the decode would refuse.
+    ///
+    /// Three bits an index is a legal width and one a byte does not divide
+    /// into. Nothing here writes one and libtiff will not read the sixteen bit
+    /// page that was written by hand to find out, so the widths that are read
+    /// are the ones a reference implementation reads too.
+    #[test]
+    fn a_palette_width_that_is_not_read_is_refused_at_identify() {
+        let error = image_info(&fixture("tiff-palette-3bit.tiff"), true)
+            .expect_err("a three bit palette is refused");
+        assert!(error.to_string().contains("3 bit"), "{error}");
+    }
+
+    /// A file that is not a tiff is declined rather than refused, and a path with
+    /// no file behind it falls back on the extension, which is the hint a format
+    /// with a signature can do without.
+    #[test]
+    fn a_file_that_is_not_a_tiff_is_declined() {
         assert!(!owns(Path::new("a.png")));
         assert!(owns(Path::new("a.tif")));
         assert!(owns(Path::new("a.TIFF")));

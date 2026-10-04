@@ -1891,6 +1891,68 @@ def test_separated_inks() -> None:
         f"cmyka8: the fifth sample is the alpha clip (got {samples(five_alpha.get_frame(0))})",
     )
 
+def test_palette_pages() -> None:
+    """A palette page is expanded through its colour table.
+ 
+    The indices are read from the strips by the plugin rather than by the pinned
+    decoder, which refuses this photometric before it can describe a chunk, so
+    the bit order and the row padding are this tree's own: a row of indices is
+    padded to a byte boundary and an index narrower than a byte sits in the bits
+    above the one before it. Each width is checked against the colours libtiff
+    hands Pillow for the same file at the same positions, at (0, 0), (1, 5) and
+    (18, 11), which is what says the expansion is the one the format means.
+ 
+    A palette reports the layout its samples expand to rather than naming its
+    indices, which is what a palette png already reports here, and the four
+    widths are the ones a byte divides into.
+    """
+    expected = {
+        "tiff-palette-1bit.tiff": [(197, 0, 58), (197, 0, 58), (64, 0, 191)],
+        "tiff-palette-2bit.tiff": [(197, 0, 58), (197, 0, 58), (128, 0, 128)],
+        "tiff-palette.tiff": [(244, 0, 11), (209, 0, 46), (110, 0, 145)],
+        "tiff-palette-8bit.tiff": [(255, 0, 0), (197, 0, 58), (128, 0, 128)],
+    }
+    spots = [(0, 0), (1, 5), (18, 11)]
+    for name, colours in expected.items():
+        clip, alpha = read_alpha(files=[fixture(name)])
+        check(
+            clip.format.name == "RGB24",
+            f"{name}: the colour clip is RGB24 (got {clip.format.name})",
+        )
+        check(
+            (clip.width, clip.height) == (37, 23),
+            f"{name}: the size is the one the header states (got {clip.width}x{clip.height})",
+        )
+        frame = clip.get_frame(0)
+        plains = [samples(frame, plane) for plane in range(3)]
+        for (x, y), colour in zip(spots, colours, strict=True):
+            at = y * 37 + x
+            check(
+                tuple(plane[at] for plane in plains) == colour,
+                f"{name}: ({x}, {y}) is {colour} (got {tuple(plane[at] for plane in plains)})",
+            )
+        label = frame.props["ImgSeqOriginalColorType"]
+        check(
+            label == "Rgb8",
+            f"{name}: the label names the layout the samples expand to (got {label})",
+        )
+        check(
+            samples(alpha.get_frame(0)) == [255] * 37 * 23,
+            f"{name}: a palette has no alpha, so the clip is opaque",
+        )
+ 
+    # A width a byte does not divide into is refused by the probe rather than
+    # promised by it, which is what says the refusal is not only in the decode.
+    try:
+        read_alpha(files=[fixture("tiff-palette-3bit.tiff")])
+        check(False, "palette: three bits an index is refused")
+    except Exception as error:  # noqa: BLE001 - the refusal is the check
+        check(
+            "3 bit" in str(error),
+            f"palette: the refusal names the width (got {error})",
+        )
+
+
 
 def main() -> None:
     for test in (
@@ -1927,6 +1989,7 @@ def main() -> None:
         test_gif_stills,
         test_png_feature_sets,
         test_separated_inks,
+        test_palette_pages,
     ):
         print(f"--- {test.__name__}")
         test()

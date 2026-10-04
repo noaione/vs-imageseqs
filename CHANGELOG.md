@@ -3,6 +3,22 @@
 ## unreleased
 ### changed
 
+- A palette tiff is read here now rather than refused. `tiff-palette.tiff` is
+  the fixture that used to answer `failed to identify` and now hands out its
+  picture, and the widths that were never read at all -- one, two and eight bits
+  an index -- gained fixtures beside it. The indices are read from the strips
+  because the pinned decoder refuses the photometric before it can describe a
+  chunk, so the bit order and the row padding are this tree's own, and the
+  colormap holds sixteen-bit entries whatever the width of an index is: an
+  eight-bit frame takes the high byte of each, which is what libtiff hands out.
+  The samples are byte for byte Pillow's on all four widths, checked at
+  positions across each page rather than at its first row. A palette reports the
+  layout its samples expand to, `Rgb8`, rather than naming its indices, which is
+  what a palette png already reports. Three, five, six, seven and nine to
+  sixteen bits an index are refused: no writer here produces one and libtiff
+  refuses the sixteen-bit page that was written by hand to see whether it could,
+  so those widths have no reader to be checked against, and a wrong bit order
+  there would still look like a picture.
 - A cmyk tiff is read here again, and a cmyk tiff with an alpha channel is read
   for the first time. Removing `image` dropped the first: its tiff reader mapped
   the separated colour type onto rgb and converted it, and no fixture covered
