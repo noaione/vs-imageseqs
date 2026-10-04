@@ -921,7 +921,30 @@ both `ReadAlpha` clips byte-identical to the build before it, the fixture corpus
 unchanged, 266 tests, clippy and fmt clean, the validator at `all checks passed`
 and `frame-parity.py` at 0 of 245.
 
-**Two measured regressions remain open and neither has a fix:**
+**`tga` is 1.13x now, down from 1.34x, and it is the second fix that came from
+the profile.** The stage timing showed `stored_pixels` copying the whole picture
+(0.70 ms) into a buffer that `expand` then copied again (0.65 ms). An
+**uncompressed** targa's bytes are already what `expand` reads, so the first copy
+is one the picture does not need; the decode now hands the file's own slice to
+`expand` whenever nothing has to be moved first. Seven paired repetitions,
+median:
+
+| build | median | all seven |
+| --- | --- | --- |
+| pre-step-5 | **46.0** | 42.5 44.3 44.9 46.0 50.6 52.7 60.4 |
+| before | 57.4 | 52.9 55.1 56.6 57.4 57.5 59.0 61.7 |
+| after | **51.9** | 46.0 47.0 51.3 51.9 52.2 52.2 59.2 |
+
+5.5 ms, about a tenth, which is what 0.70 ms a file over eight files predicts.
+
+**That contrast is the finding worth keeping.** The fusion removed a *loop* and
+paid for it by replacing a memcpy with per-pixel work: no gain, reverted. This
+removed a *copy* and left every loop alone: a tenth, kept. Two passes over a
+picture only cost something when the pass is a whole extra traversal of memory
+that another pass could have done instead -- not when two traversals can be
+fused into one slower one.
+
+**One measured regression remains open and it has no fix:** `dds`.
 
 | format | before | after | state |
 | --- | --- | --- | --- |
