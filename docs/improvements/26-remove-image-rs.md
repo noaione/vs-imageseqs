@@ -1022,6 +1022,23 @@ costs. `dds`'s decode is comparable to `image`'s, so for this one format the cop
 is the whole difference and it shows as a loss. One architecture, five formats,
 and the sign of the result depends on how much the decode itself gained.
 
+**The model to copy is `png.rs`.** It is the only module that already answers with
+a stream (`src/formats/png.rs:650`), and its `Rows` is: hold the path rather than
+the picture, and in `fill` re-open the file, read the header again, check it
+against what the probe saw, then loop `reader.next_row()` handing each row to a
+`Placer` that writes it into the `RowSink`. Its own comment says why: "There is no
+buffer, so the buffer stage is nothing; the read is the decode and the placement
+together, because they are one pass."
+
+For `dds` the same shape is: `struct Rows { path, header }`, `has_alpha()` is
+`matches!(variant, Dxt3 | Dxt5)` (a DXT1 surface has no alpha plane, which is the
+rule this module already keeps), `duplicate()` re-opens, and `fill` walks **block
+rows** -- `across` blocks at a time -- decoding each block straight into the four
+pixel rows of the sink it belongs to. The block loop is already written that way
+in `blocks()`; what changes is where the sixteen pixels go, from a `Vec` to four
+row slices. The 4.3 MB intermediate then does not exist and the traversal that
+this section is about is gone.
+
 The mechanism to remove it is already in this tree and documented for exactly
 this: [`decoder::RowStream`], "a decode that hands each row to the frame it
 belongs in and therefore has no buffer of its own". `png.rs` uses it. A dds
