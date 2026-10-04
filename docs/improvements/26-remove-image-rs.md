@@ -908,6 +908,25 @@ keep the per-row work in that buffer, which is the shape `png.rs` already uses.
 That is the next action, and this corpus and this harness are what will say
 whether it worked.
 
+### the request-order half of the verification
+
+This page asks that baseline and candidate agree "including both `ReadAlpha` clips
+**and different request orders**", and for all of step 5 only the first half had
+been checked. `target/bench/request-order.py` closes it: over the 80 file step-5
+corpus, with `ReadAlpha`, it asks for every frame four ways -- ascending,
+descending, a fixed shuffle, and each frame twice -- hashes both the colour and
+the alpha clip of every one, and requires every hash to be identical. It runs that
+at `prefetch=0` and at the default, because the lookahead window is the part that
+makes a different order a different code path.
+
+All four orders agree on all 80 frames, for both clips, at both prefetch settings,
+on **three builds**: this tree, the pre-step-5 `nohooks` build, and the build the
+whole fixture set was baselined against. So the comparison the page asks for holds
+under both conditions rather than only the one that had been run.
+
+The script lives under `target/` with the rest of the benchmark tooling, so it is
+not committed; this paragraph is the record of it.
+
 ### what step 5 leaves behind
 
 **The migration itself is complete.** All ten formats of the plan are read by
