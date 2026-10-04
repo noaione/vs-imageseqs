@@ -387,6 +387,26 @@ page records the split that worked: every fix came from removing a whole
 traversal of memory, and every failure from rearranging one. `dds` has such a
 traversal to remove and no arithmetic to tune.
 
+then it was answered. **`dds` is settled rather than open**: four attempts were
+built and measured, all reverted -- three row-stream and loop variants (67.1, 62.5
+and 66.1 ms against a buffered 60.7) and one that copied whole lines instead of
+pixels (57.7 against 55.3) -- and `widen`, `from_565`, `colour_block` and
+`alpha_levels` were compared against `image`'s `dxt.rs` and are already the same
+algorithm. The regression is real (15 interleaved pairs, paired ratio median
+1.124, faster in 3 of 15) and it is not in the code that was looked at.
+
+**The streaming idea did pay, on `ppm`.** One netpbm shape now answers
+`Pixels::Stream`: a packed `P6` at `MAXVAL` 255, whose rows are `width * 3` bytes
+of the file and therefore already the layout the frame wants. Fifteen interleaved
+pairs put it at a paired ratio median of **0.789**, faster in 14 of 15 -- 21% off
+-- and 0.921 against the reader it replaced. The technique is `RowSink::place_rgb8`
+in `src/decoder.rs`, lifted out of `png.rs`, and the split it establishes is that
+streaming pays when a decoder's own output order already matches the frame's and
+loses when it must transpose, because then it trades a bulk copy for per-pixel
+work. `tga`'s uncompressed rows and `bmp`'s bottom-up rows are the next candidates
+by that rule; `hdr` transposes for three of its eight orientations and `qoi`
+decodes to a buffer by construction.
+
 **the decoder could write the frame itself**
 
 - **decode straight into the frame's planes.** `JxlOutputBuffer::new_from_ptr`
