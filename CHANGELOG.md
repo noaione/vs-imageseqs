@@ -3,6 +3,12 @@
 ## unreleased
 ### changed
 
+- An AVIF or HEIF whose samples are stored as r,g,b is now read by `libheif`
+  rather than by the `image` decoder, which is one library for every such
+  container instead of two. The frames are byte for byte identical. One
+  property moves: a file that carries no alpha channel now reports
+  `ImgSeqOriginalColorType=rgb8` where the `image` decoder reported `rgba8`,
+  because its avif hook always named four channels whatever the file held.
 - An AVIF whose coded item is written as several extents is read by the plugin
   itself instead of being handed to the `image` decoder. The extents are one
   payload split across the container, and joining them is a concatenation in

@@ -156,26 +156,18 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
     // The samples are yuv when the container states a matrix the frame
     // properties can name. A file that states none, states "unspecified", or
     // states the identity - whose samples are already r,g,b and have no planar
-    // yuv format to be handed out as - keeps the r,g,b the `image` decoder
-    // produces, and is still described here, because the colour it states is
-    // written into the frame's properties either way.
-    //
-    // An item split over several extents used to be described here too, and is
-    // not any more: this reader joins them, so it decodes such a file itself.
-    let yuv = cicp
+    // yuv format to be handed out as - is libheif's, which reads the r,g,b
+    // planes this reader has no decoder for. So is a container this walk
+    // refuses at all. Either way it is described from libheif's own answer
+    // rather than from the `image` decoder's, because the description and the
+    // decode have to name the same library.
+    let Some(format) = cicp
         .filter(|cicp| usable_matrix(cicp.matrix))
-        .and_then(|_| yuv_format(header.chroma, header.depth));
-    let (format, color_type) = match yuv {
-        Some(format) => (format, header.colour_color_type(has_alpha)),
-        // The color type the `image` decoder reports, which is what the frame
-        // request of such a file is checked against, and the depth the `av1C`
-        // box states, which is what its samples are handed out at.
-        None => (
-            PixelFormat::from_color_type(header.decoded_color_type())?
-                .at_depth(header.depth.into()),
-            header.decoded_color_type(),
-        ),
+        .and_then(|_| yuv_format(header.chroma, header.depth))
+    else {
+        return super::heif::describe(path, apply_rotation);
     };
+    let color_type = header.colour_color_type(has_alpha);
     Some(ImageInfo {
         path: path.to_path_buf(),
         width,
@@ -261,8 +253,13 @@ pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
         return crate::decoder::decode_through_image(info);
     }
     // An avif whose samples are already r,g,b has no planar yuv format to be
-    // handed out as, and the probe described it as the r,g,b the `image`
-    // decoder builds; that decoder still reads it.
+    // handed out as, and libheif is who reads those planes. The probe left it
+    // to libheif as well, so this is the same library the description named.
+    if info.format.color_family() == ColorFamily::RGB {
+        return super::heif::decode(info, demand);
+    }
+    // What is left is a monochrome item: the probe described it as the gray the
+    // `image` decoder produces, so that decoder is still the one that reads it.
     if info.format.color_family() != ColorFamily::YUV {
         return crate::decoder::decode_through_image(info);
     }
@@ -2031,6 +2028,11 @@ mod tests {
     /// that predicate stopped being true when the routing moved into [`decode`],
     /// and the hand-off being faithful is the property that actually mattered.
     fn the_routing_agrees_with_the_image_decoder(info: &ImageInfo) -> bool {
+        assert!(
+            matches!(info.format.color_family(), ColorFamily::Gray),
+            "only a monochrome item is still the image decoder's: {:?}",
+            info.format
+        );
         let routed = decode(info, Demand::ALL).expect("the routed decode");
         let direct = crate::decoder::decode_through_image(info).expect("the image decoder's");
         match (routed.pixels, direct.pixels) {
@@ -2601,11 +2603,15 @@ mod tests {
             let path = Path::new("tests/fixtures").join(name);
             let info = image_info(&path, true).expect("the container describes it");
             assert_eq!(info.format, PixelFormat::Rgb8, "{name}");
-            // This module claims the file either way, and hands it to the
-            // `image` decoder, which is the one that can read samples with no
-            // planar format; the hand-off has to be the same bytes.
+            // This module claims the file either way and hands it to libheif,
+            // which reads the r,g,b planes; the hand-off has to produce the
+            // picture. That it is the same picture the `image` decoder read is
+            // `heif`'s own test, which compares the planes of every r,g,b
+            // container the two decoders can both read.
             assert!(handles(&info), "{name}");
-            assert!(the_routing_agrees_with_the_image_decoder(&info), "{name}");
+            let decoded =
+                decode(&info, Demand::ALL).unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(decoded.format, PixelFormat::Rgb8, "{name}");
             // The colour of the container is still stated for a file that keeps
             // the r,g,b path.
             let (primaries, transfer) = if name.starts_with("cicp") {
@@ -3181,15 +3187,26 @@ mod tests {
             let path = Path::new("tests/fixtures").join(name);
             let shown_info = image_info(&path, true).expect("the container describes it");
             assert_eq!(shown_info.orientation, code, "{name}");
-            assert_eq!((shown_info.width, shown_info.height), stored, "{name}");
+            // An r,g,b container is libheif's, and libheif applies the
+            // container's own transform as it decodes: the size it reports is
+            // the shown one and there is nothing left to apply. A yuv or
+            // monochrome walk is this reader's, which hands the stored picture
+            // over and the transform that reaches the shown one beside it.
+            let applies_itself = matches!(shown_info.format.color_family(), ColorFamily::RGB);
+            if applies_itself {
+                assert_eq!((shown_info.width, shown_info.height), shown, "{name}");
+                assert_eq!(shown_info.transform, Transform::IDENTITY, "{name}");
+            } else {
+                assert_eq!((shown_info.width, shown_info.height), stored, "{name}");
+                assert_eq!(
+                    shown_info.transform,
+                    Transform::from_orientation(code),
+                    "{name}"
+                );
+            }
             assert_eq!(
                 (shown_info.output_width(), shown_info.output_height()),
                 shown,
-                "{name}"
-            );
-            assert_eq!(
-                shown_info.transform,
-                Transform::from_orientation(code),
                 "{name}"
             );
 
@@ -3200,7 +3217,15 @@ mod tests {
                 stored,
                 "{name}"
             );
-            assert_eq!(stored_info.transform, Transform::IDENTITY, "{name}");
+            // Rotation off is what undoes a transform, so a file decoded with
+            // one applied is turned back by this and a file this reader walked
+            // is already stored and has nothing to undo.
+            let expected = if applies_itself {
+                Transform::from_orientation(crate::pixel::inverse_orientation(code))
+            } else {
+                Transform::IDENTITY
+            };
+            assert_eq!(stored_info.transform, expected, "{name}");
         }
     }
 

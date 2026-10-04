@@ -57,14 +57,17 @@ const HEIF_EXTENSIONS: [&str; 4] = ["heic", "heics", "heif", "hif"];
 /// through the libheif hook, which is where those files have always been read;
 /// every other file this module describes is read here, from libheif's planes.
 pub fn handles(info: &ImageInfo) -> bool {
-    // A heif is this module's unless its samples are already r,g,b, which have
-    // no planar format to be handed out as and are the `image` decoder's.
+    // A heif is this module's, whatever colourscheme libheif reports. It was
+    // only the non-r,g,b ones while the r,g,b arrangement was the `image`
+    // decoder's; this module reads those planes itself now, so the exclusion
+    // is gone and with it the last heif a hook could take.
     //
     // An avif is not asked about here. This module still *reads* one whose
-    // container the avif walk refuses, but `avif::decode` is what hands it over,
-    // having already walked the container to find that out; asking again from
-    // here was a second walk per frame request for an answer already known.
-    has_heif_extension(&info.path) && info.format.color_family() != ColorFamily::RGB
+    // container the avif walk refuses, or whose samples are r,g,b, but
+    // `avif::decode` is what hands it over, having already walked the
+    // container to find that out; asking again from here was a second walk per
+    // frame request for an answer already known.
+    has_heif_extension(&info.path)
 }
 
 /// What the container of a heif states about its primary image, when this
@@ -489,10 +492,20 @@ pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
         ));
     }
     let decoded = image.planes();
-    pack_plane(info, decoded.y.as_ref(), 0, &mut planes[0])?;
-    if planes.len() > 1 {
-        pack_plane(info, decoded.cb.as_ref(), 1, &mut planes[1])?;
-        pack_plane(info, decoded.cr.as_ref(), 2, &mut planes[2])?;
+    // libheif names the planes of the colorspace it produced, and the two
+    // arrangements are different channels rather than different layouts: a yuv
+    // or monochrome picture fills the luma and chroma channels, and an r,g,b
+    // one fills red, green and blue instead, leaving `y` empty. The frame's
+    // planes are the same three in the same order either way -- the format's
+    // own plane order -- so the colorspace is the only thing that decides
+    // which channel feeds which plane.
+    let channels = if info.format.color_family() == ColorFamily::RGB {
+        [decoded.r.as_ref(), decoded.g.as_ref(), decoded.b.as_ref()]
+    } else {
+        [decoded.y.as_ref(), decoded.cb.as_ref(), decoded.cr.as_ref()]
+    };
+    for (plane, channel) in channels.iter().enumerate().take(planes.len()) {
+        pack_plane(info, *channel, plane, &mut planes[plane])?;
     }
     if let (Some(alpha), Some(target)) = (alpha.as_mut(), &decoded.a) {
         pack_plane(info, Some(target), 3, alpha)?;
@@ -565,11 +578,17 @@ fn pack_plane(
     frame_plane: usize,
     target: &mut [u8],
 ) -> Result<()> {
-    let name = match frame_plane {
-        0 => "luma",
-        1 => "blue chroma",
-        2 => "red chroma",
-        _ => "alpha",
+    // The name follows the format's own plane order, so an error says which
+    // channel of the picture it is about rather than which channel of some
+    // other colourscheme.
+    let name = match (info.format.color_family(), frame_plane) {
+        (_, 3) => "alpha",
+        (ColorFamily::RGB, 0) => "red",
+        (ColorFamily::RGB, 1) => "green",
+        (ColorFamily::RGB, 2) => "blue",
+        (_, 0) => "luma",
+        (_, 1) => "blue chroma",
+        _ => "red chroma",
     };
     let plane = plane.ok_or_else(|| {
         ImgSeqError::new(format!(
@@ -719,12 +738,9 @@ mod tests {
             ColorType::Rgb16
         )));
         assert!(handles(&info("a.heic", PixelFormat::Gray8, ColorType::L8)));
-        // A file the probe leaves to the hook keeps it.
-        assert!(!handles(&info(
-            "a.heic",
-            PixelFormat::Rgb8,
-            ColorType::Rgb8
-        )));
+        // An r,g,b one too: this module reads those planes itself now, which
+        // is what took the last heif away from the hook.
+        assert!(handles(&info("a.heic", PixelFormat::Rgb8, ColorType::Rgb8)));
         assert!(!handles(&info(
             "a.png",
             PixelFormat::Yuv420P8,
@@ -1077,5 +1093,111 @@ mod tests {
             header(ColorSpace::Monochrome, 10, ColorType::L16).format(),
             Some(PixelFormat::Gray10)
         );
+    }
+
+    /// Whether one plane of a frame agrees with the same plane decoded the
+    /// other way, byte for byte.
+    ///
+    /// The two decoders hand the same picture out in different layouts --
+    /// libheif's planes are the frame's own, and the `image` decoder's are
+    /// interleaved where the format is not -- so this compares the samples of
+    /// each plane rather than the buffers.
+    fn plane_of(decoded: &DecodedImage, plane: usize) -> Vec<u8> {
+        match &decoded.pixels {
+            Pixels::Planar { planes, .. } => planes[plane].clone(),
+            // An interleaved buffer carries the channels of its own color
+            // type, which is not always the format's: the `image` decoder
+            // hands an r,g,b picture over as r,g,b,a and the frame is written
+            // from the three channels the format names.
+            Pixels::Interleaved {
+                color_type, buffer, ..
+            } => {
+                let channels = color_type.channels();
+                buffer[plane..].iter().step_by(channels).copied().collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// An r,g,b container is read here now, and it has to be the same picture
+    /// the `image` decoder read from it before.
+    ///
+    /// Every r,g,b fixture is checked, because the arrangement this module had
+    /// to be taught is the one all of them take: libheif fills the red, green
+    /// and blue channels for these and leaves the luma channel empty, which is
+    /// what made this path fail before. The alpha channel is a picture of its
+    /// own and is compared as one.
+    #[test]
+    fn an_rgb_container_is_the_picture_the_image_decoder_reads() {
+        for name in [
+            // The unrotated ones. The one container with a rotation is checked
+            // by the test below, because the two decoders disagree about where
+            // the rotation is applied and that is not a difference in the
+            // picture.
+            "cicp-rgb8.avif",
+            "alpha-rgba8.avif",
+            "animation.avif",
+            "animation.heic",
+        ] {
+            let path = std::path::PathBuf::from("tests/fixtures").join(name);
+            let info = describe(&path, true).unwrap_or_else(|| panic!("{name} is described"));
+            assert!(
+                matches!(info.format.color_family(), ColorFamily::RGB),
+                "{name} is r,g,b: {:?}",
+                info.format
+            );
+            let ours = decode(&info, crate::decoder::Demand::ALL)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            // The `image` decoder labels an r,g,b avif as r,g,b,a even when the
+            // file carries no alpha, because its avif hook always reports four
+            // channels; libheif says `Rgb8`, which is what the file holds. The
+            // comparison spells the colour type that decoder expects so that it
+            // will read the picture at all, and compares the three channels the
+            // format names either way.
+            let mut via_image = info.clone();
+            if crate::pixel::alpha_channel(via_image.color_type).is_none() {
+                via_image.color_type = crate::layout::ColorType::Rgba8;
+            }
+            let theirs = crate::decoder::decode_through_image(&via_image)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(
+                (ours.width, ours.height),
+                (theirs.width, theirs.height),
+                "{name}"
+            );
+            for plane in 0..info.format.plane_count() {
+                assert_eq!(
+                    plane_of(&ours, plane),
+                    plane_of(&theirs, plane),
+                    "{name} plane {plane}"
+                );
+            }
+        }
+    }
+
+    /// An r,g,b container that states a rotation is handed out the way a jpeg
+    /// xl is: the decoder applies the container's own transform as it decodes,
+    /// so the size read here is the rotated one and nothing turns the frame
+    /// again.
+    ///
+    /// This is the one place the two decoders legitimately disagree, and it is
+    /// why the test above leaves this fixture out. Our own avif walk reports
+    /// the *stored* size and a transform derived from `irot`, because `dav1d`
+    /// hands the item over as it is coded; libheif does the opposite. Both
+    /// reach the same frame, by turning it in a different place.
+    #[test]
+    fn a_rotated_rgb_container_arrives_already_turned() {
+        let path = Path::new("tests/fixtures/orientation-avif-rgb-irot-1.avif");
+        let info = describe(path, true).expect("libheif describes it");
+        assert_eq!(info.format, PixelFormat::Rgb8);
+        // `irot` one is a quarter turn, which swaps the sides; libheif has
+        // already done it, so the frame is built at this size.
+        assert_eq!((info.width, info.height), (3, 4));
+        assert_eq!(info.transform, Transform::IDENTITY);
+        // Asking for the stored picture is what undoes it, the same shape
+        // [`crate::formats::jxl`] has for the other decoder that applies a
+        // file's orientation itself.
+        let stored = describe(path, false).expect("libheif describes it");
+        assert_ne!(stored.transform, Transform::IDENTITY);
     }
 }
