@@ -129,28 +129,14 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
         sequence_header_cicp(&payload)
     });
 
+    // A monochrome item holds one plane, and libheif hands that plane over as
+    // the gray the container states. This reader has no monochrome avif path of
+    // its own, so the container is libheif's to describe and to decode, exactly
+    // as an r,g,b one is. The `image` decoder used to be asked for these, which
+    // is where the path had always been; see
+    // `docs/improvements/05-monochrome-heif.md`.
     if header.monochrome {
-        // A monochrome item holds one plane, and the `image` decoder converts it
-        // into the four channels it reports. The probe records the gray format
-        // the samples map to, at the depth the `av1C` box states, and leaves the
-        // decode to `image`, which is where that path has always been; see
-        // `docs/improvements/05-monochrome-heif.md`.
-        return Some(ImageInfo {
-            path: path.to_path_buf(),
-            width,
-            height,
-            color_type: header.decoded_color_type(),
-            original_color_type: header.file_color_type(has_alpha).into(),
-            has_icc_profile: header.has_icc_profile,
-            icc_profile: header.icc_profile.clone(),
-            cicp,
-            // A single plane has no chroma to place.
-            chroma_location: None,
-            orientation,
-            transform,
-            format: PixelFormat::from_color_type(header.file_color_type(has_alpha))?
-                .at_depth(header.depth.into()),
-        });
+        return super::heif::describe(path, apply_rotation);
     }
 
     // The samples are yuv when the container states a matrix the frame
@@ -252,16 +238,13 @@ pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
     if !has_avif_brand(&boxes) {
         return crate::decoder::decode_through_image(info);
     }
-    // An avif whose samples are already r,g,b has no planar yuv format to be
-    // handed out as, and libheif is who reads those planes. The probe left it
-    // to libheif as well, so this is the same library the description named.
-    if info.format.color_family() == ColorFamily::RGB {
-        return super::heif::decode(info, demand);
-    }
-    // What is left is a monochrome item: the probe described it as the gray the
-    // `image` decoder produces, so that decoder is still the one that reads it.
+    // An avif whose samples are not yuv is libheif's: an r,g,b one has no
+    // planar format to be handed out as, and a monochrome one is a single
+    // plane this reader has no avif path for. The probe left both to libheif,
+    // so this is the same library the description named, and the only thing
+    // left on the `image` path is a file that is not an avif at all.
     if info.format.color_family() != ColorFamily::YUV {
-        return crate::decoder::decode_through_image(info);
+        return super::heif::decode(info, demand);
     }
     let header = AvifHeader::read(&meta.primary_properties().ok_or_else(|| {
         image_error(
@@ -822,18 +805,6 @@ impl AvifHeader {
             orientation: orientation_of(properties),
         })
     }
-
-    /// The color type the `image` avif decoder reports for this file, whose
-    /// decoder hands back four channels whatever the bitstream holds. That is
-    /// what a file this module leaves to it is probed as.
-    const fn decoded_color_type(&self) -> ColorType {
-        if self.depth > 8 {
-            ColorType::Rgba16
-        } else {
-            ColorType::Rgba8
-        }
-    }
-
     /// The color type of the samples the file holds: three channels for a colour
     /// image, and a fourth when an alpha item exists. A monochrome image holds
     /// the one sample the container says it does, beside the alpha item when
@@ -2021,29 +1992,6 @@ mod tests {
         assert!(!handles(&info("a.png", PixelFormat::Rgb8, ColorType::Rgb8)));
     }
 
-    /// Decodes the same file the way this module routes it and the way the
-    /// `image` adapter reads it, and answers whether the bytes agree.
-    ///
-    /// This is what the assertions below check instead of the old `!handles`:
-    /// that predicate stopped being true when the routing moved into [`decode`],
-    /// and the hand-off being faithful is the property that actually mattered.
-    fn the_routing_agrees_with_the_image_decoder(info: &ImageInfo) -> bool {
-        assert!(
-            matches!(info.format.color_family(), ColorFamily::Gray),
-            "only a monochrome item is still the image decoder's: {:?}",
-            info.format
-        );
-        let routed = decode(info, Demand::ALL).expect("the routed decode");
-        let direct = crate::decoder::decode_through_image(info).expect("the image decoder's");
-        match (routed.pixels, direct.pixels) {
-            (
-                Pixels::Interleaved { buffer: one, .. },
-                Pixels::Interleaved { buffer: other, .. },
-            ) => one == other,
-            _ => false,
-        }
-    }
-
     #[test]
     fn the_subsampling_of_a_coding_record_maps_onto_a_format() {
         assert_eq!(yuv_format(2, 8), Some(PixelFormat::Yuv420P8));
@@ -2633,17 +2581,24 @@ mod tests {
         let path = Path::new("tests/fixtures/mono-alpha.avif");
         let info = image_info(path, true).expect("the container describes it");
         assert_eq!(info.format, PixelFormat::Gray8);
-        // The item holds one sample per pixel, and the decoder this file is
-        // left to reports four channels for it, which is what the frame request
-        // is checked against.
-        assert_eq!(info.color_type, ColorType::Rgba8);
+        // The item holds one sample per pixel plus an alpha plane, which is
+        // what libheif reports for it: `La8`, not the `Rgba8` the `image`
+        // decoder named. That decoder's avif hook always reported four channels
+        // whatever the file held, so a one plane picture with alpha arrived
+        // spelled as r,g,b,a. This is the property change the migration to
+        // libheif brings, and it is written down in CHANGELOG.md.
+        assert_eq!(info.color_type, ColorType::La8);
         assert_eq!(info.original_color_type, SourceColorType::La8);
-        assert_eq!(alpha_channel(info.color_type), Some(3));
-        // This module claims it and hands it to the `image` decoder, because the
-        // item holds one sample per pixel and that decoder is the one that reads
-        // it; the hand-off has to be the same bytes.
+        assert_eq!(alpha_channel(info.color_type), Some(1));
+        // This module claims it and hands it to libheif, which reads the one
+        // plane and its alpha; the hand-off has to be the same picture.
         assert!(handles(&info));
-        assert!(the_routing_agrees_with_the_image_decoder(&info));
+        let decoded = decode(&info, Demand::ALL).expect("libheif reads it");
+        assert_eq!(decoded.format, PixelFormat::Gray8);
+        let Pixels::Planar { alpha, .. } = &decoded.pixels else {
+            panic!("libheif hands out planes");
+        };
+        assert!(alpha.is_some(), "the alpha plane came too");
         assert_eq!(
             output_format(path, ColorType::Rgba8),
             Some(PixelFormat::Gray8)
@@ -3187,13 +3142,13 @@ mod tests {
             let path = Path::new("tests/fixtures").join(name);
             let shown_info = image_info(&path, true).expect("the container describes it");
             assert_eq!(shown_info.orientation, code, "{name}");
-            // An r,g,b container is libheif's, and libheif applies the
-            // container's own transform as it decodes: the size it reports is
-            // the shown one and there is nothing left to apply. A yuv or
-            // monochrome walk is this reader's, which hands the stored picture
-            // over and the transform that reaches the shown one beside it.
-            let applies_itself = matches!(shown_info.format.color_family(), ColorFamily::RGB);
-            if applies_itself {
+            // Only a yuv container is this reader's, and it hands the stored
+            // picture over with the transform that reaches the shown one beside
+            // it. Everything else -- r,g,b and monochrome alike -- is libheif's,
+            // and libheif applies the container's own transform as it decodes:
+            // the size it reports is the shown one and nothing is left to apply.
+            let decoded_here = matches!(shown_info.format.color_family(), ColorFamily::YUV);
+            if !decoded_here {
                 assert_eq!((shown_info.width, shown_info.height), shown, "{name}");
                 assert_eq!(shown_info.transform, Transform::IDENTITY, "{name}");
             } else {
@@ -3220,7 +3175,7 @@ mod tests {
             // Rotation off is what undoes a transform, so a file decoded with
             // one applied is turned back by this and a file this reader walked
             // is already stored and has nothing to undo.
-            let expected = if applies_itself {
+            let expected = if !decoded_here {
                 Transform::from_orientation(crate::pixel::inverse_orientation(code))
             } else {
                 Transform::IDENTITY
