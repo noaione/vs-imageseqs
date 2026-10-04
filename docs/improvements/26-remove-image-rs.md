@@ -402,7 +402,17 @@ What is left, in plan 27's order, with the fixtures each still needs:
   in a BMP. The other baselines are `Rgb5x1` for the sixteen bit file, `La8` for
   the grayscale-with-alpha one, `L8` for plain grayscale, and `Rgb8` for the
   rest.
-- dds — `alpha-dds.dds` exists.
+- **dds** — fixtures **landed** in c783877, the port still to do. Six new files
+  from [	ests/make-dds-fixtures.py](../../tests/make-dds-fixtures.py) beside the
+  lpha-dds.dds the validator already had: the three variants by four character
+  code, the DX10 spelling of two of them, and one that states a mipmap count and
+  sets the cube map and volume bits. Written here rather than by ImageMagick, for
+  the reason the BMP and TGA fixtures are. The baseline pins the rule in two
+  ways worth keeping: dds-dxt1 and dds-dx10-bc1 share one alpha hash and
+  dds-dxt5, dds-dx10-bc3 and dds-dxt5-ignored share another, so the DX10
+  spelling reaching the same variant as the code, and the ignored bits changing
+  nothing, are measurements rather than assertions. DXT1 and its BC1 equivalent
+  are Rgb8 with no alpha; the other four are Rgba8.
 - pnm — `gray.pgm` and `rgb.ppm` exist.
 - hdr — **no fixtures**.
 - tiff and exr — `alpha-rgba32f.tiff` exists; **no exr**.
