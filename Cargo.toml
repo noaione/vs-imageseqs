@@ -27,7 +27,6 @@ image = { version = "0.25.10", default-features = false, features = [
     "bmp",
     "dds",
     "exr",
-    "ff",
     "gif",
     "ico",
     "jpeg",

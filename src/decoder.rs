@@ -66,6 +66,9 @@ fn format_decoder(info: &ImageInfo, demand: Demand) -> Option<Result<DecodedImag
     if formats::qoi::owns(&info.path) {
         return Some(formats::qoi::decode(info));
     }
+    if formats::farbfeld::owns(&info.path) {
+        return Some(formats::farbfeld::decode(info));
+    }
     None
 }
 
@@ -435,6 +438,12 @@ fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
     // so reading the header here is cheaper than the `image` reader's own
     // probe; see [`crate::formats::qoi::image_info`].
     if let Some(info) = formats::qoi::image_info(path, apply_rotation)? {
+        return Ok(info);
+    }
+    // A farbfeld's header is the same shape and just as cheap: a magic and two
+    // numbers, read here rather than by the `image` reader; see
+    // [`crate::formats::farbfeld::image_info`].
+    if let Some(info) = formats::farbfeld::image_info(path, apply_rotation)? {
         return Ok(info);
     }
     // A png is read here for the same reason a jpeg is, and one thing more:
