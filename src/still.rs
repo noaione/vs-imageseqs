@@ -6,6 +6,30 @@
 //! A caller here never names an `image` type: [`Metadata`] and [`ColorType`] are
 //! the plugin's own, and the crate's enums are translated at this boundary.
 //!
+//! What still reaches it, and what would have to exist before it could go:
+//!
+//! - **gif** — a one frame gif. `probe_segment` asks the animation adapter
+//!   first and `animation::gif` declines anything under two frames, so a still
+//!   gif falls through to here and is read by the crate. The feature is `gif`.
+//!   **This is the one that blocks dropping the crate**: there is no
+//!   `formats/gif.rs`, and no single frame gif fixture either, so writing one
+//!   starts by adding the fixture to verify it against.
+//! - **png** — a png whose rows [`crate::formats::png`] will not walk into the
+//!   frame, which it hands on rather than failing. The feature is `png`.
+//! - **webp** — the probe of every webp, because the header read is the
+//!   crate's, and a renamed animated webp, whose simple libwebp entry points
+//!   refuse a container of frames. The feature is `webp`.
+//! - **avif** — one [`crate::formats::avif`] will not describe from its own
+//!   boxes. The feature is `avif-native`, which is the crate's own av1 reading:
+//!   `dav1d`, the same decoder [`crate::formats::avif`] calls directly, plus
+//!   `mp4parse` for the boxes. It is a second adapter in front of one decoder,
+//!   the way `jpeg` was before that feature went.
+//! - **a file no format names** — [`crate::formats::identify::route`] answers
+//!   `None`, which is the last resort by design.
+//!
+//! `rayon` is the crate's own parallel decoding for the formats above. `jpeg`
+//! is deliberately not one of its features; see `Cargo.toml`.
+//!
 //! The format is chosen here rather than left to the crate, which is how the
 //! old `ImageReader::with_guessed_format` behaved and how it stays: a signature
 //! read from the file's first bytes wins and the extension is the fallback, so
