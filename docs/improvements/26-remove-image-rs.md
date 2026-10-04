@@ -99,9 +99,19 @@ the colour clip, the alpha clip and every property found **nothing** moved for
 any monochrome avif, so no changelog entry was written for it. The r,g,b step
 did move a property, and that one is in `CHANGELOG.md`.
 
-Left: delete the libheif hooks registered against `image` (`decoder.rs:23-24`),
-drop libheif-rs's `integration` feature, and remove the
-`Format::Heif => ImageFormat::Avif` hack in `src/still.rs`.
+- `fdc9b86` removed the last of it: the `libheif_rs::integration::image` hooks
+  that taught `image` to read a heif (and `libheif-rs`'s `image` feature), and
+  the stale `Format::Avif`/`Format::Heif` arms in `src/still.rs`, whose own doc
+  already said `None` was the answer for a container an adapter owns.
+
+Step 3 changed nothing observable, and that is the finding rather than a
+disappointment: the colour clip, the alpha clip and every probe fact are
+byte-identical across all 8 heic fixtures and all 23 avif ones. Every container
+was already being read by the module that owns it, so the hooks were dead
+weight. It is also *provable* that they are gone -- `image` can no longer read
+a `.heic` at all now, which is why the r,g,b equivalence test no longer names
+`animation.heic`. `image` reads an avif itself through `avif-native`, so that
+half of the comparison still works and still passes.
 
 Step 2 is done, in `398cf4e`. The shared representations exist
 (`src/layout.rs`), the identification does too (`src/format.rs`), and every

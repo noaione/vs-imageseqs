@@ -1,37 +1,31 @@
 //! heif and heic decoding through `libheif` itself.
 //!
-//! `decoder` registers `libheif_rs::integration::image`, which reads the
-//! decoded image through `planes.interleaved`. Two things follow from that.
+//! Every heif and avif this plugin reads goes through this module's own use of
+//! libheif's API, from the planes the library hands over. There is no
+//! integration with the `image` crate left to fall back on, and there is nothing
+//! to fall back to: `image` reads an avif itself (`avif-native`) but has no heif
+//! of its own, so `register_heic_decoding_hook` was the only thing that ever let
+//! it read one. That hook is gone.
 //!
-//! A monochrome image decodes into a single `Y` plane, so the integration
-//! rejects it with:
-//!
-//! ```text
-//! Format error decoding `heif`: Image is not interleaved.
-//! ```
-//!
-//! Monochrome pages are common in scanned material, so those files are decoded
-//! here instead. A colour file is stored as yuv, and the integration asks
-//! libheif for `ColorSpace::Rgb`, so every page pays libheif's whole yuv to r,g,b
-//! conversion before the plugin writes it back into three planes. Both kinds are
-//! read here now, from the planes libheif hands over: the colour clip is the
-//! yuv format the container states, the alpha clip is the gray plane of the same
-//! depth, and nothing is converted. See
-//! `docs/improvements/12-heif-avif-yuv-output.md`.
+//! What that buys is the picture as the container states it rather than as a
+//! chosen conversion: the colour clip is the yuv format the file holds, the
+//! alpha clip is the gray plane of the same depth, and an r,g,b container is
+//! handed over one plane per channel. libheif's `planes()` names the channels of
+//! whichever colourscheme it produced -- luma and chroma for a yuv picture, red,
+//! green and blue for an r,g,b one -- so [`decode`] picks the set that matches the
+//! format the probe recorded, and the frame's own plane order is what it writes
+//! them into. See `docs/improvements/12-heif-avif-yuv-output.md`.
 //!
 //! The probe is here for the same reason, and for one more: `libheif` says what
 //! a file holds without decoding it. [`image_info`] reads the size, the color
 //! type, the depth, whether an alpha plane exists and the colour description
-//! from the primary image handle, which is the same handle the monochrome path
-//! already opens, and the frames are then sized from what the container says
-//! rather than from a decode of the whole picture.
+//! from the primary image handle, so the frames are sized from what the container
+//! says rather than from a decode of the whole picture.
 //!
-//! A file this module will not describe keeps the `image` decoder: a container
-//! whose preferred colorspace is r,g,b (an uncompressed or jpeg 2000 item, say),
-//! one libheif reports a custom or non-visual arrangement for, and any file
-//! whose colour statement the frame properties cannot carry. Those files are the
-//! only ones the libheif hook still decodes.
-
+//! A container libheif will not describe is left to whatever else can read it,
+//! and after the hooks were removed that is nothing: [`image_info`] returning
+//! `None` for a heif means the file is refused rather than handed on, which is
+//! the honest answer for a container this tree cannot read.
 use std::{path::Path, sync::Arc, time::Instant};
 
 use crate::layout::{ColorType, Orientation};
