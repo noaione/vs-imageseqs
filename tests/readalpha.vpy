@@ -1405,6 +1405,21 @@ def test_icc_profile_properties() -> None:
     )
     check(samples(enabled) == samples(disabled), "icc: export does not change pixels")
 
+    # The profile can arrive in a webp as well, in an `ICCP` chunk, and no
+    # committed webp fixture held one until these. All three shapes are checked
+    # because the profile is a chunk a bitstream walk has to *find* rather than a
+    # number it can read where it stands, which makes it the part of a webp probe
+    # most likely to be missed. The alpha one is here for its `ALPH` chunk: a
+    # fully opaque alpha channel is dropped by the encoder, so a fixture named for
+    # one can easily be a file without it.
+    for name in ["webp-icc.webp", "webp-icc-lossless.webp", "webp-icc-alpha.webp"]:
+        frame = core.imgseqs.Read(files=[fixture(name)], icc_profile=True).get_frame(0)
+        check(frame.props.get("ImgSeqHasICC") == 1, f"icc: {name} reports its profile")
+        check(
+            frame.props.get("ICCProfile") == expected,
+            f"icc: {name} keeps the exact profile bytes",
+        )
+
     plain = read_alpha(files=[fixture("icc-rgba8.png")])
     result = core.imgseqs.ReadAlpha(
         files=[fixture("icc-rgba8.png")],
