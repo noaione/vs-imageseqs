@@ -3,6 +3,14 @@
 ## unreleased
 ### changed
 
+- The plugin no longer asks `image` for a jpeg decoder. That feature was merely
+  `image`'s own link to `zune-jpeg`, which this tree depends on directly for
+  `src/formats/jpeg.rs`, so the flag put a second adapter in front of the same
+  decoder: a jpeg this reader declines, `image` declined too. `Cargo.lock` loses
+  those two edges from `image` and keeps the package, which the direct reader
+  still uses. No frame, format or property changes. The `jpeg` flag on the
+  `tiff` dependency is a different one and is still needed, for a strip that
+  holds a jpeg.
 - Creating a clip over a long list is faster. Describing 170 files went from a
   median of 78 ms to 40 ms, over seven interleaved pairs. Every format module
   answered "is this mine?" by opening the file, so one file was opened once per

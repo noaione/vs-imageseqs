@@ -36,12 +36,17 @@ image = { version = "0.25.10", default-features = false, features = [
     # formats
     "avif-native",
     "gif",
-    "jpeg",
     "png",
     "webp",
     # other
     "rayon"
 ] }
+# `jpeg` is deliberately not one of the features above. `image`'s own jpeg
+# decoder *is* `zune-jpeg`, which this tree depends on directly for
+# `src/formats/jpeg.rs`, so enabling it here would put a second adapter in
+# front of the same decoder: a jpeg this tree declines, `image` declines too.
+# The `jpeg` in the `tiff` features earlier is a different flag and is needed --
+# a tiff strip can hold a jpeg -- so this is not a claim that jpeg is unused.
 # openexr is read here rather than by `image`, whose adapter decodes into an
 # f32 image of its own and then copies its bytes to the generic buffer; see
 # `src/formats/exr.rs`
