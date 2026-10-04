@@ -473,6 +473,22 @@ What is left, in plan 27's order, with the fixtures each still needs:
     does it in integer arithmetic, will therefore show a partial match: planes
     nought and one wrong, plane two right. That signature points at the rescale
     rather than at the raster reader.
+  - **The rescale saturates, and that is load-bearing.** A bitmap's
+    `maximal_sample()` is `1`, so `factor` is `255.0` and the one bit subtypes
+    go through it too: `PbmBit::from_ascii` writes `0` or `255` for a `0` or `1`
+    digit, and `255.0 * 255.0` is `65025.0`. Rust's float to integer `as` cast
+    **saturates** -- it is not the wrapping truncation a C cast would give --
+    so `65025.0 as u8` is `255` and the file reads correctly. A port that wrote
+    the rounding any other way, or that reused a wrapping conversion, would turn
+    every white pixel of a `P1` into `1`: a nearly black picture that still has
+    the right shape. Measured against the baseline, `pnm-p1.pbm` and
+    `pnm-p4.pbm` hold the same pattern and both decode to exactly `0` and `255`,
+    which is what pins this rather than the arithmetic looking right.
+  - **`P4` unpacks in place and backwards**, one bit a sample, most significant
+    bit first, with each row padded to `width.div_ceil(8)` bytes, and writes
+    `1 - bit` so that a set bit (black in the format) becomes `0`. Working
+    backwards is what lets the packed bytes be expanded into the same buffer
+    without a second allocation.
 - hdr — **no fixtures**.
 - tiff and exr — `alpha-rgba32f.tiff` exists; **no exr**.
 
