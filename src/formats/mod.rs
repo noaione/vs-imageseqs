@@ -38,4 +38,5 @@ pub mod png;
 pub mod pnm;
 pub mod qoi;
 pub mod tga;
+pub mod tiff;
 pub mod webp;

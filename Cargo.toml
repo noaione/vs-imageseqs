@@ -15,6 +15,9 @@ rust-version = "1.94.0"
 crate-type = ["cdylib"]
 
 [dependencies]
+# Its default features are what bring in LZW and Deflate, so it is taken as it
+# ships: default-features = false silently drops three of the fixtures.
+tiff = "0.11.3"
 vapoursynth4-rs = { version = "0.5.1", default-features = false, features = [
     "vs-42", # >=R74
     "vsscript-43" # >=R79
@@ -28,7 +31,6 @@ image = { version = "0.25.10", default-features = false, features = [
     "gif",
     "jpeg",
     "png",
-    "tiff",
     "webp",
     # other
     "rayon"

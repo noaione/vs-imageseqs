@@ -575,7 +575,6 @@ dependencies = [
  "png",
  "ravif",
  "rayon",
- "tiff",
  "zune-core",
  "zune-jpeg",
 ]
@@ -1490,6 +1489,7 @@ dependencies = [
  "pkg-config",
  "png",
  "qoi",
+ "tiff",
  "vapoursynth4-rs",
  "vcpkg",
  "zune-core",
