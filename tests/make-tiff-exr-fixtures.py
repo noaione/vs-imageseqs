@@ -91,6 +91,105 @@ def write_zstd_tiff(path: str, rows: list[bytes]) -> None:
     print(f"  + {os.path.basename(path):28} TIFF {width}x{height} RGB zstd ({len(strip)} bytes in strip)")
 
 
+def write_multipart_exr(path: str) -> None:
+    """Writes a two part openexr whose **first** part holds no colour channel.
+
+    Hand written because nothing on this machine writes a multi part file:
+    ImageMagick writes one part, and the OpenEXR command line tools are not
+    installed. The shape is the one the routing plan names -- part 0 is a depth
+    pass holding only ``Z``, part 1 is the colour picture -- because that is the
+    file where a probe and a decode can settle on different parts.
+
+    The bytes are the format's own: a magic, a version whose multi part bit is
+    set, one header a part, a zero byte that ends the headers, then an offset
+    table a part and the scan line chunks the tables point at. Every part is
+    uncompressed, so a chunk is one scan line of raw floats.
+    """
+    import struct
+
+    FLOAT, UNCOMPRESSED = 2, 0
+    width, height = 2, 2
+    parts = [
+        ("depth", [("Z", FLOAT)], {"Z": [[100.0, 200.0], [300.0, 400.0]]}),
+        (
+            "colour",
+            [("B", FLOAT), ("G", FLOAT), ("R", FLOAT)],
+            {
+                "B": [[0.25, 0.5], [1.75, 2.0]],
+                "G": [[0.75, 1.0], [2.25, 2.5]],
+                "R": [[1.25, 1.5], [2.75, 3.0]],
+            },
+        ),
+    ]
+
+    def attribute(name: str, kind: str, payload: bytes) -> bytes:
+        return name.encode() + b"\x00" + kind.encode() + b"\x00" + struct.pack("<i", len(payload)) + payload
+
+    def part_header(name: str, channels: list) -> bytes:
+        # A channel list entry is a name, a sample type, a linearity flag and a
+        # sampling rate, and the list ends with a single zero byte.
+        listing = bytearray()
+        for channel, sample_type in channels:
+            listing += channel.encode() + b"\x00"
+            listing += struct.pack("<i", sample_type) + b"\x00" + b"\x00\x00\x00"
+            listing += struct.pack("<ii", 1, 1)
+        listing += b"\x00"
+        window = struct.pack("<iiii", 0, 0, width - 1, height - 1)
+        attributes = [
+            ("channels", "chlist", bytes(listing)),
+            # A multi part file has to state its chunk count; see the note on
+            # `OffsetTable` in the crate.
+            ("chunkCount", "int", struct.pack("<i", height)),
+            ("compression", "compression", struct.pack("<B", UNCOMPRESSED)),
+            ("dataWindow", "box2i", window),
+            ("displayWindow", "box2i", window),
+            ("lineOrder", "lineOrder", struct.pack("<B", 0)),
+            # A text attribute is the bytes of the string and nothing else: the
+            # crate reads exactly the size it was given and compares it to the
+            # literal, so a null terminator here is a different value.
+            ("name", "string", name.encode()),
+            ("pixelAspectRatio", "float", struct.pack("<f", 1.0)),
+            ("screenWindowCenter", "v2f", struct.pack("<ff", 0.0, 0.0)),
+            ("screenWindowWidth", "float", struct.pack("<f", 1.0)),
+            ("type", "string", b"scanlineimage"),
+        ]
+        attributes.sort(key=lambda entry: entry[0])
+        out = bytearray()
+        for attribute_name, kind, payload in attributes:
+            out += attribute(attribute_name, kind, payload)
+        return bytes(out) + b"\x00"
+
+    # Version 2 with bit 12 set, which is what makes a file multi part.
+    out = bytearray(b"\x76\x2f\x31\x01" + struct.pack("<I", 2 | 0x1000))
+    for name, channels, _ in parts:
+        out += part_header(name, channels)
+    out += b"\x00"
+
+    # The offset tables follow the headers and the chunks follow the tables, so
+    # an offset is only known once both are laid out.
+    chunks_at = len(out) + len(parts) * height * 8
+    offsets: list[list[int]] = []
+    chunks = bytearray()
+    for number, (_name, channels, rows) in enumerate(parts):
+        part_offsets = []
+        for y in range(height):
+            payload = bytearray()
+            for channel, _sample_type in channels:
+                payload += struct.pack(f"<{width}f", *rows[channel][y])
+            part_offsets.append(chunks_at + len(chunks))
+            chunks += struct.pack("<iii", number, y, len(payload)) + bytes(payload)
+        offsets.append(part_offsets)
+
+    for part_offsets in offsets:
+        for offset in part_offsets:
+            out += struct.pack("<Q", offset)
+    out += chunks
+
+    with open(path, "wb") as handle:
+        handle.write(out)
+    print(f"  + {os.path.basename(path):28} EXR {width}x{height} 2 parts (Z, then BGR)")
+
+
 def source(name: str, depth: int = 8) -> str:
     """Writes the picture every fixture holds, as a png the encoders read."""
     path = os.path.join(FIXTURES, name)
@@ -213,6 +312,13 @@ def main() -> int:
         path = os.path.join(FIXTURES, name)
         magick(colour, "-type", "TrueColor", "-compress", compression, path)
         report(name, path)
+
+    # ---- Two parts, the first of which holds no colour channel at all. A probe
+    # that reads the header and a decode that asks the crate for a layer can
+    # settle on different parts, and this is the file where that shows.
+    path = os.path.join(FIXTURES, "exr-multipart-z-rgb.exr")
+    write_multipart_exr(path)
+    report("exr-multipart-z-rgb.exr", path)
 
     for leftover in ["_src-gray.png", "_src-gray16.png", "_src-rgb.png", "_src-rgb16.png", "_src-rgba.png"]:
         target = os.path.join(FIXTURES, leftover)

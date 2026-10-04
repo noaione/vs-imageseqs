@@ -29,7 +29,7 @@ use std::{io::Read, path::Path};
 
 use exr::{
     meta::MetaData,
-    prelude::{FlatSamples, read_first_flat_layer_from_file},
+    prelude::{ReadChannels, ReadLayers, ReadSpecificChannel, Vec2, read},
 };
 
 use crate::{
@@ -188,33 +188,6 @@ fn header(path: &Path) -> Result<Option<Header>> {
     }))
 }
 
-/// Writes one channel into its slot of an interleaved frame buffer.
-///
-/// A channel's samples are stored plane by plane, so this is the step that
-/// separates a correct picture from a transposed or a shuffled one. A channel
-/// whose samples do not cover the layer is refused rather than read past its
-/// own end: a release build aborts on a panic, and a file that states a
-/// sampling other than one sample a pixel is a shape this reader does not take.
-fn interleave(
-    samples: &FlatSamples,
-    slot: usize,
-    channels: usize,
-    pixels: usize,
-    buffer: &mut [u8],
-) -> Result<()> {
-    if samples.len() != pixels {
-        return Err(ImgSeqError::new(format!(
-            "a channel holds {} samples where the layer states {pixels} pixels",
-            samples.len()
-        )));
-    }
-    for (index, value) in samples.values_as_f32().enumerate() {
-        let at = (index * channels + slot) * size_of::<f32>();
-        buffer[at..at + size_of::<f32>()].copy_from_slice(&value.to_ne_bytes());
-    }
-    Ok(())
-}
-
 /// What a picture states, when this module reads the file.
 ///
 /// # Errors
@@ -248,81 +221,110 @@ pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo
 
 /// Decodes a picture into one interleaved buffer of native-endian floats.
 ///
-/// The two halves of the file's work -- opening it and reading its samples --
-/// are one call into the crate, so the open time is where all of it lands and
-/// what is left to measure separately is the laying out of the picture.
+/// The layer read is the one the probe chose: the first that holds `R`, `G` and
+/// `B`. The crate's own `first_valid_layer` answers a different question -- "the
+/// first layer I can read at all" -- and a file whose first part is a depth pass
+/// has a first layer with no colour channel in it, so a probe that asked for a
+/// colour layer and a decode that asked for any layer read different parts of
+/// the same file. The requirement is stated here in the same terms the probe
+/// uses, so the two cannot disagree about which part holds the picture.
+///
+/// The channels are then asked for by name rather than by position, so a file
+/// that stores them in another order still reads as the picture it holds, and
+/// each sample is written straight into the buffer the frame is built from
+/// rather than into a plane a second pass has to interleave.
 ///
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file cannot be read or is malformed.
 pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
+    let alpha = info.color_type.has_alpha();
+    let slots = if alpha { 4 } else { 3 };
+    let stride = usize::try_from(info.width)
+        .map_err(|_| ImgSeqError::new("the layer states a width a frame cannot hold"))?;
+    let bytes = usize::try_from(info.width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(info.height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(slots))
+        .and_then(|samples| samples.checked_mul(size_of::<f32>()))
+        .ok_or_else(|| ImgSeqError::new("the layer is too large for a frame"))?;
+
     let open_started = std::time::Instant::now();
-    let image = read_first_flat_layer_from_file(&info.path)
+    let image = read()
+        .no_deep_data()
+        .largest_resolution_level()
+        .specific_channels()
+        // The three the probe insists on, which is what makes this skip a
+        // layer the probe skipped: `flat_rgb` states the same predicate, and
+        // the two part fixture is what fails if the two ever drift apart.
+        .required::<f32>("R")
+        .required::<f32>("G")
+        .required::<f32>("B")
+        // Alpha is asked for either way so that one read answers a call that
+        // wants it and one that does not: a file without an `A` leaves the
+        // default in the fourth slot, which the stride below never writes.
+        .optional::<f32>("A", 1.0)
+        .collect_pixels(
+            // The buffer the frame is written from, in the layout the call
+            // asked for. This closure cannot report an error, so a layer too
+            // large to lay out is refused by the size check below rather than
+            // aborting a release build here.
+            move |_: Vec2<usize>, _: &_| vec![0u8; bytes],
+            move |buffer: &mut Vec<u8>, at: Vec2<usize>, (r, g, b, a): (f32, f32, f32, f32)| {
+                // A position that does not fit is skipped rather than indexed,
+                // because the same size check is what refuses the file.
+                let Some(start) = at
+                    .y()
+                    .checked_mul(stride)
+                    .and_then(|row| row.checked_add(at.x()))
+                    .and_then(|pixel| pixel.checked_mul(slots))
+                else {
+                    return;
+                };
+                for (slot, value) in [r, g, b, a].into_iter().take(slots).enumerate() {
+                    let from = (start + slot) * size_of::<f32>();
+                    if let Some(target) = buffer.get_mut(from..from + size_of::<f32>()) {
+                        target.copy_from_slice(&value.to_ne_bytes());
+                    }
+                }
+            },
+        )
+        .first_valid_layer()
+        .all_attributes()
+        .from_file(&info.path)
         .map_err(|error| image_error("decode", &info.path, error))?;
     let open = open_started.elapsed();
 
-    let layer = &image.layer_data;
+    let layer = image.layer_data;
     let (width, height) = frame_size(layer.size.width(), layer.size.height())
         .map_err(|error| image_error("decode", &info.path, error))?;
     if (width, height) != (info.width, info.height) {
         return Err(ImgSeqError::new(format!(
-            "image '{}' changed after probing (was {}x{}, now {}x{})",
+            "image '{}' changed after probing (was {}x{}, now {width}x{height})",
             info.path.display(),
             info.width,
             info.height,
-            width,
-            height,
         )));
     }
-
-    // The channels are found by name, so a file that stores them in another
-    // order reads the same picture as one that does not.
-    let find = |name: &[u8]| {
-        layer
-            .channel_data
-            .list
-            .iter()
-            .find(|channel| channel.name.bytes() == name)
-    };
-    let alpha = find(ALPHA_CHANNEL).is_some();
-    if alpha != info.color_type.has_alpha() {
+    if layer.channel_data.channels.3.is_some() != alpha {
         return Err(ImgSeqError::new(format!(
             "image '{}' changed after probing: its alpha channel is {}",
             info.path.display(),
-            if alpha { "there" } else { "gone" },
+            if alpha { "gone" } else { "there" },
         )));
     }
 
-    let pixels = layer
-        .size
-        .width()
-        .checked_mul(layer.size.height())
-        .ok_or_else(|| ImgSeqError::new("the layer states more pixels than a frame holds"))?;
-    let channels = if alpha { 4 } else { 3 };
-    let bytes = pixels
-        .checked_mul(channels)
-        .and_then(|count| count.checked_mul(size_of::<f32>()))
-        .ok_or_else(|| ImgSeqError::new("the layer is too large for a frame"))?;
-
-    let read_started = std::time::Instant::now();
-    let mut buffer = vec![0u8; bytes];
-    for (slot, name) in COLOR_CHANNELS.iter().enumerate() {
-        let channel = find(name).ok_or_else(|| {
-            ImgSeqError::new(format!(
-                "the file states no {:?} channel",
-                String::from_utf8_lossy(name)
-            ))
-        })?;
-        interleave(&channel.sample_data, slot, channels, pixels, &mut buffer)
-            .map_err(|error| image_error("decode", &info.path, error))?;
+    let buffer = layer.channel_data.pixels;
+    if buffer.len() != bytes {
+        return Err(ImgSeqError::new(format!(
+            "the layer lays out {} bytes where the frame holds {bytes}",
+            buffer.len(),
+        )));
     }
-    if alpha {
-        let channel =
-            find(ALPHA_CHANNEL).ok_or_else(|| ImgSeqError::new("the file states no A channel"))?;
-        interleave(&channel.sample_data, 3, channels, pixels, &mut buffer)
-            .map_err(|error| image_error("decode", &info.path, error))?;
-    }
-    let read = read_started.elapsed();
 
     Ok(DecodedImage {
         width,
@@ -341,11 +343,12 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
             open,
             metadata: std::time::Duration::ZERO,
             buffer: std::time::Duration::ZERO,
-            read,
+            // Laying the picture out is the crate's own walk over the layer,
+            // so it lands in `open` with the rest of the read.
+            read: std::time::Duration::ZERO,
         },
     })
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,6 +422,36 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// A file whose first part holds no colour channel at all.
+    ///
+    /// The probe picks the first part that has `R`, `G` and `B`, which here is
+    /// the second one, and the decode has to read **that** part rather than the
+    /// first one the crate happens to accept. A decode that answers a different
+    /// question than the probe did promises a frame it cannot produce.
+    #[test]
+    fn the_part_the_probe_chose_is_the_part_that_is_decoded() {
+        let (info, decoded, buffer) = read("exr-multipart-z-rgb.exr");
+        assert_eq!((info.width, info.height), (2, 2));
+        assert_eq!(info.color_type, ColorType::Rgb32F);
+        assert_eq!(info.format, PixelFormat::Rgb32F);
+        assert_eq!(decoded, ColorType::Rgb32F);
+
+        // The colour part holds `B`, `G` and `R` plane by plane, and the frame
+        // is r,g,b. A decode that read the depth part would either refuse the
+        // file -- there is no `R` in it -- or hand back the `Z` samples.
+        let expected: [f32; 12] = [
+            1.25, 0.75, 0.25, 1.5, 1.0, 0.5, //
+            2.75, 2.25, 1.75, 3.0, 2.5, 2.0,
+        ];
+        let got: Vec<f32> = buffer
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| f32::from_ne_bytes(*bytes))
+            .collect();
+        assert_eq!(got, expected);
     }
 
     /// The five compressions the fixtures cover, which are the whole of what a

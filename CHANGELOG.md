@@ -3,6 +3,16 @@
 ## unreleased
 ### changed
 
+- An OpenEXR whose first part holds no colour channel now decodes. The probe and
+  the decode were asking different questions: the probe took the first part that
+  states `R`, `G` and `B`, and the decode took the first part it could read at
+  all -- which in a file whose first part is a depth pass is a layer with no
+  colour in it -- so a file the probe accepted failed at the frame request with
+  "the file states no `\"R\"` channel". Both now select by the same rule. Every
+  other OpenEXR is byte for byte identical, and the two changes that come with
+  it are small: the channels are written straight into the frame instead of
+  into a plane a second pass interleaves, so the `debug` log's timings count
+  that work with the open rather than separately.
 - A TIFF that states an orientation and carries an embedded ICC profile now
   reports both. The adapter had been building its description with the two
   hardcoded away, so a file that states orientation 6 -- a quarter turn clockwise
