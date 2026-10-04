@@ -25,7 +25,11 @@
 //! the bitmap reader uses: five bits of `3` become `25`, where a shift and or
 //! gives `24`. See [`crate::formats::bmp::expand`].
 
-use std::path::Path;
+use std::{
+    fs::File,
+    io::{BufReader, Read, Seek, SeekFrom},
+    path::Path,
+};
 
 use crate::{
     decoder::{
@@ -500,9 +504,83 @@ pub fn image_info(
 /// sixteen bit word, a bottom-up image, an encoded one -- keeps the buffered
 /// path, which is the rule that a stream is only answered with when it can fill
 /// every frame of a call.
+
+/// A window the header of a targa is read through.
+///
+/// The header is fixed at eighteen bytes plus the image id the file states, so
+/// this is far past any real one; a file whose header is larger is refused by the
+/// parse rather than read further.
+const HEAD_WINDOW: usize = 64 * 1024;
+
+/// Opens `path` and reads its header, leaving the reader at the raster.
+///
+/// Answers `None` for every shape the stream does not cover, so the caller falls
+/// back to [`decode`].
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the file cannot be read or its header cannot be
+/// parsed.
+fn prepare(path: &Path) -> Result<Option<(Header, BufReader<File>)>> {
+    let mut reader = BufReader::new(File::open(path).map_err(|e| image_error("open", path, e))?);
+    let mut window = vec![0u8; HEAD_WINDOW];
+    let read = reader
+        .read(&mut window)
+        .map_err(|e| image_error("open", path, e))?;
+    window.truncate(read);
+    let header = header(&window).map_err(|e| image_error("decode", path, e))?;
+    if header.encoded
+        || header.color_map.is_some()
+        || header.raw_bytes_per_pixel != 3
+        || header.color_type != ColorType::Rgb8
+        || header.descriptor & TOP_TO_BOTTOM == 0
+        || header.descriptor & RIGHT_TO_LEFT != 0
+    {
+        return Ok(None);
+    }
+    reader
+        .seek(SeekFrom::Start(
+            u64::try_from(header.data_offset).unwrap_or(0),
+        ))
+        .map_err(|e| image_error("open", path, e))?;
+    Ok(Some((header, reader)))
+}
 #[derive(Debug)]
 pub struct Rows {
     path: std::path::PathBuf,
+    /// What the header states, kept so a read does not parse it again.
+    header: Option<Header>,
+    /// The reader the preparation opened, positioned at the first byte of the
+    /// raster. `None` is a stream that came from [`RowStream::duplicate`], which
+    /// prepares itself on its way into a fill: duplicating cannot report the
+    /// failure that opening and parsing can.
+    raster: Option<BufReader<File>>,
+}
+
+impl Rows {
+    /// The header and the reader positioned at the raster, prepared here when
+    /// this stream is a duplicate that has not read anything yet.
+    fn raster(&mut self) -> Result<(&Header, &mut BufReader<File>)> {
+        if self.raster.is_none() {
+            let Some((header, reader)) = prepare(&self.path)? else {
+                return Err(ImgSeqError::new(format!(
+                    "'{}' is no longer a targa this reader walks a row at a time",
+                    self.path.display()
+                )));
+            };
+            self.header = Some(header);
+            self.raster = Some(reader);
+        }
+        let header = self
+            .header
+            .as_ref()
+            .ok_or_else(|| ImgSeqError::new("the raster header is missing"))?;
+        let reader = self
+            .raster
+            .as_mut()
+            .ok_or_else(|| ImgSeqError::new("the raster reader is missing"))?;
+        Ok((header, reader))
+    }
 }
 
 impl RowStream for Rows {
@@ -511,33 +589,34 @@ impl RowStream for Rows {
     }
 
     fn fill(&mut self, mut sink: RowSink<'_>) -> Result<DecodeTimings> {
-        let open_started = std::time::Instant::now();
-        let data = std::fs::read(&self.path).map_err(|e| image_error("open", &self.path, e))?;
-        let open = open_started.elapsed();
-        let header = header(&data).map_err(|e| image_error("decode", &self.path, e))?;
-
         let read_started = std::time::Instant::now();
+        let (header, reader) = self.raster()?;
         let row_bytes = header.width as usize * 3;
-        for row in 0..header.height as usize {
-            let at = header.data_offset + row * row_bytes;
-            let line = data
-                .get(at..at + row_bytes)
-                .ok_or_else(|| ImgSeqError::new(format!("the targa ends in row {row}")))?;
-            sink.place_bgr8(line, row)
+        let height = header.height as usize;
+        let mut line = vec![0u8; row_bytes];
+        for row in 0..height {
+            reader
+                .read_exact(&mut line)
+                .map_err(|_| ImgSeqError::new(format!("the targa ends in row {row}")))?;
+            sink.place_bgr8(&line, row)
                 .ok_or_else(|| ImgSeqError::new("the frame holds no three colour planes"))?;
         }
-        let read = read_started.elapsed();
+        // A stream is read once. Letting the reader go here means a second fill
+        // starts from the raster again rather than from where this one stopped.
+        self.raster = None;
         Ok(DecodeTimings {
-            open,
+            open: std::time::Duration::ZERO,
             metadata: std::time::Duration::ZERO,
             buffer: std::time::Duration::ZERO,
-            read,
+            read: read_started.elapsed(),
         })
     }
 
     fn duplicate(&self) -> Box<dyn RowStream> {
         Box::new(Self {
             path: self.path.clone(),
+            header: None,
+            raster: None,
         })
     }
 }
@@ -551,17 +630,9 @@ impl RowStream for Rows {
 ///
 /// Returns [`ImgSeqError`] when the header cannot be read back.
 pub fn stream(info: &ImageInfo) -> Result<Option<DecodedImage>> {
-    let data = image_head(&info.path).map_err(|e| image_error("open", &info.path, e))?;
-    let header = header(&data).map_err(|e| image_error("decode", &info.path, e))?;
-    if header.encoded
-        || header.color_map.is_some()
-        || header.raw_bytes_per_pixel != 3
-        || header.color_type != ColorType::Rgb8
-        || header.descriptor & TOP_TO_BOTTOM == 0
-        || header.descriptor & RIGHT_TO_LEFT != 0
-    {
+    let Some((header, raster)) = prepare(&info.path)? else {
         return Ok(None);
-    }
+    };
     Ok(Some(DecodedImage {
         width: info.width,
         height: info.height,
@@ -569,6 +640,8 @@ pub fn stream(info: &ImageInfo) -> Result<Option<DecodedImage>> {
         transform: info.transform,
         pixels: Pixels::Stream(Box::new(Rows {
             path: info.path.clone(),
+            header: Some(header),
+            raster: Some(raster),
         })),
         timings: DecodeTimings {
             open: std::time::Duration::ZERO,

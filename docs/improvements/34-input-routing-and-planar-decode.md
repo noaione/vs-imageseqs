@@ -27,7 +27,7 @@ This documentation update implements no decoder changes.
 | --- | --- | --- |
 | 1. Consistent routing, saved plan and sample/subimage invariants | **Content-routing slice landed, and the route is saved and threaded.** `2b02f64` routes stills by content, `c206944` does the same for animation, and the saved-route slices record what the router named on `ImageInfo` and pass it to every module's probe entry, so a file is identified with one read. EXR selection, PAM word width and TIFF metadata/sample handling have also received fixes. | The saved route names the container and nothing more: the backend and the selected subimage are still decided inside each adapter, and the broader error/sample invariants need separate completion checks. |
 | 2. Combine metadata passes | **Partly landed: the front of the file answers, and a timeline is not rendered to describe it.** PNG, GIF and WebP no longer require image-rs for metadata or fallback pixels; a webp's or jpeg xl's animation adapter answers from the file header, a jpeg 2000 probe reads a window over the front that grows only while the header is incomplete, an avif or heif sequence walk seeks over media data rather than reading it, and an animated png's delays come from its own `fcTL` chunks instead of a rendered frame each. | One shared probe reader is not implemented. |
-| 3. Retain initialized readers and preserve planes | **Partly complete.** Eligible PNG, binary RGB8 PNM/PAM, TGA and BMP have row sinks. TIFF now also has a native YCbCr plane path (`8cf7b06`). | PNM/TGA/BMP row sinks still read the whole file during filling after a separate preparation read. PNG initializes a reader again in `fill`. True farbfeld/PNM row reads, direct separate-planar RGB TIFF, direct EXR planes and shared initialized decode state remain open. |
+| 3. Retain initialized readers and preserve planes | **Partly complete, and the netpbm row sink now streams.** Eligible PNG, binary RGB8 PNM/PAM, TGA and BMP have row sinks; TIFF has a native YCbCr plane path (`8cf7b06`); and the netpbm sink keeps the reader its preparation opened and reads one row at a time instead of buffering the file. | TGA and BMP row sinks still read the whole file during filling after a separate preparation read. PNG initializes a reader again in `fill`. True farbfeld/PNM row reads, direct separate-planar RGB TIFF, direct EXR planes and shared initialized decode state remain open. |
 | 4. Timing and selected subtype repairs | **Partly complete, and the two timing repairs have landed.** BigTIFF/RGBE recognition, PAM MAXVAL interpretation, TIFF orientation/ICC and EXR flat-RGB part selection have landed; an APNG's timeline is placed on the lowest common denominator of the fractions it states rather than on rounded milliseconds; and an animation segment contributes the output sample instants before its end rather than the whole output ticks it covers. Palette and CMYK(A)/YCbCr TIFF coverage has since expanded too. | Core BMP, odd DDS edge blocks and variable-length headers still have the inspected restrictions. Other coverage candidates require individual decisions and evidence. |
 | 5. Remove image-rs | **Landed.** `d431764` removes `image`, `8682c2f` removes leftover layout helpers, and `src/still.rs` is deleted. Cargo.toml and Cargo.lock contain no `image` dependency. | This does not finish phases 1–4. Ported code's notices remain applicable; codec dependencies such as libwebp are independent of image-rs. |
 
@@ -160,6 +160,18 @@ still png corpus is the control -- 35 files of 65.8 MiB, none of them holding an
 5.60 ms, with 13 of 28 samples favouring the new build
 (`target/bench/clip-png-apng-check.txt`). The apng corpus is synthetic and
 `target/bench/make-apng-corpus.py` writes it.
+
+The first phase-3 slice is the netpbm row sink, which buffered the whole file
+before copying rows out of it. A 3000x3000 `P6` of 25.7 MiB now holds 48 MiB while
+it decodes instead of 74 MiB -- the file buffer, exactly -- and decodes in 23.0 ms
+by median against 26.1 ms, with overlapping tails. The still png is the control,
+unchanged at 100.5 ms and 48.3 MiB. Seven fresh processes a side
+(`target/bench/decode-pnm-stream.txt`); the corpus is `target/bench/big/`.
+
+Coverage note: neither the validator nor the routing check reads a netpbm, so the
+pixel side of this slice rests on a unit test that the prepared rows are the
+raster byte for byte, and on the row write being the call it already was. A `P6`
+case in the validator would close that gap.
 
 Artifacts: `target/bench/route-time.py`, `target/bench/accepted.py`,
 `target/bench/route-pair-fixtures.txt`, `target/bench/route-pair-common.txt`,

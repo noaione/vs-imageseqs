@@ -29,7 +29,11 @@
 //! Sixteen bit samples are stored big-endian and converted to the word a frame
 //! is written from, which is why the rescale below reads them natively.
 
-use std::path::Path;
+use std::{
+    fs::File,
+    io::{BufReader, Read, Seek, SeekFrom},
+    path::Path,
+};
 
 use crate::{
     decoder::{
@@ -644,18 +648,85 @@ fn raster(header: &Header, data: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// A packed eight bit RGB raster whose rows are the file's own bytes.
+/// A window the header of a netpbm is read through.
 ///
-/// This is the one netpbm shape that needs no work between the file and the
-/// frame: a `P6` at `MAXVAL` 255 holds `width * 3` bytes a row with nothing to
-/// unpack and nothing to rescale, so the row is a slice of the file and
-/// [`RowSink::place_rgb8`] writes it. Every other form -- ASCII, a word a
-/// sample, a `MAXVAL` that rescales, `P4`, `P5`, `P7` -- keeps the buffered
-/// path, which is the rule a stream is only answered with when it can fill
-/// every frame of the call.
+/// The preamble is text and every real one is a line or two. A file whose header
+/// is larger than this is refused by the parse rather than read further, which is
+/// what reading a head through [`image_head`] did for it.
+const HEAD_WINDOW: usize = 64 * 1024;
+
+/// Opens `path` and reads its header, leaving the reader at the raster.
+///
+/// Answers `None` for every shape the stream does not cover, so the caller falls
+/// back to [`decode`].
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the file cannot be read or its header cannot be
+/// parsed.
+fn prepare(path: &Path) -> Result<Option<(Header, BufReader<File>)>> {
+    let mut reader = BufReader::new(File::open(path).map_err(|e| image_error("open", path, e))?);
+    let mut window = vec![0u8; HEAD_WINDOW];
+    let read = reader
+        .read(&mut window)
+        .map_err(|e| image_error("open", path, e))?;
+    window.truncate(read);
+    let header = header(&window).map_err(|e| image_error("decode", path, e))?;
+    if header.ascii || header.tuple != Tuple::RgbU8 || header.maxval != 0xFF {
+        return Ok(None);
+    }
+    reader
+        .seek(SeekFrom::Start(
+            u64::try_from(header.data_offset).unwrap_or(0),
+        ))
+        .map_err(|e| image_error("open", path, e))?;
+    Ok(Some((header, reader)))
+}
+
+/// A raster this reader walks a row at a time.
+///
+/// The form is one byte a sample, three samples a pixel, so a row is a row of
+/// the file and nothing is unpacked or rescaled: [`RowSink::place_rgb8`] writes
+/// each row as it is read, into a buffer one row wide rather than into the whole
+/// raster. Every other form -- ASCII, a word a sample, a `MAXVAL` that rescales,
+/// `P4`, `P5`, `P7` -- keeps the buffered path, which is the rule a stream is
+/// only answered with when it can fill every frame of the call.
 #[derive(Debug)]
 pub struct Rows {
     path: std::path::PathBuf,
+    /// What the header states, kept so a read does not parse it again.
+    header: Option<Header>,
+    /// The reader the preparation opened, positioned at the first byte of the
+    /// raster. `None` is a stream that came from [`RowStream::duplicate`], which
+    /// prepares itself on its way into a fill: duplicating cannot report the
+    /// failure that opening and parsing can.
+    raster: Option<BufReader<File>>,
+}
+
+impl Rows {
+    /// The header and the reader positioned at the raster, prepared here when
+    /// this stream is a duplicate that has not read anything yet.
+    fn raster(&mut self) -> Result<(&Header, &mut BufReader<File>)> {
+        if self.raster.is_none() {
+            let Some((header, reader)) = prepare(&self.path)? else {
+                return Err(ImgSeqError::new(format!(
+                    "'{}' is no longer a netpbm this reader walks a row at a time",
+                    self.path.display()
+                )));
+            };
+            self.header = Some(header);
+            self.raster = Some(reader);
+        }
+        let header = self
+            .header
+            .as_ref()
+            .ok_or_else(|| ImgSeqError::new("the raster header is missing"))?;
+        let reader = self
+            .raster
+            .as_mut()
+            .ok_or_else(|| ImgSeqError::new("the raster reader is missing"))?;
+        Ok((header, reader))
+    }
 }
 
 impl RowStream for Rows {
@@ -664,33 +735,34 @@ impl RowStream for Rows {
     }
 
     fn fill(&mut self, mut sink: RowSink<'_>) -> Result<DecodeTimings> {
-        let open_started = std::time::Instant::now();
-        let data = std::fs::read(&self.path).map_err(|e| image_error("open", &self.path, e))?;
-        let open = open_started.elapsed();
-        let header = header(&data).map_err(|e| image_error("decode", &self.path, e))?;
-
         let read_started = std::time::Instant::now();
+        let (header, reader) = self.raster()?;
         let row_bytes = header.width as usize * 3;
-        for row in 0..header.height as usize {
-            let at = header.data_offset + row * row_bytes;
-            let line = data
-                .get(at..at + row_bytes)
-                .ok_or_else(|| ImgSeqError::new(format!("the raster ends in row {row}")))?;
-            sink.place_rgb8(line, row)
+        let height = header.height as usize;
+        let mut row = vec![0u8; row_bytes];
+        for line in 0..height {
+            reader
+                .read_exact(&mut row)
+                .map_err(|_| ImgSeqError::new(format!("the raster ends in row {line}")))?;
+            sink.place_rgb8(&row, line)
                 .ok_or_else(|| ImgSeqError::new("the frame holds no three colour planes"))?;
         }
-        let read = read_started.elapsed();
+        // A stream is read once. Letting the reader go here means a second fill
+        // starts from the raster again rather than from where this one stopped.
+        self.raster = None;
         Ok(DecodeTimings {
-            open,
+            open: std::time::Duration::ZERO,
             metadata: std::time::Duration::ZERO,
             buffer: std::time::Duration::ZERO,
-            read,
+            read: read_started.elapsed(),
         })
     }
 
     fn duplicate(&self) -> Box<dyn RowStream> {
         Box::new(Self {
             path: self.path.clone(),
+            header: None,
+            raster: None,
         })
     }
 }
@@ -704,11 +776,9 @@ impl RowStream for Rows {
 ///
 /// Returns [`ImgSeqError`] when the header cannot be read back.
 pub fn stream(info: &ImageInfo) -> Result<Option<DecodedImage>> {
-    let data = image_head(&info.path).map_err(|e| image_error("open", &info.path, e))?;
-    let header = header(&data).map_err(|e| image_error("decode", &info.path, e))?;
-    if header.ascii || header.tuple != Tuple::RgbU8 || header.maxval != 0xFF {
+    let Some((header, raster)) = prepare(&info.path)? else {
         return Ok(None);
-    }
+    };
     Ok(Some(DecodedImage {
         width: info.width,
         height: info.height,
@@ -716,6 +786,8 @@ pub fn stream(info: &ImageInfo) -> Result<Option<DecodedImage>> {
         transform: info.transform,
         pixels: Pixels::Stream(Box::new(Rows {
             path: info.path.clone(),
+            header: Some(header),
+            raster: Some(raster),
         })),
         timings: DecodeTimings {
             open: std::time::Duration::ZERO,
@@ -819,6 +891,25 @@ mod tests {
             .join("tests")
             .join("fixtures")
             .join(name)
+    }
+
+    /// The preparation leaves the reader at the raster, and the rows it reads
+    /// are the raster exactly: a `P6` at `MAXVAL` 255 is the one shape the row
+    /// sink takes, and its rows are three bytes a pixel with no padding.
+    #[test]
+    fn the_row_sink_reads_the_raster_a_row_at_a_time() {
+        let path = fixture("pnm-p6.ppm");
+        let (header, mut reader) = prepare(&path)
+            .expect("the fixture is readable")
+            .expect("a P6 at MAXVAL 255 is a row sink");
+        let mut row = vec![0u8; header.width as usize * 3];
+        let mut rows = Vec::new();
+        for _ in 0..header.height {
+            reader.read_exact(&mut row).expect("a row of the raster");
+            rows.extend_from_slice(&row);
+        }
+        let file = std::fs::read(&path).expect("the fixture");
+        assert_eq!(rows, file[header.data_offset..], "the rows are the raster");
     }
 
     fn decoded(name: &str) -> Vec<u8> {
