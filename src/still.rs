@@ -6,14 +6,12 @@
 //! A caller here never names an `image` type: [`Metadata`] and [`ColorType`] are
 //! the plugin's own, and the crate's enums are translated at this boundary.
 //!
+//! Gif used to be the first of these and is not any more: `src/formats/gif.rs`
+//! reads a one frame gif now, onto the same compositor `animation::gif` composes
+//! its presentations with.
+//!
 //! What still reaches it, and what would have to exist before it could go:
 //!
-//! - **gif** — a one frame gif. `probe_segment` asks the animation adapter
-//!   first and `animation::gif` declines anything under two frames, so a still
-//!   gif falls through to here and is read by the crate. The feature is `gif`.
-//!   **This is the one that blocks dropping the crate**: there is no
-//!   `formats/gif.rs`, and no single frame gif fixture either, so writing one
-//!   starts by adding the fixture to verify it against.
 //! - **png** — a png whose rows [`crate::formats::png`] will not walk into the
 //!   frame, which it hands on rather than failing. The feature is `png`.
 //! - **webp** — the probe of every webp, because the header read is the

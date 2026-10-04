@@ -83,7 +83,15 @@ fn format_decoder(info: &ImageInfo, demand: Demand) -> Option<Result<DecodedImag
         // A png and a gif are the two the tail of [`decode`] owns: the png row
         // walk, and the generic decoder for both. No format here means the same
         // thing, so a file no module claims keeps the path it had.
-        Some(Format::Png | Format::Gif) | None => return None,
+        // A gif is read here now: its container states the logical screen and its
+        // one frame draws a rectangle onto it, so `formats/gif.rs` composes the
+        // picture rather than the crate handing a sub-rectangle back as the whole
+        // image.
+        Some(Format::Gif) => formats::gif::decode(info),
+        // A png is the tail of [`decode`]'s: the row walk, and the generic
+        // decoder for a file the walk will not take. No format here means the
+        // same thing, so a file no module claims keeps the path it had.
+        Some(Format::Png) | None => return None,
     })
 }
 
@@ -568,12 +576,15 @@ fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
         // A jpeg is read here rather than through the generic decoder, whose
         // reader would parse the file's headers four times for one probe.
         Some(Format::Jpeg) => formats::jpeg::image_info(path, apply_rotation)?,
-        // A gif and a webp are the generic decoder's, which is where they have
-        // always been: the animation module composes a gif's timeline, but a one
-        // frame gif is a still and this reader has no gif module of its own, and
-        // a webp states its lossy yuv arrangement somewhere only `output_format`
-        // reads, which the path below already asks for.
-        Some(Format::Gif | Format::Webp) | None => None,
+        // A gif is read here: the container states the logical screen and its one
+        // frame draws a rectangle onto it, so a still gif has a reader of its own.
+        Some(Format::Gif) => formats::gif::image_info(path, apply_rotation)?,
+        // A webp is the generic decoder's, which is where it has always been: the
+        // animation module composes a webp's timeline, but a one frame webp is a
+        // still and this reader has no webp module of its own, and a webp states
+        // its lossy yuv arrangement somewhere only `output_format` reads, which
+        // the path below already asks for.
+        Some(Format::Webp) | None => None,
     };
     if let Some(info) = described {
         return Ok(info);

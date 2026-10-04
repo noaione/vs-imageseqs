@@ -1664,6 +1664,81 @@ def test_animation() -> None:
     )
 
 
+def test_gif_stills() -> None:
+    """A gif is read here now, and it is the *logical screen* that is handed out.
+
+    A gif is a sequence of sub-rectangles drawn onto a screen, so a reader that
+    returns the one frame as the picture gets two things wrong for a file whose
+    frame is smaller than its screen: the size, and every sample the rectangle
+    does not cover. The fixtures are a full canvas frame, an 8x8 screen holding
+    a 3x2 frame at (2,1), and a full canvas frame with one index transparent.
+
+    `RGB24` is three *planes* here rather than interleaved bytes, so a sample is
+    read a plane at a time: plane 0 is red, 1 is green and 2 is blue.
+    """
+    clip, alpha = read_alpha(files=[fixture("gif-still-subrect.gif")])
+    frame = clip.get_frame(0)
+    check(
+        (frame.width, frame.height) == (8, 8),
+        f"a gif is handed out at its logical screen (got {frame.width}x{frame.height})",
+    )
+    check(frame.format.name == "RGB24", f"and as three channels (got {frame.format.name})")
+    check(frame.format.num_planes == 3, "which are three planes")
+    check(alpha.get_frame(0).format.name == "Gray8", "with a gray alpha clip")
+
+    # The palette is red, green, blue, yellow. The frame's indices are
+    # 0,1,0 / 1,0,1 drawn at (2,1), so red lands on (2,1), (4,1) and (3,2) and
+    # green on (3,1), (2,2) and (4,2) -- and nothing in the frame is blue.
+    red = samples(frame, 0)
+    green = samples(frame, 1)
+    blue = samples(frame, 2)
+
+    def at(x: int, y: int) -> int:
+        return y * 8 + x
+
+    for x, y in [(2, 1), (4, 1), (3, 2)]:
+        check(red[at(x, y)] == 255, f"the sample at ({x}, {y}) is red (got {red[at(x, y)]})")
+        check(green[at(x, y)] == 0, f"and carries no green at ({x}, {y})")
+    for x, y in [(3, 1), (2, 2), (4, 2)]:
+        check(
+            green[at(x, y)] == 255,
+            f"the sample at ({x}, {y}) is green (got {green[at(x, y)]})",
+        )
+        check(red[at(x, y)] == 0, f"and carries no red at ({x}, {y})")
+    check(all(value == 0 for value in blue), "and nothing in the frame is blue")
+
+    # The samples the rectangle does not cover are untouched, and the alpha clip
+    # says so: transparent rather than the background colour the file names.
+    for x, y in [(0, 0), (1, 1), (5, 1), (7, 7)]:
+        check(red[at(x, y)] == 0, f"the screen outside the frame is untouched at ({x}, {y})")
+    coverage = samples(alpha.get_frame(0))
+    check(coverage[at(0, 0)] == 0, "and so is the sample at (0, 0)")
+    check(coverage[at(1, 1)] == 0, "and the one just outside the rectangle")
+    check(coverage[at(2, 1)] == 255, "while the frame itself is opaque")
+    check(coverage[at(4, 2)] == 255, "all the way to its last sample")
+
+    # A transparent index keeps its palette colour in the colour clip. Index 0 is
+    # red, so the two full canvas fixtures agree plane for plane and differ only
+    # in the alpha clip. That is what the reader being replaced produced, and it is
+    # why the still path *places* the frame instead of compositing it: the
+    # animation compositor would replace a transparent sample with what is
+    # underneath, which for the first frame is nothing at all.
+    opaque = read_alpha(files=[fixture("gif-still.gif")])
+    see_through = read_alpha(files=[fixture("gif-still-alpha.gif")])
+    full = opaque[0].get_frame(0)
+    check((full.width, full.height) == (4, 4), "a full canvas frame is the screen size")
+    for plane in range(3):
+        check(
+            samples(see_through[0].get_frame(0), plane) == samples(full, plane),
+            f"a transparent index leaves plane {plane} of the colour clip alone",
+        )
+    check(
+        samples(see_through[1].get_frame(0)) != samples(opaque[1].get_frame(0)),
+        "and shows in the alpha clip instead",
+    )
+    check(samples(see_through[1].get_frame(0))[0] == 0, "index 0 is the transparent one")
+    check(samples(opaque[1].get_frame(0))[0] == 255, "and is opaque without it")
+
 def main() -> None:
     for test in (
         test_rgba8,
@@ -1696,6 +1771,7 @@ def main() -> None:
         test_avif_grid,
         test_alpha_demand,
         test_animation,
+        test_gif_stills,
     ):
         print(f"--- {test.__name__}")
         test()

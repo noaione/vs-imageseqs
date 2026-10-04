@@ -3,6 +3,20 @@
 ## unreleased
 ### changed
 
+- A one frame gif is read here now rather than by `image`, which drops that
+  reader from the dependency. The picture is unchanged, and the fixtures that
+  pin it are new because this path had no coverage at all before. A gif is a
+  sub-rectangle drawn onto a logical screen, and a still read is that frame
+  placed at its offset on a transparent screen: the size handed out is the
+  *screen*, so a file whose one frame is smaller than its screen keeps the screen
+  size with the rest transparent rather than the background colour the file
+  names. A transparent index keeps its palette colour in the colour clip and
+  shows only in the alpha clip, which is what the reader being replaced did and
+  is deliberately not what the animation compositor does. An animated gif under
+  a name that does not say `gif` reads as its first *presentation*, which is what
+  the animation path shows for frame zero. The `debug` log's per-frame timings
+  for a still gif are zero for the same reason an animated gif's already were:
+  the compositor reports none.
 - The plugin no longer asks `image` for a jpeg decoder. That feature was merely
   `image`'s own link to `zune-jpeg`, which this tree depends on directly for
   `src/formats/jpeg.rs`, so the flag put a second adapter in front of the same

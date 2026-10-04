@@ -155,6 +155,76 @@ pub fn segment_info(
     }))
 }
 
+/// The logical screen and the embedded profile, from the header alone.
+///
+/// The still path asks for these here rather than opening the file a second
+/// way: the options and the colour output have to be the ones the compositor
+/// reads with, and both facts come from the same header read. `image`'s gif
+/// reader took its size and its profile from the same crate call.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the file cannot be read or is not a gif.
+pub fn screen(path: &Path) -> Result<(u32, u32, Option<Vec<u8>>)> {
+    let decoder = open(path)?;
+    Ok((
+        u32::from(decoder.width()),
+        u32::from(decoder.height()),
+        decoder.icc_profile().map(<[u8]>::to_vec),
+    ))
+}
+
+/// Decodes the one picture a gif that displays one picture shows.
+///
+/// A gif that displays one picture is that picture placed on a transparent canvas
+/// and nothing else: no blend, and no disposal, because a disposal rule is about
+/// what a *later* frame does to an earlier one and there is no later frame. That is
+/// [`Canvas::place`], deliberately not the [`Canvas::compose`] the animation path
+/// uses, and the difference shows in the red plane of a file that states a
+/// transparent index.
+///
+/// A gif that displays several is its first *presentation* instead, which is what
+/// the animation path shows for frame zero and therefore what a renamed copy of an
+/// animation has always shown.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the file cannot be read, is malformed, or holds no
+/// frame at all.
+pub fn still(
+    path: &Path,
+    transform: crate::pixel::Transform,
+    format: PixelFormat,
+) -> Result<DecodedImage> {
+    let mut source = Source::new(path, transform, format)?;
+    // Which read is right is the file's to decide and not the caller's: the
+    // header that answers it is the one already open, so this peeks rather than
+    // paying a second pass over the metadata.
+    let animated = source.next_subframe()?.is_some() && source.next_subframe()?.is_some();
+    source.restart()?;
+    if animated {
+        return source.presentation(0);
+    }
+    let Some(frame) = source.next_subframe()? else {
+        return Err(ImgSeqError::new(format!(
+            "image '{}' holds no picture",
+            path.display()
+        )));
+    };
+    let buffer = source.canvas.place(&frame);
+    Ok(DecodedImage {
+        width: source.canvas.width as u32,
+        height: source.canvas.height as u32,
+        format: source.format,
+        transform: source.transform,
+        pixels: Pixels::Interleaved {
+            color_type: ColorType::Rgba8,
+            buffer,
+        },
+        timings: DecodeTimings::default(),
+    })
+}
+
 /// One decoded sub-rectangle, in the layout the `gif` crate hands over.
 struct Subframe {
     left: u32,
@@ -231,6 +301,35 @@ impl Canvas {
             }
         }
         composed
+    }
+
+    /// Places `frame` on a transparent canvas without compositing it.
+    ///
+    /// This is what a *still* gif is, and it is not [`compose`](Self::compose).
+    /// The reader being replaced builds a still by copying the one frame's
+    /// rectangle to its offset and leaving everything else transparent; it never
+    /// blends, because a disposal rule is about what a *later* frame does to an
+    /// earlier one and there is no later frame. The difference shows: a sample the
+    /// frame's own transparency index leaves transparent keeps its palette colour
+    /// here, where `compose` would replace it with whatever is underneath -- which
+    /// for a first frame is nothing at all. Getting this wrong moves the red
+    /// plane of every still gif that states a transparent index, and only that
+    /// plane; see the `gif-still-alpha` fixture.
+    fn place(&self, frame: &Subframe) -> Vec<u8> {
+        let mut placed = vec![0u8; self.width.saturating_mul(self.height).saturating_mul(4)];
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let frame_x = x.wrapping_sub(frame.left as usize);
+                let frame_y = y.wrapping_sub(frame.top as usize);
+                if frame_x >= frame.width as usize || frame_y >= frame.height as usize {
+                    continue;
+                }
+                let to = (y * self.width + x) * 4;
+                let from = (frame_y * frame.width as usize + frame_x) * 4;
+                placed[to..to + 4].copy_from_slice(&frame.pixels[from..from + 4]);
+            }
+        }
+        placed
     }
 }
 

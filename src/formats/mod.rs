@@ -29,6 +29,7 @@ pub mod bmp;
 pub mod dds;
 pub mod exr;
 pub mod farbfeld;
+pub mod gif;
 pub mod hdr;
 pub mod heif;
 pub mod ico;
