@@ -494,7 +494,36 @@ What is left, in plan 27's order, with the fixtures each still needs:
     `1 - bit` so that a set bit (black in the format) becomes `0`. Working
     backwards is what lets the packed bytes be expanded into the same buffer
     without a second allocation.
-- hdr — **no fixtures**.
+- **hdr** — fixtures **landed** in `09684f9`, the port still to do. Ten files from
+  [`tests/make-hdr-fixtures.py`](../../tests/make-hdr-fixtures.py): the three scanline
+  encodings (flat, the new per-component run-length form, and the old
+  repeat-marker form), an exponent sweep, a header with an unknown field, and the
+  four resolution signs. The baseline is `RGBS` with `original=Rgb32F` for every
+  file that reads at all, which is the rule's first half confirmed.
+
+  **A scope decision has to be made before the port, and it is not a detail.** The
+  plan says hdr is "written here ... covering both RLE schemes and the sixteen
+  orientations the candidate refuses", which reads as though the orientations are
+  the reason to write it rather than port it. But **the reader in this tree today
+  refuses them too**: `image`'s hdr decoder accepts the pair `("-Y", "+X")` and
+  returns `Unsupported` for every other spelling, with a comment acknowledging
+  that the others exist. Measured against the current build, three of the four
+  sign combinations fail:
+
+  | resolution | today |
+  | --- | --- |
+  | `-Y h +X w` | reads |
+  | `+Y h +X w` | `does not support the format features Orientation +Y +X` |
+  | `-Y h -X w` | `... Orientation -Y -X` |
+  | `+Y h -X w` | `... Orientation +Y -X` |
+
+  So the two readings are: **refuse the same three**, which keeps every file's
+  behaviour byte-identical and makes the three failing fixtures the spec, or
+  **implement all of them**, which is more capable than the tree is today and is
+  therefore a change a user can see -- it needs a `CHANGELOG.md` entry and a
+  deliberate decision rather than a default. Deciding this after writing the
+  reader would mean discovering it from a failing fixture, so it is recorded
+  here first.
 - tiff and exr — `alpha-rgba32f.tiff` exists; **no exr**.
 
 Step 6, removing the crate, still waits for all of these plus plan 28's
