@@ -50,9 +50,6 @@ use crate::{
     pixel::{PixelFormat, Transform, inverse_orientation},
 };
 
-/// File extension that holds a jpeg xl image.
-const EXTENSION: &str = "jxl";
-
 /// Signature of a bare jpeg xl codestream.
 const CODESTREAM_SIGNATURE: [u8; 2] = [0xff, 0x0a];
 
@@ -81,13 +78,12 @@ pub fn owns(path: &Path) -> bool {
 /// Every jpeg xl file goes through this module: the `image` integration has no
 /// decoder to keep a color type back for.
 pub fn handles(info: &ImageInfo) -> bool {
-    has_jxl_extension(&info.path)
-}
-
-fn has_jxl_extension(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case(EXTENSION))
+    // The same question the probe asks, asked the same way: `describe` routes
+    // this format through `owns`, so a `handles` answering from the extension
+    // here would promise a frame the decode then refused. That is the disagreement
+    // plan 34 is about, and it was live -- a renamed jxl passed the probe and fell
+    // through to `image` at decode.
+    owns(&info.path)
 }
 
 /// What the codestream of a jpeg xl file states about its image.
@@ -731,11 +727,11 @@ mod tests {
 
     #[test]
     fn only_jxl_extensions_are_taken_over() {
-        assert!(has_jxl_extension(Path::new("a.jxl")));
-        assert!(has_jxl_extension(Path::new("a.JXL")));
-        assert!(!has_jxl_extension(Path::new("a.jxls")));
-        assert!(!has_jxl_extension(Path::new("jxl")));
-        assert!(!has_jxl_extension(Path::new("a.png")));
+        assert!(owns(Path::new("a.jxl")));
+        assert!(owns(Path::new("a.JXL")));
+        assert!(!owns(Path::new("a.jxls")));
+        assert!(!owns(Path::new("jxl")));
+        assert!(!owns(Path::new("a.png")));
     }
 
     #[test]

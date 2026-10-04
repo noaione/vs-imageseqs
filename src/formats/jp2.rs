@@ -65,11 +65,6 @@ struct SizHeader {
     components: Vec<ComponentHeader>,
 }
 
-/// Whether a path has a JPEG 2000 extension and should be validated by this
-/// module before the general image decoder gets a chance to identify it.
-/// The extensions a JPEG 2000 file is named with.
-const EXTENSIONS: [&str; 5] = ["jp2", "j2k", "jpf", "jpx", "j2c"];
-
 pub fn owns(path: &Path) -> bool {
     // Content first: a file whose bytes say it is something else is that
     // something else however it is named, and the extension is the hint a
@@ -80,17 +75,12 @@ pub fn owns(path: &Path) -> bool {
 
 /// Whether this module decodes the probed image.
 pub fn handles(info: &ImageInfo) -> bool {
-    has_extension(&info.path)
-}
-
-fn has_extension(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            EXTENSIONS
-                .iter()
-                .any(|known| extension.eq_ignore_ascii_case(known))
-        })
+    // The same question the probe asks, asked the same way: `describe` routes
+    // this format through `owns`, so a `handles` answering from the extension
+    // here would promise a frame the decode then refused. That is the disagreement
+    // plan 34 is about, and it was live -- a renamed jxl passed the probe and fell
+    // through to `image` at decode.
+    owns(&info.path)
 }
 
 /// Probe one JPEG 2000 image without asking OpenJPEG to decode its pixels.
@@ -796,15 +786,15 @@ mod tests {
 
     #[test]
     fn accepts_the_supported_extensions_case_insensitively() {
-        for extension in EXTENSIONS {
-            assert!(has_extension(Path::new(&format!("page.{extension}"))));
-            assert!(has_extension(Path::new(&format!(
+        for extension in crate::formats::identify::Format::Jp2.extensions() {
+            assert!(owns(Path::new(&format!("page.{extension}"))));
+            assert!(owns(Path::new(&format!(
                 "page.{}",
                 extension.to_uppercase()
             ))));
         }
-        assert!(!has_extension(Path::new("page.jp2.zip")));
-        assert!(!has_extension(Path::new("page.png")));
+        assert!(!owns(Path::new("page.jp2.zip")));
+        assert!(!owns(Path::new("page.png")));
     }
 
     #[test]
