@@ -908,6 +908,27 @@ keep the per-row work in that buffer, which is the shape `png.rs` already uses.
 That is the next action, and this corpus and this harness are what will say
 whether it worked.
 
+### every frame property, not just the four a survey reads
+
+The step-5 constraint names "every pixel, every frame property and both
+`ReadAlpha` clips". The pixels and both clips were checked exhaustively and
+`probe-facts.py` reads four properties, but nothing had ever asked a frame for its
+*whole* property set -- so a property no survey tool names could have moved
+unnoticed. `target/bench/all-props.py` prints every key and value of the colour
+frame and of the alpha frame for every fixture; two runs diffed are the check.
+
+**Zero of the 160 files both builds read differ in any property**, colour clip or
+alpha clip. The properties that exist at all are `_FieldBased`, `_Matrix`,
+`_Primaries`, `_Range`, `_Transfer`, `ImgSeqAlpha`, `ImgSeqHasICC`,
+`ImgSeqIndex`, `ImgSeqOrientation`, `ImgSeqOriginalColorType` and `ImgSeqPath` --
+and for these formats `_Primaries` and `_Transfer` are unset throughout, because
+no step-5 still states a colour, which is worth knowing rather than assuming.
+
+Four files are newly readable and that is the intended widening: the three HDR
+orientations the plan asks for (in `CHANGELOG.md`) and `tiff-zstd.tiff`, which is
+a new fixture rather than a behaviour change. Their properties are new lines, not
+changed ones.
+
 ### the licence obligation, checked against the modules
 
 The constraint is that "a ported decoder keeps image-rs's `LICENSE-*` text and a
