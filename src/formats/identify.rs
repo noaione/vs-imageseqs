@@ -242,12 +242,32 @@ pub fn identify(head: &[u8]) -> Option<Format> {
 /// file answers, and the format that ends up declining it reports the reason.
 fn head_of(path: &Path) -> Vec<u8> {
     use std::io::Read;
+    #[cfg(test)]
+    HEAD_READS.with(|count| count.set(count.get() + 1));
     let Ok(file) = std::fs::File::open(path) else {
         return Vec::new();
     };
     let mut head = Vec::with_capacity(HEAD_BYTES);
     let _ = file.take(HEAD_BYTES as u64).read_to_end(&mut head);
     head
+}
+
+/// How many times this thread has read a file's head, which is how a probe and
+/// a decode are checked to read it once between them.
+#[cfg(test)]
+pub(crate) fn head_reads() -> usize {
+    HEAD_READS.with(std::cell::Cell::get)
+}
+
+/// Starts [`head_reads`] from zero.
+#[cfg(test)]
+pub(crate) fn reset_head_reads() {
+    HEAD_READS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+thread_local! {
+    static HEAD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The one format that owns a path, from one read of its leading bytes.
@@ -284,6 +304,19 @@ pub fn route_from(head: &[u8], path: &Path) -> Option<Format> {
 #[must_use]
 pub fn owns(format: Format, path: &Path) -> bool {
     route_from(&head_of(path), path) == Some(format)
+}
+
+/// Whether `format` owns a file whose route a probe already settled.
+///
+/// A saved route answers without a read, which is what stops a module the
+/// router already chose from opening the file to ask the question again. `None`
+/// is a caller that built its own description, and that falls back to the head.
+#[must_use]
+pub fn route_agrees(route: Option<Format>, format: Format, path: &Path) -> bool {
+    match route {
+        Some(saved) => saved == format,
+        None => owns(format, path),
+    }
 }
 #[cfg(test)]
 mod tests {

@@ -653,6 +653,7 @@ mod tests {
     /// A segment record without a decoder, for the timeline tests.
     fn info(name: &str) -> ImageInfo {
         ImageInfo {
+            route: None,
             path: PathBuf::from(name),
             width: 4,
             height: 4,

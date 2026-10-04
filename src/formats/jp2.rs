@@ -12,6 +12,8 @@
 //! channel.
 
 use std::{
+    fs::File,
+    io::Read,
     path::Path,
     sync::Arc,
     time::{Duration, Instant},
@@ -29,6 +31,14 @@ use crate::{
 
 const JP2_SIGNATURE: [u8; 12] = [0, 0, 0, 12, b'j', b'P', b' ', b' ', 0x0d, 0x0a, 0x87, 0x0a];
 const J2K_SIGNATURE: [u8; 4] = [0xff, 0x4f, 0xff, 0x51];
+
+/// Bytes of the front of a file a probe reads before it grows the window.
+///
+/// Every fact a description reads lives in the signature, the `jp2h` superbox or
+/// the `SIZ` at the start of the first codestream box, and a JP2 file writes
+/// those first -- so a window this size holds the header of every file whose
+/// colour profile is of an ordinary size.
+const PROBE_WINDOW: u64 = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum EnumeratedColor {
@@ -67,11 +77,11 @@ struct SizHeader {
 
 /// Probe one JPEG 2000 image without asking OpenJPEG to decode its pixels.
 pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<ImageInfo> {
-    let data = std::fs::read(path).map_err(|error| image_error("open", path, error))?;
-    let header = parse_header(&data, path)?;
+    let header = read_description(path)?;
     let (color_type, format) = output_format(&header, path)?;
 
     Ok(ImageInfo {
+        route: None,
         path: path.to_path_buf(),
         width: header.width,
         height: header.height,
@@ -471,6 +481,37 @@ fn parse_header(data: &[u8], path: &Path) -> Result<Header> {
     }
 }
 
+/// Reads what describing `path` needs, without reading its picture.
+///
+/// A JP2 file's header boxes come before its codestream, so this reads a window
+/// over the front and grows it while the header is incomplete. An incomplete
+/// header fails the walk with an error, and that error cannot be told apart from
+/// a real one, so the window only ever grows: the last attempt covers the whole
+/// file and reports exactly what the single whole-file read reported before.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the file cannot be read or its header cannot be
+/// described.
+fn read_description(path: &Path) -> Result<Header> {
+    let length = std::fs::metadata(path)
+        .map_err(|error| image_error("open", path, error))?
+        .len();
+    let mut window = PROBE_WINDOW.min(length);
+    loop {
+        let file = File::open(path).map_err(|error| image_error("open", path, error))?;
+        let mut data = Vec::new();
+        file.take(window)
+            .read_to_end(&mut data)
+            .map_err(|error| image_error("read", path, error))?;
+        match parse_header(&data, path) {
+            Ok(header) => return Ok(header),
+            Err(error) if window >= length => return Err(error),
+            Err(_) => window = window.saturating_mul(2).min(length),
+        }
+    }
+}
+
 fn parse_jp2(data: &[u8], path: &Path) -> Result<Header> {
     let mut state = Jp2State::default();
     walk_boxes(data, 0, data.len(), &mut state, path)?;
@@ -530,7 +571,25 @@ fn walk_boxes(
             }
             length => (8, usize::try_from(length).unwrap()),
         };
-        if box_len < header_size || box_len > end - offset {
+        if box_len < header_size {
+            return Err(image_error(
+                "identify",
+                path,
+                "a JP2 box extends past the file",
+            ));
+        }
+        let payload_start = offset + header_size;
+        // A box that runs past the bytes read so far is either a header the
+        // caller has to grow its window for, or the codestream box: a probe reads
+        // only the `SIZ` at the start of that one and nothing after it, so a
+        // codestream whose own length runs past the data still describes the
+        // file. The codestream is the last box a JP2 file writes, so nothing a
+        // description needs is left behind by stopping here.
+        if box_len > end - offset {
+            if box_type == b"jp2c" && state.siz.is_none() {
+                state.siz = Some(parse_siz(&data[payload_start..end], path)?);
+                return Ok(());
+            }
             return Err(image_error(
                 "identify",
                 path,
@@ -847,5 +906,72 @@ mod tests {
                 "depth={depth}, chroma={chroma:?}"
             );
         }
+    }
+
+    /// A box with `kind` and `payload`, as the container writes one.
+    fn boxed(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&u32::try_from(payload.len() + 8).unwrap().to_be_bytes());
+        out.extend_from_slice(kind);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    /// An `ihdr` payload for a three component image of `width` by `height`.
+    fn ihdr_payload(width: u32, height: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&height.to_be_bytes());
+        out.extend_from_slice(&width.to_be_bytes());
+        out.extend_from_slice(&3u16.to_be_bytes());
+        out.push(7);
+        out.extend_from_slice(&[7, 0, 0]);
+        out
+    }
+
+    /// Writes bytes to a temp file named for this test process.
+    fn write_temp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("imgseqs-jp2-{}-{name}", std::process::id()));
+        std::fs::write(&path, bytes).expect("a writable image");
+        path
+    }
+
+    /// The header boxes of a JP2 file, followed by a codestream box that states
+    /// `width` by `height`, with `padding` written before the header.
+    fn jp2_file(width: u32, height: u32, padding: usize) -> Vec<u8> {
+        let components = [(7, 1, 1), (7, 1, 1), (7, 1, 1)];
+        let header = boxed(
+            b"jp2h",
+            &[
+                boxed(b"ihdr", &ihdr_payload(width, height)),
+                boxed(b"colr", &[1, 0, 0, 0, 0, 0, 16]),
+            ]
+            .concat(),
+        );
+        let mut file = Vec::from(JP2_SIGNATURE);
+        file.extend_from_slice(&boxed(b"free", &vec![0; padding]));
+        file.extend_from_slice(&header);
+        file.extend_from_slice(&boxed(b"jp2c", &siz(width, height, &components)));
+        file
+    }
+
+    /// A header past the first window is still described: the window grows until
+    /// the walk completes, and the last attempt is the whole file.
+    #[test]
+    fn a_header_past_the_probe_window_is_still_read() {
+        // A `free` box larger than the window pushes `jp2h` past it, which is
+        // what a file padded before its header looks like.
+        let past = jp2_file(64, 32, usize::try_from(PROBE_WINDOW).unwrap() + 1024);
+        let path = write_temp("past-window.jp2", &past);
+        let info = image_info(&path, true).expect("a padded header to describe");
+        assert_eq!((info.width, info.height), (64, 32));
+        let _ = std::fs::remove_file(&path);
+
+        // The same file with its header inside the window, so both sides of the
+        // growth are covered.
+        let inside = jp2_file(64, 32, 16);
+        let path = write_temp("inside-window.jp2", &inside);
+        let info = image_info(&path, true).expect("a header in the window to describe");
+        assert_eq!((info.width, info.height), (64, 32));
+        let _ = std::fs::remove_file(&path);
     }
 }

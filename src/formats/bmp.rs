@@ -849,8 +849,15 @@ fn rle(header: &Header, data: &[u8], out: &mut [u8]) -> Result<()> {
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file is one of ours and cannot be read.
-pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo>> {
-    if !owns(path) {
+pub fn image_info(
+    path: &Path,
+    _apply_rotation: bool,
+    route: Option<crate::formats::identify::Format>,
+) -> Result<Option<ImageInfo>> {
+    if !route.map_or_else(
+        || owns(path),
+        |saved| saved == crate::formats::identify::Format::Bmp,
+    ) {
         return Ok(None);
     }
     let data = image_head(path).map_err(|error| image_error("open", path, error))?;
@@ -861,6 +868,7 @@ pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo
     }
     let header = header(&data, 0, true).map_err(|error| image_error("identify", path, error))?;
     Ok(Some(ImageInfo {
+        route: None,
         path: path.to_path_buf(),
         width: header.width,
         height: header.height,
@@ -1009,7 +1017,7 @@ mod tests {
             ("bmp-v5-bitfields32.bmp", 37, 23, true, 32),
             ("bmp-bitfields16.bmp", 37, 23, false, 16),
         ] {
-            let info = image_info(&fixture(name), true)
+            let info = image_info(&fixture(name), true, None)
                 .unwrap_or_else(|error| panic!("{name}: {error}"))
                 .unwrap_or_else(|| panic!("{name} is taken over"));
             assert_eq!((info.width, info.height), (width, height), "{name}");
@@ -1025,10 +1033,10 @@ mod tests {
     /// bitfield alpha mask is zero, and one whose mask is set.
     #[test]
     fn the_bitfield_alpha_mask_decides_the_alpha_plane() {
-        let with = image_info(&fixture("bmp-bitfields32.bmp"), true)
+        let with = image_info(&fixture("bmp-bitfields32.bmp"), true, None)
             .expect("read")
             .expect("taken over");
-        let without = image_info(&fixture("bmp-bitfields32-noalpha.bmp"), true)
+        let without = image_info(&fixture("bmp-bitfields32-noalpha.bmp"), true, None)
             .expect("read")
             .expect("taken over");
         assert_eq!(with.color_type, ColorType::Rgba8);
@@ -1041,7 +1049,7 @@ mod tests {
     /// the same picture, so the difference is the rule and not the samples.
     #[test]
     fn a_thirty_two_bit_rgb_bitmap_drops_its_fourth_byte() {
-        let info = image_info(&fixture("bmp-rgb32.bmp"), true)
+        let info = image_info(&fixture("bmp-rgb32.bmp"), true, None)
             .expect("read")
             .expect("taken over");
         assert_eq!(info.color_type, ColorType::Rgb8);
@@ -1070,7 +1078,7 @@ mod tests {
 
         // A png named as a bitmap is declined, not refused.
         assert!(
-            image_info(&fixture("cicp-rgb8.png"), true)
+            image_info(&fixture("cicp-rgb8.png"), true, None)
                 .expect("a png is not ours")
                 .is_none()
         );

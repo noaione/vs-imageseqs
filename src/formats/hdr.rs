@@ -428,8 +428,15 @@ fn raster(header: &Header, data: &[u8]) -> Result<Vec<u8>> {
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file is one of ours and cannot be read.
-pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo>> {
-    if !owns(path) {
+pub fn image_info(
+    path: &Path,
+    _apply_rotation: bool,
+    route: Option<crate::formats::identify::Format>,
+) -> Result<Option<ImageInfo>> {
+    if !route.map_or_else(
+        || owns(path),
+        |saved| saved == crate::formats::identify::Format::Hdr,
+    ) {
         return Ok(None);
     }
     let data = image_head(path).map_err(|error| image_error("open", path, error))?;
@@ -441,6 +448,7 @@ pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo
     }
     let header = header(&data).map_err(|error| image_error("identify", path, error))?;
     Ok(Some(ImageInfo {
+        route: None,
         path: path.to_path_buf(),
         width: header.width,
         height: header.height,
@@ -581,7 +589,7 @@ mod tests {
             ("hdr-orient-bottom-left.hdr", 37, 23),
             ("hdr-orient-bottom-right.hdr", 37, 23),
         ] {
-            let info = image_info(&fixture(name), true)
+            let info = image_info(&fixture(name), true, None)
                 .unwrap_or_else(|error| panic!("{name}: {error}"))
                 .unwrap_or_else(|| panic!("{name} is taken over"));
             assert_eq!((info.width, info.height), (width, height), "{name}");
@@ -604,7 +612,7 @@ mod tests {
     #[test]
     fn the_signs_are_applied_rather_than_ignored() {
         let read = |name: &str| -> Vec<u8> {
-            let info = image_info(&fixture(name), true)
+            let info = image_info(&fixture(name), true, None)
                 .expect("read")
                 .expect("taken over");
             match decode(&info).expect("decodes").pixels {
@@ -647,7 +655,7 @@ mod tests {
         assert!(owns(Path::new("a.hdr")));
         assert!(owns(Path::new("a.HDR")));
         assert!(
-            image_info(&fixture("cicp-rgb8.png"), true)
+            image_info(&fixture("cicp-rgb8.png"), true, None)
                 .expect("a png is not ours")
                 .is_none()
         );

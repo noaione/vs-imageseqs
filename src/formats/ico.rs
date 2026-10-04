@@ -193,8 +193,15 @@ fn payload<'a>(data: &'a [u8], entry: Entry, path: &Path) -> Result<&'a [u8]> {
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file is one of ours and cannot be read.
-pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo>> {
-    if !owns(path) {
+pub fn image_info(
+    path: &Path,
+    _apply_rotation: bool,
+    route: Option<crate::formats::identify::Format>,
+) -> Result<Option<ImageInfo>> {
+    if !route.map_or_else(
+        || owns(path),
+        |saved| saved == crate::formats::identify::Format::Ico,
+    ) {
         return Ok(None);
     }
     // The whole file, not a header: an icon's directory indexes payloads anywhere
@@ -234,6 +241,7 @@ pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo
     }
 
     Ok(Some(ImageInfo {
+        route: None,
         path: path.to_path_buf(),
         width,
         height,
@@ -404,7 +412,7 @@ mod tests {
                 (width, height),
                 "{name}"
             );
-            let info = image_info(&fixture(name), true)
+            let info = image_info(&fixture(name), true, None)
                 .unwrap_or_else(|error| panic!("{name}: {error}"))
                 .unwrap_or_else(|| panic!("{name} is taken over"));
             assert_eq!((info.width, info.height), (width, height), "{name}");
@@ -451,7 +459,7 @@ mod tests {
             ("ico-png.ico", 32, 32),
             ("ico-multi.ico", 48, 48),
         ] {
-            let info = image_info(&fixture(name), true)
+            let info = image_info(&fixture(name), true, None)
                 .expect("read")
                 .expect("taken over");
             let decoded = decode(&info).unwrap_or_else(|error| panic!("{name}: {error}"));
@@ -534,7 +542,7 @@ mod tests {
         assert!(owns(Path::new("a.ICO")));
         assert!(!owns(Path::new("a.png")));
         assert!(
-            image_info(&fixture("cicp-rgb8.png"), true)
+            image_info(&fixture("cicp-rgb8.png"), true, None)
                 .expect("a png is not ours")
                 .is_none()
         );

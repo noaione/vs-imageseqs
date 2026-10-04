@@ -100,8 +100,15 @@ fn pixel_data<'a>(data: &'a [u8], width: u32, height: u32, path: &Path) -> Resul
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file is one of ours and cannot be read.
-pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo>> {
-    if !owns(path) {
+pub fn image_info(
+    path: &Path,
+    _apply_rotation: bool,
+    route: Option<crate::formats::identify::Format>,
+) -> Result<Option<ImageInfo>> {
+    if !route.map_or_else(
+        || owns(path),
+        |saved| saved == crate::formats::identify::Format::Farbfeld,
+    ) {
         return Ok(None);
     }
     let data = image_head(path).map_err(|error| image_error("open", path, error))?;
@@ -112,6 +119,7 @@ pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo
         return Err(image_error("identify", path, "the header states no pixels"));
     }
     Ok(Some(ImageInfo {
+        route: None,
         path: path.to_path_buf(),
         width,
         height,
@@ -203,7 +211,7 @@ mod tests {
     /// The committed fixture: two by two, four channels of sixteen bits.
     #[test]
     fn the_header_is_read_as_the_file_states_it() {
-        let info = image_info(&fixture("alpha-rgba16.ff"), true)
+        let info = image_info(&fixture("alpha-rgba16.ff"), true, None)
             .expect("the header is read")
             .expect("a farbfeld is taken over");
         assert_eq!((info.width, info.height), (2, 2));
@@ -220,7 +228,7 @@ mod tests {
     /// than 1000.
     #[test]
     fn the_samples_are_big_endian_on_disk_and_native_in_memory() {
-        let info = image_info(&fixture("alpha-rgba16.ff"), true)
+        let info = image_info(&fixture("alpha-rgba16.ff"), true, None)
             .expect("the header is read")
             .expect("taken over");
         let decoded = decode(&info).expect("the file decodes");
@@ -311,7 +319,7 @@ mod tests {
     /// A file whose size changed after probing is refused.
     #[test]
     fn a_file_that_changed_after_probing_is_refused() {
-        let mut info = image_info(&fixture("alpha-rgba16.ff"), true)
+        let mut info = image_info(&fixture("alpha-rgba16.ff"), true, None)
             .expect("the header is read")
             .expect("taken over");
         info.height += 1;

@@ -45,13 +45,15 @@ impl Demand {
 /// allocated and packed here. A webp or a jxl arrives with its alpha channel
 /// already in the buffer the decoder wrote, so there is nothing to skip.
 fn format_decoder(info: &ImageInfo, demand: Demand) -> Option<Result<DecodedImage>> {
-    // One read of the head answers which module owns this file, and it is the
-    // same call the probe makes -- see [`identify::route`]. This replaces a
-    // chain of sixteen `owns` calls, one open each, that had to agree with
-    // `describe` and could not be kept in agreement: a module answering from the
-    // name rather than from the bytes probed as one format and decoded as
-    // another.
-    Some(match identify::route(&info.path) {
+    // The probe already read the head to answer which module owns this file,
+    // and this is that answer; an `ImageInfo` built by hand has none and
+    // identifies from its path, which is what every decode did before. The
+    // saved route replaces a chain of sixteen `owns` calls, one open each, that
+    // had to agree with `describe` and could not be kept in agreement: a module
+    // answering from the name rather than from the bytes probed as one format
+    // and decoded as another.
+    let route = info.route.or_else(|| identify::route(&info.path));
+    Some(match route {
         Some(Format::Avif) => formats::avif::decode(info, demand),
         Some(Format::Heif) => formats::heif::decode(info, demand),
         Some(Format::Webp) => formats::webp::decode(info),
@@ -119,6 +121,10 @@ pub struct ImageInfo {
     /// when the file states no orientation or the caller turned rotation off.
     pub transform: Transform,
     pub format: PixelFormat,
+    /// The container [`identify::route`] named for this file, kept so that the
+    /// timeline decision and the decode reuse it instead of reading the head
+    /// again. It is `None` for an `ImageInfo` that no probe built.
+    pub route: Option<Format>,
 }
 
 impl ImageInfo {
@@ -473,11 +479,11 @@ pub fn probe_segment(
     let info = probe(path, apply_rotation, export_icc_profile)?;
     // An animated file is described by its own container: the delay of every
     // picture and how to replay it. Whether a file is one is the container's
-    // answer, so this asks the same question the probe and the decode ask --
-    // [`identify::route`] -- rather than the file's name. A format whose
+    // answer, and the probe has already asked it: this reads the route the
+    // probe saved rather than the file's name. A format whose
     // adapter finds no timeline is a still, which is one frame and no decoder
     // at all.
-    let animated = match identify::route(path) {
+    let animated = match info.route {
         Some(Format::Png) => crate::animation::apng::segment_info(path, info.clone(), fps)?,
         Some(Format::Gif) => crate::animation::gif::segment_info(path, info.clone(), fps)?,
         Some(Format::Avif | Format::Heif) => {
@@ -511,10 +517,11 @@ fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
     // or not r,g,b, say -- is then followed by the generic decoder below, which
     // is what a chain of fifteen `owns` calls did before: with the content
     // deciding, no other module could have claimed it anyway.
-    let described = match identify::route(path) {
+    let route = identify::route(path);
+    let described = match route {
         // The two containers whose own reader answers a size without decoding
         // the picture at all.
-        Some(Format::Heif) => formats::heif::image_info(path, apply_rotation),
+        Some(Format::Heif) => formats::heif::image_info(path, apply_rotation, route),
         Some(Format::Avif) => formats::avif::image_info(path, apply_rotation),
         // A jpeg xl is read here whether or not the `image` crate could reach a
         // decoder for one, which it cannot: it has no jpeg xl format of its own.
@@ -524,60 +531,64 @@ fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
         Some(Format::Jp2) => Some(formats::jp2::image_info(path, apply_rotation)?),
         // A quite ok image states its size and its channel count in fourteen
         // bytes, and a farbfeld's header is the same shape and just as cheap.
-        Some(Format::Qoi) => formats::qoi::image_info(path, apply_rotation)?,
-        Some(Format::Farbfeld) => formats::farbfeld::image_info(path, apply_rotation)?,
+        Some(Format::Qoi) => formats::qoi::image_info(path, apply_rotation, route)?,
+        Some(Format::Farbfeld) => formats::farbfeld::image_info(path, apply_rotation, route)?,
         // A bitmap states its depth, its compression and its masks in a header
         // this module reads without touching a sample, and the alpha decision is
         // part of that header rather than of the samples.
-        Some(Format::Bmp) => formats::bmp::image_info(path, apply_rotation)?,
+        Some(Format::Bmp) => formats::bmp::image_info(path, apply_rotation, route)?,
         // An icon is a directory of payloads, and which one is read is decided
         // by the directory rather than by the frame.
-        Some(Format::Ico) => formats::ico::image_info(path, apply_rotation)?,
+        Some(Format::Ico) => formats::ico::image_info(path, apply_rotation, route)?,
         // A targa states its layout in an eighteen byte header, and the two
         // direction bits in that header decide where the pixels go rather than
         // an orientation property.
-        Some(Format::Tga) => formats::tga::image_info(path, apply_rotation)?,
+        Some(Format::Tga) => formats::tga::image_info(path, apply_rotation, route)?,
         // A surface states its compression in a four character code or in a
         // DXGI format number, and its size has to be a whole number of four by
         // four blocks.
-        Some(Format::Dds) => formats::dds::image_info(path, apply_rotation)?,
+        Some(Format::Dds) => formats::dds::image_info(path, apply_rotation, route)?,
         // A netpbm states its magic, its size and its `MAXVAL` in a text
         // preamble, and that preamble is also where a comment is legal.
-        Some(Format::Pnm) => formats::pnm::image_info(path, apply_rotation)?,
+        Some(Format::Pnm) => formats::pnm::image_info(path, apply_rotation, route)?,
         // A tagged format, whose directories this module walks without decoding
         // a sample.
-        Some(Format::Tiff) => formats::tiff::image_info(path, apply_rotation)?,
+        Some(Format::Tiff) => formats::tiff::image_info(path, apply_rotation, route)?,
         // A radiance picture states its layout in a resolution line and its
         // samples as four bytes a pixel.
-        Some(Format::Hdr) => formats::hdr::image_info(path, apply_rotation)?,
+        Some(Format::Hdr) => formats::hdr::image_info(path, apply_rotation, route)?,
         // An openexr states its layers, their channels and their sample types in
         // its header, and the crate parses that header without decompressing a
         // block.
-        Some(Format::Exr) => formats::exr::image_info(path, apply_rotation)?,
+        Some(Format::Exr) => formats::exr::image_info(path, apply_rotation, route)?,
         // A png is read here for the same reason a jpeg is, and one thing more:
         // the `cICP` chunk is not something the `image` decoder exposes at all.
-        Some(Format::Png) => formats::png::image_info(path, apply_rotation)?,
+        Some(Format::Png) => formats::png::image_info(path, apply_rotation, route)?,
         // A jpeg is read here rather than through the generic decoder, whose
         // reader would parse the file's headers four times for one probe.
-        Some(Format::Jpeg) => formats::jpeg::image_info(path, apply_rotation)?,
+        Some(Format::Jpeg) => formats::jpeg::image_info(path, apply_rotation, route)?,
         // A gif is read here: the container states the logical screen and its one
         // frame draws a rectangle onto it, so a still gif has a reader of its own.
-        Some(Format::Gif) => formats::gif::image_info(path, apply_rotation)?,
+        Some(Format::Gif) => formats::gif::image_info(path, apply_rotation, route)?,
         // A webp is read here too: the container states the canvas, the alpha
         // flag, the orientation and the profile, so describing one no longer
         // costs a decode of the whole picture.
-        Some(Format::Webp) => formats::webp::image_info(path, apply_rotation)?,
+        Some(Format::Webp) => formats::webp::image_info(path, apply_rotation, route)?,
         // A file no format here names is a file this plugin does not read. It
         // used to be the generic decoder's, which was the last thing `image`
         // was linked for; there is no generic decoder any more.
         None => None,
     };
-    described.ok_or_else(|| {
+    let mut info = described.ok_or_else(|| {
         ImgSeqError::new(format!(
             "failed to identify image '{}': no reader here knows its format",
             path.display()
         ))
-    })
+    })?;
+    // The route is saved on the description so that the timeline decision and
+    // the decode do not read the head again to reach the same answer.
+    info.route = route;
+    Ok(info)
 }
 
 /// Decodes `info`.
@@ -633,6 +644,39 @@ mod tests {
             .join("tests")
             .join("fixtures")
             .join(name)
+    }
+
+    /// A probe reads a file's head once, and the timeline decision reads the
+    /// route it saved rather than reading the head again.
+    #[test]
+    fn a_probe_reads_the_head_once_and_saves_the_route() {
+        use crate::formats::identify::{self, Format};
+
+        let path = fixture("alpha-rgb8.png");
+        identify::reset_head_reads();
+        let segment =
+            probe_segment(&path, Rate::from_fps(24, 1), true, false).expect("the fixture probes");
+        // The route is the only read: the module the router chose takes the saved
+        // answer instead of opening the file to ask the ownership question again.
+        assert_eq!(identify::head_reads(), 1, "one probe reads the head once");
+        assert_eq!(segment.info.route, Some(Format::Png));
+    }
+
+    /// The decode reads the route the probe saved instead of the head again.
+    #[test]
+    fn a_decode_reads_the_head_none() {
+        use crate::formats::identify;
+
+        let path = fixture("alpha-rgb8.png");
+        let info = probe(&path, true, false).expect("the fixture probes");
+        identify::reset_head_reads();
+        let decoded = super::decode(&info, super::Demand::COLOR).expect("the fixture decodes");
+        assert!(decoded.width > 0);
+        assert_eq!(
+            identify::head_reads(),
+            0,
+            "the decode reuses the saved route"
+        );
     }
 
     /// The fixture animations all state the same 600 ms of four pictures, so
@@ -720,6 +764,20 @@ mod tests {
         // The codestream states its timeline as ticks of a 1000 Hz timescale,
         // which is the rate the segment keeps.
         assert_eq!(segment.rate, Rate::new(1000, 1));
+    }
+
+    /// The animation adapter declines a still from the codestream header, which
+    /// is what keeps a still jpeg xl off the frame scan.
+    #[test]
+    fn only_an_animated_jpeg_xl_states_a_timeline() {
+        let animated = crate::formats::jxl::states_animation(&fixture("animation.jxl"))
+            .expect("the fixture reads");
+        assert!(animated, "the fixture holds four pictures");
+        for name in ["alpha-rgba8.jxl", "jxl-gray10.jxl"] {
+            let still =
+                crate::formats::jxl::states_animation(&fixture(name)).expect("the fixture reads");
+            assert!(!still, "{name}");
+        }
     }
 
     /// A still jpeg xl stays one frame.

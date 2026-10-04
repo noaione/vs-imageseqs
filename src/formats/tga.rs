@@ -454,8 +454,15 @@ fn reverse_encoding(header: &Header, pixels: &mut [u8]) {
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file is one of ours and cannot be read.
-pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo>> {
-    if !owns(path) {
+pub fn image_info(
+    path: &Path,
+    _apply_rotation: bool,
+    route: Option<crate::formats::identify::Format>,
+) -> Result<Option<ImageInfo>> {
+    if !route.map_or_else(
+        || owns(path),
+        |saved| saved == crate::formats::identify::Format::Tga,
+    ) {
         return Ok(None);
     }
     let data = image_head(path).map_err(|error| image_error("open", path, error))?;
@@ -465,6 +472,7 @@ pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo
         return Ok(None);
     };
     Ok(Some(ImageInfo {
+        route: None,
         path: path.to_path_buf(),
         width: header.width,
         height: header.height,
@@ -730,7 +738,7 @@ mod tests {
                 SourceColorType::Rgb8,
             ),
         ] {
-            let info = image_info(&fixture(name), true)
+            let info = image_info(&fixture(name), true, None)
                 .unwrap_or_else(|error| panic!("{name}: {error}"))
                 .unwrap_or_else(|| panic!("{name} is taken over"));
             assert_eq!((info.width, info.height), (width, height), "{name}");
@@ -744,7 +752,7 @@ mod tests {
     /// byte is alpha here and is dropped there.
     #[test]
     fn a_thirty_two_bit_image_keeps_its_fourth_byte_without_stating_alpha() {
-        let info = image_info(&fixture("tga-rgb32-attr0.tga"), true)
+        let info = image_info(&fixture("tga-rgb32-attr0.tga"), true, None)
             .expect("read")
             .expect("taken over");
         assert_eq!(info.color_type, ColorType::Rgba8);
@@ -770,13 +778,13 @@ mod tests {
             ("tga-mapped8.tga", "tga-mapped8-rle.tga"),
         ] {
             let plain = decode(
-                &image_info(&fixture(raw), true)
+                &image_info(&fixture(raw), true, None)
                     .expect("read")
                     .expect("taken over"),
             )
             .expect("decodes");
             let packed = decode(
-                &image_info(&fixture(encoded), true)
+                &image_info(&fixture(encoded), true, None)
                     .expect("read")
                     .expect("taken over"),
             )
@@ -795,7 +803,7 @@ mod tests {
     #[test]
     fn the_descriptor_directions_are_applied() {
         let plain = decode(
-            &image_info(&fixture("tga-rgb24.tga"), true)
+            &image_info(&fixture("tga-rgb24.tga"), true, None)
                 .expect("read")
                 .expect("taken over"),
         )
@@ -806,7 +814,7 @@ mod tests {
         for name in ["tga-rgb24-topdown.tga", "tga-rgb24-rightleft.tga"] {
             // Stored the other way round and read back the same way up.
             let turned = decode(
-                &image_info(&fixture(name), true)
+                &image_info(&fixture(name), true, None)
                     .expect("read")
                     .expect("taken over"),
             )
@@ -837,7 +845,7 @@ mod tests {
         assert!(owns(Path::new("a.tga")));
         assert!(owns(Path::new("a.TGA")));
         assert!(
-            image_info(&fixture("cicp-rgb8.png"), true)
+            image_info(&fixture("cicp-rgb8.png"), true, None)
                 .expect("a png is not ours")
                 .is_none()
         );

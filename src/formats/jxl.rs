@@ -339,6 +339,7 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
     let opened = open_header(path)?;
     let header = Header::read(&opened.decoder, path)?;
     Ok(ImageInfo {
+        route: None,
         path: path.to_path_buf(),
         width: header.width,
         height: header.height,
@@ -499,6 +500,22 @@ fn open_header(path: &Path) -> Result<Opened> {
         open,
         metadata,
     })
+}
+
+/// Whether a jpeg xl codestream states that it holds a timeline.
+///
+/// [`image_info`] reads the same header for the facts a probe reports, and the
+/// animation adapter asks this before it reads a file it may not need: a still
+/// is the common case, and what a scan costs is the frames that follow the
+/// header rather than the header itself.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the file cannot be opened or its header cannot
+/// be read.
+pub(crate) fn states_animation(path: &Path) -> Result<bool> {
+    let opened = open_header(path)?;
+    Ok(opened.decoder.basic_info().animation.is_some())
 }
 
 /// Reads the two signatures a jpeg xl file starts with, without using the bytes

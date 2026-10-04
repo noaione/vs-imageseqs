@@ -143,16 +143,14 @@ pub fn read(path: &Path) -> Result<Option<Sequence>> {
     let length = file
         .seek(SeekFrom::End(0))
         .map_err(|error| image_error("read", path, error))?;
-    // Only the box structure is wanted, and every box this reader cares about
-    // is at the front of the file; an `mdat` of media data follows it and is
-    // never read. The walk stops when a box runs past what was read, so what is
-    // read has to cover the boxes that matter rather than the whole file.
+    // Only the box structure is wanted, and an `mdat` of coded pictures can be
+    // most of the file and sit either side of the boxes that state a timeline.
+    // `data` is as long as the file up to the limit, so every offset a box
+    // states is the offset it has there, and what it holds is filled in from the
+    // file rather than read whole; see [`fill_structure`].
     let wanted = length.min(METADATA_LIMIT);
     let mut data = vec![0u8; usize::try_from(wanted).unwrap_or(0)];
-    file.seek(SeekFrom::Start(0))
-        .map_err(|error| image_error("read", path, error))?;
-    file.read_exact(&mut data)
-        .map_err(|error| image_error("read", path, error))?;
+    fill_structure(&mut file, &mut data, path)?;
 
     let Some(moov) = child(
         &data,
@@ -189,6 +187,71 @@ pub fn read(path: &Path) -> Result<Option<Sequence>> {
     }
 
     Ok(None)
+}
+
+/// Fills `data` with the box structure of a file and the payloads of the boxes a
+/// description reads.
+///
+/// The walk below steps over a box by the size the box itself states, so a
+/// payload left as zeros is never interpreted: `data` holds the header of every
+/// top level box, and the payload of `moov` -- the timeline -- and of `meta` --
+/// the coded size and the aperture. Everything else, an `mdat` of coded pictures
+/// above all, is skipped by seeking past it, which is what keeps a description
+/// from reading a file's pixels to find its own box list.
+///
+/// The sizes are read the way [`boxes`] reads them, including the two the format
+/// spells differently: a size of one means a 64 bit size follows the kind, and a
+/// size of zero means the box runs to the end of what is here. A box that states
+/// a size that does not fit ends the walk, which leaves the same list [`boxes`]
+/// builds from the same bytes.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the file cannot be read.
+fn fill_structure(file: &mut File, data: &mut [u8], path: &Path) -> Result<()> {
+    let end = u64::try_from(data.len()).unwrap_or(u64::MAX);
+    let mut at = 0u64;
+    while at + 8 <= end {
+        let mut header = [0u8; 16];
+        file.seek(SeekFrom::Start(at))
+            .map_err(|error| image_error("read", path, error))?;
+        file.read_exact(&mut header[..8])
+            .map_err(|error| image_error("read", path, error))?;
+        let kind = [header[4], header[5], header[6], header[7]];
+        let size = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+        let (header_size, size) = match size {
+            1 => {
+                if at + 16 > end {
+                    break;
+                }
+                file.read_exact(&mut header[8..16])
+                    .map_err(|error| image_error("read", path, error))?;
+                let mut wide = [0u8; 8];
+                wide.copy_from_slice(&header[8..16]);
+                (16u64, u64::from_be_bytes(wide))
+            }
+            0 => (8u64, end - at),
+            size => (8u64, u64::from(size)),
+        };
+        if size < header_size || at + size > end {
+            break;
+        }
+        let header_size = usize::try_from(header_size).unwrap_or(0);
+        let start = usize::try_from(at).unwrap_or(0);
+        data[start..start + header_size].copy_from_slice(&header[..header_size]);
+        if &kind == b"moov" || &kind == b"meta" {
+            let from = start + header_size;
+            let payload = usize::try_from(size)
+                .unwrap_or(0)
+                .saturating_sub(header_size);
+            file.seek(SeekFrom::Start(at + header_size as u64))
+                .map_err(|error| image_error("read", path, error))?;
+            file.read_exact(&mut data[from..from + payload])
+                .map_err(|error| image_error("read", path, error))?;
+        }
+        at += size;
+    }
+    Ok(())
 }
 
 /// Whether a track's media handler says it holds pictures.

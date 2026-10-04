@@ -25,17 +25,46 @@ This documentation update implements no decoder changes.
 
 | original phase | current status | remaining work |
 | --- | --- | --- |
-| 1. Consistent routing, saved plan and sample/subimage invariants | **Content-routing slice landed; phase partly complete.** `2b02f64` routes stills by content, and `c206944` does the same for animation. EXR selection, PAM word width and TIFF metadata/sample handling have also received fixes. | `ImageInfo` still stores output facts and a pathname, not a saved container/backend/selected-subimage plan. Decode calls `identify::route` again, and adapters still parse their own inputs. The broader saved-plan and error/sample invariants need separate completion checks. |
-| 2. Combine metadata passes | **Open, with first-party probes landed.** PNG, GIF and WebP no longer require image-rs for metadata or fallback pixels. | One shared probe reader is not implemented. APNG timing still calls `next_frame`; WebP/JXL discovery still reads the complete input; ISO sequence discovery still reads a capped prefix; JP2 probing still reads the whole file. |
+| 1. Consistent routing, saved plan and sample/subimage invariants | **Content-routing slice landed, and the route is saved and threaded.** `2b02f64` routes stills by content, `c206944` does the same for animation, and the saved-route slices record what the router named on `ImageInfo` and pass it to every module's probe entry, so a file is identified with one read. EXR selection, PAM word width and TIFF metadata/sample handling have also received fixes. | The saved route names the container and nothing more: the backend and the selected subimage are still decided inside each adapter, and the broader error/sample invariants need separate completion checks. |
+| 2. Combine metadata passes | **Partly landed: the front of the file answers.** PNG, GIF and WebP no longer require image-rs for metadata or fallback pixels; a webp's or jpeg xl's animation adapter answers from the file header, a jpeg 2000 probe reads a window over the front that grows only while the header is incomplete, and an avif or heif sequence walk seeks over media data rather than reading it. | One shared probe reader is not implemented, and APNG timing still calls `next_frame`. |
 | 3. Retain initialized readers and preserve planes | **Partly complete.** Eligible PNG, binary RGB8 PNM/PAM, TGA and BMP have row sinks. TIFF now also has a native YCbCr plane path (`8cf7b06`). | PNM/TGA/BMP row sinks still read the whole file during filling after a separate preparation read. PNG initializes a reader again in `fill`. True farbfeld/PNM row reads, direct separate-planar RGB TIFF, direct EXR planes and shared initialized decode state remain open. |
 | 4. Timing and selected subtype repairs | **Partly complete.** BigTIFF/RGBE recognition, PAM MAXVAL interpretation, TIFF orientation/ICC and EXR flat-RGB part selection have landed. Palette and CMYK(A)/YCbCr TIFF coverage has since expanded too. | Exact APNG rational delays and the total-frame-count discrepancy remain. Core BMP, odd DDS edge blocks and variable-length headers still have the inspected restrictions. Other coverage candidates require individual decisions and evidence. |
 | 5. Remove image-rs | **Landed.** `d431764` removes `image`, `8682c2f` removes leftover layout helpers, and `src/still.rs` is deleted. Cargo.toml and Cargo.lock contain no `image` dependency. | This does not finish phases 1–4. Ported code's notices remain applicable; codec dependencies such as libwebp are independent of image-rs. |
 
-The number of `identify::route` references is evidence that routing is wired,
-not evidence that identification happens only once. `describe`,
-`probe_segment` and `format_decoder` still call it separately. The central
-function makes those decisions consistent; the saved-plan and shared-reader
-parts of this proposal would remove repeated decisions and opens.
+`identify::route` has one production caller in each direction now: `describe`
+saves what it named on `ImageInfo`, `probe_segment` reads that route for the
+timeline decision, and `format_decoder` reads it for the decode. What remains is
+the rest of the saved plan -- the backend and the selected subimage -- and the
+per-module ownership guard, which still opens the file to confirm what the
+router already decided.
+
+### the saved route, and what still reads the head
+
+`ImageInfo` carries the container `identify::route` named, so the timeline
+decision and the decode no longer read the head to reach an answer the probe
+already had. `identify::route_agrees` is how a guard uses it: a saved route
+answers without a read, and `None` -- an `ImageInfo` built by hand -- falls back
+to the head, so a caller that did not come through a probe behaves as before.
+
+`identify::head_reads()` counts the reads on one thread, and two `decoder` tests
+pin them for `alpha-rgb8.png`. The before column is what the call sites did; the
+after column is what the test counts.
+
+| step | before | after |
+| --- | --- | --- |
+| one png probe | 4 | 1 |
+| one png decode | 2 | 0 |
+
+The route is the only read a probe makes now: `describe` passes it to the module
+the router chose, and `image_info` answers the ownership question from it. `None`
+is a caller that never routed the file -- a module test, say -- and falls back to
+the leading bytes, so nothing that skips the router behaves differently.
+
+The same paired protocol on the 1860 entry cohort this bench uses reads 0.128 ms
+a file against 0.188 before these slices, seven blocks of four reps a side and
+one-sided in every block. That is 32% less work a file, and it leaves clip
+creation 1.03x per file against the installed pre-branch build where reading the
+bytes cost 1.53x.
 
 ### routing acceptance and the 84 → 76 cohort change
 
@@ -66,6 +95,69 @@ per extension and frame 0, compares `ImgSeq` properties rather than every color
 property or opt-in ICC payload, and uses `.dat` rather than a no-suffix copy.
 Saved backend/item identity, changed-file validation, all animation frames,
 missing-extension and ambiguous-format cases need their own acceptance checks.
+
+### clip creation, paired on preserved binaries
+
+The closing note below asks for alternating runs of preserved binaries over one
+file list. `target/bench/route-cost.py` does that, and both sides print how many
+files they described, so a comparison can be seen to be over the same set.
+
+Seven interleaved pairs over `tests/fixtures`, 187 files accepted by both sides:
+
+| build | median | per file |
+| --- | --- | --- |
+| `vs-imageseqs-preroute.dll` | 68.5 ms | 0.368 ms |
+| `vs-imageseqs-route.dll` | 35.8 ms | 0.191 ms |
+
+Every pair was one-sided, so the routing slice is the 1.91x it claims to be --
+against the branch's own interim build, which is not a build anyone has.
+
+The installed `.venv` library is. It was built 2026-10-03 15:47, before any of the
+work this plan is about, and it dispatches by extension: `tests/routing.py` reads
+**12 of 76** renamed copies differently through it, where both branch builds read
+**0 of 76**. Describing the 186 fixture files it and the current build both accept,
+replicated tenfold so 0.15 ms a file clears this machine's noise floor:
+
+| build | median, 1860 entries | per file |
+| --- | --- | --- |
+| installed, pre-branch | 254.8 ms | 0.137 ms |
+| current `target/release` | 388.9 ms | 0.209 ms |
+
+Seven blocks of four reps a side, 28 samples each, no overlap: reading bytes
+rather than trusting a name cost 1.53x a file there. Both saved-route slices
+have since taken the duplicate head reads out, and the same pairing is 1.03x
+(`target/bench/route-time-release-021-vs-threaded.txt`). The replication is not
+decoration: the same binary over the same work read 20.2 ms in one run and
+33.6 ms in another at this scale.
+
+The webp and jpeg xl corpora are the other end of the scale: 35 files of 146 MiB
+and 35 of 174 MiB, nearly all of it in a few large pictures, where clip creation
+read every one of them whole to ask whether it displays a timeline. Asking the
+file header instead takes the same paired protocol from 99 ms to 6 ms and from
+157 ms to 5 ms, 17x and 35x, one-sided in every block
+(`target/bench/clip-webp-header.txt`, `target/bench/clip-jxl-header.txt`).
+
+Jpeg 2000 is the third, and its probe read the whole file: 35 files of 251 MiB
+cost a median of 159 ms and now cost 4 ms, 36x, one-sided in every block
+(`target/bench/clip-jp2-window.txt`). The first window implementation demanded
+that the codestream box fit inside it, which grew the window to the whole file
+and made the probe 4.5x *slower* -- the walk now stops at the `SIZ` a
+description reads from the codestream and never asks for the rest of that box.
+
+Avif and heic are the last of these, and there the walk could not simply stop at
+a box that runs past what it read: a movie box may follow the media data it
+describes, so stopping early would lose a timeline. It seeks over a payload it
+does not read instead, which finds a `moov` on either side of an `mdat`: 35 avif
+files of 126 MiB went from 84 ms to 6 ms, and 35 heic files of 236 MiB from
+170 ms to 13 ms, one-sided in every block
+(`target/bench/clip-avif-seekwalk.txt`, `target/bench/clip-heic-seekwalk.txt`).
+
+Artifacts: `target/bench/route-time.py`, `target/bench/accepted.py`,
+`target/bench/route-pair-fixtures.txt`, `target/bench/route-pair-common.txt`,
+`target/bench/route-time-x10.txt`, `target/bench/route-time-savedroute.txt`,
+`target/bench/route-time-release-vs-savedroute.txt`,
+`target/bench/route-time-before-savedroute-vs-threaded.txt` and
+`target/bench/route-time-release-021-vs-threaded.txt`.
 
 ### what the planar half specifically asks for
 

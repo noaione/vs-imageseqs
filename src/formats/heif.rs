@@ -48,8 +48,15 @@ use crate::{
 /// `None` means this module cannot describe the file: another container, or one
 /// whose image libheif reports in a shape this probe will not state a format
 /// for. No reader here reads such a file.
-pub fn image_info(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
-    if !owns(path) {
+pub fn image_info(
+    path: &Path,
+    apply_rotation: bool,
+    route: Option<crate::formats::identify::Format>,
+) -> Option<ImageInfo> {
+    if !route.map_or_else(
+        || owns(path),
+        |saved| saved == crate::formats::identify::Format::Heif,
+    ) {
         return None;
     }
     describe(path, apply_rotation)
@@ -91,6 +98,7 @@ pub fn describe(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
     let orientation =
         crate::formats::avif::container_orientation(path).unwrap_or(Orientation::NoTransforms);
     Some(ImageInfo {
+        route: None,
         path: path.to_path_buf(),
         width: header.width,
         height: header.height,
@@ -637,6 +645,7 @@ mod tests {
         height: u32,
     ) -> ImageInfo {
         ImageInfo {
+            route: None,
             path: PathBuf::from(path),
             width,
             height,
@@ -734,7 +743,7 @@ mod tests {
         if !path.is_file() {
             return;
         }
-        let info = image_info(&path, true).expect("a colour heic");
+        let info = image_info(&path, true, None).expect("a colour heic");
         assert_eq!((info.width, info.height), (3, 2));
         assert_eq!(info.format, PixelFormat::Yuv420P8);
         assert_eq!(info.color_type, ColorType::Rgba8);
@@ -780,14 +789,14 @@ mod tests {
             if !path.is_file() {
                 return;
             }
-            let rotated = image_info(&path, true).expect("a rotated heic");
+            let rotated = image_info(&path, true, None).expect("a rotated heic");
             assert_eq!(rotated.orientation, code, "{name}");
             // `libheif` hands the displayed picture over, so the size the decoder
             // produced is the displayed one and there is nothing left to apply.
             assert_eq!((rotated.width, rotated.height), shown, "{name}");
             assert_eq!(rotated.transform, Transform::IDENTITY, "{name}");
 
-            let stored_info = image_info(&path, false).expect("a rotated heic");
+            let stored_info = image_info(&path, false, None).expect("a rotated heic");
             assert_eq!(stored_info.orientation, code, "{name}");
             assert_eq!((stored_info.width, stored_info.height), shown, "{name}");
             assert_eq!(
@@ -812,7 +821,7 @@ mod tests {
         if !path.is_file() {
             return;
         }
-        let info = image_info(&path, false).expect("a rotated heic");
+        let info = image_info(&path, false, None).expect("a rotated heic");
         assert_eq!((info.output_width(), info.output_height()), (4, 3));
         assert_eq!(
             info.transform,
@@ -833,7 +842,7 @@ mod tests {
         if !path.is_file() {
             return;
         }
-        let info = image_info(&path, true).expect("a monochrome heic");
+        let info = image_info(&path, true, None).expect("a monochrome heic");
         assert_eq!((info.width, info.height), (7, 5));
         assert_eq!(info.format, PixelFormat::Gray8);
         // The alpha item is a channel of the file, not of the gray frame it is
@@ -848,7 +857,7 @@ mod tests {
             "tests/fixtures/mono-alpha.png",
             "tests/fixtures/alpha-rgba8.jxl",
         ] {
-            assert!(image_info(Path::new(path), true).is_none(), "{path}");
+            assert!(image_info(Path::new(path), true, None).is_none(), "{path}");
         }
     }
 

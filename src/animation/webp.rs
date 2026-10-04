@@ -21,7 +21,11 @@
 //! disagreed with them it was because the `ANMF` flags byte has the blend method
 //! in bit 1 and the disposal in bit 0, which [`Frame::of`] now says explicitly.
 
-use std::path::{Path, PathBuf};
+use std::{
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 use crate::{
     decoder::{DecodeTimings, DecodedImage, Pixels, image_error},
@@ -33,6 +37,10 @@ use crate::{
 use super::{AnimationDecoder, AnimationSource, Presentation, Rate, SegmentInfo};
 /// Bytes of a RIFF chunk header: the four-character code and the size.
 const CHUNK_HEADER: usize = 8;
+
+/// Animation flag of the `VP8X` container header: the bit that says a timeline
+/// follows the picture.
+const VP8X_ANIMATION_FLAG: u8 = 0x02;
 
 /// Bytes of an `ANMF` header before its sub-chunks.
 const ANMF_HEADER: usize = 16;
@@ -329,6 +337,12 @@ pub fn segment_info(
     info: crate::decoder::ImageInfo,
     fps: Rate,
 ) -> Result<Option<SegmentInfo>> {
+    // A still is the common case, and the walk below reads the whole file to
+    // find that out. The container states it in the flags of its `VP8X` header,
+    // so a file that cannot be animated never reaches the walk.
+    if !header_states_animation(path)? {
+        return Ok(None);
+    }
     let Some(animation) = walk(path)? else {
         return Ok(None);
     };
@@ -492,6 +506,42 @@ pub fn walk(path: &Path) -> Result<Option<Animation>> {
     parse(&data, path)
 }
 
+/// Whether a webp's container states that it is animated.
+///
+/// [`walk`] answers this by reading the whole file, and a webp that displays one
+/// picture is the common case. The first chunks answer it on their own: a plain
+/// still bitstream starts with `VP8 ` or `VP8L` and cannot hold a timeline at
+/// all, and an extended one starts with the `VP8X` header whose animation bit
+/// says whether one follows.
+///
+/// Anything else -- a chunk order the format does not write, a header too short
+/// to read -- answers `true`, which leaves the refusal to [`walk`], the same walk
+/// that made it before this check existed.
+fn header_states_animation(path: &Path) -> Result<bool> {
+    let mut file = File::open(path).map_err(|error| image_error("open", path, error))?;
+    let mut riff = [0; 12];
+    let mut header = [0; CHUNK_HEADER];
+    if file.read_exact(&mut riff).is_err() || !is_container(&riff) {
+        return Ok(true);
+    }
+    if file.read_exact(&mut header).is_err() {
+        return Ok(true);
+    }
+    match &header[..4] {
+        b"VP8X" => {
+            // The flags are the payload's first byte, and a payload with no
+            // room for one is [`walk`]'s to refuse rather than this check's.
+            let size = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+            let mut flags = [0; 1];
+            if size < 10 || file.read_exact(&mut flags).is_err() {
+                return Ok(true);
+            }
+            Ok(flags[0] & VP8X_ANIMATION_FLAG != 0)
+        }
+        b"VP8 " | b"VP8L" => Ok(false),
+        _ => Ok(true),
+    }
+}
 /// Reads an animated webp out of its bytes.
 /// Reads an animated webp out of its bytes, or `None` for a webp that is not
 /// animated.
@@ -534,7 +584,7 @@ fn parse(data: &[u8], path: &Path) -> Result<Option<Animation>> {
                     return Err(bad("holds a VP8X chunk that is too short"));
                 }
                 let flags = payload[0];
-                animation = flags & 0x02 != 0;
+                animation = flags & VP8X_ANIMATION_FLAG != 0;
                 // The canvas is stated one less than its size, because zero is
                 // not a valid dimension; see the spec's `Canvas Width Minus One`.
                 let width = read_three(&payload[4..7]) + 1;
@@ -1024,5 +1074,44 @@ mod tests {
         )
         .expect("a decline rather than a refusal");
         assert!(declined.is_none());
+    }
+
+    /// A still webp is declined from its header: a `VP8X` whose animation bit is
+    /// clear is an extended still, and a plain bitstream has no timeline to hold.
+    #[test]
+    fn a_still_is_declined_from_its_header() {
+        let extended = write_temp(
+            "header-still.webp",
+            &riff(&[(b"VP8X", vp8x(4, 4, 0x10)), (b"VP8 ", vec![0; 8])]),
+        );
+        assert!(!header_states_animation(&extended).expect("the header to be read"));
+        assert!(matches!(walk(&extended), Ok(None)));
+        let _ = std::fs::remove_file(&extended);
+
+        let plain = write_temp("header-plain.webp", &riff(&[(b"VP8L", vec![0; 8])]));
+        assert!(!header_states_animation(&plain).expect("the header to be read"));
+        let _ = std::fs::remove_file(&plain);
+    }
+
+    /// The header answers before the rest of the file is read, which is the point
+    /// of asking it: a tail the walk refuses is never reached.
+    #[test]
+    fn a_still_is_declined_without_reading_its_tail() {
+        let path = write_temp(
+            "header-still-tail.webp",
+            &riff(&[(b"VP8X", vp8x(4, 4, 0x10)), (b"VP8X", vec![0; 3])]),
+        );
+        // A second `VP8X` too short to hold flags, which the walk refuses.
+        assert!(walk(&path).is_err());
+        assert!(!header_states_animation(&path).expect("the header to be read"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Writes bytes to a temp file named for this test process.
+    fn write_temp(name: &str, bytes: &[u8]) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("imgseqs-webp-anim-{}-{name}", std::process::id()));
+        std::fs::write(&path, bytes).expect("a writable image");
+        path
     }
 }

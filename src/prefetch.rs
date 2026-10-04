@@ -593,6 +593,7 @@ mod tests {
     /// An image that is never read, to size budgets in tests.
     fn synthetic(width: u32, height: u32, color_type: ColorType) -> ImageInfo {
         ImageInfo {
+            route: None,
             path: PathBuf::from("synthetic"),
             width,
             height,

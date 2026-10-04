@@ -318,8 +318,15 @@ fn probe_header(path: &Path) -> Option<ProbeHeader> {
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file is one of ours and cannot be read.
-pub fn image_info(path: &Path, apply_rotation: bool) -> Result<Option<ImageInfo>> {
-    if !owns(path) {
+pub fn image_info(
+    path: &Path,
+    apply_rotation: bool,
+    route: Option<crate::formats::identify::Format>,
+) -> Result<Option<ImageInfo>> {
+    if !route.map_or_else(
+        || owns(path),
+        |saved| saved == crate::formats::identify::Format::Webp,
+    ) {
         return Ok(None);
     }
     let Some(header) = probe_header(path) else {
@@ -336,6 +343,7 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Result<Option<ImageInfo>
         .and_then(orientation_of)
         .unwrap_or(Orientation::NoTransforms);
     Ok(Some(ImageInfo {
+        route: None,
         path: path.to_path_buf(),
         width: header.width,
         height: header.height,
@@ -796,6 +804,7 @@ mod tests {
 
     fn info(path: &Path, color_type: ColorType, width: u32, height: u32) -> ImageInfo {
         ImageInfo {
+            route: None,
             path: path.to_path_buf(),
             width,
             height,

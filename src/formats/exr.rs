@@ -193,14 +193,22 @@ fn header(path: &Path) -> Result<Option<Header>> {
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file is one of ours and cannot be read.
-pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo>> {
-    if !owns(path) {
+pub fn image_info(
+    path: &Path,
+    _apply_rotation: bool,
+    route: Option<crate::formats::identify::Format>,
+) -> Result<Option<ImageInfo>> {
+    if !route.map_or_else(
+        || owns(path),
+        |saved| saved == crate::formats::identify::Format::Exr,
+    ) {
         return Ok(None);
     }
     let Some(header) = header(path)? else {
         return Ok(None);
     };
     Ok(Some(ImageInfo {
+        route: None,
         path: path.to_path_buf(),
         width: header.width,
         height: header.height,
@@ -362,7 +370,7 @@ mod tests {
 
     /// One fixture's colour buffer, from the probe to the decoded pixels.
     fn read(name: &str) -> (ImageInfo, ColorType, Vec<u8>) {
-        let info = image_info(&fixture(name), true)
+        let info = image_info(&fixture(name), true, None)
             .unwrap_or_else(|error| panic!("{name}: {error}"))
             .unwrap_or_else(|| panic!("{name} is taken over"));
         let decoded = decode(&info).unwrap_or_else(|error| panic!("{name}: {error}"));
@@ -399,7 +407,7 @@ mod tests {
             ("exr-zips.exr", ColorType::Rgb32F, SourceColorType::Rgb32F),
             ("exr-piz.exr", ColorType::Rgb32F, SourceColorType::Rgb32F),
         ] {
-            let info = image_info(&fixture(name), true)
+            let info = image_info(&fixture(name), true, None)
                 .unwrap_or_else(|error| panic!("{name}: {error}"))
                 .unwrap_or_else(|| panic!("{name} is taken over"));
             assert_eq!((info.width, info.height), (37, 23), "{name}");
@@ -491,7 +499,7 @@ mod tests {
         assert!(owns(Path::new("a.exr")));
         assert!(owns(Path::new("a.EXR")));
         assert!(
-            image_info(&fixture("cicp-rgb8.png"), true)
+            image_info(&fixture("cicp-rgb8.png"), true, None)
                 .expect("a png is not ours")
                 .is_none()
         );

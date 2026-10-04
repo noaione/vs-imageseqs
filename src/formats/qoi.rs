@@ -102,8 +102,15 @@ impl Header {
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file is one of ours and cannot be read.
-pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo>> {
-    if !owns(path) {
+pub fn image_info(
+    path: &Path,
+    _apply_rotation: bool,
+    route: Option<crate::formats::identify::Format>,
+) -> Result<Option<ImageInfo>> {
+    if !route.map_or_else(
+        || owns(path),
+        |saved| saved == crate::formats::identify::Format::Qoi,
+    ) {
         return Ok(None);
     }
     let data = image_head(path).map_err(|error| image_error("open", path, error))?;
@@ -115,6 +122,7 @@ pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo
     }
     let header = Header::read(&data, path)?;
     Ok(Some(ImageInfo {
+        route: None,
         path: path.to_path_buf(),
         width: header.width,
         height: header.height,
@@ -215,7 +223,7 @@ mod tests {
             ("qoi-rgba8.qoi", 8, 6, ColorType::Rgba8, PixelFormat::Rgb8),
             ("qoi-linear.qoi", 8, 6, ColorType::Rgb8, PixelFormat::Rgb8),
         ] {
-            let info = image_info(&fixture(name), true)
+            let info = image_info(&fixture(name), true, None)
                 .expect("the header is read")
                 .expect("a qoi is taken over");
             assert_eq!((info.width, info.height), (width, height), "{name}");
@@ -233,10 +241,10 @@ mod tests {
     /// names, and it is the reason `qoi-linear.qoi` exists.
     #[test]
     fn the_colours_flag_is_not_a_colour_property() {
-        let plain = image_info(&fixture("qoi-rgb8.qoi"), true)
+        let plain = image_info(&fixture("qoi-rgb8.qoi"), true, None)
             .expect("the header is read")
             .expect("taken over");
-        let linear = image_info(&fixture("qoi-linear.qoi"), true)
+        let linear = image_info(&fixture("qoi-linear.qoi"), true, None)
             .expect("the header is read")
             .expect("taken over");
         assert_eq!(plain.color_type, linear.color_type);
@@ -248,10 +256,10 @@ mod tests {
     /// The channel count is what decides the alpha plane, not the samples.
     #[test]
     fn the_channel_count_decides_the_alpha_plane() {
-        let rgb = image_info(&fixture("qoi-rgb8.qoi"), true)
+        let rgb = image_info(&fixture("qoi-rgb8.qoi"), true, None)
             .expect("the header is read")
             .expect("taken over");
-        let rgba = image_info(&fixture("qoi-rgba8.qoi"), true)
+        let rgba = image_info(&fixture("qoi-rgba8.qoi"), true, None)
             .expect("the header is read")
             .expect("taken over");
         assert_eq!(crate::pixel::alpha_channel(rgb.color_type), None);
@@ -264,7 +272,7 @@ mod tests {
     /// the fixtures were written to hold.
     #[test]
     fn the_samples_are_the_ones_the_file_holds() {
-        let info = image_info(&fixture("qoi-rgba8.qoi"), true)
+        let info = image_info(&fixture("qoi-rgba8.qoi"), true, None)
             .expect("the header is read")
             .expect("taken over");
         let decoded = decode(&info).expect("the file decodes");
@@ -291,7 +299,7 @@ mod tests {
         // A png named as a qoi is not one, so the extension alone is not
         // enough to claim it.
         assert!(
-            image_info(&fixture("cicp-rgb8.png"), true)
+            image_info(&fixture("cicp-rgb8.png"), true, None)
                 .expect("a png is not ours to describe")
                 .is_none()
                 || !owns(Path::new("cicp-rgb8.png"))
@@ -323,7 +331,7 @@ mod tests {
     /// than handed out at the wrong size or in the wrong layout.
     #[test]
     fn a_file_that_changed_after_probing_is_refused() {
-        let mut info = image_info(&fixture("qoi-rgb8.qoi"), true)
+        let mut info = image_info(&fixture("qoi-rgb8.qoi"), true, None)
             .expect("the header is read")
             .expect("taken over");
         info.width += 1;
@@ -336,7 +344,7 @@ mod tests {
         // The channel count is the other half: it decides the alpha plane, so
         // handing one out at the other layout would be a wrong picture rather
         // than a wrong size.
-        let mut info = image_info(&fixture("qoi-rgba8.qoi"), true)
+        let mut info = image_info(&fixture("qoi-rgba8.qoi"), true, None)
             .expect("the header is read")
             .expect("taken over");
         info.color_type = ColorType::Rgb8;

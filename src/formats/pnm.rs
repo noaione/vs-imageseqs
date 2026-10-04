@@ -730,8 +730,15 @@ pub fn stream(info: &ImageInfo) -> Result<Option<DecodedImage>> {
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file is one of ours and cannot be read.
-pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo>> {
-    if !owns(path) {
+pub fn image_info(
+    path: &Path,
+    _apply_rotation: bool,
+    route: Option<crate::formats::identify::Format>,
+) -> Result<Option<ImageInfo>> {
+    if !route.map_or_else(
+        || owns(path),
+        |saved| saved == crate::formats::identify::Format::Pnm,
+    ) {
         return Ok(None);
     }
     let data = image_head(path).map_err(|error| image_error("open", path, error))?;
@@ -742,6 +749,7 @@ pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo
     }
     let header = header(&data).map_err(|error| image_error("identify", path, error))?;
     Ok(Some(ImageInfo {
+        route: None,
         path: path.to_path_buf(),
         width: header.width,
         height: header.height,
@@ -814,7 +822,7 @@ mod tests {
     }
 
     fn decoded(name: &str) -> Vec<u8> {
-        let info = image_info(&fixture(name), true)
+        let info = image_info(&fixture(name), true, None)
             .unwrap_or_else(|error| panic!("{name}: {error}"))
             .unwrap_or_else(|| panic!("{name} is taken over"));
         match decode(&info)
@@ -902,7 +910,7 @@ mod tests {
                 SourceColorType::L8,
             ),
         ] {
-            let info = image_info(&fixture(name), true)
+            let info = image_info(&fixture(name), true, None)
                 .unwrap_or_else(|error| panic!("{name}: {error}"))
                 .unwrap_or_else(|| panic!("{name} is taken over"));
             assert_eq!((info.width, info.height), (width, height), "{name}");
@@ -957,14 +965,14 @@ mod tests {
     #[test]
     fn a_comment_is_legal_in_the_preamble_and_not_in_an_ascii_raster() {
         // Two comments, one whole line and one between two fields.
-        let with = image_info(&fixture("pnm-comment.pgm"), true)
+        let with = image_info(&fixture("pnm-comment.pgm"), true, None)
             .expect("read")
             .expect("taken over");
         assert_eq!((with.width, with.height), (37, 23));
         assert!(decode(&with).is_ok());
 
         let error = decode(
-            &image_info(&fixture("pnm-ascii-comment.pgm"), true)
+            &image_info(&fixture("pnm-ascii-comment.pgm"), true, None)
                 .expect("read")
                 .expect("taken over"),
         )
@@ -987,7 +995,7 @@ mod tests {
         assert!(owns(Path::new("a.pgm")));
         assert!(owns(Path::new("a.PPM")));
         assert!(
-            image_info(&fixture("cicp-rgb8.png"), true)
+            image_info(&fixture("cicp-rgb8.png"), true, None)
                 .expect("a png is not ours")
                 .is_none()
         );

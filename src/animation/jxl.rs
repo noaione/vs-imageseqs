@@ -49,6 +49,13 @@ pub fn segment_info(
     info: crate::decoder::ImageInfo,
     fps: Rate,
 ) -> Result<Option<SegmentInfo>> {
+    // A still is the common case and the scan below reads the whole file to find
+    // that out. The codestream states it in the header, so a file with no
+    // animation header never reaches the scan; a header this cannot read is the
+    // scan's to report, with the words it already had.
+    if matches!(crate::formats::jxl::states_animation(path), Ok(false)) {
+        return Ok(None);
+    }
     let bytes =
         Arc::<[u8]>::from(fs::read(path).map_err(|error| image_error("open", path, error))?);
     let scanned = match scan(&bytes, path)? {

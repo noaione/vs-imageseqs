@@ -463,8 +463,15 @@ fn blocks(header: &Header, data: &[u8]) -> Result<Vec<u8>> {
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file is one of ours and cannot be read.
-pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo>> {
-    if !owns(path) {
+pub fn image_info(
+    path: &Path,
+    _apply_rotation: bool,
+    route: Option<crate::formats::identify::Format>,
+) -> Result<Option<ImageInfo>> {
+    if !route.map_or_else(
+        || owns(path),
+        |saved| saved == crate::formats::identify::Format::Dds,
+    ) {
         return Ok(None);
     }
     let data = image_head(path).map_err(|error| image_error("open", path, error))?;
@@ -476,6 +483,7 @@ pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo
     }
     let header = header(&data).map_err(|error| image_error("identify", path, error))?;
     Ok(Some(ImageInfo {
+        route: None,
         path: path.to_path_buf(),
         width: header.width,
         height: header.height,
@@ -627,7 +635,7 @@ mod tests {
                 SourceColorType::Rgba8,
             ),
         ] {
-            let info = image_info(&fixture(name), true)
+            let info = image_info(&fixture(name), true, None)
                 .unwrap_or_else(|error| panic!("{name}: {error}"))
                 .unwrap_or_else(|| panic!("{name} is taken over"));
             assert_eq!((info.width, info.height), (width, height), "{name}");
@@ -644,7 +652,7 @@ mod tests {
     #[test]
     fn the_dx10_spelling_and_the_ignored_bits_reach_the_same_picture() {
         let decode_fixture = |name: &str| {
-            let info = image_info(&fixture(name), true)
+            let info = image_info(&fixture(name), true, None)
                 .expect("read")
                 .expect("taken over");
             let decoded = decode(&info).unwrap_or_else(|error| panic!("{name}: {error}"));
@@ -671,7 +679,7 @@ mod tests {
     /// others are four. The rule is about the variant rather than the depth.
     #[test]
     fn a_dxt1_block_has_no_alpha_plane() {
-        let info = image_info(&fixture("dds-dxt1.dds"), true)
+        let info = image_info(&fixture("dds-dxt1.dds"), true, None)
             .expect("read")
             .expect("taken over");
         assert_eq!(crate::pixel::alpha_channel(info.color_type), None);
@@ -681,7 +689,7 @@ mod tests {
         };
         assert_eq!(buffer.len(), 40 * 24 * 3);
         // And a four channel one is four bytes a pixel.
-        let info = image_info(&fixture("dds-dxt5.dds"), true)
+        let info = image_info(&fixture("dds-dxt5.dds"), true, None)
             .expect("read")
             .expect("taken over");
         let decoded = decode(&info).expect("decodes");
@@ -711,7 +719,7 @@ mod tests {
         assert!(owns(Path::new("a.dds")));
         assert!(owns(Path::new("a.DDS")));
         assert!(
-            image_info(&fixture("cicp-rgb8.png"), true)
+            image_info(&fixture("cicp-rgb8.png"), true, None)
                 .expect("a png is not ours")
                 .is_none()
         );

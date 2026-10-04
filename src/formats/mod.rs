@@ -14,7 +14,9 @@
 //!   as the `image` path
 //!
 //! A module that can describe a file from its own container without decoding it
-//! also exposes `image_info(path)` for the probe, and `output_format` for the
+//! also exposes `image_info(path, apply_rotation, route)` for the probe, where
+//! `route` is what [`identify::route`] named for the file -- a module the route
+//! already names answers without reading the head -- and `output_format` for the
 //! files it describes but leaves to the `image` path: [`heif`] answers both, and
 //! [`avif`] answers them for a file the `image` decoder would have had to decode
 //! whole before it could report a size.

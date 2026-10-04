@@ -639,8 +639,15 @@ fn format(layout: &Layout) -> PixelFormat {
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file is one of ours and cannot be read.
-pub fn image_info(path: &Path, apply_rotation: bool) -> Result<Option<ImageInfo>> {
-    if !owns(path) {
+pub fn image_info(
+    path: &Path,
+    apply_rotation: bool,
+    route: Option<crate::formats::identify::Format>,
+) -> Result<Option<ImageInfo>> {
+    if !route.map_or_else(
+        || owns(path),
+        |saved| saved == crate::formats::identify::Format::Tiff,
+    ) {
         return Ok(None);
     }
     // The file itself, not a header buffer: a tiff's IFD can sit anywhere in the
@@ -710,6 +717,7 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Result<Option<ImageInfo>
         .map(std::sync::Arc::from);
 
     Ok(Some(ImageInfo {
+        route: None,
         path: path.to_path_buf(),
         width,
         height,
@@ -1380,7 +1388,7 @@ mod tests {
     }
 
     fn read(name: &str) -> Vec<u8> {
-        let info = image_info(&fixture(name), true)
+        let info = image_info(&fixture(name), true, None)
             .unwrap_or_else(|error| panic!("{name}: {error}"))
             .unwrap_or_else(|| panic!("{name} is taken over"));
         match decode(&info)
@@ -1394,7 +1402,7 @@ mod tests {
 
     /// The planes a planar fixture hands out, with what its header says.
     fn planes(name: &str) -> (ImageInfo, Vec<Vec<u8>>) {
-        let info = image_info(&fixture(name), true)
+        let info = image_info(&fixture(name), true, None)
             .unwrap_or_else(|error| panic!("{name}: {error}"))
             .unwrap_or_else(|| panic!("{name} is taken over"));
         let decoded = decode(&info).unwrap_or_else(|error| panic!("{name}: {error}"));
@@ -1534,7 +1542,7 @@ mod tests {
                 SourceColorType::Cmyk8,
             ),
         ] {
-            let info = image_info(&fixture(name), true)
+            let info = image_info(&fixture(name), true, None)
                 .unwrap_or_else(|error| panic!("{name}: {error}"))
                 .unwrap_or_else(|| panic!("{name} is taken over"));
             assert_eq!((info.width, info.height), (width, height), "{name}");
@@ -1754,7 +1762,7 @@ mod tests {
                 [(0, 0, 255, 0, 0), (1, 5, 197, 0, 58), (18, 11, 128, 0, 128)],
             ),
         ] {
-            let info = image_info(&fixture(name), true)
+            let info = image_info(&fixture(name), true, None)
                 .unwrap_or_else(|error| panic!("{name}: {error}"))
                 .unwrap_or_else(|| panic!("{name} is taken over"));
             assert_eq!((info.width, info.height), (37, 23), "{name}");
@@ -1782,7 +1790,7 @@ mod tests {
     /// are the ones a reference implementation reads too.
     #[test]
     fn a_palette_width_that_is_not_read_is_refused_at_identify() {
-        let error = image_info(&fixture("tiff-palette-3bit.tiff"), true)
+        let error = image_info(&fixture("tiff-palette-3bit.tiff"), true, None)
             .expect_err("a three bit palette is refused");
         assert!(error.to_string().contains("3 bit"), "{error}");
     }
@@ -1796,7 +1804,7 @@ mod tests {
         assert!(owns(Path::new("a.tif")));
         assert!(owns(Path::new("a.TIFF")));
         assert!(
-            image_info(&fixture("cicp-rgb8.png"), true)
+            image_info(&fixture("cicp-rgb8.png"), true, None)
                 .expect("a png is not ours")
                 .is_none()
         );
@@ -1810,7 +1818,7 @@ mod tests {
     /// crate reads for the dimensions holds both tags, so neither costs a pass.
     #[test]
     fn the_orientation_and_the_profile_are_read_from_the_directory() {
-        let info = image_info(&fixture("tiff-orient6-icc.tiff"), true)
+        let info = image_info(&fixture("tiff-orient6-icc.tiff"), true, None)
             .expect("a tiff is ours")
             .expect("the fixture is taken over");
         assert_eq!(info.orientation, Orientation::Rotate90, "orientation 6");
@@ -1917,7 +1925,7 @@ mod tests {
             ("tiff-ycbcr-16bit.tiff", "16"),
             ("tiff-ycbcr-lzw.tiff", "compressed"),
         ] {
-            let error = image_info(&fixture(name), true).expect_err("the page is refused");
+            let error = image_info(&fixture(name), true, None).expect_err("the page is refused");
             assert!(error.to_string().contains(said), "{name}: {error}");
         }
     }
@@ -1932,7 +1940,7 @@ mod tests {
     /// reasonable.
     #[test]
     fn a_page_whose_coefficients_cannot_be_named_is_converted() {
-        let info = image_info(&fixture("tiff-ycbcr-rgb.tiff"), true)
+        let info = image_info(&fixture("tiff-ycbcr-rgb.tiff"), true, None)
             .unwrap_or_else(|error| panic!("{error}"))
             .unwrap_or_else(|| panic!("the page is taken over"));
         assert_eq!(info.format, PixelFormat::Rgb8);

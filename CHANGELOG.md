@@ -28,6 +28,12 @@
   not say so plays its timeline instead of a single still. The dispatch is one
   `identify::route` call rather than five extension checks, so the file is read
   once instead of up to five times
+- `identify::route` decides whose file this is once, instead of every format
+  module opening the file to ask -- about fifteen times -- and the decode asking
+  all of it again with a gate of its own. The probe saves that route and every
+  module takes it, so a file is opened once to identify it and not again: over
+  the fixture set, clip creation costs 3% more per file than the released
+  build's extension check did
 - A tiff that states an orientation, carries an ICC profile or is a BigTIFF now
   reports all three: the adapter had hardcoded the first two away and its
   signature check accepted only the classic version word
@@ -62,6 +68,13 @@
 
 ### performance
 
+- Creating a clip over a long list reads the front of each file instead of the
+  whole file, where the container states what a description needs there. Over
+  seven interleaved pairs a set: 35 webp files of 146 MiB went from a median of
+  99 ms to 6 ms, 35 jpeg xl of 174 MiB from 157 ms to 5 ms, 35 jpeg 2000 of
+  251 MiB from 159 ms to 4 ms, and 35 avif plus 35 heic of 362 MiB from 84 and
+  170 ms to 6 and 13 ms
+
 - PNG decoding hands each decoded row to the frame it belongs in instead of
   building the whole picture in a buffer the plugin then copies, which is one
   pass over the image rather than two: 1.2x on the decoded side of every PNG set
@@ -80,11 +93,6 @@
     `-C target-cpu`, so a machine that could load the plugin before still can
   - the Windows wheel is 10.4 MiB instead of 3.8 MiB, which is what the three
     builds cost
-- Creating a clip over a long list is faster: describing 170 files went from a
-  median of 78 ms to 40 ms over seven interleaved pairs. Every format module
-  answered "is this mine?" by opening the file -- about fifteen times -- and
-  the decode asked all of it again with a gate of its own. `identify::route`
-  answers it once, so sixteen opens became one and fifteen became two
 
 ### build
 

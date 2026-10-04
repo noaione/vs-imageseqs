@@ -53,13 +53,21 @@ pub fn owns(path: &Path) -> bool {
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file is one of ours and cannot be read.
-pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<Option<ImageInfo>> {
-    if !owns(path) {
+pub fn image_info(
+    path: &Path,
+    _apply_rotation: bool,
+    route: Option<crate::formats::identify::Format>,
+) -> Result<Option<ImageInfo>> {
+    if !route.map_or_else(
+        || owns(path),
+        |saved| saved == crate::formats::identify::Format::Gif,
+    ) {
         return Ok(None);
     }
     let (width, height, icc_profile) = composite::screen(path)?;
     let profile = icc_profile.map(Arc::<[u8]>::from);
     Ok(Some(ImageInfo {
+        route: None,
         path: path.to_path_buf(),
         width,
         height,

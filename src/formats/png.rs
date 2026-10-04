@@ -29,6 +29,7 @@ use crate::{
     decoder::{DecodeTimings, DecodedImage, ImageInfo, Pixels, RowSink, RowStream, image_error},
     error::{ImgSeqError, Result},
     exif::orientation_of,
+    formats::identify::{self, Format},
     layout::{Orientation, SourceColorType},
     pixel::{PixelFormat, Transform},
 };
@@ -58,15 +59,10 @@ pub fn owns(path: &Path) -> bool {
     crate::formats::identify::owns(crate::formats::identify::Format::Png, path)
 }
 
-/// The colour description a png states with a `cICP` chunk, or `None` when it
-/// has none and when it is not a png at all.
-pub fn cicp(path: &Path) -> Option<Cicp> {
-    // The content decides and not the name: a renamed page still carries its
-    // `cICP` chunk, so a caller with a file whose extension lies gets the same
-    // properties as one whose extension does not.
-    if !owns(path) {
-        return None;
-    }
+/// The `cICP` chunk of a file this module has already established is a png,
+/// which is what keeps [`image_info`] from asking the ownership question a
+/// second time and with a second read.
+fn cicp_of_file(path: &Path) -> Option<Cicp> {
     cicp_from(File::open(path).ok()?)
 }
 
@@ -137,12 +133,19 @@ fn cicp_chunk(payload: &[u8]) -> Option<Cicp> {
 ///
 /// Returns [`ImgSeqError`] when the file cannot be read or its header cannot be
 /// parsed.
-pub fn image_info(path: &Path, apply_rotation: bool) -> Result<Option<ImageInfo>> {
+pub fn image_info(
+    path: &Path,
+    apply_rotation: bool,
+    route: Option<crate::formats::identify::Format>,
+) -> Result<Option<ImageInfo>> {
     // The content decides, not the name. This asked the extension, which is the
     // one thing plan 34 is about: the decode next door answered from the bytes, so
     // a renamed page was *described* by one reader and *decoded* by another, and
     // that only ever worked while the generic decoder could describe it too.
-    if !owns(path) {
+    if !route.map_or_else(
+        || owns(path),
+        |saved| saved == crate::formats::identify::Format::Png,
+    ) {
         return Ok(None);
     }
     let file = File::open(path).map_err(|error| image_error("open", path, error))?;
@@ -164,6 +167,7 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Result<Option<ImageInfo>
         .unwrap_or(Orientation::NoTransforms);
 
     Ok(Some(ImageInfo {
+        route: None,
         path: path.to_path_buf(),
         width: header.width,
         height: header.height,
@@ -177,7 +181,7 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Result<Option<ImageInfo>
             .icc_profile
             .as_ref()
             .map(|profile| std::sync::Arc::from(profile.as_ref())),
-        cicp: cicp(path),
+        cicp: cicp_of_file(path),
         // A png states no chroma sample position: it is grey or r,g,b.
         chroma_location: None,
         orientation,
@@ -414,7 +418,9 @@ struct Rows {
 /// Everything refused here is refused for the whole file, not for one frame, so
 /// a sequence of them decides once per path.
 pub fn stream(info: &ImageInfo) -> Option<Pixels> {
-    if !owns(&info.path) || info.transform != Transform::IDENTITY {
+    if !identify::route_agrees(info.route, Format::Png, &info.path)
+        || info.transform != Transform::IDENTITY
+    {
         return None;
     }
     // Only the four formats a png's own samples land in. A format that names a
@@ -464,7 +470,7 @@ pub fn stream(info: &ImageInfo) -> Option<Pixels> {
 ///
 /// Returns [`ImgSeqError`] when the file is interlaced and cannot be decoded.
 pub fn decode(info: &ImageInfo) -> Result<Option<DecodedImage>> {
-    if !owns(&info.path) {
+    if !identify::route_agrees(info.route, Format::Png, &info.path) {
         return Ok(None);
     }
     let open_started = Instant::now();

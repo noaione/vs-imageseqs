@@ -126,8 +126,15 @@ fn open_stream(path: &Path) -> Result<Stream> {
 ///
 /// Returns [`ImgSeqError`] when the file cannot be read or is not a jpeg this
 /// decoder can make sense of.
-pub fn image_info(path: &Path, apply_rotation: bool) -> Result<Option<ImageInfo>> {
-    if !owns(path) {
+pub fn image_info(
+    path: &Path,
+    apply_rotation: bool,
+    route: Option<crate::formats::identify::Format>,
+) -> Result<Option<ImageInfo>> {
+    if !route.map_or_else(
+        || owns(path),
+        |saved| saved == crate::formats::identify::Format::Jpeg,
+    ) {
         return Ok(None);
     }
     let decoder = read_headers(open_stream(path)?, path)?;
@@ -211,6 +218,7 @@ fn too_wide(path: &Path) -> ImgSeqError {
 /// The [`ImageInfo`] one probed header describes.
 fn info(path: &Path, header: &Header, apply_rotation: bool) -> ImageInfo {
     ImageInfo {
+        route: None,
         path: path.to_path_buf(),
         width: header.width,
         height: header.height,
