@@ -78,6 +78,9 @@ fn format_decoder(info: &ImageInfo, demand: Demand) -> Option<Result<DecodedImag
     if formats::tga::owns(&info.path) {
         return Some(formats::tga::decode(info));
     }
+    if formats::dds::owns(&info.path) {
+        return Some(formats::dds::decode(info));
+    }
     None
 }
 
@@ -470,6 +473,12 @@ fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
     // direction bits in that header decide where the pixels go rather than an
     // orientation property; see [`crate::formats::tga`].
     if let Some(info) = formats::tga::image_info(path, apply_rotation)? {
+        return Ok(info);
+    }
+    // A surface states its compression in a four character code or in a DXGI
+    // format number, and its size has to be a whole number of four by four
+    // blocks; see [`crate::formats::dds`].
+    if let Some(info) = formats::dds::image_info(path, apply_rotation)? {
         return Ok(info);
     }
     // A png is read here for the same reason a jpeg is, and one thing more:
