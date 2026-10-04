@@ -652,6 +652,8 @@ mod tests {
                 Pixels::Planar { planes, alpha } => {
                     planes.iter().map(Vec::len).sum::<usize>() + alpha.as_ref().map_or(0, Vec::len)
                 }
+                // One buffer, so one buffer's worth: the planes are inside it.
+                Pixels::Strided { buffer, .. } => buffer.len(),
                 // A stream holds no pixels of its own, so this synthetic
                 // payload has nothing to report for one.
                 Pixels::Stream(_) => 0,

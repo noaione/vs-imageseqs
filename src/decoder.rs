@@ -305,6 +305,30 @@ pub enum Pixels {
         planes: Vec<Vec<u8>>,
         alpha: Option<Vec<u8>>,
     },
+    /// One buffer holding every plane, laid out the way a separate-planar
+    /// decoder laid it out: `plane_stride` bytes from one plane to the next,
+    /// and `row_stride` bytes from one row of a plane to the next.
+    ///
+    /// This is [`Self::Planar`] without the copy. A planar page is already one
+    /// plane per channel, so splitting it into a buffer a plane spends a whole
+    /// picture of allocation and a whole picture of memory traffic on a picture
+    /// that is already in the shape the frame wants. Handing the decoder's own
+    /// buffer over with its stride attached is the same picture for one buffer;
+    /// see `docs/improvements/34-input-routing-and-planar-decode.md`.
+    ///
+    /// There is no alpha plane here. A decode that keeps the decoder's layout is
+    /// handing out a page whose channels are its planes, and an alpha channel of
+    /// its own is a plane the alpha clip reads rather than a fourth colour plane.
+    Strided {
+        /// How many planes the buffer holds, one per channel.
+        planes: usize,
+        /// The decoder's own buffer, the planes laid end to end inside it.
+        buffer: Vec<u8>,
+        /// Bytes from one row of a plane to the next.
+        row_stride: usize,
+        /// Bytes from one plane to the next.
+        plane_stride: usize,
+    },
     /// A decode that hands each row to the frame it belongs in, and therefore
     /// has no buffer of its own.
     Stream(Box<dyn RowStream>),
@@ -320,6 +344,17 @@ impl Clone for Pixels {
             Self::Planar { planes, alpha } => Self::Planar {
                 planes: planes.clone(),
                 alpha: alpha.clone(),
+            },
+            Self::Strided {
+                planes,
+                buffer,
+                row_stride,
+                plane_stride,
+            } => Self::Strided {
+                planes: *planes,
+                buffer: buffer.clone(),
+                row_stride: *row_stride,
+                plane_stride: *plane_stride,
             },
             Self::Stream(stream) => Self::Stream(stream.duplicate()),
         }
@@ -349,6 +384,25 @@ impl PartialEq for Pixels {
                     alpha: right_alpha,
                 },
             ) => left_planes == right_planes && left_alpha == right_alpha,
+            (
+                Self::Strided {
+                    planes: left_planes,
+                    buffer: left_buffer,
+                    row_stride: left_row_stride,
+                    plane_stride: left_plane_stride,
+                },
+                Self::Strided {
+                    planes: right_planes,
+                    buffer: right_buffer,
+                    row_stride: right_row_stride,
+                    plane_stride: right_plane_stride,
+                },
+            ) => {
+                left_planes == right_planes
+                    && left_buffer == right_buffer
+                    && left_row_stride == right_row_stride
+                    && left_plane_stride == right_plane_stride
+            }
             // A stream is a picture that has not been read, so there is
             // nothing to compare and two of them are never equal.
             _ => false,

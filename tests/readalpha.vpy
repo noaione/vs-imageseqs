@@ -1891,6 +1891,36 @@ def test_separated_inks() -> None:
         f"cmyka8: the fifth sample is the alpha clip (got {samples(five_alpha.get_frame(0))})",
     )
 
+
+def test_planar_pages() -> None:
+    """A separate-planar page is the chunky page, read without splitting its buffer.
+
+    The two spellings of one picture are stored differently -- one interleaved
+    buffer, one plane per channel laid end to end -- and the plugin hands the
+    second to the frame in the shape the decoder produced it in, so the whole of
+    every plane is compared here rather than a few samples of it. Every sample is
+    present either way, so only the order tells the two apart, and a picture of
+    the right size with the wrong colours passes a spot check.
+    """
+    planar, planar_alpha = read_alpha(files=[fixture("tiff-planar.tiff")])
+    chunky, chunky_alpha = read_alpha(files=[fixture("tiff-rgb8.tiff")])
+    planar_frame = planar.get_frame(0)
+    chunky_frame = chunky.get_frame(0)
+    check(
+        (planar_frame.width, planar_frame.height)
+        == (chunky_frame.width, chunky_frame.height),
+        f"planar: the picture is the chunky file's size (got {planar_frame.width}x{planar_frame.height})",
+    )
+    for plane in range(3):
+        check(
+            samples(planar_frame, plane) == samples(chunky_frame, plane),
+            f"planar rgb8: plane {plane} is the chunky file's",
+        )
+    check(
+        samples(planar_alpha.get_frame(0)) == samples(chunky_alpha.get_frame(0)),
+        "planar rgb8: the alpha clip is the chunky file's",
+    )
+
 def test_palette_pages() -> None:
     """A palette page is expanded through its colour table.
  
@@ -2100,6 +2130,7 @@ def main() -> None:
         test_gif_stills,
         test_png_feature_sets,
         test_separated_inks,
+        test_planar_pages,
         test_palette_pages,
         test_ycbcr_pages,
     ):

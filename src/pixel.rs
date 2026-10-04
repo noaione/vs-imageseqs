@@ -1107,34 +1107,69 @@ pub fn write_planar(
     })
 }
 
-/// Copy one tightly packed decoder buffer per plane into the VapourSynth
-/// planes.
+/// Copy decoded planes into the VapourSynth planes they belong in.
 ///
-/// Unlike [`write_planar`] the buffers already have the plane layout, so a
+/// Unlike [`write_planar`] the source already has the plane layout, so a
 /// transform-free write only moves whole rows around the frame padding, which is
 /// what makes the planar formats cheaper to write: there is no per sample work
 /// at all. A transform writes one sample at a time instead, in blocks that keep
 /// its reads in cache, because a transposed plane is read down a column rather
 /// than along a row.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the source does not hold a whole picture of the
+/// shape the frame asks for, which means the decoder's strides and its header
+/// disagree.
 pub fn write_decoded_planes(
     frame: &mut VideoFrame,
     format: PixelFormat,
     width: u32,
     height: u32,
-    planes: &[Vec<u8>],
+    planes: PlaneSource<'_>,
     transform: Transform,
 ) -> Result<WriteTimings> {
     // The sample size is a constant of the write rather than a value it carries,
     // so that a transformed plane moves whole samples instead of calling a copy
     // routine once per sample for it.
     match format.bytes_per_sample() {
-        1 => write_sample_planes::<u8>(frame, format, width, height, planes, transform),
-        2 => write_sample_planes::<u16>(frame, format, width, height, planes, transform),
-        4 => write_sample_planes::<f32>(frame, format, width, height, planes, transform),
+        1 => write_sample_planes::<u8>(frame, format, width, height, &planes, transform),
+        2 => write_sample_planes::<u16>(frame, format, width, height, &planes, transform),
+        4 => write_sample_planes::<f32>(frame, format, width, height, &planes, transform),
         bytes_per_sample => Err(ImgSeqError::new(format!(
             "unsupported sample size {bytes_per_sample} for {}",
             format.name()
         ))),
+    }
+}
+
+/// Where a decoded image's planes are read from.
+///
+/// A decode either owns one buffer per plane or owns the decoder's own buffer
+/// with the decoder's strides attached, and the difference is only how far apart
+/// two consecutive rows of the same plane are.
+#[derive(Clone, Copy, Debug)]
+pub enum PlaneSource<'a> {
+    /// One tightly packed buffer per plane, in frame plane order.
+    Packed(&'a [Vec<u8>]),
+    /// One buffer holding every plane laid end to end, `plane_stride` bytes from
+    /// one plane to the next and `row_stride` bytes from one row of a plane to the
+    /// next.
+    Strided {
+        buffer: &'a [u8],
+        planes: usize,
+        row_stride: usize,
+        plane_stride: usize,
+    },
+}
+
+impl PlaneSource<'_> {
+    /// How many planes the source holds.
+    fn plane_count(&self) -> usize {
+        match self {
+            Self::Packed(planes) => planes.len(),
+            Self::Strided { planes, .. } => *planes,
+        }
     }
 }
 
@@ -1143,13 +1178,13 @@ fn write_sample_planes<T: Sample>(
     format: PixelFormat,
     width: u32,
     height: u32,
-    planes: &[Vec<u8>],
+    planes: &PlaneSource<'_>,
     transform: Transform,
 ) -> Result<WriteTimings> {
-    if planes.len() != format.plane_count() {
+    if planes.plane_count() != format.plane_count() {
         return Err(ImgSeqError::new(format!(
             "decoder returned {} planes, {} has {}",
-            planes.len(),
+            planes.plane_count(),
             format.name(),
             format.plane_count(),
         )));
@@ -1162,20 +1197,60 @@ fn write_sample_planes<T: Sample>(
     let (output_width, output_height) = transform.output_size(width, height);
     let started = Instant::now();
 
-    for (index, buffer) in planes.iter().enumerate() {
+    for index in 0..planes.plane_count() {
         let (decoded_width, decoded_height) = format.plane_dimensions(index, width, height);
-        let decoded_row = decoded_width
+        let packed_row = decoded_width
             .checked_mul(sample_bytes)
             .ok_or_else(|| ImgSeqError::new("image plane row is too large"))?;
+        // A tightly packed plane advances one row by its own width. A decoder
+        // that kept its own buffer advances by the row stride it reported, which
+        // is never narrower than the row it holds, and starts a plane
+        // `plane_stride` bytes after the one before it. Nothing else about the two
+        // shapes differs, which is the point of carrying the stride instead of
+        // splitting the buffer first.
+        let (buffer, decoded_row, plane_start) = match *planes {
+            PlaneSource::Packed(packed) => {
+                let buffer = packed[index].as_slice();
+                // A tightly packed plane is the whole picture and nothing else,
+                // so its length is checked exactly rather than as a lower bound.
+                let exact = packed_row.checked_mul(decoded_height);
+                if exact != Some(buffer.len()) {
+                    return Err(ImgSeqError::new(format!(
+                        "decoder returned {actual} bytes for plane {index}, expected {expected}",
+                        actual = buffer.len(),
+                        expected = exact.unwrap_or(usize::MAX),
+                    )));
+                }
+                (buffer, packed_row, 0usize)
+            }
+            PlaneSource::Strided {
+                buffer,
+                row_stride,
+                plane_stride,
+                ..
+            } => {
+                if row_stride < packed_row {
+                    return Err(ImgSeqError::new(format!(
+                        "decoder reported a {row_stride}-byte row for plane {index}, which is narrower than the {packed_row}-byte row it holds"
+                    )));
+                }
+                let start = index
+                    .checked_mul(plane_stride)
+                    .ok_or_else(|| ImgSeqError::new("a plane offset does not fit in memory"))?;
+                (buffer, row_stride, start)
+            }
+        };
         let expected = decoded_row
             .checked_mul(decoded_height)
             .ok_or_else(|| ImgSeqError::new("image plane is too large"))?;
-        if buffer.len() != expected {
-            return Err(ImgSeqError::new(format!(
-                "decoder returned {actual} bytes for plane {index}, expected {expected}",
-                actual = buffer.len(),
-            )));
-        }
+        let plane_bytes = buffer
+            .get(plane_start..plane_start.saturating_add(expected))
+            .ok_or_else(|| {
+                ImgSeqError::new(format!(
+                    "decoder returned {actual} bytes for plane {index}, expected {expected}",
+                    actual = buffer.len(),
+                ))
+            })?;
 
         // The frame can be a row or a column smaller than the decoder's plane
         // on an odd size, and the extra samples have nowhere to go.
@@ -1224,7 +1299,7 @@ fn write_sample_planes<T: Sample>(
                 // Every row of the decoder buffer is `decoded_row` bytes wide,
                 // and the frame keeps the first `row_bytes` of it.
                 let source =
-                    &buffer[source_row * decoded_row..source_row * decoded_row + row_bytes];
+                    &plane_bytes[source_row * decoded_row..source_row * decoded_row + row_bytes];
                 // Safety: `plane_target` checked the plane against these rows,
                 // so every active row fits in it.
                 let destination =
@@ -1240,7 +1315,7 @@ fn write_sample_planes<T: Sample>(
 
         // A transpose reads the buffer from a different row for every sample it
         // writes, so the destination is walked in blocks: see [`for_each_block`].
-        let source = buffer.as_ptr();
+        let source = plane_bytes.as_ptr();
         for_each_block(frame_width, frame_height, |row, columns| {
             // The plane was checked against these rows, so every active row of
             // it fits and `row_bytes` is a whole number of samples.

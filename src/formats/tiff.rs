@@ -840,22 +840,27 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
                 .map_or(0, std::num::NonZeroUsize::get);
             // A frame is written from either planes or one interleaved buffer.
             // The planes the decoder laid out are already one per channel, so a
-            // three channel file is handed over as planes: that is a linear copy
-            // each, where interleaving them and letting the frame writer separate
-            // the channels again is a transpose either way. The separated inks of
-            // a four channel file are not three channels and still take that
-            // route.
+            // three channel file is handed over with the decoder's own stride:
+            // the frame writer takes each plane out of the buffer where it
+            // already is, which is where splitting it into a buffer a plane and
+            // then copying that was costing a whole picture of allocation and a
+            // whole picture of traffic. Interleaving the planes instead and letting
+            // the frame writer separate the channels again is a transpose either
+            // way, so neither shape pays twice. The separated inks of a four
+            // channel file are not three channels and still take that route.
             if layout.channels == 3 && !layout.separated {
-                let planes = split_planes(&buffer, &layout, stride)
+                let in_place = planes_in_place(&buffer, &layout, stride, height)
                     .map_err(|error| image_error("decode", &info.path, error))?;
                 return Ok(DecodedImage {
                     width,
                     height,
                     format: info.format,
                     transform: info.transform,
-                    pixels: Pixels::Planar {
-                        planes,
-                        alpha: None,
+                    pixels: Pixels::Strided {
+                        planes: layout.channels,
+                        buffer,
+                        row_stride: in_place.row_stride,
+                        plane_stride: in_place.plane_stride,
                     },
                     timings: DecodeTimings {
                         open,
@@ -975,18 +980,25 @@ fn interleave(buffer: &[u8], layout: &Layout, stride: usize) -> Result<Vec<u8>> 
     Ok(out)
 }
 
-/// Splits the decoder's plane-major buffer into one buffer a plane.
+/// The strides a separate-planar page is read with, when the decoder's buffer
+/// already holds it in that shape.
 ///
-/// This is [`interleave`]'s inverse, and it is the shape a three channel frame
-/// wants: the planes are already one per channel, so each is one linear copy
-/// into the frame it belongs in. The stride is the decoder's own, which is the
-/// size of a plane when the planes it laid out are contiguous.
+/// The stride the decoder reports is the size of one plane when the planes it
+/// laid out are contiguous, which is what makes the buffer a whole picture of
+/// planes with nothing copied out of it. This is [`interleave`]'s other half:
+/// where that one turns a plane-major buffer into an interleaved one, this one
+/// says the buffer already is the planes and the frame writer can read it.
 ///
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when a plane does not hold a whole picture, which
 /// means the stride and the header disagree.
-fn split_planes(buffer: &[u8], layout: &Layout, stride: usize) -> Result<Vec<Vec<u8>>> {
+fn planes_in_place(
+    buffer: &[u8],
+    layout: &Layout,
+    stride: usize,
+    height: u32,
+) -> Result<PlaneStrides> {
     let sample_bytes = layout.sample_bytes;
     let samples = buffer.len() / (layout.channels * sample_bytes);
     let plane_bytes = samples * sample_bytes;
@@ -995,9 +1007,23 @@ fn split_planes(buffer: &[u8], layout: &Layout, stride: usize) -> Result<Vec<Vec
             "a plane does not hold a whole picture, so the stride and the header disagree",
         ));
     }
-    Ok((0..layout.channels)
-        .map(|channel| buffer[channel * stride..channel * stride + plane_bytes].to_vec())
-        .collect())
+    let height = usize::try_from(height)
+        .map_err(|_| ImgSeqError::new("image height does not fit in memory"))?;
+    if height == 0 {
+        return Err(ImgSeqError::new(
+            "a plane of no rows holds no picture, so the stride and the header disagree",
+        ));
+    }
+    Ok(PlaneStrides {
+        row_stride: stride / height,
+        plane_stride: stride,
+    })
+}
+
+/// The two strides one plane-major buffer is read with.
+struct PlaneStrides {
+    row_stride: usize,
+    plane_stride: usize,
 }
 
 /// Expands a palette page's indices into the channels a frame holds.
@@ -1441,6 +1467,45 @@ mod tests {
             .join(name)
     }
 
+    /// The planes one fixture decodes to, however the decode handed them over.
+    ///
+    /// A planar page is either split into one buffer a plane or handed over in
+    /// the decoder's own plane-major buffer, and the tests here compare pictures
+    /// rather than which of those two shapes a decode chose.
+    fn planes(name: &str) -> (ImageInfo, Vec<Vec<u8>>) {
+        let info = image_info(&fixture(name), true, None)
+            .unwrap_or_else(|error| panic!("{name}: {error}"))
+            .unwrap_or_else(|| panic!("{name} is taken over"));
+        let decoded = decode(&info).unwrap_or_else(|error| panic!("{name}: {error}"));
+        match decoded.pixels {
+            Pixels::Interleaved { .. } => panic!("{name} hands out one interleaved buffer"),
+            Pixels::Planar { planes, alpha } => {
+                assert!(alpha.is_none(), "{name} states no alpha of its own");
+                (info, planes)
+            }
+            Pixels::Strided {
+                planes,
+                buffer,
+                row_stride,
+                plane_stride,
+            } => {
+                let height = usize::try_from(decoded.height).expect("height");
+                let mut out = Vec::with_capacity(planes);
+                for plane in 0..planes {
+                    let start = plane * plane_stride;
+                    out.push(
+                        buffer[start..start + row_stride * height]
+                            .chunks(row_stride)
+                            .flat_map(<[u8]>::to_vec)
+                            .collect(),
+                    );
+                }
+                (info, out)
+            }
+            Pixels::Stream(_) => panic!("{name} streams its rows"),
+        }
+    }
+
     /// The picture one fixture decodes to, in one buffer. A decode hands over
     /// either that buffer or the planes it already was, and the tests here
     /// compare pictures rather than the shape a format chose.
@@ -1449,13 +1514,11 @@ mod tests {
             .unwrap_or_else(|error| panic!("{name}: {error}"))
             .unwrap_or_else(|| panic!("{name} is taken over"));
         let sample_bytes = info.format.bytes_per_sample();
-        match decode(&info)
-            .unwrap_or_else(|error| panic!("{name}: {error}"))
-            .pixels
-        {
+        let decoded = decode(&info).unwrap_or_else(|error| panic!("{name}: {error}"));
+        match decoded.pixels {
             Pixels::Interleaved { buffer, .. } => buffer,
-            Pixels::Planar { planes, alpha } => {
-                assert!(alpha.is_none(), "{name} states no alpha of its own");
+            _ => {
+                let (info, planes) = planes(name);
                 let channels = planes.len();
                 let samples = planes.first().map_or(0, Vec::len) / sample_bytes;
                 let mut joined = vec![0u8; samples * channels * sample_bytes];
@@ -1467,24 +1530,9 @@ mod tests {
                             .copy_from_slice(&plane[from..from + sample_bytes]);
                     }
                 }
+                assert_eq!(info.format, decoded.format, "{name}");
                 joined
             }
-            _ => panic!("{name} hands out pixels"),
-        }
-    }
-
-    /// The planes a planar fixture hands out, with what its header says.
-    fn planes(name: &str) -> (ImageInfo, Vec<Vec<u8>>) {
-        let info = image_info(&fixture(name), true, None)
-            .unwrap_or_else(|error| panic!("{name}: {error}"))
-            .unwrap_or_else(|| panic!("{name} is taken over"));
-        let decoded = decode(&info).unwrap_or_else(|error| panic!("{name}: {error}"));
-        match decoded.pixels {
-            Pixels::Planar { planes, alpha } => {
-                assert!(alpha.is_none(), "{name} states no alpha of its own");
-                (info, planes)
-            }
-            _ => panic!("{name} hands out planes"),
         }
     }
 
@@ -1664,6 +1712,67 @@ mod tests {
             read("tiff-planar.tiff"),
             read("tiff-rgb8.tiff"),
             "the planar and interleaved spellings of one picture are one picture"
+        );
+    }
+
+    /// The planar page is handed over in the layout the decoder produced rather
+    /// than copied into one buffer a channel, which is the whole point of the
+    /// stride a decode carries.
+    ///
+    /// This asserts the shape as well as the picture: the copy is not wrong, it is
+    /// a whole picture of allocation and traffic spent on the same picture, so a
+    /// decode that quietly went back to splitting passes
+    /// [`a_planar_file_is_reordered_into_a_frame`] and fails here.
+    #[test]
+    fn a_planar_page_keeps_the_decoder_buffer_and_its_strides() {
+        let info = image_info(&fixture("tiff-planar.tiff"), true, None)
+            .unwrap_or_else(|error| panic!("tiff-planar.tiff: {error}"))
+            .unwrap_or_else(|| panic!("tiff-planar.tiff is taken over"));
+        let decoded = decode(&info).expect("the page is decoded");
+        let Pixels::Strided {
+            planes,
+            buffer,
+            row_stride,
+            plane_stride,
+        } = decoded.pixels
+        else {
+            panic!("a separate-planar page keeps the decoder's buffer");
+        };
+        assert_eq!(planes, 3, "one plane per channel, in one buffer");
+        assert_eq!(
+            buffer.len(),
+            plane_stride * planes,
+            "the buffer is exactly its planes and nothing else"
+        );
+        assert_eq!(
+            row_stride,
+            usize::try_from(decoded.width).expect("width"),
+            "a row of the buffer is one row of the picture"
+        );
+        assert_eq!(
+            plane_stride,
+            row_stride * usize::try_from(decoded.height).expect("height"),
+            "a plane of the buffer is one plane of the picture"
+        );
+    }
+
+    /// The planes a strided page holds are the interleaved page's own samples,
+    /// which is what the write out of one buffer has to reproduce. This reads the
+    /// buffer by stride rather than by copy, so a wrong plane stride or a wrong
+    /// row stride changes the picture here rather than only in the frame.
+    #[test]
+    fn the_strides_of_a_planar_page_address_its_own_picture() {
+        let (_, from_planar) = planes("tiff-planar.tiff");
+        let mut rejoined = Vec::with_capacity(from_planar[0].len() * 3);
+        for sample in 0..from_planar[0].len() {
+            for channel in from_planar.iter().take(3) {
+                rejoined.push(channel[sample]);
+            }
+        }
+        assert_eq!(
+            rejoined,
+            read("tiff-rgb8.tiff"),
+            "the three planes, read by stride, are the interleaved picture"
         );
     }
 
