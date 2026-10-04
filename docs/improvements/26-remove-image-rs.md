@@ -771,7 +771,16 @@ flattening did nothing: it removed the *per-row* allocations and left all three
 whole-picture ones, which were the cost. Two guesses were wrong for the same
 reason -- each fixed something real that was not the thing being measured.
 
-`dds`, `ppm` and `tga` are the same shape and are next: one output allocation and
+**`dds` improved but is not conclusively fixed.** Its variant match was inside
+the block loops, where it cannot change between blocks; hoisting it so each arm's
+loop is monomorphic took the best-of ratio from 1.302 to 1.135. Pixels are
+unchanged and 266 tests pass. But the per-round ratios are still 0.92 1.33 1.36
+1.07 0.99 1.23, which is two below 1.0 and four above: `dds`'s group takes about
+40 ms for eight files, so this set is at the edge of what the harness can
+resolve, and a wider corpus of that format is what a conclusion needs. Recording
+that as unresolved rather than calling 1.135 a fix.
+
+`ppm` and `tga` are next, and they are the same shape as `hdr` was: one output allocation and
 a reusable row, `dds` being the one with the stable ratio (1.30 this round, 1.2
 before, so it needs the profile this method just supplied for `hdr`).
 

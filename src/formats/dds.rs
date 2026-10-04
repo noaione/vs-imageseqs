@@ -415,25 +415,42 @@ fn blocks(header: &Header, data: &[u8]) -> Result<Vec<u8>> {
         })?;
 
     let mut out = vec![0u8; width * height * channels];
-    for block_y in 0..down {
-        for block_x in 0..across {
-            let at = (block_y * across + block_x) * per_block;
-            let encoded = &body[at..at + per_block];
-            match header.variant {
-                Variant::Dxt1 => {
-                    let pixels = colour_block(encoded, true);
+    // The variant is matched **once**, outside the block loops. It cannot change
+    // between blocks, and matching it inside made every block carry a branch and
+    // left each arm's helpers unable to be inlined into a loop that only ever
+    // runs for one of them.
+    match header.variant {
+        Variant::Dxt1 => {
+            for block_y in 0..down {
+                for block_x in 0..across {
+                    let at = (block_y * across + block_x) * per_block;
+                    let pixels = colour_block(&body[at..at + per_block], true);
                     for (index, pixel) in pixels.iter().enumerate() {
                         let (row, column) = (index / 4, index % 4);
                         let target = ((block_y * 4 + row) * width + block_x * 4 + column) * 3;
                         out[target..target + 3].copy_from_slice(pixel);
                     }
                 }
-                Variant::Dxt3 | Variant::Dxt5 => {
-                    let pixels = if header.variant == Variant::Dxt3 {
-                        dxt3_block(encoded)
-                    } else {
-                        dxt5_block(encoded)
-                    };
+            }
+        }
+        Variant::Dxt3 => {
+            for block_y in 0..down {
+                for block_x in 0..across {
+                    let at = (block_y * across + block_x) * per_block;
+                    let pixels = dxt3_block(&body[at..at + per_block]);
+                    for (index, pixel) in pixels.iter().enumerate() {
+                        let (row, column) = (index / 4, index % 4);
+                        let target = ((block_y * 4 + row) * width + block_x * 4 + column) * 4;
+                        out[target..target + 4].copy_from_slice(pixel);
+                    }
+                }
+            }
+        }
+        Variant::Dxt5 => {
+            for block_y in 0..down {
+                for block_x in 0..across {
+                    let at = (block_y * across + block_x) * per_block;
+                    let pixels = dxt5_block(&body[at..at + per_block]);
                     for (index, pixel) in pixels.iter().enumerate() {
                         let (row, column) = (index / 4, index % 4);
                         let target = ((block_y * 4 + row) * width + block_x * 4 + column) * 4;
