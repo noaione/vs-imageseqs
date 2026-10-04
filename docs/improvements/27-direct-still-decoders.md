@@ -30,7 +30,7 @@ path then reads with its own reader.
 | jpeg 2000 | `jpeg2k 0.10.1`, unchanged | container boxes and codestream header | vendored OpenJPEG | `Pixels::Planar` | implemented in [`formats/jp2.rs`](../../src/formats/jp2.rs) |
 | tiff | `tiff 0.11.3` | `Decoder::new`, `dimensions`, `colortype`, tags | `read_image_to_buffer`, or `read_image_bytes` per chunk | `Pixels::Interleaved`, one pass | promote the crate from `image`'s adapter to a direct dependency |
 | exr | `exr 1.74.2` | header read, no pixels | `SpecificChannels` for the channels a frame has | `Pixels::Planar` | promote the crate to a direct dependency |
-| qoi | `qoi 0.4.1` | `decode_header`, 14 bytes | `Decoder::decode_to_buf` | `Pixels::Interleaved` | promote the crate to a direct dependency |
+| qoi | `qoi 0.4.1` | `decode_header`, 14 bytes | `Decoder::decode_to_buf` | `Pixels::Interleaved` | **landed** in [`formats/qoi.rs`](../../src/formats/qoi.rs), and `image`'s qoi feature is off |
 | bmp | image-rs's BMP decoder, ported | header | the port | `Pixels::Interleaved` | no candidate crate passes: `zune-bmp` fails every palette and RLE file in the corpus |
 | ico | ported directory, then the BMP port or `png` | directory | the payload reader | the payload's route | `zune-bmp` has no DIB entry point and answers `probe_bmp=false` on every `.ico` |
 | dds | ported header and DXT | header | the port | `Pixels::Interleaved` | `ddsfile` adds a proc-macro to the build graph and `bcdec_rs` changes samples and panics on a truncated block |
@@ -156,9 +156,16 @@ dependency changes, which wait for the module shape to settle.
    shape to reproduce. Gate: the 35-file `sandbox/jpeg` corpus, byte-identical
    samples and properties, and the orientation fixtures in `tests/`
    (`orientation-6.png` has a jpeg sibling in `sandbox/level-check`).
-2. **qoi directly** — `qoi 0.4.1` is already in `Cargo.lock` as the `image`
-   adapter and already matches the baseline byte for byte, so this is a
-   dependency promotion plus a module.
+2. **qoi directly** — **done**, in `f329f79`. `qoi 0.4.1` was already in
+   `Cargo.lock` as the `image` adapter and already matched the baseline byte for
+   byte, so this was a dependency promotion plus a module: [`src/formats/qoi.rs`](../../src/formats/qoi.rs)
+   reads the fourteen byte header for the probe and runs the crate's decoder into
+   the frame's buffer. `image`'s own `qoi` feature is off, which is what proves
+   the crate no longer reads one. There were no committed qoi fixtures at all, so
+   [`tests/make-qoi-fixtures.py`](../../tests/make-qoi-fixtures.py) wrote three: a
+   three channel file, a four channel one with varying alpha, and one whose
+   colours flag is set, which exists only to pin that the flag stays informative
+   and never becomes a `_Transfer` property.
 3. **farbfeld, written here** — 50 to 80 lines, one format, no dependency,
    and the smallest module that exercises a ported reader's shape
    ([`decoder::RowStream`](../../src/decoder.rs) or

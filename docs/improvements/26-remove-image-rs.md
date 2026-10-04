@@ -326,7 +326,40 @@ its new error string written down. `formats/heif.rs` already has the entry
 point for a colour page, which is what plan 28's "HEIF RGB page" row names, so
 the work is the routing and the expectations rather than a decoder.
 
-Step 5, the remaining still formats, is untouched.
+### step 5, the remaining still formats
+
+Started, in `f329f79` for qoi. The order and the per-format decisions are
+[27](27-direct-still-decoders.md)'s; this is what has landed so far.
+
+- **qoi** — done. `qoi 0.4.1` was already in the lock behind `image`, so the
+  crate was promoted and [`src/formats/qoi.rs`](../../src/formats/qoi.rs) reads
+  the fourteen byte header for the probe and runs the decoder into the frame's
+  buffer. `image`'s own `qoi` feature is now off, which is what proves the crate
+  no longer reads one. There were **no committed qoi fixtures at all**, so
+  [`tests/make-qoi-fixtures.py`](../../tests/make-qoi-fixtures.py) wrote three:
+  three channels, four channels with varying alpha, and one whose colours flag is
+  set. That third one exists only to pin the parity rule -- the flag is
+  informative and must never become a `_Transfer` property -- and the validator
+  checks that its planes, alpha, source label and colour properties all equal the
+  plain file's.
+
+Parity was exact: probe facts, colour planes and both clips are byte-identical
+to the build before it, across the whole fixture set, and no changelog entry was
+written because nothing a user can see moved.
+
+What is left, in plan 27's order, with the fixtures each still needs:
+
+- farbfeld — `alpha-rgba16.ff` exists and is already validated.
+- ico and bmp — **no fixtures**; the plan warns the research corpus was
+  synthetic and nothing committed exercises a palette or an RLE bitmap.
+- tga — **no fixtures**.
+- dds — `alpha-dds.dds` exists.
+- pnm — `gray.pgm` and `rgb.ppm` exist.
+- hdr — **no fixtures**.
+- tiff and exr — `alpha-rgba32f.tiff` exists; **no exr**.
+
+Step 6, removing the crate, still waits for all of these plus plan 28's
+fallback cases.
 
 ## the order of work
 
