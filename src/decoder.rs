@@ -222,6 +222,7 @@ impl RowSink<'_> {
         }
         Some(())
     }
+
     /// As [`Self::place_rgb8`], for a source that stores blue first.
     ///
     /// Targa does. The swap is the one thing this does that the other does not,
@@ -687,7 +688,7 @@ mod tests {
             let segment = probe_segment(&fixture(name), Rate::from_fps(24, 1), true, false)
                 .expect("the fixture probes");
             assert!(segment.animated, "{name}");
-            assert_eq!(segment.frame_count(), 14, "{name}");
+            assert_eq!(segment.frame_count(), 15, "{name}");
             assert_eq!(segment.output_size(), (16, 12), "{name}");
             assert_eq!(
                 segment.info.format,
@@ -736,8 +737,8 @@ mod tests {
             assert!(segment.animated, "{name}");
             assert_eq!(segment.output_size(), (16, 12), "{name}");
             // The avif states 80/170/110/240 ms and the heic four 150 ms
-            // samples; both are 600 ms, which is 14.4 ticks at 24 fps.
-            assert_eq!(segment.frame_count(), 14, "{name}");
+            // samples; both are 600 ms, which ends 14.4 ticks in at 24 fps.
+            assert_eq!(segment.frame_count(), 15, "{name}");
             assert_eq!(
                 segment.info.format,
                 crate::pixel::PixelFormat::Rgb8,
@@ -758,7 +759,7 @@ mod tests {
         )
         .expect("the fixture probes");
         assert!(segment.animated);
-        assert_eq!(segment.frame_count(), 14);
+        assert_eq!(segment.frame_count(), 15);
         assert_eq!(segment.output_size(), (16, 12));
         assert_eq!(segment.info.format, crate::pixel::PixelFormat::Rgb8);
         // The codestream states its timeline as ticks of a 1000 Hz timescale,
@@ -826,8 +827,8 @@ mod tests {
         assert_eq!(segment.info.original_color_type, SourceColorType::Rgba16);
         assert_eq!(segment.output_size(), (4, 3));
         // The fixture's two pictures hold for 100 ms and 200 ms, which is
-        // 7.2 output ticks at 24 fps, so seven ticks start before it ends.
-        assert_eq!(segment.frame_count(), 7);
+        // 7.2 output ticks at 24 fps, so eight instants fall before it ends.
+        assert_eq!(segment.frame_count(), 8);
         // The first picture is shown at tick 0 and the second at `ceil(2.4)`,
         // which is tick 3.
         assert_eq!(segment.presentation(0).unwrap(), 0);

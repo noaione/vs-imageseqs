@@ -639,6 +639,7 @@ mod tests {
             );
         }
     }
+
     /// A file that is not a radiance picture is declined; one whose header
     /// states a format this reader does not take is refused by name.
     #[test]

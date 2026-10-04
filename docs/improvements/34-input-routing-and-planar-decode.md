@@ -28,7 +28,7 @@ This documentation update implements no decoder changes.
 | 1. Consistent routing, saved plan and sample/subimage invariants | **Content-routing slice landed, and the route is saved and threaded.** `2b02f64` routes stills by content, `c206944` does the same for animation, and the saved-route slices record what the router named on `ImageInfo` and pass it to every module's probe entry, so a file is identified with one read. EXR selection, PAM word width and TIFF metadata/sample handling have also received fixes. | The saved route names the container and nothing more: the backend and the selected subimage are still decided inside each adapter, and the broader error/sample invariants need separate completion checks. |
 | 2. Combine metadata passes | **Partly landed: the front of the file answers, and a timeline is not rendered to describe it.** PNG, GIF and WebP no longer require image-rs for metadata or fallback pixels; a webp's or jpeg xl's animation adapter answers from the file header, a jpeg 2000 probe reads a window over the front that grows only while the header is incomplete, an avif or heif sequence walk seeks over media data rather than reading it, and an animated png's delays come from its own `fcTL` chunks instead of a rendered frame each. | One shared probe reader is not implemented. |
 | 3. Retain initialized readers and preserve planes | **Partly complete.** Eligible PNG, binary RGB8 PNM/PAM, TGA and BMP have row sinks. TIFF now also has a native YCbCr plane path (`8cf7b06`). | PNM/TGA/BMP row sinks still read the whole file during filling after a separate preparation read. PNG initializes a reader again in `fill`. True farbfeld/PNM row reads, direct separate-planar RGB TIFF, direct EXR planes and shared initialized decode state remain open. |
-| 4. Timing and selected subtype repairs | **Partly complete, and an animated png's delays are exact.** BigTIFF/RGBE recognition, PAM MAXVAL interpretation, TIFF orientation/ICC and EXR flat-RGB part selection have landed, and an APNG's timeline is placed on the lowest common denominator of the fractions it states rather than on rounded milliseconds. Palette and CMYK(A)/YCbCr TIFF coverage has since expanded too. | The total-frame-count discrepancy remains. Core BMP, odd DDS edge blocks and variable-length headers still have the inspected restrictions. Other coverage candidates require individual decisions and evidence. |
+| 4. Timing and selected subtype repairs | **Partly complete, and the two timing repairs have landed.** BigTIFF/RGBE recognition, PAM MAXVAL interpretation, TIFF orientation/ICC and EXR flat-RGB part selection have landed; an APNG's timeline is placed on the lowest common denominator of the fractions it states rather than on rounded milliseconds; and an animation segment contributes the output sample instants before its end rather than the whole output ticks it covers. Palette and CMYK(A)/YCbCr TIFF coverage has since expanded too. | Core BMP, odd DDS edge blocks and variable-length headers still have the inspected restrictions. Other coverage candidates require individual decisions and evidence. |
 | 5. Remove image-rs | **Landed.** `d431764` removes `image`, `8682c2f` removes leftover layout helpers, and `src/still.rs` is deleted. Cargo.toml and Cargo.lock contain no `image` dependency. | This does not finish phases 1–4. Ported code's notices remain applicable; codec dependencies such as libwebp are independent of image-rs. |
 
 `identify::route` has one production caller in each direction now: `describe`
@@ -385,6 +385,12 @@ than a segment will hold -- several large coprime ones -- is placed on
 milliseconds, exactly as it was before, so the change is exact where the old
 placement was lossy and identical where it was not. Reduced rational timestamps
 stay the answer if a file like that ever matters.
+
+What landed for the count: a segment contributes the output sample instants that
+fall before its end, so the count is `ceil(total * fps)` rather than the floor of
+it. An animation whose length is not a whole number of output frames therefore
+keeps one more frame -- the 600 ms fixtures went from 14 to 15 at 24 fps -- and
+the clips, the unit tests and the validator moved together in that change.
 
 ## architecture for this plugin
 

@@ -72,6 +72,12 @@
   long animation drifted; the timeline now runs at the lowest common denominator
   of the delays the file states
 
+- An animation whose length is not a whole number of output frames keeps its
+  last frame. The clip was given the complete output ticks the source covers, so
+  a 600 ms animation at 24 fps was 14 frames and dropped the picture shown at
+  583 ms; the count is now the number of output sample instants before the
+  segment ends, which is what the sampling rule states, and that clip is 15
+
 ### performance
 
 - Creating a clip over a long list reads the front of each file instead of the

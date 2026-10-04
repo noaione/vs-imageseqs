@@ -1577,7 +1577,7 @@ def test_animation() -> None:
 
     for name, starts in animations:
         clip = core.imgseqs.Read(files=[fixture(name)])
-        check(clip.num_frames == 14, f"animation: {name} is 14 frames at 24 fps (got {clip.num_frames})")
+        check(clip.num_frames == 15, f"animation: {name} is 15 frames at 24 fps (got {clip.num_frames})")
         check(
             (clip.width, clip.height) == (16, 12),
             f"animation: {name} is 16x12 (got {clip.width}x{clip.height})",
@@ -1633,10 +1633,10 @@ def test_animation() -> None:
         f"animation: a 16-bit APNG stays 16-bit (got {rgba16['clip'].format.name})",
     )
     check(
-        rgba16["clip"].num_frames == 7,
-        f"animation: a 16-bit APNG is 7 frames (got {rgba16['clip'].num_frames})",
+        rgba16["clip"].num_frames == 8,
+        f"animation: a 16-bit APNG is 8 frames (got {rgba16['clip'].num_frames})",
     )
-    sixteen = [frame_hash(rgba16["clip"].get_frame(index)) for index in range(7)]
+    sixteen = [frame_hash(rgba16["clip"].get_frame(index)) for index in range(8)]
     check(
         len(set(sixteen[:3])) == 1 and len(set(sixteen[3:])) == 1 and sixteen[0] != sixteen[3],
         "animation: a 16-bit APNG switches picture at the third frame",
@@ -1656,7 +1656,7 @@ def test_animation() -> None:
     # its one frame at the front.
     mixed = core.imgseqs.Read(files=[fixture("animation.gif"), fixture("animation.gif")])
     check(
-        mixed.num_frames == 28,
+        mixed.num_frames == 30,
         f"animation: two animations play back to back (got {mixed.num_frames})",
     )
 
@@ -1674,7 +1674,7 @@ def test_animation() -> None:
         files=[fixture("animation.gif"), fixture("alpha-rgb8.png")], mismatch=1
     )
     check(
-        variable.num_frames == 15,
+        variable.num_frames == 16,
         f"animation: mismatch allows a still after an animation (got {variable.num_frames})",
     )
 
