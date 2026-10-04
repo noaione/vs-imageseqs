@@ -532,7 +532,34 @@ What is left, in plan 27's order, with the fixtures each still needs:
   deliberate decision rather than a default. Deciding this after writing the
   reader would mean discovering it from a failing fixture, so it is recorded
   here first.
-- tiff and exr — `alpha-rgba32f.tiff` exists; **no exr**.
+- **tiff and exr** — fixtures **landed** in `2205e87`, the modules still to do.
+  Eight EXR files and thirteen TIFF files from
+  [`tests/make-tiff-exr-fixtures.py`](../../tests/make-tiff-exr-fixtures.py).
+  Every EXR reads (`RGBS` with `original=Rgb32F` or `Rgba32F`) across all five
+  compressions, and twelve of the thirteen TIFFs read. Four things the run
+  settled, and the first two are why the script prints what ImageMagick actually
+  wrote:
+
+  - **`image` refuses palette TIFF**, and that is the one TIFF that does not
+    read: `does not support the format features Photometric interpretation
+    RGBPalette`. Whether the `tiff` crate reads one is therefore a **decision**,
+    the same shape as the HDR orientations: taking it is more capable than the
+    tree is today and needs a `CHANGELOG.md` entry, and refusing it keeps every
+    file's behaviour identical.
+  - **ImageMagick writes a palette page for a picture with few enough colours,
+    whatever was asked for.** The first run produced *eight* files that were all
+    palette, so they were all testing one refusal rather than the six subtypes
+    they were named for. `-type TrueColor` is what forces the photometric, and it
+    has to be per case: applying it to the grey sources turned them into three
+    channel ones, which the dump caught on the next run.
+  - **`PackBits` is not an ImageMagick compression name**; the TIFF codec it
+    means is spelled `RLE`. And **`-depth 16` alone does not make the writer emit
+    sixteen bit samples** -- it wrote eight from an eight bit source, and only a
+    sixteen bit source produced `16 srgb`. Both were caught by the dump rather
+    than by the file being wrong later.
+  - **The four channel sources land as three channel colour plus an alpha clip**:
+    `tiff-rgba8.tiff` is `RGB24 original=Rgba8` and every EXR RGBA is `RGBS
+    original=Rgba32F`, with the alpha in `GrayS` on its own clip.
 
 Step 6, removing the crate, still waits for all of these plus plan 28's
 fallback cases.
