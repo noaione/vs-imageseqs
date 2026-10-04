@@ -30,7 +30,6 @@ image = { version = "0.25.10", default-features = false, features = [
     "jpeg",
     "png",
     "pnm",
-    "tga",
     "tiff",
     "webp",
     # other

@@ -75,6 +75,9 @@ fn format_decoder(info: &ImageInfo, demand: Demand) -> Option<Result<DecodedImag
     if formats::ico::owns(&info.path) {
         return Some(formats::ico::decode(info));
     }
+    if formats::tga::owns(&info.path) {
+        return Some(formats::tga::decode(info));
+    }
     None
 }
 
@@ -461,6 +464,12 @@ fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
     // An icon is a directory of payloads, and which one is read is decided by the
     // directory rather than by the frame; see [crate::formats::ico].
     if let Some(info) = formats::ico::image_info(path, apply_rotation)? {
+        return Ok(info);
+    }
+    // A targa states its layout in an eighteen byte header, and the two
+    // direction bits in that header decide where the pixels go rather than an
+    // orientation property; see [`crate::formats::tga`].
+    if let Some(info) = formats::tga::image_info(path, apply_rotation)? {
         return Ok(info);
     }
     // A png is read here for the same reason a jpeg is, and one thing more:
