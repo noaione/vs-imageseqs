@@ -1059,6 +1059,31 @@ its own `place` -- "walking the row once per plane reads it three times and
 multiplies for every byte it writes". The lesson it took a specialised `place` to
 learn is the one this attempt ignored.
 
+**The correction is one pass over the row, not three.** The implementation did
+
+```rust
+for (plane, channel) in [(0, 0), (1, 1), (2, 2)] {
+    let line = target.row(y);
+    for (x, pixel) in source.chunks_exact(channels).enumerate() {
+        line[x] = pixel[channel];
+    }
+}
+```
+
+-- which reads the band once per plane, three or four times over. `png.rs` does
+the opposite and says so: it walks the row **once** and writes all three planes
+inside that walk, so every byte of the source is read once and the three plane
+rows are held together. Its comment is about the gather it is avoiding; the same
+sentence is the instruction this attempt needed and read past.
+
+Holding the three plane rows at once is not the obstacle it looks like: they are
+three separate `PlaneRows` in `sink.colour`, so disjoint mutable borrows come from
+splitting the `Vec`, and within one plane the four rows of a block row are
+disjoint slices of one `bytes` buffer. That is the shape a third attempt should
+have, and it is a different claim from the one that failed -- the previous one was
+correct that the 4.3 MB copy is worth removing and wrong about what removing it
+would cost.
+
 So the stream is the right *shape* and this was the wrong *implementation* of it:
 the transpose has to happen inside the block decode -- each block's four pixels
 writing their four bytes per plane as they are decoded, rather than into a band
