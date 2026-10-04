@@ -92,6 +92,17 @@ def main() -> int:
         )
         report(name, path, want)
 
+    # The same pictures without interlacing, so that a check can say interlacing
+    # changes nothing but the order the samples are stored in.
+    print("the same pictures, not interlaced:")
+    for name, src, color_type, extra in [
+        ("png-plain-rgb8.png", colour, "2", []),
+        ("png-plain-gray8.png", grey, "0", []),
+    ]:
+        path = str(FIXTURES / name)
+        magick(src, *extra, "-define", f"png:color-type={color_type}", path)
+        report(name, path, (8, int(color_type)))
+
     print("not interlaced, for comparison:")
     for name, src, extra, want in [
         ("png-palette8.png", blocks, ["-colors", "8"], (4, 3)),

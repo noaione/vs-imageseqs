@@ -6,14 +6,14 @@
 //! A caller here never names an `image` type: [`Metadata`] and [`ColorType`] are
 //! the plugin's own, and the crate's enums are translated at this boundary.
 //!
-//! Gif used to be the first of these and is not any more: `src/formats/gif.rs`
-//! reads a one frame gif now, onto the same compositor `animation::gif` composes
-//! its presentations with.
+//! Two formats used to be on this list and are not any more. Gif is read by
+//! `src/formats/gif.rs`, onto the same compositor `animation::gif` composes its
+//! presentations with, and png is read by `src/formats/png.rs` -- the row walk for
+//! the files whose rows can be placed as they are read, and a whole-frame read for
+//! the two shapes whose cannot be, Adam7 and an orientation.
 //!
 //! What still reaches it, and what would have to exist before it could go:
 //!
-//! - **png** — a png whose rows [`crate::formats::png`] will not walk into the
-//!   frame, which it hands on rather than failing. The feature is `png`.
 //! - **webp** — the probe of every webp, because the header read is the
 //!   crate's, and a renamed animated webp, whose simple libwebp entry points
 //!   refuse a container of frames. The feature is `webp`.

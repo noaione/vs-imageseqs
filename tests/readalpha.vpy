@@ -1739,6 +1739,59 @@ def test_gif_stills() -> None:
     check(samples(see_through[1].get_frame(0))[0] == 0, "index 0 is the transparent one")
     check(samples(opaque[1].get_frame(0))[0] == 255, "and is opaque without it")
 
+
+def test_png_feature_sets() -> None:
+    """Interlacing, a palette and a narrow depth, none of which had a fixture.
+
+    Adam7 stores the samples in a different order and the reader has to put that
+    back together; a palette page arrives as indices which the walk widens; and a
+    one, two or four bit grey page arrives narrower than a byte. Each interlaced
+    fixture has a non-interlaced twin holding the same picture, so the check that
+    matters is that the two agree -- a reader that dropped an Adam7 pass would
+    still decode *something*, and only the comparison says it decoded the page.
+    """
+    for interlaced, plain in [
+        ("png-interlaced-rgb8.png", "png-plain-rgb8.png"),
+        ("png-interlaced-gray8.png", "png-plain-gray8.png"),
+    ]:
+        from_interlaced = read_alpha(files=[fixture(interlaced)])[0].get_frame(0)
+        from_plain = read_alpha(files=[fixture(plain)])[0].get_frame(0)
+        check(
+            (from_interlaced.width, from_interlaced.height) == (37, 23),
+            f"{interlaced} is the size its header states",
+        )
+        check(
+            from_interlaced.format.name == from_plain.format.name,
+            f"{interlaced} is handed out as {from_plain.format.name}",
+        )
+        for plane in range(from_interlaced.format.num_planes):
+            check(
+                samples(from_interlaced, plane) == samples(from_plain, plane),
+                f"{interlaced} plane {plane} is {plain}",
+            )
+
+    # A palette page is handed out as the r,g,b its indices name, at either table
+    # width: four bits is the walk's own expansion and eight is the decoder's.
+    for name in ["png-palette8.png", "png-palette256.png"]:
+        frame = read_alpha(files=[fixture(name)])[0].get_frame(0)
+        check(frame.format.name == "RGB24", f"{name} widens its indices to r,g,b")
+        check(
+            str(frame.props["ImgSeqOriginalColorType"]) == "Rgb8",
+            f"{name} names the layout its indices widen to",
+        )
+
+    # A narrow grey page is widened to eight bits, whatever the header states.
+    for name, depth in [("png-gray1.png", 1), ("png-gray2.png", 2), ("png-gray4.png", 4)]:
+        frame = read_alpha(files=[fixture(name)])[0].get_frame(0)
+        check(
+            frame.format.name == "Gray8",
+            f"{name}, at {depth} bits, is handed out as eight",
+        )
+        check(
+            str(frame.props["ImgSeqOriginalColorType"]) == "L8",
+            f"{name} names the grey it widens to",
+        )
+
 def main() -> None:
     for test in (
         test_rgba8,
@@ -1772,6 +1825,7 @@ def main() -> None:
         test_alpha_demand,
         test_animation,
         test_gif_stills,
+        test_png_feature_sets,
     ):
         print(f"--- {test.__name__}")
         test()
