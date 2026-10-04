@@ -801,6 +801,22 @@ was never a regression and the 1.19x was an artifact of the statistic. `tga` is
 the opposite and is real: the two ranges do not overlap at all, 43.4 against
 55.7, a stable 1.28x.
 
+**`tga`'s profile, the same way, on a 3.24 MB file over twenty rounds:**
+
+    read 1.95 ms   header 0.001   stored_pixels 0.70   orient+expand 0.65   reverse 0.64
+
+The module is 3.95 ms a file, and the interesting line is the last one:
+`reverse_encoding` is a **whole extra pass over the picture** doing a byte swap of
+channels nought and two, and `expand` is already reading every stored pixel on
+its way to the wider one. Fusing them is one loop instead of two and is worth the
+0.64 ms, which is 16% of the module and about 5 ms of the eight file run the
+harness measures. That is the identified next step for `tga` and it is a
+measurement rather than a reading: the pass is named and timed, not inferred.
+
+The read is 1.95 of the 3.95, as it was for `pnm`, so the ceiling on what any of
+this can win is bounded by the file read -- which is also why `ppm` turned out not
+to be a regression at all.
+
 So one format is left, not two, and the numbers that said otherwise were
 measuring the harness. **Read the median of paired repetitions, not the best of
 them** -- a build that occasionally stalls makes best-of look better than it is,
