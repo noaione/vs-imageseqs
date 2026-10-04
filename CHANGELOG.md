@@ -3,18 +3,23 @@
 ## unreleased
 ### changed
 
+- Whether a file plays a timeline is decided by its bytes now, like its format
+  already was. `Read` picked the animation adapter by extension while the probe
+  and the decode picked the format by content, so an animated gif, webp, avif or
+  heic under a name that did not say so was read as a single still frame. It
+  plays its timeline now, the same one the file plays under its own name. The
+  dispatch is one `identify::route` call rather than a chain of five extension
+  checks, so the format is also read from the file once instead of up to five
+  times. Nothing changes for a file whose name says what it is.
 - A webp is described here now rather than by `image`, which drops that reader
   from the dependency: `image-webp` is out of `Cargo.lock`. The container walk
   the decode already used answers the probe's four facts -- the canvas, the
   alpha flag, the exif orientation and the `ICCP` chunk -- so a webp's
   `ImgSeqOrientation` and `ImgSeqHasICC` come from the file's own chunks. The
   size is still the stored one and the transform still does the swap, so the
-  fixtures describe and decode byte for byte as they did. An animated webp under
-  a name that does not say `webp` keeps the single-frame read it had: what it
-  contributes is the picture its timeline starts with, read from the timeline
-  now rather than by a decoder of its own. A webp that does not hold the
-  container its `RIFF` header declares -- a file cut short -- is refused rather
-  than described.
+  fixtures describe and decode byte for byte as they did. A webp that does not
+  hold the container its `RIFF` header declares -- a file cut short -- is refused
+  rather than described.
 - An interlaced png is read here now rather than by `image`, and so is one that
   states an orientation. Both are shapes the row walk cannot place: it writes each
   row into the frame as it reads it, and Adam7 hands the file over one *pass* at a
@@ -63,9 +68,7 @@
   renamed file also routes the same way in both halves now, which it did not --
   webp, heif, jxl and jpeg 2000 answered the decode from the extension while
   the probe answered from the bytes, so a file whose name lied about it could
-  be described as one format and decoded as another. An animated webp under a
-  name that does not say `webp` keeps the single-frame read it had; what that
-  frame comes from is the entry above.
+  be described as one format and decoded as another.
 - An OpenEXR whose first part holds no colour channel now decodes. The probe and
   the decode were asking different questions: the probe took the first part that
   states `R`, `G` and `B`, and the decode took the first part it could read at

@@ -35,12 +35,6 @@ use crate::{
 
 use super::{AnimationDecoder, AnimationSource, Presentation, Rate, SegmentInfo};
 
-/// Whether this module reads `path`.
-#[must_use]
-pub fn owns(path: &Path) -> bool {
-    crate::formats::jxl::owns(path)
-}
-
 /// Describes an animated jpeg xl's timeline without rendering its frames.
 ///
 /// Returns `None` for a file that is not an animation, which leaves it on the

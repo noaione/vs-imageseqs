@@ -39,18 +39,6 @@ use crate::{
 use super::sequence::{Crop, Sequence, TrackTiming};
 use super::{AnimationDecoder, AnimationSource, Presentation, Rate, SegmentInfo};
 
-/// Whether this module owns an avif sequence.
-#[must_use]
-pub fn owns_avif(path: &Path) -> bool {
-    crate::formats::avif::owns_extension(path)
-}
-
-/// Whether this module owns a heif or heic sequence.
-#[must_use]
-pub fn owns_heif(path: &Path) -> bool {
-    crate::formats::heif::owns_extension(path)
-}
-
 /// Describes an avif or heif sequence's timeline without decoding it.
 ///
 /// Returns `None` for a file that is not a sequence, which leaves it on the

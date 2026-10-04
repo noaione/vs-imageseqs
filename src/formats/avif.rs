@@ -1683,11 +1683,6 @@ fn decode_error(path: &Path, error: impl std::fmt::Display) -> ImgSeqError {
     image_error("decode", path, error)
 }
 
-/// Whether `path` names an avif, which is how this module is selected.
-pub fn owns_extension(path: &Path) -> bool {
-    has_avif_extension(path)
-}
-
 fn has_avif_extension(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())

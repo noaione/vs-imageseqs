@@ -31,9 +31,6 @@ use crate::{
 };
 
 use super::{AnimationDecoder, AnimationSource, Presentation, Rate, SegmentInfo};
-/// File extensions that hold a webp.
-const EXTENSIONS: [&str; 1] = ["webp"];
-
 /// Bytes of a RIFF chunk header: the four-character code and the size.
 const CHUNK_HEADER: usize = 8;
 
@@ -44,18 +41,6 @@ const ANMF_HEADER: usize = 16;
 /// a field of a file. libwebp's own limit is the same order.
 const MAX_SIDE: u32 = 16_384;
 
-/// Whether this module reads `path`.
-#[must_use]
-pub fn owns(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            EXTENSIONS
-                .iter()
-                .any(|known| extension.eq_ignore_ascii_case(known))
-        })
-}
-
 /// Whether `data` opens with the form a container walk can be asked about.
 ///
 /// A webp is a RIFF file whose form type is `WEBP`, which is the whole of what
@@ -65,18 +50,18 @@ fn is_container(data: &[u8]) -> bool {
     data.len() >= 12 && &data[..4] == b"RIFF" && &data[8..12] == b"WEBP"
 }
 
-/// The first picture an animated webp displays, for a file read as a still.
+/// The first picture a webp container holds, for a file read as a still.
 ///
-/// libwebp's simple entry points read one image and refuse a container of them,
-/// so a webp that holds an animation has to be answered from its timeline. One
-/// reaches the still decoder only when its name hid the animation from
-/// `probe_segment`, which picks an animation adapter from the file's route: a
-/// file called `webp` is an animated segment and never arrives here.
+/// libwebp's simple entry points read one image and refuse a container of them.
+/// `probe_segment` sends a container that displays several pictures to the
+/// animation adapter, so what reaches the still decoder is one that displays
+/// one -- and libwebp refuses that too, because the refusal is about the
+/// container rather than about how many pictures it shows.
 ///
-/// What it contributes as a still is the picture the timeline starts with,
-/// which is what the reader being replaced handed back for such a file. A file
-/// that is not a webp container at all is declined rather than refused, so that
-/// the caller's own decoder is what reports it and names libwebp.
+/// What it contributes is the picture the timeline starts with, which is what
+/// the reader being replaced handed back. A file that is not a webp container
+/// at all is declined rather than refused, so that the caller's own decoder is
+/// what reports it and names libwebp.
 ///
 /// # Errors
 ///
@@ -487,16 +472,17 @@ impl AnimationDecoder for Source {
     }
 }
 
-/// Reads `path`'s animation, or `None` for a file this module does not read.
+/// Reads `path`'s animation, or `None` for a webp that displays one picture.
+///
+/// Every caller reaches this for a path the route named a webp, so the file is
+/// read and its container parsed without a second gate: a gate here would be a
+/// second copy of the decision [`crate::formats::identify::route`] already made.
 ///
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file cannot be read or its container is
 /// malformed.
 pub fn walk(path: &Path) -> Result<Option<Animation>> {
-    if !owns(path) {
-        return Ok(None);
-    }
     let data = std::fs::read(path).map_err(|error| {
         ImgSeqError::new(format!(
             "failed to open image '{}': {error}",
@@ -875,17 +861,6 @@ mod tests {
             (animation.frames[0].width, animation.frames[0].height),
             (3, 3)
         );
-    }
-
-    /// Only a webp extension is taken over.
-    #[test]
-    fn only_webp_extensions_are_taken_over() {
-        for name in ["a.webp", "a.WEBP"] {
-            assert!(owns(Path::new(name)), "{name}");
-        }
-        for name in ["a.png", "a.gif", "a.webpx", "a"] {
-            assert!(!owns(Path::new(name)), "{name}");
-        }
     }
 
     /// A container this walk cannot describe is refused rather than guessed at.

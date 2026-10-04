@@ -23,16 +23,9 @@ use png::{BitDepth, BlendOp, Decoder, DisposeOp, Reader};
 use crate::{
     decoder::{DecodeTimings, DecodedImage, Pixels, image_error},
     error::{ImgSeqError, Result},
-    formats::png as png_format,
 };
 
 use super::{AnimationDecoder, AnimationSource, Presentation, Rate, SegmentInfo};
-
-/// Whether this module reads `path`.
-#[must_use]
-pub fn owns(path: &Path) -> bool {
-    png_format::owns(path)
-}
 
 /// Describes an animated png's timeline without rendering its frames.
 ///

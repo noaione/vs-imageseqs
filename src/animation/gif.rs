@@ -48,27 +48,12 @@ use crate::{
 
 use super::{AnimationDecoder, AnimationSource, Presentation, Rate, SegmentInfo};
 
-/// File extensions that hold a gif.
-const EXTENSIONS: [&str; 1] = ["gif"];
-
 /// The rate a gif's delays are counted in.
 ///
 /// A gif states a delay in hundredths of a second, so the timeline counts
 /// microseconds and a delay of one is 10 ms exactly. `image` states the delay as
 /// a `num/100` millisecond ratio; both reach the same ticks.
 const RATE: Rate = Rate::new(1_000_000, 1);
-
-/// Whether this module reads `path`.
-#[must_use]
-pub fn owns(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            EXTENSIONS
-                .iter()
-                .any(|known| extension.eq_ignore_ascii_case(known))
-        })
-}
 
 /// One displayed picture's timing and rectangle, as the metadata pass reads it.
 struct Timing {
@@ -589,16 +574,5 @@ mod tests {
         let _ = canvas.compose(&subframe(0, 0, 2, 2, painted, DisposalMethod::Keep));
         let composed = canvas.compose(&subframe(0, 0, 1, 1, [99, 99, 99, 0], DisposalMethod::Keep));
         assert_eq!(at(&canvas, &composed, 0, 0), painted);
-    }
-
-    /// Only a gif extension is taken over.
-    #[test]
-    fn only_gif_extensions_are_taken_over() {
-        for name in ["a.gif", "a.GIF"] {
-            assert!(owns(Path::new(name)), "{name}");
-        }
-        for name in ["a.png", "a.webp", "a.gifv", "a"] {
-            assert!(!owns(Path::new(name)), "{name}");
-        }
     }
 }

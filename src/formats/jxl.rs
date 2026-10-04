@@ -59,20 +59,6 @@ const CONTAINER_SIGNATURE: [u8; 12] = [
     0x00, 0x00, 0x00, 0x0c, b'J', b'X', b'L', b' ', 0x0d, 0x0a, 0x87, 0x0a,
 ];
 
-/// Whether this module owns `path`.
-///
-/// The probe asks this before it opens an `image` decoder, because `image` has
-/// no jpeg xl format for `ImageReader` to identify on its own: the extension and
-/// the two signatures below are what the hook this module replaces used to
-/// register with it.
-pub fn owns(path: &Path) -> bool {
-    // Content first: a file whose bytes say it is something else is that
-    // something else however it is named, and the extension is the hint a
-    // format with no signature of its own has to fall back on. See
-    // [`identify::owns`](crate::formats::identify::owns).
-    crate::formats::identify::owns(crate::formats::identify::Format::Jxl, path)
-}
-
 /// What the codestream of a jpeg xl file states about its image.
 ///
 /// Shared with the animation adapter, which reads the same header from its own
@@ -710,15 +696,6 @@ mod tests {
             Pixels::Interleaved { buffer, .. } => buffer,
             other => panic!("a jpeg xl decodes into an interleaved buffer, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn only_jxl_extensions_are_taken_over() {
-        assert!(owns(Path::new("a.jxl")));
-        assert!(owns(Path::new("a.JXL")));
-        assert!(!owns(Path::new("a.jxls")));
-        assert!(!owns(Path::new("jxl")));
-        assert!(!owns(Path::new("a.png")));
     }
 
     #[test]

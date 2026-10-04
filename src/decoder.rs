@@ -487,24 +487,23 @@ pub fn probe_segment(
 ) -> Result<Segment> {
     let info = probe(path, apply_rotation, export_icc_profile)?;
     // An animated file is described by its own container: the delay of every
-    // picture and how to replay it. A file no adapter claims is a still, which
-    // is one frame and no decoder at all, and that is also what an adapter
-    // answers for a file of its format that turns out not to be animated.
-    let animated = if crate::animation::apng::owns(path) {
-        crate::animation::apng::segment_info(path, info.clone(), fps)?
-    } else if crate::animation::gif::owns(path) {
-        crate::animation::gif::segment_info(path, info.clone(), fps)?
-    } else if crate::animation::heif::owns_avif(path) || crate::animation::heif::owns_heif(path) {
-        crate::animation::heif::segment_info(path, info.clone(), fps)?
-    } else if crate::animation::jxl::owns(path) {
-        crate::animation::jxl::segment_info(path, info.clone(), fps)?
-    } else if crate::animation::webp::owns(path) {
+    // picture and how to replay it. Whether a file is one is the container's
+    // answer, so this asks the same question the probe and the decode ask --
+    // [`identify::route`] -- rather than the file's name. A format whose
+    // adapter finds no timeline is a still, which is one frame and no decoder
+    // at all.
+    let animated = match identify::route(path) {
+        Some(Format::Png) => crate::animation::apng::segment_info(path, info.clone(), fps)?,
+        Some(Format::Gif) => crate::animation::gif::segment_info(path, info.clone(), fps)?,
+        Some(Format::Avif | Format::Heif) => {
+            crate::animation::heif::segment_info(path, info.clone(), fps)?
+        }
+        Some(Format::Jxl) => crate::animation::jxl::segment_info(path, info.clone(), fps)?,
         // A webp whose bitstream is a still image stays on the libwebp path,
         // which is what hands a lossy file out as its own yuv planes. Only an
         // animated one is claimed here.
-        crate::animation::webp::segment_info(path, info.clone(), fps)?
-    } else {
-        None
+        Some(Format::Webp) => crate::animation::webp::segment_info(path, info.clone(), fps)?,
+        _ => None,
     };
     match animated {
         Some(segment) => segment.into_segment(),

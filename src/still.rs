@@ -12,8 +12,8 @@
 //! the files whose rows can be placed as they are read, and a whole-frame read
 //! for the two shapes whose cannot be, Adam7 and an orientation. Webp is read
 //! by `src/formats/webp.rs`, which is libwebp for the pixels and its own
-//! container walk for the probe, and by `animation/webp.rs` for the picture a
-//! renamed animated webp starts with.
+//! container walk for the probe, with `animation/webp.rs` answering a still
+//! read of a container that holds an animation.
 //!
 //! What is left of the crate here is the avif reader below and the last resort
 //! for a file no format names.

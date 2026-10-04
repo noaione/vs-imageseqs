@@ -644,11 +644,6 @@ fn pack_plane(
     Ok(())
 }
 
-/// Whether `path` names a heif or heic, which is how this module is selected.
-pub fn owns_extension(path: &Path) -> bool {
-    has_heif_extension(path)
-}
-
 fn has_heif_extension(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
