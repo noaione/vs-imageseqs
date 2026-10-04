@@ -423,7 +423,30 @@ What is left, in plan 27's order, with the fixtures each still needs:
   5-to-8 bit expansion" is that difference, and reusing `bmp::expand` would have
   been wrong -- as the author of this note found out by writing the
   round-to-nearest table into the test that exists to tell the two apart.
-- pnm — `gray.pgm` and `rgb.ppm` exist.
+- **pnm** — fixtures **landed** in `1bb56df`, the port still to do. Sixteen files from
+  [`tests/make-pnm-fixtures.py`](../../tests/make-pnm-fixtures.py) beside the two the
+  validator already had, and the set covers the rule's three parts rather than
+  the format as a whole:
+
+  - **`P1` to `P7`**, which is seven subtypes and not one. The three ASCII
+    rasters, the three binary ones, and the tagged container in four spellings
+    (`RGB`, `RGB_ALPHA`, `GRAYSCALE`, `GRAYSCALE_ALPHA`), so the tuple type is
+    what varies between the last four.
+  - **The comment asymmetry, which is the part worth having.** A comment between
+    two header fields is legal and `pnm-comment.pgm` carries two; a comment
+    inside the raster of an *ASCII* file is not, and `pnm-ascii-comment.pgm` is
+    refused with "Non-ASCII-digit character when parsing number in sample". The
+    same bytes in a binary subtype are data rather than a comment, so the two
+    files together are what hold the distinction.
+  - **The `f32` rescale.** `pnm-p7-maxval31.pam` states a `MAXVAL` of 31, which
+    is not one less than a power of two, so its samples are not a shift of the
+    frame's word and the reader rescales them instead of widening them.
+
+  The baseline is otherwise unremarkable and worth stating because three
+  formats in a row have been anything but: `P1` and `P4` are labelled `L1` and
+  handed out as `Gray8`; eight bit files keep their word; sixteen bit ones are
+  `Gray16` or `RGB48`; and the tagged container's alpha spellings are `La8` and
+  `Rgba8`.
 - hdr — **no fixtures**.
 - tiff and exr — `alpha-rgba32f.tiff` exists; **no exr**.
 
