@@ -581,7 +581,7 @@ What is left, in plan 27's order, with the fixtures each still needs:
        replaces `read_image` has to be the plane aware reader; the sample count
        check is the guard that stops a wrong picture being handed out in the
        meantime.
-    4. **A palette page is refused at *identify*, not at decode**, which keeps
+    6. **A palette page is refused at *identify*, not at decode**, which keeps
        the probe from promising a frame the decode would refuse. That part
        worked.
 
