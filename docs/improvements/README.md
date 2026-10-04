@@ -359,6 +359,34 @@ code-path defect. Each bullet names the page that keeps the full argument. the
 rest of that `defer:` list — gpu output, manual simd, filesystem globbing and
 format-based clip grouping — is in `not planned` below, with its reasons.
 
+**one format is slower than the reader it replaced**
+
+[26](26-remove-image-rs.md) moved ten still formats off the `image` crate and
+verified every one of their pixels, planes and properties byte-identical. Three
+of the four speed differences that measurement found are resolved: `hdr` is
+faster (1.16x to 0.965x, three whole-picture buffers collapsed to one), `tga` is
+1.13x from 1.34x (a redundant copy of the picture removed), and `ppm` needed
+nothing -- its 1.19x was this tree's own harness comparing best-of runs between
+a high-variance baseline and a low-variance build, and the median says it is
+faster.
+
+`dds` is still 1.12x, and the cause is verified rather than inferred:
+`still::Decoder::read(self, buffer)` fills the caller's frame directly, while
+`src/formats/dds.rs` builds a 4.3 MB `Vec` that the plugin then copies into the
+frame -- about 0.86 ms a file of extra traffic against a measured gap of 1.15.
+The fix is a `RowStream`, which `src/formats/png.rs:650` already models: hold the
+path, re-open in `fill`, and hand each decoded row to the `RowSink`. For `dds`
+that means walking block rows and decoding each block into the four pixel rows it
+belongs to, so the intermediate never exists. The part that makes it more than
+mechanical is that the sink is one entry per **plane**, so an interleaved pixel
+is three plane writes and a correct stream decodes a whole block row into a small
+buffer before scattering it.
+
+Four measured attempts went into these two formats and three were wrong, so the
+page records the split that worked: every fix came from removing a whole
+traversal of memory, and every failure from rearranging one. `dds` has such a
+traversal to remove and no arithmetic to tune.
+
 **the decoder could write the frame itself**
 
 - **decode straight into the frame's planes.** `JxlOutputBuffer::new_from_ptr`
