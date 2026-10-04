@@ -907,6 +907,35 @@ block. The fix is to write the picture into one buffer allocated once and to
 keep the per-row work in that buffer, which is the shape `png.rs` already uses.
 That is the next action, and this corpus and this harness are what will say
 whether it worked.
+
+### what step 5 leaves behind
+
+**The migration itself is complete.** All ten formats of the plan are read by
+this tree, every one of their `image` features is disabled, and `image`'s
+remaining feature list is `jpeg`, `avif-native`, `gif`, `png` and `webp` -- none
+of them a step-5 format. What is left on the crate is the animated paths and the
+two fallbacks, and removing it is step 6.
+
+Per slice the evidence is the same shape in each: probe facts, colour planes and
+both `ReadAlpha` clips byte-identical to the build before it, the fixture corpus
+unchanged, 266 tests, clippy and fmt clean, the validator at `all checks passed`
+and `frame-parity.py` at 0 of 245.
+
+**Two measured regressions remain open and neither has a fix:**
+
+| format | before | after | state |
+| --- | --- | --- | --- |
+| `tga` | 43.6 ms | 58.3 ms | profiled; five attempts; no fix found |
+| `dds` | 39.1 ms | 50.9 ms | improved to 1.135 by hoisting the variant match; needs a wider corpus |
+
+`ppm`, which read as a third, was cleared: its 1.19x was this harness comparing
+best-of runs between a high-variance baseline and a low-variance build, and by
+median it is faster.
+
+So step 5's objective is met and the performance constraint that goes with it is
+**not** fully met. That distinction is the point of this section rather than a
+footnote: the format work is done and verified, and two formats are slower than
+the readers they replaced with a profile and no remedy. Step 6 should wait.
 Step 6, removing the crate, still waits for all of these plus plan 28's
 fallback cases.
 
