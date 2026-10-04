@@ -95,6 +95,11 @@
   buffer the size of the file: a 3000x3000 image of each holds 48 MiB rather
   than 74 MiB while it decodes, and decodes 7 to 14% faster
 
+- A DirectDraw surface whose width or height is not a multiple of four is read
+  instead of refused. Its last block of a row and of a column is in the file in
+  full, and the pixels that hang over the edge are dropped: a 7x24 DXT1 or DXT5
+  texture decodes to 7x24, where it failed to identify before
+
 - A planar tiff is handed to the frame as the planes it already is rather than
   interleaved and separated again: a 3000x3000 eight bit page decodes in 43 ms
   rather than 139 ms, which is the chunky spelling's own time

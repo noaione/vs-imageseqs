@@ -28,7 +28,7 @@ This documentation update implements no decoder changes.
 | 1. Consistent routing, saved plan and sample/subimage invariants | **Content-routing slice landed, and the route is saved and threaded.** `2b02f64` routes stills by content, `c206944` does the same for animation, and the saved-route slices record what the router named on `ImageInfo` and pass it to every module's probe entry, so a file is identified with one read. EXR selection, PAM word width and TIFF metadata/sample handling have also received fixes. | The saved route names the container and nothing more: the backend and the selected subimage are still decided inside each adapter, and the broader error/sample invariants need separate completion checks. |
 | 2. Combine metadata passes | **Partly landed: the front of the file answers, and a timeline is not rendered to describe it.** PNG, GIF and WebP no longer require image-rs for metadata or fallback pixels; a webp's or jpeg xl's animation adapter answers from the file header, a jpeg 2000 probe reads a window over the front that grows only while the header is incomplete, an avif or heif sequence walk seeks over media data rather than reading it, and an animated png's delays come from its own `fcTL` chunks instead of a rendered frame each. | One shared probe reader is not implemented. |
 | 3. Retain initialized readers and preserve planes | **Mostly landed.** Eligible PNG, binary RGB8 PNM/PAM, TGA and BMP have row sinks; TIFF has a native YCbCr plane path (`8cf7b06`) and hands a planar RGB page over as the planes it already is rather than interleaving it; and the netpbm, targa and bitmap sinks keep the reader their preparation opened and read one row at a time instead of buffering the file. | PNG initializes a reader again in `fill`. True farbfeld/PNM row reads, direct EXR planes and shared initialized decode state remain open, and the planes a planar page is split into could still be read in place rather than copied. |
-| 4. Timing and selected subtype repairs | **Partly complete, and the two timing repairs have landed.** BigTIFF/RGBE recognition, PAM MAXVAL interpretation, TIFF orientation/ICC and EXR flat-RGB part selection have landed; an APNG's timeline is placed on the lowest common denominator of the fractions it states rather than on rounded milliseconds; and an animation segment contributes the output sample instants before its end rather than the whole output ticks it covers. Palette and CMYK(A)/YCbCr TIFF coverage has since expanded too. | Core BMP, odd DDS edge blocks and variable-length headers still have the inspected restrictions. Other coverage candidates require individual decisions and evidence. |
+| 4. Timing and selected subtype repairs | **Partly complete, and the timing repairs plus one subtype have landed.** BigTIFF/RGBE recognition, PAM MAXVAL interpretation, TIFF orientation/ICC and EXR flat-RGB part selection have landed; an APNG's timeline is placed on the lowest common denominator of the fractions it states rather than on rounded milliseconds; an animation segment contributes the output sample instants before its end rather than the whole output ticks it covers; and a DirectDraw surface whose size is not a whole number of blocks is read with the pixels that hang over its edge clipped. Palette and CMYK(A)/YCbCr TIFF coverage has since expanded too. | Core BMP and variable-length headers still have the inspected restrictions. Other coverage candidates require individual decisions and evidence. |
 | 5. Remove image-rs | **Landed.** `d431764` removes `image`, `8682c2f` removes leftover layout helpers, and `src/still.rs` is deleted. Cargo.toml and Cargo.lock contain no `image` dependency. | This does not finish phases 1–4. Ported code's notices remain applicable; codec dependencies such as libwebp are independent of image-rs. |
 
 `identify::route` has one production caller in each direction now: `describe`
@@ -200,6 +200,44 @@ area byte for byte, and `target/bench/row-sink-parity.py` compares the plugin's
 three planes for the 3000x3000 corpus files against Pillow's own read of the
 targa and the bitmap and against the netpbm's own raster -- 0 of 3 wrong on both
 builds. A case for each in the validator is still where they belong.
+
+The DirectDraw subtype is the other kind of slice: a file that was refused
+rather than one that was slow. A 7x24 DXT1 and a 7x24 DXT5 made by ImageMagick
+both fail to identify on the previous build (`a 7x24 surface is not a whole
+number of four by four blocks`) and both decode to 7x24 now, with Pillow reading
+the same file as 7x24 (`target/bench/dds-odd-check.txt`). Pillow's own pixels
+differ from this reader's by one channel value at worst, and the control says
+that is the endpoint interpolation rather than the clip: the same comparison on
+the aligned fixtures is also one. The clip itself is pinned exactly by a unit
+test that decodes one fixture's blocks twice -- once as the 40x24 surface it
+states and once as a 37x23 surface ending inside the same blocks -- and requires
+every pixel the narrow surface holds to be the wide one's.
+
+A note for anyone working in these loops: the sixteen-pixel store loop has to
+stay unrollable. Written with a bound the compiler cannot see -- the clipped
+rows and columns -- it cost 25% on an aligned DXT5 surface, and only a
+whole-block fast path in the original shape brought it back.
+
+### proposal: the DXT colour block in SIMD
+The decode is compute-bound, not memory-bound: a 3000x3000 DXT1 page is 4.5 MiB
+in and 27 MiB out, about 32 MiB of traffic, and it decodes in roughly 42 ms, an
+order of magnitude above what that traffic costs. The per-block interpolation is
+the cost. [`colour_block`](../../src/formats/dds.rs) is the piece to take first,
+because DXT3 and DXT5 call it for their colour halves.
+Its arithmetic maps onto sixteen-bit SIMD lanes exactly. Four colour mode is
+`(2a + b + 1) / 3` and `(a + 2b + 1) / 3`, whose numerator is at most 766, so
+`(n * 0xAAAB) >> 17` is the same division -- a `_mm_mulhi_epu16` and a shift --
+and three colour mode is `(a + b + 1) >> 1`. The identity holds over that whole
+range and the test should check it exhaustively rather than trust it.
+The gather is where SSE2 alone is weak: sixteen 2-bit indices select from four
+colours, and the cheap way to do that is `pshufb`, which is SSSE3. SSE2 can
+blend the four candidates with masks instead, and that is close to the scalar
+loop's own cost, so gating the fast path on `target_feature = "avx2"` -- which
+implies SSSE3 and is already one of the three libraries this build produces --
+is the shape that can actually win, with the scalar path kept for every other
+target. The acceptance is byte equality against the scalar kernel over the
+fixtures and a run of synthetic blocks, and the measurement needs a quiet
+machine: repeated runs of one unchanged binary swung threefold while this was written.
 
 Artifacts: `target/bench/route-time.py`, `target/bench/accepted.py`,
 `target/bench/route-pair-fixtures.txt`, `target/bench/route-pair-common.txt`,
@@ -665,7 +703,7 @@ unimplemented.
    rows individually. Preserve a buffered fallback for orientation and layouts
    that cannot fill every demanded output.
 4. **Repair timing and add selected subtypes.** Exact APNG fractions, the total
-   count contract discrepancy, BigTIFF/core BMP/odd DDS/RGBE/long headers, then
+   count contract discrepancy, BigTIFF/core BMP/RGBE/long headers, then
    separately chosen coverage from the table. These user-visible fixes need
    changelog entries when implemented.
 5. **Finish image-rs removal.** Replace remaining generic PNG/GIF/WebP cases,

@@ -246,16 +246,11 @@ pub fn header(data: &[u8]) -> Result<Header> {
         (variant, DATA_OFFSET)
     };
 
-    // A block is four pixels square, so a surface that is not a multiple of four
-    // cannot be read at all. The upstream reader refuses this at construction
-    // rather than while decoding, and so does this one, which is what keeps the
-    // probe and the decode from disagreeing.
-    if !width.is_multiple_of(4) || !height.is_multiple_of(4) {
-        return Err(ImgSeqError::new(format!(
-            "a {width}x{height} surface is not a whole number of four by four blocks"
-        )));
-    }
-
+    // A surface that is not a whole number of blocks is stored as if it were:
+    // the last block of a row and of a column is there in full, and the pixels
+    // that hang over the edge are not part of the picture. [`blocks`] decodes
+    // the ceiling of that division and writes only the pixels inside the
+    // surface, so the size this reports is the size a decode produces.
     Ok(Header {
         width,
         height,
@@ -394,8 +389,10 @@ fn blocks(header: &Header, data: &[u8]) -> Result<Vec<u8>> {
         Variant::Dxt3 | Variant::Dxt5 => 4,
     };
     let per_block = header.variant.encoded_bytes_per_block();
-    let across = width / 4;
-    let down = height / 4;
+    // The last block of a row or of a column is a whole block in the file even
+    // when the surface it describes ends inside it.
+    let across = width.div_ceil(4);
+    let down = height.div_ceil(4);
     let needed = across
         .checked_mul(down)
         .and_then(|count| count.checked_mul(per_block))
@@ -420,11 +417,7 @@ fn blocks(header: &Header, data: &[u8]) -> Result<Vec<u8>> {
                 for block_x in 0..across {
                     let at = (block_y * across + block_x) * per_block;
                     let pixels = colour_block(&body[at..at + per_block], true);
-                    for (index, pixel) in pixels.iter().enumerate() {
-                        let (row, column) = (index / 4, index % 4);
-                        let target = ((block_y * 4 + row) * width + block_x * 4 + column) * 3;
-                        out[target..target + 3].copy_from_slice(pixel);
-                    }
+                    write_block(&mut out, &pixels, block_x, block_y, width, height);
                 }
             }
         }
@@ -433,11 +426,7 @@ fn blocks(header: &Header, data: &[u8]) -> Result<Vec<u8>> {
                 for block_x in 0..across {
                     let at = (block_y * across + block_x) * per_block;
                     let pixels = dxt3_block(&body[at..at + per_block]);
-                    for (index, pixel) in pixels.iter().enumerate() {
-                        let (row, column) = (index / 4, index % 4);
-                        let target = ((block_y * 4 + row) * width + block_x * 4 + column) * 4;
-                        out[target..target + 4].copy_from_slice(pixel);
-                    }
+                    write_block(&mut out, &pixels, block_x, block_y, width, height);
                 }
             }
         }
@@ -446,16 +435,46 @@ fn blocks(header: &Header, data: &[u8]) -> Result<Vec<u8>> {
                 for block_x in 0..across {
                     let at = (block_y * across + block_x) * per_block;
                     let pixels = dxt5_block(&body[at..at + per_block]);
-                    for (index, pixel) in pixels.iter().enumerate() {
-                        let (row, column) = (index / 4, index % 4);
-                        let target = ((block_y * 4 + row) * width + block_x * 4 + column) * 4;
-                        out[target..target + 4].copy_from_slice(pixel);
-                    }
+                    write_block(&mut out, &pixels, block_x, block_y, width, height);
                 }
             }
         }
     }
     Ok(out)
+}
+
+/// Writes one decoded block into the surface.
+///
+/// A block that is wholly inside the surface -- which is every block of one
+/// that is a whole number of blocks -- is written sixteen pixels at a time, in
+/// the shape the compiler unrolls into stores. Only a block at the right or
+/// bottom edge of a surface that ends inside it takes the other path, where the
+/// pixels that hang over that edge are not part of the picture.
+fn write_block<const N: usize>(
+    out: &mut [u8],
+    pixels: &[[u8; N]; 16],
+    block_x: usize,
+    block_y: usize,
+    width: usize,
+    height: usize,
+) {
+    let (x0, y0) = (block_x * 4, block_y * 4);
+    if x0 + 4 <= width && y0 + 4 <= height {
+        for (index, pixel) in pixels.iter().enumerate() {
+            let (row, column) = (index / 4, index % 4);
+            let target = ((y0 + row) * width + x0 + column) * N;
+            out[target..target + N].copy_from_slice(pixel);
+        }
+        return;
+    }
+    let columns = (width - x0).min(4);
+    let rows = (height - y0).min(4);
+    for row in 0..rows {
+        for column in 0..columns {
+            let target = ((y0 + row) * width + x0 + column) * N;
+            out[target..target + N].copy_from_slice(&pixels[row * 4 + column]);
+        }
+    }
 }
 
 /// What a surface states, when this module reads the file.
@@ -699,16 +718,54 @@ mod tests {
         assert_eq!(buffer.len(), 40 * 24 * 4);
     }
 
-    /// A surface that is not a whole number of blocks, and one whose code names
-    /// a variant this reader does not take, are both refused by name.
+    /// A surface that is not a whole number of blocks is read, and the pixels
+    /// that hang over its right or bottom edge are not part of the picture. The
+    /// same blocks decoded as a wider, taller surface are the oracle: every
+    /// pixel the narrow surface does hold has to be the pixel the wide one
+    /// holds there. A reorder that wrote the hanging pixels into the next row
+    /// instead would move them, which is what this catches.
     #[test]
-    fn an_unported_variant_or_size_is_refused_by_name() {
-        let mut odd = std::fs::read(fixture("dds-dxt1.dds")).expect("the fixture is read");
-        // A width that is not a multiple of four.
-        odd[16..20].copy_from_slice(&37u32.to_le_bytes());
-        let error = header(&odd).expect_err("a 37 wide surface is refused");
-        assert!(error.to_string().contains("blocks"), "{error}");
+    fn a_surface_that_is_not_a_whole_number_of_blocks_is_clipped() {
+        let wide = std::fs::read(fixture("dds-dxt1.dds")).expect("the fixture is read");
+        let wide_header = header(&wide).expect("the fixture's header");
+        assert!(
+            wide_header.width.is_multiple_of(4) && wide_header.height.is_multiple_of(4),
+            "the fixture is aligned"
+        );
+        let wide_pixels = blocks(&wide_header, &wide).expect("the fixture decodes");
 
+        // The same blocks, handed out as a surface that ends inside them.
+        let width = wide_header.width - 3;
+        let height = wide_header.height - 1;
+        let mut narrow = wide.clone();
+        narrow[12..16].copy_from_slice(&height.to_le_bytes());
+        narrow[16..20].copy_from_slice(&width.to_le_bytes());
+        let narrow_header = header(&narrow).expect("a surface ending inside a block is read");
+        assert_eq!((narrow_header.width, narrow_header.height), (width, height));
+        let narrow_pixels = blocks(&narrow_header, &narrow).expect("it decodes");
+
+        let (wide_row, narrow_row) = (wide_header.width as usize * 3, width as usize * 3);
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let wide_at = y * wide_row + x * 3;
+                let narrow_at = y * narrow_row + x * 3;
+                assert_eq!(
+                    narrow_pixels[narrow_at..narrow_at + 3],
+                    wide_pixels[wide_at..wide_at + 3],
+                    "pixel {x},{y}"
+                );
+            }
+        }
+        assert_eq!(
+            narrow_pixels.len(),
+            width as usize * height as usize * 3,
+            "the picture is the surface's size"
+        );
+    }
+
+    /// A variant this reader does not take is refused by name.
+    #[test]
+    fn an_unported_variant_is_refused_by_name() {
         // A four character code that is not one of the three.
         let mut code = std::fs::read(fixture("dds-dxt1.dds")).expect("the fixture is read");
         code[84..88].copy_from_slice(b"DX20");
