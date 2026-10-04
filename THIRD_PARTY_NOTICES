@@ -85,6 +85,36 @@ native runtime dependency. The macOS CMake toolchain also disables the optional
 libheif backends this plugin does not use, including x265. Always verify the
 final native link output after changing either dependency configuration.
 
+Ported source code
+------------------
+
+Some of the still readers this plugin decodes with its own code are ports of
+the corresponding reader in the `image` crate, version 0.25.10, which is
+licensed MIT OR Apache-2.0. `image` puts no per-file header on its sources, so
+the license travels with the files named here rather than inside them. The
+texts are kept verbatim as LICENSES/image-LICENSE-MIT.txt and
+LICENSES/image-LICENSE-APACHE.txt.
+
+The ported files, and the upstream module each was ported from under
+image-0.25.10's src/codecs/:
+
+  src/formats/bmp.rs
+      bmp/decoder.rs, bmp/mod.rs -- the palette, run-length and bitfield
+      paths, and the DIB header parsing that ico.rs also uses
+  src/formats/ico.rs
+      ico/decoder.rs -- the directory, the entry scoring and the AND mask
+  src/formats/tga.rs
+      tga/ -- the header and all eleven image types
+  src/formats/dds.rs
+      dds/ -- the DXT1, DXT3 and DXT5 block decoding and the DX10 mapping
+  src/formats/pnm.rs
+      pnm/decoder.rs and pnm/header.rs -- the parser and the header, and not
+      pnm/autobreak.rs, which writes a pnm rather than reading one
+
+Each of those modules says at its head what it was ported from. The other
+still readers under src/formats/ are not ports: hdr.rs is written for this
+plugin, and the rest call a crate or a library directly.
+
 Static-linking release checklist
 ---------------------------------
 

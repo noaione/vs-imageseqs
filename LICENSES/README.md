@@ -29,6 +29,18 @@ These files are copied verbatim from the dependency sources used by the build:
   toolchain rather than one of the pinned inputs above, and the musllinux image
   provides no license file for its copy of it.
 
+## Ported source code
+
+Some of the still readers under `src/formats/` are ports of the matching reader
+in the `image` crate 0.25.10 rather than calls into a library, and `image`
+carries its license once for the whole crate rather than in a header on each
+file. These are those texts, verbatim:
+
+- `image-LICENSE-APACHE.txt` — the Apache-2.0 text, the other of the two.
+- `image-LICENSE-MIT.txt` — the MIT text, one of the two the crate is licensed
+  under. `THIRD_PARTY_NOTICES` names the ported files and the upstream modules
+  they came from.
+
 The current manifest disables libheif default features, so x265 is not part
 of the refreshed install or current native dependency set. If HEVC encoding
 is enabled later, add x265's exact `COPYING` file and update the notices
