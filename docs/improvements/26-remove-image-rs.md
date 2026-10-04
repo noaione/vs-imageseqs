@@ -1002,6 +1002,26 @@ the two fixes that worked: `hdr`'s three buffers and `tga`'s redundant copy.
 So `blocks` at 3.94 ms is not proof that the block arithmetic is the cost -- it is
 the cost of *building a buffer*, which the other decoder does not do.
 
+**That the extra copy is real was checked rather than assumed.** `src/still.rs` is
+the `image` path, and its reader is
+
+```rust
+pub fn read(self, buffer: &mut [u8]) -> Result<(), OpenError>
+```
+
+-- **the caller hands it the buffer and it fills that.** So the two paths differ
+by exactly one traversal of the picture: `image` writes the frame, and this
+tree's `dds.rs` writes a 4.3 MB `Vec` that the plugin then copies into the frame,
+which is 4.3 MB of extra write and 4.3 MB of extra read, about 0.86 ms a file at
+10 GB/s against a measured gap of 1.15.
+
+It also explains the formats that came out *ahead* despite doing the same thing.
+`bmp`, `hdr`, `tga` and `qoi` all build an intermediate too, and all four are
+faster than the reader they replaced -- their decode wins more than the copy
+costs. `dds`'s decode is comparable to `image`'s, so for this one format the copy
+is the whole difference and it shows as a loss. One architecture, five formats,
+and the sign of the result depends on how much the decode itself gained.
+
 The mechanism to remove it is already in this tree and documented for exactly
 this: [`decoder::RowStream`], "a decode that hands each row to the frame it
 belongs in and therefore has no buffer of its own". `png.rs` uses it. A dds
