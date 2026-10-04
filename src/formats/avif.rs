@@ -63,36 +63,14 @@ const ALPHA_AUX_TYPES: [&[u8]; 2] = [
 /// Only a file the probe described as yuv is decoded here; a file whose samples
 /// the container does not name keeps the r,g,b the `image` decoder produces.
 pub fn handles(info: &ImageInfo) -> bool {
+    // Every `.avif` is this module's, because this module is the one that knows
+    // which library reads each container -- and it knows that from the same walk
+    // [`decode`] needs for the pixels, so the decision costs no second pass.
+    // [`refuses`] was the gate that asked here instead, and it walked the
+    // container once per frame request to answer a question the decode was about
+    // to answer again: a 6.8 MB fixture measured ~46 us a walk, and a frame
+    // request paid it twice.
     has_avif_extension(&info.path)
-        && info.format.color_family() == ColorFamily::YUV
-        && !refuses(&info.path)
-}
-
-/// Whether this reader's own walk of `path` refuses the container.
-///
-/// [`image_info`] hands such a file to libheif, so this is what keeps the probe
-/// and the decode from disagreeing: a container this answers `true` for is the
-/// one libheif describes, and `heif::handles` is what claims it.
-///
-/// A file this reader cannot open at all answers `false`, because it is not a
-/// container the walk *refused*: the walk that described it already decided, and
-/// an unreadable file's error belongs to whoever tried to open it rather than to
-/// a reassignment to another library.
-#[must_use]
-pub fn refuses(path: &Path) -> bool {
-    let Ok(mut file) = File::open(path) else {
-        return false;
-    };
-    let Ok(file_len) = file_length(&file) else {
-        return false;
-    };
-    let Some(boxes) = leading_boxes(&mut file) else {
-        return true;
-    };
-    match Meta::read(&boxes, file_len) {
-        Some(meta) => !meta.native_eligible(),
-        None => true,
-    }
 }
 
 /// What the container of an avif states about its image, when this module can
@@ -265,20 +243,28 @@ pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
     let metadata_started = Instant::now();
     let meta = Meta::read(&boxes, file_len)
         .ok_or_else(|| image_error("read the boxes of", &info.path, "malformed item boxes"))?;
-    // A container the probe declines never reaches here, so this is the guard
-    // for a file that was described by something else: the layouts it names are
-    // the ones [`Meta::native_eligible`] refuses, and the probe hands those to
-    // the `image` decoder rather than to this one.
+    // Three containers are not this reader's decode, and the walk above is what
+    // tells them apart. [`handles`] claims every `.avif`, so this is where a
+    // file is handed to the library that really reads it -- once, from the walk
+    // that was going to happen anyway.
+    //
+    // A container the walk refuses is libheif's, which joins a grid of tiles and
+    // follows a construction method this walk does not. The `image` decoder used
+    // to be asked and could not: it has no monochrome avif, so a grid of
+    // monochrome cells ended as `Invalid argument`.
     if !meta.native_eligible() {
-        return Err(image_error(
-            "read the boxes of",
-            &info.path,
-            if meta.grid {
-                "its primary item is a grid of tiles, which this reader does not join"
-            } else {
-                "its primary item is not one payload this reader can locate"
-            },
-        ));
+        return super::heif::decode(info, demand);
+    }
+    // A file that is not an avif at all, whatever its extension says. The probe
+    // left it to the `image` decoder, which is where it stays.
+    if !has_avif_brand(&boxes) {
+        return crate::decoder::decode_through_image(info);
+    }
+    // An avif whose samples are already r,g,b has no planar yuv format to be
+    // handed out as, and the probe described it as the r,g,b the `image`
+    // decoder builds; that decoder still reads it.
+    if info.format.color_family() != ColorFamily::YUV {
+        return crate::decoder::decode_through_image(info);
     }
     let header = AvifHeader::read(&meta.primary_properties().ok_or_else(|| {
         image_error(
@@ -2017,30 +2003,43 @@ mod tests {
     }
 
     #[test]
-    fn handles_needs_an_avif_extension_and_a_yuv_probe() {
-        assert!(handles(&info(
-            "a.avif",
-            PixelFormat::Yuv420P8,
-            ColorType::Rgb8
-        )));
-        assert!(handles(&info(
-            "a.avif",
-            PixelFormat::Yuv444P12,
-            ColorType::Rgb16
-        )));
-        // A file the probe leaves to the decoder keeps it, and a monochrome
-        // item is one of those.
-        assert!(!handles(&info(
-            "a.avif",
-            PixelFormat::Rgb8,
-            ColorType::Rgb8
-        )));
-        assert!(!handles(&info("a.avif", PixelFormat::Gray8, ColorType::L8)));
+    fn handles_takes_every_avif_and_leaves_other_containers_alone() {
+        // Every `.avif` is this module's, whatever the probe made of its
+        // samples: this module is the one that knows which library reads each
+        // container, and it decides that from the walk [`decode`] needs anyway.
+        for (format, color_type) in [
+            (PixelFormat::Yuv420P8, ColorType::Rgb8),
+            (PixelFormat::Yuv444P12, ColorType::Rgb16),
+            (PixelFormat::Rgb8, ColorType::Rgb8),
+            (PixelFormat::Gray8, ColorType::L8),
+        ] {
+            assert!(handles(&info("a.avif", format, color_type)), "{format:?}");
+        }
+        // Another container is not.
         assert!(!handles(&info(
             "a.heic",
             PixelFormat::Yuv420P8,
             ColorType::Rgb8
         )));
+        assert!(!handles(&info("a.png", PixelFormat::Rgb8, ColorType::Rgb8)));
+    }
+
+    /// Decodes the same file the way this module routes it and the way the
+    /// `image` adapter reads it, and answers whether the bytes agree.
+    ///
+    /// This is what the assertions below check instead of the old `!handles`:
+    /// that predicate stopped being true when the routing moved into [`decode`],
+    /// and the hand-off being faithful is the property that actually mattered.
+    fn the_routing_agrees_with_the_image_decoder(info: &ImageInfo) -> bool {
+        let routed = decode(info, Demand::ALL).expect("the routed decode");
+        let direct = crate::decoder::decode_through_image(info).expect("the image decoder's");
+        match (routed.pixels, direct.pixels) {
+            (
+                Pixels::Interleaved { buffer: one, .. },
+                Pixels::Interleaved { buffer: other, .. },
+            ) => one == other,
+            _ => false,
+        }
     }
 
     #[test]
@@ -2602,7 +2601,11 @@ mod tests {
             let path = Path::new("tests/fixtures").join(name);
             let info = image_info(&path, true).expect("the container describes it");
             assert_eq!(info.format, PixelFormat::Rgb8, "{name}");
-            assert!(!handles(&info), "{name}");
+            // This module claims the file either way, and hands it to the
+            // `image` decoder, which is the one that can read samples with no
+            // planar format; the hand-off has to be the same bytes.
+            assert!(handles(&info), "{name}");
+            assert!(the_routing_agrees_with_the_image_decoder(&info), "{name}");
             // The colour of the container is still stated for a file that keeps
             // the r,g,b path.
             let (primaries, transfer) = if name.starts_with("cicp") {
@@ -2630,7 +2633,11 @@ mod tests {
         assert_eq!(info.color_type, ColorType::Rgba8);
         assert_eq!(info.original_color_type, SourceColorType::La8);
         assert_eq!(alpha_channel(info.color_type), Some(3));
-        assert!(!handles(&info));
+        // This module claims it and hands it to the `image` decoder, because the
+        // item holds one sample per pixel and that decoder is the one that reads
+        // it; the hand-off has to be the same bytes.
+        assert!(handles(&info));
+        assert!(the_routing_agrees_with_the_image_decoder(&info));
         assert_eq!(
             output_format(path, ColorType::Rgba8),
             Some(PixelFormat::Gray8)

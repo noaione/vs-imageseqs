@@ -493,11 +493,26 @@ fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
     })
 }
 
+/// Decodes `info` with the `image` crate.
+///
+/// This is the adapter every format module hands a file to when it is not one
+/// that module reads itself. It is a function rather than the tail of [`decode`]
+/// because a module can be the one that *knows* a file is not its own -- an
+/// avif whose container the walk refuses is libheif's, and one whose samples
+/// have no planar yuv format is this path's -- and the alternative is for every
+/// such module to re-walk the container to find that out a second time.
+/// Decodes `info`.
+///
+/// The format modules go first, then the png row walk, then the `image` crate;
+/// see [`decode_through_image`] for the last of those.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when no path produces the frame.
 pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
     if let Some(decoded) = format_decoder(info, demand) {
         return decoded;
     }
-
     // A png this module can walk a row at a time is answered with a decode
     // rather than with pixels: the rows go straight into the frame, which is
     // one pass over the picture instead of the two a whole buffer costs. The
@@ -513,7 +528,23 @@ pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
             timings: DecodeTimings::default(),
         });
     }
+    decode_through_image(info)
+}
 
+/// Decodes `info` with the `image` crate.
+///
+/// This is the adapter every format module hands a file to when it is not one
+/// that module reads itself. It is a function rather than the tail of [`decode`]
+/// because a module can be the one that *knows* a file is not its own -- an
+/// avif whose container the walk refuses is libheif's, and one whose samples
+/// have no planar yuv format is this path's -- and the alternative is for every
+/// such module to re-walk the container to find that out a second time.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the file cannot be read, or when it changed
+/// between the probe and this read.
+pub(crate) fn decode_through_image(info: &ImageInfo) -> Result<DecodedImage> {
     let open_started = Instant::now();
     let decoder = open_decoder(&info.path)?;
     let open = open_started.elapsed();

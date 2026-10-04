@@ -57,15 +57,14 @@ const HEIF_EXTENSIONS: [&str; 4] = ["heic", "heics", "heif", "hif"];
 /// through the libheif hook, which is where those files have always been read;
 /// every other file this module describes is read here, from libheif's planes.
 pub fn handles(info: &ImageInfo) -> bool {
-    if has_heif_extension(&info.path) {
-        return info.format.color_family() != ColorFamily::RGB;
-    }
-    // An avif whose container this tree's own walker refuses is libheif's,
-    // which is what described it in [`super::avif::image_info`]. The walker's
-    // own descriptions stay with it -- and an r,g,b one of those is the `image`
-    // decoder's, because the samples have no planar yuv format to be handed out
-    // as -- so this asks the same question the probe did.
-    super::avif::owns_extension(&info.path) && super::avif::refuses(&info.path)
+    // A heif is this module's unless its samples are already r,g,b, which have
+    // no planar format to be handed out as and are the `image` decoder's.
+    //
+    // An avif is not asked about here. This module still *reads* one whose
+    // container the avif walk refuses, but `avif::decode` is what hands it over,
+    // having already walked the container to find that out; asking again from
+    // here was a second walk per frame request for an answer already known.
+    has_heif_extension(&info.path) && info.format.color_family() != ColorFamily::RGB
 }
 
 /// What the container of a heif states about its primary image, when this
