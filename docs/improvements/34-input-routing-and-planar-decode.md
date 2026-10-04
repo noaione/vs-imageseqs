@@ -27,7 +27,7 @@ This documentation update implements no decoder changes.
 | --- | --- | --- |
 | 1. Consistent routing, saved plan and sample/subimage invariants | **Content-routing slice landed, and the route is saved and threaded.** `2b02f64` routes stills by content, `c206944` does the same for animation, and the saved-route slices record what the router named on `ImageInfo` and pass it to every module's probe entry, so a file is identified with one read. EXR selection, PAM word width and TIFF metadata/sample handling have also received fixes. | `ImageInfo` saves an icon's selected directory entry as `subimage`, and the decode reads that entry instead of scoring the directory again; the EXR part and the heif/avif backend are *stated* as the same predicate by the probe and the decode rather than saved as an index, because the `exr` crate selects a layer by its channels and has no by-index form, and `exr.rs`'s `the_part_the_probe_chose_is_the_part_that_is_decoded` pins that agreement, while `ico.rs`'s `the_probe_records_the_entry_its_decode_reads` pins what a saved index buys, and the broader error/sample invariants now have their own check: `target/bench/probe-agreement.py` asks every fixture and the step-5 corpus whether anything is described as readable and then refused, and names the two files whose *raster* is what is wrong rather than a header, so a new promise broken by a well-formed file fails it. |
 | 2. Combine metadata passes | **Partly landed: the front of the file answers, and a timeline is not rendered to describe it.** PNG, GIF and WebP no longer require image-rs for metadata or fallback pixels; a webp's or jpeg xl's animation adapter answers from the file header, a jpeg 2000 probe reads a window over the front that grows only while the header is incomplete, an avif or heif sequence walk seeks over media data rather than reading it, and an animated png's delays come from its own `fcTL` chunks instead of a rendered frame each. | **The measuring step is finished, and what it measured is that every one of these costs exactly one open.** `animation::timeline_reads` sits beside `identify::head_reads`, is per thread like it, and is bumped by all four readers that open a file for themselves: `apng::timing`, `gif::timings`, `webp::header_states_animation` and the avif/heif sequence walk. `decoder.rs`'s `an_animation_probe_reads_the_front_of_the_file_once_for_its_timeline` reads the number for every animated fixture: one each for `png`, `gif`, `webp`, `avif` and `heic`, and **none** for `jxl`, whose adapter already answers from the codestream header its own probe read. Those counts were run, not predicted -- a guessed expected count is how a suite goes red for the wrong reason. What is left is the reader itself: giving those four the front the routing read already fetched takes every one of them to the `jxl` line, and that test is what will say so. |
-| 3. Retain initialized readers and preserve planes | **Mostly landed.** Eligible PNG, binary RGB8 PNM/PAM, TGA and BMP have row sinks; TIFF has a native YCbCr plane path (`8cf7b06`) and hands a planar RGB page over as the planes it already is rather than interleaving it; and the netpbm, targa and bitmap sinks keep the reader their preparation opened and read one row at a time instead of buffering the file. **A separate-planar page is now handed over with the decoder's own strides instead of being split**, which is the leftover the previous entry called out: `decoder::Pixels` grew a `Strided` variant carrying the plane count, the row stride and the plane stride, `pixel::write_decoded_planes` takes a `PlaneSource` that is either one buffer a plane or that one buffer read by stride, and `tiff.rs`'s three channel planar page hands its decoder buffer straight over. `split_planes` is gone and `interleave` still serves the separated inks, which are not three channels. **Farbfeld is a row sink now too, and its buffered `decode` is deleted rather than kept**: `Rows` opens the file, checks the length against the header, and each row goes straight into the frame through `RowSink::place_rgba16`, which swaps a sample as it takes it apart. | PNG initializes a reader again in `fill`. Direct EXR planes and shared initialized decode state remain open. **The two measurements disagree, and the disagreement is the useful part.** The planar slice removed a copy and moved nothing: twelve alternating blocks put the pre-change build at a 47.5 ms median (40.8 to 83.1, peak 86.8 MiB) and the new one at 49.8 ms (44.5 to 66.1, peak 86.8 MiB), and the chunky control, which never split anything, peaks at the same number. Farbfeld removed two whole buffers and moved everything: a 3000x3000 page, 72 MB of raster, ten alternating blocks, 96.5 ms (78.8 to 158.4, peak 185.2 MiB) against 37.3 ms (30.7 to 62.3, peak 73.8 MiB), 2.6x and 111 MiB, with the two peak distributions not overlapping at all. The difference is not the quality of the two slices but which buffer the high-water mark lands on, and that is the prediction for what is left: **a slice that removes an input buffer is the one worth measuring**, because `fs::read` of a whole file is a buffer like any other. EXR, QOI, HDR and the core BMP still hold one. |
+| 3. Retain initialized readers and preserve planes | **Mostly landed.** Eligible PNG, binary RGB8 PNM/PAM, TGA and BMP have row sinks; TIFF has a native YCbCr plane path (`8cf7b06`) and hands a planar RGB page over as the planes it already is rather than interleaving it; and the netpbm, targa and bitmap sinks keep the reader their preparation opened and read one row at a time instead of buffering the file. **A separate-planar page is now handed over with the decoder's own strides instead of being split**, which is the leftover the previous entry called out: `decoder::Pixels` grew a `Strided` variant carrying the plane count, the row stride and the plane stride, `pixel::write_decoded_planes` takes a `PlaneSource` that is either one buffer a plane or that one buffer read by stride, and `tiff.rs`'s three channel planar page hands its decoder buffer straight over. `split_planes` is gone and `interleave` still serves the separated inks, which are not three channels. **Farbfeld is a row sink now too, and its buffered `decode` is deleted rather than kept**: `Rows` opens the file, checks the length against the header, and each row goes straight into the frame through `RowSink::place_rgba16`, which swaps a sample as it takes it apart. **EXR writes its planes too**, into one plane-major buffer with its strides attached rather than one interleaved `f32` picture the writer had to separate; an `A` channel is the last plane of that buffer, which is what `Strided`'s `alpha` flag and `PlaneSource::Strided`'s `first` are for. | PNG initializes a reader again in `fill`, and shared initialized decode state remains open. **The three measurements are what make this row useful, and they do not agree with each other.** The planar slice removed a copy and moved nothing: twelve alternating blocks put the pre-change build at a 47.5 ms median (40.8 to 83.1, peak 86.8 MiB) and the new one at 49.8 ms (44.5 to 66.1, peak 86.8 MiB), and the chunky control, which never split anything, peaks at the same number. Farbfeld removed two whole buffers and moved everything: a 3000x3000 page, 72 MB of raster, ten alternating blocks, 96.5 ms (78.8 to 158.4, peak 185.2 MiB) against 37.3 ms (30.7 to 62.3, peak 73.8 MiB), 2.6x and 111 MiB, with the two peak distributions not overlapping at all. EXR removed a pass rather than a buffer, and landed between them: two 2048x2048 rgb float pages, ten alternating blocks, 83.8 ms (74.1 to 106.9, peak 215.0 MiB) against 69.6 ms (64.3 to 80.6, peak 214.7 MiB), 1.20x and no peak change. The difference between the three is not the quality of the slices but which buffer the high-water mark lands on, and that is the prediction for what is left: **a slice that removes an input buffer is the one worth measuring**, because `fs::read` of a whole file is a buffer like any other. QOI, HDR and the core BMP still hold one. |
 | 4. Timing and selected subtype repairs | **Partly complete, and the timing repairs plus two subtypes have landed.** BigTIFF/RGBE recognition, PAM MAXVAL interpretation, TIFF orientation/ICC and EXR flat-RGB part selection have landed; an APNG's timeline is placed on the lowest common denominator of the fractions it states rather than on rounded milliseconds; an animation segment contributes the output sample instants before its end rather than the whole output ticks it covers; a DirectDraw surface whose size is not a whole number of blocks is read with the pixels that hang over its edge clipped; and a netpbm whose header outruns the window it was read through is read, growing that window while the parse needs more. Palette and CMYK(A)/YCbCr TIFF coverage has since expanded too. | Core BMP still has its inspected restriction. Other coverage candidates require individual decisions and evidence. |
 | 5. Remove image-rs | **Landed.** `d431764` removes `image`, `8682c2f` removes leftover layout helpers, and `src/still.rs` is deleted. Cargo.toml and Cargo.lock contain no `image` dependency. | This does not finish phases 1–4. Ported code's notices remain applicable; codec dependencies such as libwebp are independent of image-rs. |
 
@@ -269,8 +269,43 @@ whose allocation overlapped something larger already live, so nothing moved; thi
 one removed two buffers that nothing else was competing with. That is the
 prediction worth carrying to the remaining items: a slice that removes an input
 buffer is worth measuring first, because `fs::read` of a whole file is a buffer like
-any other and the formats still holding one -- EXR, QOI, HDR, the core BMP -- are
-the ones where the number should move.
+any other and the formats still holding one -- QOI, HDR, the core BMP -- are the
+ones where the number should move.
+
+### the exr planes, and what that prediction actually said
+
+EXR was the prediction's own test case, and the prediction holds. The named
+channels now go into a plane-major buffer handed over as `Pixels::Strided` with
+its strides attached, rather than into one interleaved `f32` picture the frame
+writer had to separate afterwards. An `A` channel is the last plane of that same
+buffer, which is why `Pixels::Strided` grew an `alpha` flag and
+`pixel::PlaneSource::Strided` a `first`: the colour clip reads the first `planes`
+of them and the alpha clip the one after, out of one allocation, with no copy
+between them.
+
+Two 2048x2048 rgb float pages, one uncompressed and one `ZIP`, written by
+ImageMagick, ten alternating blocks of two fresh processes a side
+(`target/bench/decode-exr-planes.txt`):
+
+| build | median | range | peak median |
+| --- | --- | --- | --- |
+| one interleaved `f32` buffer, separated by the writer | 83.8 ms | 74.1 to 106.9 | 215.0 MiB |
+| one buffer, a plane a channel, read by stride | 69.6 ms | 64.3 to 80.6 | 214.7 MiB |
+
+**1.20x on the median and no peak change at all**, which is what the rule above
+says: EXR's buffer was one buffer either way, so removing the pass is a time
+result and not a memory one. Seventeen of the twenty streaming-side samples are
+below the interleaved side's median; the tails overlap, so this is a real but
+modest number rather than the farbfeld's.
+
+The bytes are unchanged in both directions: `ab-frame-hash.py` over all nine `exr`
+fixtures gives the same digest on the build before the slice and the build after
+it, read through `ReadAlpha` so the alpha clip's own plane is hashed too --
+`a7591dd3...4689d` for `exr-float-rgba.exr` and `a4fc6358...f43e` for the seven that
+hold the same colour. `exr.rs`'s `one_buffer_holds_a_plane_a_channel` asserts the shape
+itself, because the interleaved layout is the same samples with one more pass over
+them and a decode that went back to it would pass every other test in the
+module.
 Coverage note: neither the validator nor the routing check reads a netpbm, a
 targa or a bitmap, so the pixel side of these slices rests on two things. A unit
 test per format checks that the prepared rows are the raster or the padded pixel
@@ -358,7 +393,7 @@ them; the DDS row approach already has negative performance evidence.
 | Non-alpha, non-RLE BMP | Row expansion into VS planes. | The preparation/fill pair still reparses and reopens; make it one initialized operation with actual row reads. |
 | farbfeld | **Rows, not a buffer.** Every farbfeld streams: `Rows` opens the file, checks the length against the header and reads one row at a time into the frame through `RowSink::place_rgba16`, which swaps each sample as it takes it apart. The buffered `decode` is deleted rather than kept as a fallback, because the format has one spelling and nothing to fall back from. | Nothing left on this path. |
 | Separate-planar RGB TIFF | **Handed over as `Pixels::Strided`**: the decoder's own buffer with its row and plane stride, and the frame writer takes each plane out of it where it already is. | Nothing left on this path. The newer native YCbCr path is a landed, distinct case. |
-| Flat RGB(A) EXR | Named channels populate one interleaved f32 buffer. | Write selected channels into final planes without that intermediate layout. Grayscale Y/Y+A support is a separate coverage proposal. |
+| Flat RGB(A) EXR | **One buffer, a plane a channel.** The named channels are written into a plane-major buffer with the row and plane stride attached and handed over as `Pixels::Strided`, so the frame writer takes each plane out of it where it already is and the picture is never interleaved on the way and separated again on the way out. An `A` channel is the last plane of that buffer, which is where the alpha clip reads it from. | Grayscale Y/Y+A support is a separate coverage proposal. |
 | Native AVIF/HEIF/WebP/JPEG 2000 routes | Several already return owned native planes. | Preserve native layout; removal of packing buffers or direct VS allocation is a later measured optimization, not required for content-routing acceptance. |
 | JPEG/JXL/QOI and other slice-oriented codecs | Buffered codec output remains valid. | Avoid unnecessary input opens/parsing; introduce a new output strategy only when it earns its complexity. |
 
@@ -381,9 +416,10 @@ uncontrolled machine load. These same-binary timings do not establish a runtime
 regression or improvement. Logs are
 `target/research-plan34-status-{release-final,validator-final,bench-before,bench-after}.log`.
 
-The three slices recorded above -- the timeline-read measure, the in-place planar
-planes and the farbfeld rows -- were closed against release build SHA-256
-`2278B82EC8E16B2F5E547ABF442DF509272E9813ED130A8D3DBD2EBE74BA159D`: 304
+The four slices recorded above -- the timeline-read measure, the in-place planar
+planes, the farbfeld rows and the exr planes -- were closed against release
+build SHA-256
+`792FA035250A7D37E342C207D12283405A2B81B83B8E369FD260BBCD24585DDC`: 305
 unit tests pass, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check`
 are clean, the validator passes with `test_planar_pages` in it, `tests/routing.py`
 reports 0 of 76 renamed copies differing, and `target/bench/probe-agreement.py`
@@ -391,8 +427,10 @@ reports nothing promised that a decode will not produce over 200 fixtures and th
 step-5 corpus. The measurement artifacts are
 `target/bench/decode-planar-tiff-inplace.txt`,
 `target/bench/decode-farbfeld-stream.txt`,
+`target/bench/decode-exr-planes.txt`,
 `target/bench/ab-inplace-tiff-{preinplace,inplace}.txt`,
 `target/bench/ab-farbfeld-{inplace,farbfeld-stream}.txt`,
+`target/bench/ab-exr-alpha-{before,after}.txt`,
 `target/bench/ab-inplace-planes.py`, `ab-frame-hash.py` and
 `make-farbfeld-corpus.py`.
 

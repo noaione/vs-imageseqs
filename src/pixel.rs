@@ -1155,9 +1155,14 @@ pub enum PlaneSource<'a> {
     /// One buffer holding every plane laid end to end, `plane_stride` bytes from
     /// one plane to the next and `row_stride` bytes from one row of a plane to the
     /// next.
+    ///
+    /// `first` is where this write starts in the buffer, so the colour clip can
+    /// read the first `planes` of them and the alpha clip the one after: one
+    /// buffer, two frames, and no copy between them.
     Strided {
         buffer: &'a [u8],
         planes: usize,
+        first: usize,
         row_stride: usize,
         plane_stride: usize,
     },
@@ -1225,6 +1230,7 @@ fn write_sample_planes<T: Sample>(
             }
             PlaneSource::Strided {
                 buffer,
+                first,
                 row_stride,
                 plane_stride,
                 ..
@@ -1234,7 +1240,10 @@ fn write_sample_planes<T: Sample>(
                         "decoder reported a {row_stride}-byte row for plane {index}, which is narrower than the {packed_row}-byte row it holds"
                     )));
                 }
-                let start = index
+                let plane = first
+                    .checked_add(index)
+                    .ok_or_else(|| ImgSeqError::new("a plane offset does not fit in memory"))?;
+                let start = plane
                     .checked_mul(plane_stride)
                     .ok_or_else(|| ImgSeqError::new("a plane offset does not fit in memory"))?;
                 (buffer, row_stride, start)

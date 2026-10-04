@@ -858,6 +858,7 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
                     transform: info.transform,
                     pixels: Pixels::Strided {
                         planes: layout.channels,
+                        alpha: false,
                         buffer,
                         row_stride: in_place.row_stride,
                         plane_stride: in_place.plane_stride,
@@ -1484,11 +1485,13 @@ mod tests {
                 (info, planes)
             }
             Pixels::Strided {
+                alpha: says_alpha,
                 planes,
                 buffer,
                 row_stride,
                 plane_stride,
             } => {
+                assert!(!says_alpha, "{name} states no alpha of its own");
                 let height = usize::try_from(decoded.height).expect("height");
                 let mut out = Vec::with_capacity(planes);
                 for plane in 0..planes {
@@ -1730,6 +1733,7 @@ mod tests {
             .unwrap_or_else(|| panic!("tiff-planar.tiff is taken over"));
         let decoded = decode(&info).expect("the page is decoded");
         let Pixels::Strided {
+            alpha,
             planes,
             buffer,
             row_stride,
@@ -1739,6 +1743,7 @@ mod tests {
             panic!("a separate-planar page keeps the decoder's buffer");
         };
         assert_eq!(planes, 3, "one plane per channel, in one buffer");
+        assert!(!alpha, "a three channel page has no alpha plane of its own");
         assert_eq!(
             buffer.len(),
             plane_stride * planes,

@@ -376,12 +376,16 @@ pub enum Pixels {
     /// buffer over with its stride attached is the same picture for one buffer;
     /// see `docs/improvements/34-input-routing-and-planar-decode.md`.
     ///
-    /// There is no alpha plane here. A decode that keeps the decoder's layout is
-    /// handing out a page whose channels are its planes, and an alpha channel of
-    /// its own is a plane the alpha clip reads rather than a fourth colour plane.
+    /// `alpha` says whether the plane after the colour ones is the alpha clip
+    /// rather than a fourth colour channel. It is the same question
+    /// [`Self::Planar`] answers with an `Option`, asked of the buffer rather than
+    /// of a value: the plane is still inside the one buffer, one stride after the
+    /// last colour plane.
     Strided {
         /// How many planes the buffer holds, one per channel.
         planes: usize,
+        /// Whether the plane after the colour ones is the alpha clip.
+        alpha: bool,
         /// The decoder's own buffer, the planes laid end to end inside it.
         buffer: Vec<u8>,
         /// Bytes from one row of a plane to the next.
@@ -407,11 +411,13 @@ impl Clone for Pixels {
             },
             Self::Strided {
                 planes,
+                alpha,
                 buffer,
                 row_stride,
                 plane_stride,
             } => Self::Strided {
                 planes: *planes,
+                alpha: *alpha,
                 buffer: buffer.clone(),
                 row_stride: *row_stride,
                 plane_stride: *plane_stride,
@@ -447,18 +453,21 @@ impl PartialEq for Pixels {
             (
                 Self::Strided {
                     planes: left_planes,
+                    alpha: left_alpha,
                     buffer: left_buffer,
                     row_stride: left_row_stride,
                     plane_stride: left_plane_stride,
                 },
                 Self::Strided {
                     planes: right_planes,
+                    alpha: right_alpha,
                     buffer: right_buffer,
                     row_stride: right_row_stride,
                     plane_stride: right_plane_stride,
                 },
             ) => {
                 left_planes == right_planes
+                    && left_alpha == right_alpha
                     && left_buffer == right_buffer
                     && left_row_stride == right_row_stride
                     && left_plane_stride == right_plane_stride

@@ -238,10 +238,15 @@ pub fn image_info(
 /// the same file. The requirement is stated here in the same terms the probe
 /// uses, so the two cannot disagree about which part holds the picture.
 ///
-/// The channels are then asked for by name rather than by position, so a file
+/// The channels are asked for by name rather than by position, so a file
 /// that stores them in another order still reads as the picture it holds, and
-/// each sample is written straight into the buffer the frame is built from
-/// rather than into a plane a second pass has to interleave.
+/// each sample is written straight into the buffer the frame is written from.
+/// That buffer is one plane per channel laid end to end rather than an
+/// interleaved picture, so the frame writer takes each plane out of it where it
+/// already is and the picture is never interleaved on the way and separated
+/// again on the way out; `pixels::PlaneSource::Strided` is the shape that says
+/// so. An alpha channel is the last plane of that buffer, which is where the
+/// alpha clip reads it from.
 ///
 /// # Errors
 ///
@@ -251,15 +256,20 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     let slots = if alpha { 4 } else { 3 };
     let stride = usize::try_from(info.width)
         .map_err(|_| ImgSeqError::new("the layer states a width a frame cannot hold"))?;
-    let bytes = usize::try_from(info.width)
+    let plane_bytes = usize::try_from(info.width)
         .ok()
         .and_then(|width| {
             usize::try_from(info.height)
                 .ok()
                 .and_then(|height| width.checked_mul(height))
         })
-        .and_then(|pixels| pixels.checked_mul(slots))
-        .and_then(|samples| samples.checked_mul(size_of::<f32>()))
+        .and_then(|pixels| pixels.checked_mul(size_of::<f32>()))
+        .ok_or_else(|| ImgSeqError::new("the layer is too large for a frame"))?;
+    // One plane per channel, laid end to end: the frame writer takes each one
+    // out of the buffer where it already is, so the picture is never interleaved
+    // on the way and separated again on the way out.
+    let bytes = plane_bytes
+        .checked_mul(slots)
         .ok_or_else(|| ImgSeqError::new("the layer is too large for a frame"))?;
 
     let open_started = std::time::Instant::now();
@@ -278,24 +288,28 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
         // default in the fourth slot, which the stride below never writes.
         .optional::<f32>("A", 1.0)
         .collect_pixels(
-            // The buffer the frame is written from, in the layout the call
-            // asked for. This closure cannot report an error, so a layer too
-            // large to lay out is refused by the size check below rather than
-            // aborting a release build here.
+            // The one buffer the frame is written from, one plane a channel laid
+            // end to end. This closure cannot report an error, so a layer too large to
+            // lay out is refused by the size check above rather than aborting a release
+            // build here.
             move |_: Vec2<usize>, _: &_| vec![0u8; bytes],
             move |buffer: &mut Vec<u8>, at: Vec2<usize>, (r, g, b, a): (f32, f32, f32, f32)| {
-                // A position that does not fit is skipped rather than indexed,
-                // because the same size check is what refuses the file.
-                let Some(start) = at
-                    .y()
-                    .checked_mul(stride)
-                    .and_then(|row| row.checked_add(at.x()))
-                    .and_then(|pixel| pixel.checked_mul(slots))
-                else {
-                    return;
-                };
+                // Channel `slot` of the picture is `slot` planes into the buffer, and a
+                // position that does not fit is skipped rather than indexed, because the
+                // same size check is what refuses the file.
                 for (slot, value) in [r, g, b, a].into_iter().take(slots).enumerate() {
-                    let from = (start + slot) * size_of::<f32>();
+                    let from = at
+                        .y()
+                        .checked_mul(stride)
+                        .and_then(|row| row.checked_add(at.x()))
+                        .and_then(|pixel| {
+                            plane_bytes.checked_mul(slot).and_then(|plane| {
+                                pixel.checked_mul(size_of::<f32>()).map(|at| plane + at)
+                            })
+                        });
+                    let Some(from) = from else {
+                        return;
+                    };
                     if let Some(target) = buffer.get_mut(from..from + size_of::<f32>()) {
                         target.copy_from_slice(&value.to_ne_bytes());
                     }
@@ -340,13 +354,12 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
         height,
         format: info.format,
         transform: info.transform,
-        pixels: Pixels::Interleaved {
-            color_type: if alpha {
-                ColorType::Rgba32F
-            } else {
-                ColorType::Rgb32F
-            },
+        pixels: Pixels::Strided {
+            planes: slots,
+            alpha,
             buffer,
+            row_stride: stride * size_of::<f32>(),
+            plane_stride: plane_bytes,
         },
         timings: DecodeTimings {
             open,
@@ -369,16 +382,46 @@ mod tests {
             .join(name)
     }
 
-    /// One fixture's colour buffer, from the probe to the decoded pixels.
-    fn read(name: &str) -> (ImageInfo, ColorType, Vec<u8>) {
+    /// One fixture's planes, from the probe to the decoded pixels.
+    ///
+    /// The decode hands over one buffer with a plane per channel, so the helper
+    /// reads it back by stride and copies the colour planes out the way the frame
+    /// writer takes them. The tests below compare pictures rather than the shape
+    /// the reader chose; [`one_buffer_holds_a_plane_a_channel`] asserts the shape.
+    fn read(name: &str) -> (ImageInfo, Vec<Vec<u8>>) {
         let info = image_info(&fixture(name), true, None)
             .unwrap_or_else(|error| panic!("{name}: {error}"))
             .unwrap_or_else(|| panic!("{name} is taken over"));
         let decoded = decode(&info).unwrap_or_else(|error| panic!("{name}: {error}"));
-        match decoded.pixels {
-            Pixels::Interleaved { color_type, buffer } => (info, color_type, buffer),
-            _ => panic!("{name} hands out one interleaved buffer"),
-        }
+        let Pixels::Strided {
+            planes,
+            alpha,
+            buffer,
+            row_stride,
+            plane_stride,
+        } = decoded.pixels
+        else {
+            panic!("{name} hands out one buffer with a plane per channel");
+        };
+        assert_eq!(
+            buffer.len(),
+            plane_stride * planes,
+            "{name}: the buffer is exactly its planes"
+        );
+        assert_eq!(
+            plane_stride % row_stride,
+            0,
+            "{name}: a plane is a whole number of rows"
+        );
+        // The alpha plane is the last one; the colour clip reads the rest.
+        let colour = planes - usize::from(alpha);
+        let planes_out = (0..colour)
+            .map(|plane| {
+                let start = plane * plane_stride;
+                buffer[start..start + plane_stride].to_vec()
+            })
+            .collect();
+        (info, planes_out)
     }
 
     /// Every committed fixture, and what its header states. A file without an
@@ -422,14 +465,17 @@ mod tests {
             assert!(info.cicp.is_none(), "{name}");
             assert!(info.chroma_location.is_none(), "{name}");
 
-            let (_, decoded, buffer) = read(name);
-            assert_eq!(decoded, color_type, "{name}");
-            let channels = info.color_type.channels();
-            assert_eq!(
-                buffer.len(),
-                37 * 23 * channels * size_of::<f32>(),
-                "{name}"
-            );
+            let (_, planes) = read(name);
+            // The colour clip takes the planes before an alpha one.
+            let channels = color_type.channels() - usize::from(color_type.has_alpha());
+            assert_eq!(planes.len(), channels, "{name}: one plane a colour channel");
+            for plane in &planes {
+                assert_eq!(
+                    plane.len(),
+                    37 * 23 * size_of::<f32>(),
+                    "{name}: a plane is a whole picture"
+                );
+            }
         }
     }
 
@@ -441,26 +487,26 @@ mod tests {
     /// question than the probe did promises a frame it cannot produce.
     #[test]
     fn the_part_the_probe_chose_is_the_part_that_is_decoded() {
-        let (info, decoded, buffer) = read("exr-multipart-z-rgb.exr");
+        let (info, planes) = read("exr-multipart-z-rgb.exr");
         assert_eq!((info.width, info.height), (2, 2));
         assert_eq!(info.color_type, ColorType::Rgb32F);
         assert_eq!(info.format, PixelFormat::Rgb32F);
-        assert_eq!(decoded, ColorType::Rgb32F);
 
         // The colour part holds `B`, `G` and `R` plane by plane, and the frame
         // is r,g,b. A decode that read the depth part would either refuse the
         // file -- there is no `R` in it -- or hand back the `Z` samples.
-        let expected: [f32; 12] = [
-            1.25, 0.75, 0.25, 1.5, 1.0, 0.5, //
-            2.75, 2.25, 1.75, 3.0, 2.5, 2.0,
-        ];
-        let got: Vec<f32> = buffer
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|bytes| f32::from_ne_bytes(*bytes))
-            .collect();
-        assert_eq!(got, expected);
+        assert_eq!(planes.len(), 3, "three colour planes");
+        let samples = |plane: &[u8]| -> Vec<f32> {
+            plane
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|bytes| f32::from_ne_bytes(*bytes))
+                .collect()
+        };
+        assert_eq!(samples(&planes[0]), vec![1.25, 1.5, 2.75, 3.0]);
+        assert_eq!(samples(&planes[1]), vec![0.75, 1.0, 2.25, 2.5]);
+        assert_eq!(samples(&planes[2]), vec![0.25, 0.5, 1.75, 2.0]);
     }
 
     /// The five compressions the fixtures cover, which are the whole of what a
@@ -469,26 +515,74 @@ mod tests {
     /// so they decode to the same bytes.
     #[test]
     fn every_compression_decodes_to_the_same_picture() {
-        let (_, _, expected) = read("exr-none.exr");
+        let (_, expected) = read("exr-none.exr");
         for name in ["exr-rle.exr", "exr-zip.exr", "exr-zips.exr", "exr-piz.exr"] {
-            let (_, _, got) = read(name);
-            assert_eq!(got.len(), expected.len(), "{name}");
+            let (_, got) = read(name);
             assert_eq!(got, expected, "{name} is the same picture as exr-none.exr");
         }
     }
 
     /// Half is the format's native sample and float is the other, and the same
-    /// picture stored either way holds the same numbers. The alpha file's first
-    /// three channels are the colour file's, pixel for pixel.
+    /// picture stored either way holds the same numbers. The alpha file's colour
+    /// planes are the colour file's, pixel for pixel.
     #[test]
     fn a_half_picture_and_a_float_one_agree_on_colour() {
-        let (_, _, rgb) = read("exr-half-rgb.exr");
+        let (_, rgb) = read("exr-half-rgb.exr");
+        assert_eq!(rgb.len(), 3, "three colour planes");
         for name in ["exr-half-rgba.exr", "exr-float-rgba.exr"] {
-            let (_, _, rgba) = read(name);
-            assert_eq!(rgba.len(), rgb.len() / 3 * 4, "{name}");
-            for (pixel, colour) in rgba.as_chunks::<16>().0.iter().zip(rgb.as_chunks::<12>().0) {
-                assert_eq!(&pixel[..12], colour, "{name}");
+            let (_, rgba) = read(name);
+            assert_eq!(rgba.len(), 3, "{name}: three colour planes");
+            for (channel, colour) in rgba.iter().zip(rgb.iter()) {
+                assert_eq!(channel, colour, "{name}: channel by channel");
             }
+        }
+    }
+
+    /// The decode hands over one buffer with a plane per channel rather than an
+    /// interleaved picture, and an alpha channel is the last of those planes.
+    ///
+    /// This asserts the shape and not just the picture: the interleaved layout
+    /// is the same samples with one more pass over them, so a decode that went
+    /// back to it would pass every other test in this module.
+    #[test]
+    fn one_buffer_holds_a_plane_a_channel() {
+        for (name, alpha) in [
+            ("exr-none.exr", false),
+            ("exr-half-rgba.exr", true),
+            ("exr-multipart-z-rgb.exr", false),
+        ] {
+            let info = image_info(&fixture(name), true, None)
+                .unwrap_or_else(|error| panic!("{name}: {error}"))
+                .unwrap_or_else(|| panic!("{name} is taken over"));
+            let decoded = decode(&info).unwrap_or_else(|error| panic!("{name}: {error}"));
+            let Pixels::Strided {
+                planes,
+                alpha: says_alpha,
+                buffer,
+                row_stride,
+                plane_stride,
+            } = decoded.pixels
+            else {
+                panic!("{name} hands out one buffer with a plane per channel");
+            };
+            assert_eq!(says_alpha, alpha, "{name}: whether it has an alpha plane");
+            let colour = planes - usize::from(alpha);
+            assert_eq!(colour, 3, "{name}: the colour clip is three planes");
+            assert_eq!(
+                buffer.len(),
+                plane_stride * planes,
+                "{name}: the buffer is exactly its planes"
+            );
+            assert_eq!(
+                row_stride,
+                usize::try_from(info.width).expect("width") * size_of::<f32>(),
+                "{name}: a row of a plane is a row of the picture"
+            );
+            assert_eq!(
+                plane_stride,
+                row_stride * usize::try_from(info.height).expect("height"),
+                "{name}: a plane is a whole picture"
+            );
         }
     }
 

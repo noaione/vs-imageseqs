@@ -508,6 +508,7 @@ fn write_frame(
             Clip::Color,
             Pixels::Strided {
                 planes,
+                alpha,
                 buffer,
                 row_stride,
                 plane_stride,
@@ -519,7 +520,8 @@ fn write_frame(
             decoded.height,
             PlaneSource::Strided {
                 buffer,
-                planes: *planes,
+                planes: planes - usize::from(*alpha),
+                first: 0,
                 row_stride: *row_stride,
                 plane_stride: *plane_stride,
             },
@@ -555,9 +557,34 @@ fn write_frame(
             decoded.output_width(),
             decoded.output_height(),
         ),
-        // A decode that kept the decoder's buffer states no alpha of its own,
-        // because every channel of that picture is a plane of the buffer.
-        (Clip::Alpha, Pixels::Strided { .. }) => write_opaque_alpha(
+        // The alpha plane of a strided decode is the last plane of the one buffer,
+        // one stride after the colour planes. It is read where it already is.
+        (
+            Clip::Alpha,
+            Pixels::Strided {
+                planes,
+                alpha: true,
+                buffer,
+                row_stride,
+                plane_stride,
+            },
+        ) => write_decoded_planes(
+            frame,
+            format,
+            decoded.width,
+            decoded.height,
+            PlaneSource::Strided {
+                buffer,
+                planes: 1,
+                first: planes - 1,
+                row_stride: *row_stride,
+                plane_stride: *plane_stride,
+            },
+            transform,
+        ),
+        // A decode whose buffer holds colour planes only states no alpha of its own,
+        // because every channel of that picture is one of them.
+        (Clip::Alpha, Pixels::Strided { alpha: false, .. }) => write_opaque_alpha(
             frame,
             format,
             decoded.output_width(),

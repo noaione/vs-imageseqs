@@ -162,8 +162,9 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   `pnm.rs` for the netpbm family, whose seven subtypes, ASCII and binary rasters
   and MAXVAL rescale are a port,
   `exr.rs` for OpenEXR, read through the `exr` crate, whose channels are
-  selected by name rather than position and whose header is read without the
-  picture,
+  selected by name rather than position, whose header is read without the
+  picture, and whose named channels go into one plane-major buffer handed to
+  the frame with its strides attached rather than an interleaved picture,
   `jpeg.rs` for every jpeg, whose headers one `zune-jpeg` pass answers without
   the pixels and whose picture is decoded from the file read whole, because a
   probe over a stream stops where the raster begins -- creating a clip over a
