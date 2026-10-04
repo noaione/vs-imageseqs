@@ -34,6 +34,7 @@ pub mod jp2;
 pub mod jpeg;
 pub mod jxl;
 pub mod png;
+pub mod pnm;
 pub mod qoi;
 pub mod tga;
 pub mod webp;

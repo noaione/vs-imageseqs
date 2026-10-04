@@ -81,6 +81,9 @@ fn format_decoder(info: &ImageInfo, demand: Demand) -> Option<Result<DecodedImag
     if formats::dds::owns(&info.path) {
         return Some(formats::dds::decode(info));
     }
+    if formats::pnm::owns(&info.path) {
+        return Some(formats::pnm::decode(info));
+    }
     None
 }
 
@@ -479,6 +482,12 @@ fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
     // format number, and its size has to be a whole number of four by four
     // blocks; see [`crate::formats::dds`].
     if let Some(info) = formats::dds::image_info(path, apply_rotation)? {
+        return Ok(info);
+    }
+    // A netpbm states its magic, its size and its `MAXVAL` in a text preamble,
+    // and that preamble is also where a comment is legal; see
+    // [`crate::formats::pnm`].
+    if let Some(info) = formats::pnm::image_info(path, apply_rotation)? {
         return Ok(info);
     }
     // A png is read here for the same reason a jpeg is, and one thing more:

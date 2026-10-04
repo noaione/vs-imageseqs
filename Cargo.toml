@@ -28,7 +28,6 @@ image = { version = "0.25.10", default-features = false, features = [
     "gif",
     "jpeg",
     "png",
-    "pnm",
     "tiff",
     "webp",
     # other
