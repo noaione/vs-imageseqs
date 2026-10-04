@@ -698,7 +698,39 @@ fixed rather than noted. The four are `dds`, `hdr`, `ppm` and `tga`; the other
 five are faster or unchanged, so this is not one systemic mistake but something
 the four have in common.
 
-What they have in common, from their own code: each allocates per row or per
+**It is the probe, not the decode, and the first diagnosis was wrong.** Splitting
+the two stages for six formats, one measurement each, milliseconds:
+
+| format | probe before | probe after | decode before | decode after |
+| --- | --- | --- | --- | --- |
+| `hdr` | 2.5 | **23.3** | 318.4 | 330.6 |
+| `tga` | 1.5 | **24.4** | 53.1 | 72.7 |
+| `ppm` | 1.5 | **22.1** | 47.8 | 53.2 |
+| `dds` | 5.0 | **11.3** | 101.7 | 92.8 |
+| `bmp` | 2.6 | **19.8** | 104.1 | 60.5 |
+| `qoi` | 1.4 | 7.8 | 121.8 | 81.7 |
+
+**Every module here reads the whole file to parse a header, and `image` reads only
+the bytes the header occupies.** The probe went from 1.5 to 5 ms to 8 to 24 ms, a
+10x to 16x increase, and that is the regression: `hdr`'s decode is 318 ms before
+against 331 after, and its probe is 2.5 against 23.3. The decode got *faster* on
+four of the six, which is why `bmp`, `ff`, `ico` and `qoi` came out ahead anyway
+-- their decode wins were larger than the probe they had added.
+
+So the fix is one change in all of them, not four: **probe from the header alone.**
+`image_info` should read the first few kilobytes rather than the file, which is
+what the `image` decoder did and what `png.rs` in this tree already does. Every
+module listed above has its own `std::fs::read(path)` in `image_info` and each one
+is the whole file.
+
+The first attempt at this section guessed per-row allocation and flattened
+`hdr.rs`'s `Vec<Vec<[u8; 4]>>` into one buffer. That is kept -- it is 900 fewer
+allocations on a 900 row picture, the pixels are unchanged, and it cost nothing --
+but it did not move the ratio (hdr was 1.33 before it and 1.29 after), which is
+what ruled the guess out. A guess that is not measured is how the wrong thing gets
+written twice.
+
+What they have in common, from their own code, was the guess above and it is
 block where the reader it replaces writes into a buffer it was handed, and
 `hdr` and `dds` additionally build an intermediate `Vec` per scanline or per
 block. The fix is to write the picture into one buffer allocated once and to

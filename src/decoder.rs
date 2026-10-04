@@ -90,6 +90,9 @@ fn format_decoder(info: &ImageInfo, demand: Demand) -> Option<Result<DecodedImag
     if formats::hdr::owns(&info.path) {
         return Some(formats::hdr::decode(info));
     }
+    if formats::exr::owns(&info.path) {
+        return Some(formats::exr::decode(info));
+    }
     None
 }
 
@@ -502,6 +505,12 @@ fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
         return Ok(info);
     }
     if let Some(info) = formats::hdr::image_info(path, apply_rotation)? {
+        return Ok(info);
+    }
+    // An openexr states its layers, their channels and their sample types in
+    // its header, and the crate parses that header without decompressing a
+    // block; see [`crate::formats::exr`].
+    if let Some(info) = formats::exr::image_info(path, apply_rotation)? {
         return Ok(info);
     }
     // A png is read here for the same reason a jpeg is, and one thing more:

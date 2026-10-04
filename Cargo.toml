@@ -43,6 +43,10 @@ image = { version = "0.25.10", default-features = false, features = [
     # other
     "rayon"
 ] }
+# openexr is read here rather than by `image`, whose adapter decodes into an
+# f32 image of its own and then copies its bytes to the generic buffer; see
+# `src/formats/exr.rs`
+exr = "1.74.2"
 libheif-rs = { version = "3.0.0", default-features = false, features = [
     # `image` is deliberately not enabled: this tree reads every heif and avif
     # through this crate's own API, and the integration that taught `image` to

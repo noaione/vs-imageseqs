@@ -27,6 +27,7 @@
 pub mod avif;
 pub mod bmp;
 pub mod dds;
+pub mod exr;
 pub mod farbfeld;
 pub mod hdr;
 pub mod heif;
