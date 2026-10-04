@@ -908,6 +908,24 @@ keep the per-row work in that buffer, which is the shape `png.rs` already uses.
 That is the next action, and this corpus and this harness are what will say
 whether it worked.
 
+### the three documents, checked against the tree
+
+The goal names three files to keep current as slices land, and two of them were
+checked by reading them. The third, `AGENTS.md`, was checked by asking it about
+the tree instead: every module in `src/formats/` is named in its source layout.
+
+That found one that was not -- `jpeg.rs`, which is step 3 of the *previous* goal
+rather than a step-5 slice, and which that goal left out of the layout. It is
+named now, with what it does and why: one `zune-jpeg` header pass answers every
+fact a probe asks, so creating a clip over a 35 page corpus reads headers instead
+of 213 MB of pictures. Left out, a reader of `AGENTS.md` would not know the module
+exists, and the layout is the document that says which file owns which format.
+
+The other two were checked the same way and needed nothing beyond what earlier
+rounds fixed: `27-direct-still-decoders.md`'s two status tables both name all ten
+as landed, and `26-remove-image-rs.md`'s sections above are the record of the
+verification itself.
+
 ### every frame property, not just the four a survey reads
 
 The step-5 constraint names "every pixel, every frame property and both
