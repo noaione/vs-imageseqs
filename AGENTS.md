@@ -102,15 +102,13 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   lookahead worker that has moved ahead of a consumer from making that
   consumer's next request replay the wrong picture.
 - `src/animation/`: one module per animated format. `apng.rs` composes APNG
-  frames at the file's own depth, because the `image` compositor's 16-bit arm is
-  `unreachable!` and it refuses every 16-bit colour type. `gif.rs` reads the
+  frames at the file's own depth rather than at a fixed one. `gif.rs` reads the
   timeline with the frame decoding skipped and composes the canvas itself,
-  keeping `image`'s two deliberate departures from the specification: the
-  background colour is never used, and `Any` disposal means `Keep`. `webp.rs`
+  keeping two deliberate departures from the specification: the background
+  colour is never used, and `Any` disposal means `Keep`. `webp.rs`
   walks the RIFF container for the same timeline, builds the smallest container
   libwebp will decode one frame out of, and composes the canvas with libwebp's
-  own integer alpha blending. Neither names `frames.rs`, which is gone: no
-  animated format is replayed through the `image` crate any more. `jxl.rs`
+  own integer alpha blending. `jxl.rs`
   scans frame headers without rendering and decodes each presentation from its
   own seek checkpoint. `sequence.rs` reads an avif or heif sequence's sample
   table and clean aperture from the container, because the embedded libheif
@@ -133,18 +131,16 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   profile would otherwise hold one copy per file for the life of the clip.
   [`Pixels`] is what a buffered decode produced, and `RowStream` is the decode
   that has not read its picture yet because it can write each row into the frame;
-  a format answers with one only when it can fill every frame of the call, and
-  anything it refuses goes back to the `image` path.
-- `src/formats/`: per-format paths for what the `image` crate cannot express or
-  reports wrongly, one module per container and picked by extension (`heif.rs`
+  a format answers with one only when it can fill every frame of the call.
+- `src/formats/`: one module per container, chosen by `identify.rs` rather than
+  by the file's name (`heif.rs`
   for monochrome heif/heic and for the colour pages of both containers, which are
   decoded through libheif's own yuv planes and handed out as they are, `avif.rs`
   for every colour avif, which `dav1d` decodes and which also answers
   `decoder::probe` from the container boxes and the av1 sequence header so that
   probing an avif does not decode it, `jxl.rs` for every jpeg xl, which the `jxl`
-  crate decodes directly because `image` has no jxl format of its own, `jp2.rs`
-  for JPEG 2000 header probing and OpenJPEG decoding, `png.rs` for the `cICP`
-  chunk, which `image` has no accessor for, and for the png files whose rows it
+  crate decodes directly, `jp2.rs` for JPEG 2000 header probing and OpenJPEG
+  decoding, `png.rs` for the `cICP` chunk and for the png files whose rows it
   walks straight into the frame instead of buffering the picture whole — which
   includes expanding a palette page's indices itself — and
   `bmp.rs` for Windows bitmaps, whose palette, run-length and bitfield paths are a
@@ -204,8 +200,7 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   is read rather than refused, because those extents are one payload split
   across the container. A container it still refuses — a grid of tiles, a
   construction method it does not follow — is described and decoded by `libheif`
-  instead, which reads both where the `image` decoder could not: it has no
-  monochrome avif, so a grid of monochrome cells ended as `Invalid argument`.
+  instead, which reads both.
   `avif.rs` is the one module that decides which library owns an avif, and it
   decides it from the same walk the decode needs for the pixels: a container the
   walk refuses, an r,g,b one and a monochrome one all go to `libheif`, and only
@@ -268,8 +263,8 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   fixture per format under a wrong extension and under an uppercase one and
   requires every copy to decode to the same bytes, alpha and properties as its
   source, so it measures whether a file's *content* decides how it is read rather
-  than its name. It reports 59 of 84 copies wrong while `owns()` is extension-only
-  and is expected to reach 0 when routing consults `src/formats/identify.rs`. It
+  than its name. It reports no wrong copies, which is the state routing through
+  `src/formats/identify.rs` reaches and must stay in. It
   needs a release build and the plugin, like `tests/readalpha.vpy`.
 - `tests/check-packaging-tools.py`: the checks for `tools/`, run with any Python
   3.12 or later. it builds its own tree under `target/check-packaging-tools`, so

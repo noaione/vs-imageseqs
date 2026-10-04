@@ -1,183 +1,58 @@
 # changelog
 
 ## unreleased
+
 ### changed
 
-- A ycbcr tiff is read here for the first time. The pinned decoder refuses a
-  subsampled page unless its compression is JPEG and upsamples the chroma of the
-  ones it does take, so the raster is read from the strips here and handed out
-  as the file's own planes: `YUV444P8`, `YUV422P8` and `YUV420P8` for the three
-  samplings the format defines, one coding unit holding every luma sample it
-  covers and then one chroma pair. `_Matrix` comes from `YCbCrCoefficients` and
-  `_Range` from `ReferenceBlackWhite`, with the specification's own defaults --
-  bt.601 at full range -- for a page that states neither, and a page whose
+- **The `image` crate is gone**. Every format this plugin reads has a reader of its
+  own under `src/formats/`. A file whose bytes and extension both name no format
+  here is refused with `no reader here knows its format` rather than sent to it.
+  The plugin is about 435 KB smaller. Several of those readers are ports of that
+  crate's, so its licence texts and notices stay where they were
+- Support cmyk tiff is read again, and a cmyk tiff with an alpha channel is read for
+  the first time. Both are handed out as rgb by the same formula of
+  `(maximum - ink) * (maximum - k) / maximum` in `f32` with the same
+  truncation, so a file reads as it always did -- which is why a black-only
+  pixel of 128 comes out 126 rather than 127. `ImgSeqOriginalColorType` is
+  `Cmyk8` or `Cmyk16`, and a fifth sample becomes the alpha clip
+- A palette tiff is now properly supported (partially)
+- A ycbcr tiff is read for the first time, as the file's own planes:
+  `YUV444P8`, `YUV422P8` and `YUV420P8` for the three samplings the format
+  defines. `_Matrix` comes from `YCbCrCoefficients` and `_Range` from
+  `ReferenceBlackWhite`, defaulting to bt.601 at full range, and a page whose
   coefficients name no matrix VapourSynth has a code for is converted to rgb
-  with those coefficients rather than labelled with a guess, which is what
-  libtiff's own `tiff2rgba` gives for the same file sample for sample. Eight bit
-  plane, uncompressed: a page of any other shape and a compressed page are both
-  refused at identify rather than later, so the
-  probe cannot promise a frame the decode would refuse to produce. The fixtures
-  are written by hand, because no encoder here writes a subsampled ycbcr page at
-  all, and libtiff's own `tiff2rgba` reads each of them to neutral greys at
-  exactly the luma levels they were written with.
-- A palette tiff is read here now rather than refused. `tiff-palette.tiff` is
-  the fixture that used to answer `failed to identify` and now hands out its
-  picture, and the widths that were never read at all -- one, two and eight bits
-  an index -- gained fixtures beside it. The indices are read from the strips
-  because the pinned decoder refuses the photometric before it can describe a
-  chunk, so the bit order and the row padding are this tree's own, and the
-  colormap holds sixteen-bit entries whatever the width of an index is: an
-  eight-bit frame takes the high byte of each, which is what libtiff hands out.
-  The samples are byte for byte Pillow's on all four widths, checked at
-  positions across each page rather than at its first row. A palette reports the
-  layout its samples expand to, `Rgb8`, rather than naming its indices, which is
-  what a palette png already reports. Three, five, six, seven and nine to
-  sixteen bits an index are refused: no writer here produces one and libtiff
-  refuses the sixteen-bit page that was written by hand to see whether it could,
-  so those widths have no reader to be checked against, and a wrong bit order
-  there would still look like a picture.
-- A cmyk tiff is read here again, and a cmyk tiff with an alpha channel is read
-  for the first time. Removing `image` dropped the first: its tiff reader mapped
-  the separated colour type onto rgb and converted it, and no fixture covered
-  one, so nothing caught it. Both are handed out as the rgb a frame holds, by
-  the same `(maximum - ink) * (maximum - k) / maximum` in `f32` and with the
-  same truncation the old reader used, so a file reads as it always did -- which
-  is why a black-only pixel of 128 comes out 126 rather than 127. The ink model
-  is still the `ImgSeqOriginalColorType` label, `Cmyk8` or `Cmyk16`, and a
-  fifth sample becomes the alpha clip.
-- The `image` crate is gone. Every format this plugin reads has a reader of its
-  own, so the last two things it was still linked for -- the probe of a webp,
-  and the probe and decode of an avif -- are handled by those modules' own
-  container walks, and the generic decoder that remained as a last resort is
-  gone with them. A file whose bytes name no format here, and whose extension
-  names none either, is refused with `no reader here knows its format` rather
-  than sent to it. The plugin is about 435 KB smaller, and several modules
-  under `src/formats/` are ports of that crate's readers, so its licence texts
-  and notices stay where they were.
+  with the coefficients it states. Eight bit samples, uncompressed, and
+  libtiff's own `tiff2rgba` gives the same samples for every fixture
 - Whether a file plays a timeline is decided by its bytes now, like its format
-  already was. `Read` picked the animation adapter by extension while the probe
-  and the decode picked the format by content, so an animated gif, webp, avif or
-  heic under a name that did not say so was read as a single still frame. It
-  plays its timeline now, the same one the file plays under its own name. The
-  dispatch is one `identify::route` call rather than a chain of five extension
-  checks, so the format is also read from the file once instead of up to five
-  times. Nothing changes for a file whose name says what it is.
-- A webp is described here now rather than by `image`, which drops that reader
-  from the dependency: `image-webp` is out of `Cargo.lock`. The container walk
-  the decode already used answers the probe's four facts -- the canvas, the
-  alpha flag, the exif orientation and the `ICCP` chunk -- so a webp's
-  `ImgSeqOrientation` and `ImgSeqHasICC` come from the file's own chunks. The
-  size is still the stored one and the transform still does the swap, so the
-  fixtures describe and decode byte for byte as they did. A webp that does not
-  hold the container its `RIFF` header declares -- a file cut short -- is refused
-  rather than described.
-- An interlaced png is read here now rather than by `image`, and so is one that
-  states an orientation. Both are shapes the row walk cannot place: it writes each
-  row into the frame as it reads it, and Adam7 hands the file over one *pass* at a
-  time rather than one picture row at a time. Those files are decoded whole
-  instead, by the same crate call the `image` decoder made with the same
-  transformation, so the samples are the samples it produced; the fixtures for
-  four interlaced shapes and eight orientations are byte for byte identical.
-  `image`'s png reader is no longer linked as a result.
-
-- A png is identified by its bytes on the *probe* side too. `png::image_info` and
-  `png::cicp` asked the file's extension while the decode next door asked its
-  content, so a page under a name that said nothing about it was described by one
-  reader and decoded by another. That only ever worked because the generic decoder
-  could also describe it, and it stopped the moment `image`'s png reader went --
-  which is how the split was found. A file whose name lies about it now gets the
-  same description and the same `cICP` properties as one whose name does not.
-- A one frame gif is read here now rather than by `image`, which drops that
-  reader from the dependency. The picture is unchanged, and the fixtures that
-  pin it are new because this path had no coverage at all before. A gif is a
-  sub-rectangle drawn onto a logical screen, and a still read is that frame
-  placed at its offset on a transparent screen: the size handed out is the
-  *screen*, so a file whose one frame is smaller than its screen keeps the screen
-  size with the rest transparent rather than the background colour the file
-  names. A transparent index keeps its palette colour in the colour clip and
-  shows only in the alpha clip, which is what the reader being replaced did and
-  is deliberately not what the animation compositor does. An animated gif under
-  a name that does not say `gif` reads as its first *presentation*, which is what
-  the animation path shows for frame zero. The `debug` log's per-frame timings
-  for a still gif are zero for the same reason an animated gif's already were:
-  the compositor reports none.
-- The plugin no longer asks `image` for a jpeg decoder. That feature was merely
-  `image`'s own link to `zune-jpeg`, which this tree depends on directly for
-  `src/formats/jpeg.rs`, so the flag put a second adapter in front of the same
-  decoder: a jpeg this reader declines, `image` declined too. `Cargo.lock` loses
-  those two edges from `image` and keeps the package, which the direct reader
-  still uses. No frame, format or property changes. The `jpeg` flag on the
-  `tiff` dependency is a different one and is still needed, for a strip that
-  holds a jpeg.
-- Creating a clip over a long list is faster. Describing 170 files went from a
-  median of 78 ms to 40 ms, over seven interleaved pairs. Every format module
-  answered "is this mine?" by opening the file, so one file was opened once per
-  module -- about fifteen times -- and the decode then asked all of it again
-  with a gate of its own. The content decides that question in one place now,
-  `identify::route`, and the probe and the decode each ask it once: sixteen
-  opens down to one in the decode, and fifteen down to two in the probe. A
-  renamed file also routes the same way in both halves now, which it did not --
-  webp, heif, jxl and jpeg 2000 answered the decode from the extension while
-  the probe answered from the bytes, so a file whose name lied about it could
-  be described as one format and decoded as another.
-- An OpenEXR whose first part holds no colour channel now decodes. The probe and
-  the decode were asking different questions: the probe took the first part that
-  states `R`, `G` and `B`, and the decode took the first part it could read at
-  all -- which in a file whose first part is a depth pass is a layer with no
-  colour in it -- so a file the probe accepted failed at the frame request with
-  "the file states no `\"R\"` channel". Both now select by the same rule. Every
-  other OpenEXR is byte for byte identical, and the two changes that come with
-  it are small: the channels are written straight into the frame instead of
-  into a plane a second pass interleaves, so the `debug` log's timings count
-  that work with the open rather than separately.
-- A TIFF that states an orientation and carries an embedded ICC profile now
-  reports both. The adapter had been building its description with the two
-  hardcoded away, so a file that states orientation 6 -- a quarter turn clockwise
-  -- was handed out stored, and `ImgSeqOrientation` said 1 where the file said 6.
-  The profile is now read too, so `ImgSeqHasICC` and the opt-in `ICCProfile`
-  property are right for a TIFF. A BigTIFF is no longer declined either: the
-  adapter's own four-byte signature check accepted only the classic version word,
-  so the crate's BigTIFF support could not be reached. Files that state neither
-  tag, and classic TIFFs, are byte for byte identical.
-
-- A PAM that states a `MAXVAL` above a byte but names no `TUPLTYPE` is now read at
-  the width its `MAXVAL` states instead of a byte a sample. Such a file was read
-  without an error and with the wrong samples: a raster of `[1023, 512]` under a
-  `MAXVAL` of 1023 came back as `[1, 64]`, because the bytes were taken one at a
-  time and rescaled as eight bit. It now reads as `[65535, 32800]`, which is the
-  same picture at the sixteen bit container the plugin hands out. A file that
-  names its tuple, or whose `MAXVAL` fits a byte, is unchanged.
-
-- A TIFF compressed with zstd now decodes. Its decompressor is not one of the
-  `tiff` crate's default features, so it is named by hand here, and libzstd is a
-  native dependency the plugin links as a result -- see `LICENSES/zstd-COPYING.txt`.
-- A Radiance HDR whose resolution line states an orientation other than the
-  common `-Y ... +X` now decodes instead of being refused. The `image` decoder
-  accepted only that one spelling and answered "does not support the format
-  features Orientation ..." for every other, so a file that stored its scanlines
-  bottom to top, or its pixels right to left, or stated the axes the other way
-  round, could not be read at all. Four files that hold the same picture four
-  different ways now come out as that one picture. Every file that already read
-  is byte for byte identical.
-- An AVIF or HEIF whose samples are stored as r,g,b is now read by `libheif`
-  rather than by the `image` decoder, which is one library for every such
-  container instead of two. The frames are byte for byte identical. One
-  property moves: a file that carries no alpha channel now reports
-  `ImgSeqOriginalColorType=rgb8` where the `image` decoder reported `rgba8`,
-  because its avif hook always named four channels whatever the file held.
-- An AVIF whose coded item is written as several extents is read by the plugin
-  itself instead of being handed to the `image` decoder. The extents are one
-  payload split across the container, and joining them is a concatenation in
-  the order the file lists them, so the file and the one it was cut from are now
-  the same picture through the same reader. A file written that way used to
-  come out as `RGB24` where the file it was cut from came out as the `YUV420P8`
-  the container states.
-- An AVIF whose coded item is a grid of tiles now decodes instead of being
-  refused. The plugin's own walk does not join a grid, so the file goes to
-  `libheif`, which does, rather than to the `image` decoder, which could not:
-  it has no monochrome avif, and a grid's cells are monochrome, so it answered
-  `Invalid argument`. A `avifenc -g 2x2` file reads back as the joined
-  256x256 `Gray8` picture `avifdec` reads from it.
+  already was, so an animated gif, webp, avif or heic under a name that does
+  not say so plays its timeline instead of a single still. The dispatch is one
+  `identify::route` call rather than five extension checks, so the file is read
+  once instead of up to five times
+- A tiff that states an orientation, carries an ICC profile or is a BigTIFF now
+  reports all three: the adapter had hardcoded the first two away and its
+  signature check accepted only the classic version word
+- A PAM whose `MAXVAL` is above a byte but which names no `TUPLTYPE` is read at
+  the width its `MAXVAL` states, instead of coming back rescaled as eight bit
+- A tiff compressed with zstd decodes, which links libzstd -- see
+  `LICENSES/zstd-COPYING.txt`
+- A radiance hdr that states an orientation other than the common `-Y ... +X`
+  decodes rather than being refused
+- An OpenEXR whose first part holds no colour channel decodes: the probe and the
+  decode now select the part by the same rule
+- An avif whose coded item is written as several extents, or is a grid of
+  tiles, is read rather than refused or misread: the extents are joined here
+  and a grid goes to `libheif`, which joins it
+- An avif or heif whose samples are stored as r,g,b is read by `libheif`. One
+  property moves: a file that carries no alpha now reports
+  `ImgSeqOriginalColorType=rgb8` rather than the `rgba8` that adapter always
+  named
+- A png is identified by its bytes on the probe side too, so a file whose name
+  lies about it gets the same description and the same `cICP` properties as one
+  whose name does not
+- Support one frame gif properly (read as still image).
+- A webp is described from its own chunks rather than by `image`, so
+  `ImgSeqOrientation` and `ImgSeqHasICC` come from the file, and a webp cut
+  short is refused rather than described
 
 ### fixed
 
@@ -189,28 +64,27 @@
 
 - PNG decoding hands each decoded row to the frame it belongs in instead of
   building the whole picture in a buffer the plugin then copies, which is one
-  pass over the image rather than two: 1.2x on the decoded side of every PNG
-  set measured, and a frame is byte for byte identical either way
-  - this reaches every colour type and bit depth, `tRNS` on grey, rgb and
-    palette, and an odd width; an interlaced or animated file, and one the
-    caller asked to rotate, still goes through the `image` decoder
-  - a grey page is a copy per row and a colour page a single walk over the row
-    that fills all three planes, so `Read` no longer pays a second pass at all
+  pass over the image rather than two: 1.2x on the decoded side of every PNG set
+  measured, and a frame is byte for byte identical either way
   - a palette page is expanded by the plugin rather than by the decoder, which
     is one pass over one byte per pixel where `Transformations::EXPAND` is a
     pass over three: a further 1.10x on the pages made of them
   - every png set measured is now ahead of Pillow's own decode column, from
     0.89x to 0.69x of its time
+  - an interlaced or animated file, and one the caller asked to rotate, still
+    goes through a whole-picture decode
 - x86-64 wheels carry one plugin library per microarchitecture level, and
   VapourSynth loads the widest the machine's CPU supports: 6% to 11% faster on
-  the PNG and JPEG sets measured, almost all of it in the write into the frame
-  - the libraries are `vs_imageseqs.dll`, `vs_imageseqs.avx2.dll` for AVX2 and
-    `vs_imageseqs.avx512.dll` for AVX-512, and a unix wheel names the same
-    three with a `lib` prefix and a `.so` extension
+  the PNG and JPEG sets measured
   - all three decode identically, and the plain library still passes no
     `-C target-cpu`, so a machine that could load the plugin before still can
   - the Windows wheel is 10.4 MiB instead of 3.8 MiB, which is what the three
     builds cost
+- Creating a clip over a long list is faster: describing 170 files went from a
+  median of 78 ms to 40 ms over seven interleaved pairs. Every format module
+  answered "is this mine?" by opening the file -- about fifteen times -- and
+  the decode asked all of it again with a gate of its own. `identify::route`
+  answers it once, so sixteen opens became one and fifteen became two
 
 ### build
 

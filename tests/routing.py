@@ -32,7 +32,7 @@ import vapoursynth as vs
 
 
 class Policy(vs.EnvironmentPolicy):
-    def on_policy_registered(self, api):
+    def on_policy_registered(self, api):  # pyright: ignore[reportIncompatibleMethodOverride]
         self.api = api
         self.environment = api.create_environment(vs.CoreCreationFlags.DISABLE_AUTO_LOADING)
 
@@ -99,7 +99,7 @@ def read(path: pathlib.Path) -> tuple[str, str]:
             if key.startswith("ImgSeq") and key != "ImgSeqPath"
         )
         return digest.hexdigest()[:16], facts
-    except Exception as error:  # noqa: BLE001 - the answer is the measurement
+    except Exception as error:
         return "REFUSED", str(error)[-70:]
 
 
@@ -121,7 +121,7 @@ for name in SOURCES:
         failures += 1
         continue
     stem = pathlib.Path(name).stem
-    suffixes = list(WRONG) + [pathlib.Path(name).suffix.upper()]
+    suffixes = [*list(WRONG), pathlib.Path(name).suffix.upper()]
     for suffix in suffixes:
         copy = SCRATCH / f"{stem}{suffix}"
         shutil.copyfile(source, copy)
