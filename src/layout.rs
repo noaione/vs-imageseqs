@@ -42,9 +42,9 @@ pub enum ColorType {
     Rgba32F,
 }
 
-#[allow(dead_code, reason = "used by the adapters that are still migrating")]
 impl ColorType {
     /// Bytes one pixel of this layout occupies.
+    #[cfg(test)]
     #[must_use]
     pub const fn bytes_per_pixel(self) -> usize {
         let word = self.bytes_per_sample();
@@ -53,6 +53,7 @@ impl ColorType {
 
     /// Bytes one sample of this layout occupies.
     #[must_use]
+    #[cfg(test)]
     pub const fn bytes_per_sample(self) -> usize {
         match self {
             Self::L8 | Self::La8 | Self::Rgb8 | Self::Rgba8 => 1,
@@ -63,6 +64,7 @@ impl ColorType {
 
     /// Channels one pixel of this layout holds.
     #[must_use]
+    #[cfg(test)]
     pub const fn channels(self) -> usize {
         match self {
             Self::L8 | Self::L16 => 1,
@@ -79,23 +81,6 @@ impl ColorType {
             Self::La8 | Self::La16 => Some(1),
             Self::Rgba8 | Self::Rgba16 | Self::Rgba32F => Some(3),
             Self::L8 | Self::L16 | Self::Rgb8 | Self::Rgb16 | Self::Rgb32F => None,
-        }
-    }
-
-    /// The same picture laid out in sixteen-bit words.
-    ///
-    /// An APNG composes its frames at the depth its own chunks state, which is
-    /// one step wider than the eight-bit canvas the first frame may have
-    /// suggested.
-    #[must_use]
-    #[allow(dead_code, reason = "the apng compositor widens a canvas it composes")]
-    pub const fn wide(self) -> Self {
-        match self {
-            Self::L8 => Self::L16,
-            Self::La8 => Self::La16,
-            Self::Rgb8 => Self::Rgb16,
-            Self::Rgba8 | Self::L16 | Self::La16 | Self::Rgb16 | Self::Rgba16 => Self::Rgba16,
-            Self::Rgb32F | Self::Rgba32F => self,
         }
     }
 
