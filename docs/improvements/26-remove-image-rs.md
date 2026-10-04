@@ -780,6 +780,31 @@ unchanged and 266 tests pass. But the per-round ratios are still 0.92 1.33 1.36
 resolve, and a wider corpus of that format is what a conclusion needs. Recording
 that as unresolved rather than calling 1.135 a fix.
 
+**The harness was wrong before the code was: `ppm` is not a regression and `tga`
+is.** The stage timing inside `pnm` settles where its decode time goes, on a
+3.24 MB file, twenty rounds: `fs::read` **1.33 ms**, header **0.001 ms**, raster
+**0.57 ms**. The whole module is 1.9 ms a file and seven tenths of it is the
+file read, so there is almost nothing in `raster` for a regression to hide in.
+
+Seven paired repetitions of the decode stage say the same thing, and they say
+something the earlier numbers did not:
+
+| format | before, 7 reps | after, 7 reps |
+| --- | --- | --- |
+| `ppm` | 33.9 39.1 42.2 47.5 55.1 65.1 101.4, **median 47.5** | 41.0 42.0 42.4 42.7 42.9 43.1 55.2, **median 42.7** |
+| `tga` | 41.3 41.5 42.8 43.4 45.0 45.6 53.8, **median 43.4** | 55.3 55.7 55.7 58.4 58.6 59.7 61.0, **median 55.7** |
+
+`ppm`'s before row ranges from 33.9 to 101.4 and its after row does not: the
+*baseline* is the noisy build, and `step5-ab.py`'s best-of statistic rewarded it
+for that. By median `ppm` is **faster** after the port, 42.7 against 47.5, so it
+was never a regression and the 1.19x was an artifact of the statistic. `tga` is
+the opposite and is real: the two ranges do not overlap at all, 43.4 against
+55.7, a stable 1.28x.
+
+So one format is left, not two, and the numbers that said otherwise were
+measuring the harness. **Read the median of paired repetitions, not the best of
+them** -- a build that occasionally stalls makes best-of look better than it is,
+and that is what happened here for three rounds.
 **`ppm` and `tga` are decode, and three guesses have now missed them.** Splitting
 the stages again with the probe fixed, one measurement each, milliseconds:
 
