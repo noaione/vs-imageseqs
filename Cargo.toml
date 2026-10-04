@@ -15,9 +15,17 @@ rust-version = "1.94.0"
 crate-type = ["cdylib"]
 
 [dependencies]
-# Its default features are what bring in LZW and Deflate, so it is taken as it
-# ships: default-features = false silently drops three of the fixtures.
-tiff = "0.11.3"
+# The decompressors are named rather than inherited, so what this reader can
+# read is visible here: `deflate`, `fax`, `jpeg` and `lzw` are the crate's
+# defaults and `zstd` is not one of them. `webp`, its last feature, is left out
+# because a tiff is never a webp.
+tiff = { version = "0.11.3", default-features = false, features = [
+    "deflate",
+    "fax",
+    "jpeg",
+    "lzw",
+    "zstd",
+] }
 vapoursynth4-rs = { version = "0.5.1", default-features = false, features = [
     "vs-42", # >=R74
     "vsscript-43" # >=R79

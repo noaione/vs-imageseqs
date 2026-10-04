@@ -22,6 +22,11 @@ import os
 import subprocess
 import sys
 
+if sys.version_info < (3, 14):
+    raise SystemExit("needs Python 3.14 for the zstd writer below")
+
+from compression import zstd  # noqa: E402 - 3.14, hence the guard above
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIXTURES = os.path.join(HERE, "fixtures")
 
@@ -31,6 +36,59 @@ HEIGHT = 23
 
 def magick(*args: str) -> None:
     subprocess.run(["magick", *args], check=True)
+
+
+def write_zstd_tiff(path: str, rows: list[bytes]) -> None:
+    """Writes a little-endian RGB tiff whose single strip is a zstd frame.
+
+    Hand written because **no encoder on this machine writes one**:
+    ImageMagick rejects the compression name, and the libtiff Pillow bundles
+    answers "ZSTD compression support is not configured". Python 3.14 has
+    `compression.zstd`, so the container is written here and the strip is a
+    raw zstd frame, which is what libtiff's codec 50000 is.
+    """
+    import struct
+
+    height = len(rows)
+    width = len(rows[0]) // 3
+    raw = b"".join(rows)
+    strip = zstd.compress(raw)
+
+    # Tag, type, count, value. Sorted by tag, which the format asks for.
+    SHORT, LONG = 3, 4
+    entries = [
+        (256, SHORT, 1, width),           # ImageWidth
+        (257, SHORT, 1, height),          # ImageLength
+        (258, SHORT, 3, None),            # BitsPerSample, an array
+        (259, SHORT, 1, 50000),           # Compression, ZSTD
+        (262, SHORT, 1, 2),               # PhotometricInterpretation, RGB
+        (273, LONG, 1, None),             # StripOffsets
+        (277, SHORT, 1, 3),               # SamplesPerPixel
+        (278, SHORT, 1, height),          # RowsPerStrip
+        (279, LONG, 1, len(strip)),       # StripByteCounts
+        (284, SHORT, 1, 1),               # PlanarConfiguration, chunky
+    ]
+    ifd_at = 8
+    ifd_size = 2 + len(entries) * 12 + 4
+    bits_at = ifd_at + ifd_size
+    strip_at = bits_at + 6
+
+    out = bytearray(b"II\x2a\x00" + struct.pack("<I", ifd_at))
+    out += struct.pack("<H", len(entries))
+    for tag, kind, count, value in entries:
+        if tag == 258:
+            value = bits_at
+        if tag == 273:
+            value = strip_at
+        out += struct.pack("<HHI", tag, kind, count)
+        # A count of one fits in the value field; anything else is an offset.
+        out += struct.pack("<H", value) + b"\x00\x00" if kind == SHORT and count == 1 else struct.pack("<I", value)
+    out += struct.pack("<I", 0)  # no next IFD
+    out += struct.pack("<3H", 8, 8, 8)
+    out += strip
+    with open(path, "wb") as handle:
+        handle.write(out)
+    print(f"  + {os.path.basename(path):28} TIFF {width}x{height} RGB zstd ({len(strip)} bytes in strip)")
 
 
 def source(name: str, depth: int = 8) -> str:
@@ -114,6 +172,19 @@ def main() -> int:
     report("tiff-tiled.tiff", path)
 
     # ---- A palette page, whose indices are expanded through the colour map.
+    # ---- A zstd strip, which no encoder here can write; see the writer above.
+    # The pixels come from the same png the other colour fixtures were encoded
+    # from, so this file holds **that** picture rather than one re-derived from a
+    # formula that would only be nearly the same.
+    from PIL import Image
+
+    picture = Image.open(colour).convert("RGB")
+    zstd_rows = [
+        bytes(component for x in range(picture.width) for component in picture.getpixel((x, y)))
+        for y in range(picture.height)
+    ]
+    write_zstd_tiff(os.path.join(FIXTURES, "tiff-zstd.tiff"), zstd_rows)
+
     path = os.path.join(FIXTURES, "tiff-palette.tiff")
     magick(colour, "-colors", "16", "-type", "Palette", path)
     report("tiff-palette.tiff", path)

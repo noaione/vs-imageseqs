@@ -85,6 +85,12 @@ native runtime dependency. The macOS CMake toolchain also disables the optional
 libheif backends this plugin does not use, including x265. Always verify the
 final native link output after changing either dependency configuration.
 
+zstd 1.5.7 (vendored by zstd-sys 2.0.16)
+  License: BSD 3-Clause
+  Linkage: static on Windows and macOS, compiled from the vendored sources
+  Usage: the tiff reader's zstd decompressor, which `tiff`'s `zstd` feature selects
+  Notice: LICENSES/zstd-COPYING.txt
+
 Ported source code
 ------------------
 
