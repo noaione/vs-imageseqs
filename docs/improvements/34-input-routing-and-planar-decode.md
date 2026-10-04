@@ -27,7 +27,7 @@ This documentation update implements no decoder changes.
 | --- | --- | --- |
 | 1. Consistent routing, saved plan and sample/subimage invariants | **Content-routing slice landed, and the route is saved and threaded.** `2b02f64` routes stills by content, `c206944` does the same for animation, and the saved-route slices record what the router named on `ImageInfo` and pass it to every module's probe entry, so a file is identified with one read. EXR selection, PAM word width and TIFF metadata/sample handling have also received fixes. | The saved route names the container and nothing more: the backend and the selected subimage are still decided inside each adapter, and the broader error/sample invariants need separate completion checks. |
 | 2. Combine metadata passes | **Partly landed: the front of the file answers, and a timeline is not rendered to describe it.** PNG, GIF and WebP no longer require image-rs for metadata or fallback pixels; a webp's or jpeg xl's animation adapter answers from the file header, a jpeg 2000 probe reads a window over the front that grows only while the header is incomplete, an avif or heif sequence walk seeks over media data rather than reading it, and an animated png's delays come from its own `fcTL` chunks instead of a rendered frame each. | One shared probe reader is not implemented. |
-| 3. Retain initialized readers and preserve planes | **Partly complete, and the netpbm row sink now streams.** Eligible PNG, binary RGB8 PNM/PAM, TGA and BMP have row sinks; TIFF has a native YCbCr plane path (`8cf7b06`); and the netpbm sink keeps the reader its preparation opened and reads one row at a time instead of buffering the file. | TGA and BMP row sinks still read the whole file during filling after a separate preparation read. PNG initializes a reader again in `fill`. True farbfeld/PNM row reads, direct separate-planar RGB TIFF, direct EXR planes and shared initialized decode state remain open. |
+| 3. Retain initialized readers and preserve planes | **Mostly landed.** Eligible PNG, binary RGB8 PNM/PAM, TGA and BMP have row sinks; TIFF has a native YCbCr plane path (`8cf7b06`) and hands a planar RGB page over as the planes it already is rather than interleaving it; and the netpbm, targa and bitmap sinks keep the reader their preparation opened and read one row at a time instead of buffering the file. | PNG initializes a reader again in `fill`. True farbfeld/PNM row reads, direct EXR planes and shared initialized decode state remain open, and the planes a planar page is split into could still be read in place rather than copied. |
 | 4. Timing and selected subtype repairs | **Partly complete, and the two timing repairs have landed.** BigTIFF/RGBE recognition, PAM MAXVAL interpretation, TIFF orientation/ICC and EXR flat-RGB part selection have landed; an APNG's timeline is placed on the lowest common denominator of the fractions it states rather than on rounded milliseconds; and an animation segment contributes the output sample instants before its end rather than the whole output ticks it covers. Palette and CMYK(A)/YCbCr TIFF coverage has since expanded too. | Core BMP, odd DDS edge blocks and variable-length headers still have the inspected restrictions. Other coverage candidates require individual decisions and evidence. |
 | 5. Remove image-rs | **Landed.** `d431764` removes `image`, `8682c2f` removes leftover layout helpers, and `src/still.rs` is deleted. Cargo.toml and Cargo.lock contain no `image` dependency. | This does not finish phases 1–4. Ported code's notices remain applicable; codec dependencies such as libwebp are independent of image-rs. |
 
@@ -168,10 +168,33 @@ by median against 26.1 ms, with overlapping tails. The still png is the control,
 unchanged at 100.5 ms and 48.3 MiB. Seven fresh processes a side
 (`target/bench/decode-pnm-stream.txt`); the corpus is `target/bench/big/`.
 
-Coverage note: neither the validator nor the routing check reads a netpbm, so the
-pixel side of this slice rests on a unit test that the prepared rows are the
-raster byte for byte, and on the row write being the call it already was. A `P6`
-case in the validator would close that gap.
+The targa and bitmap sinks followed the same shape (`target/bench/decode-tga-bmp-stream.txt`).
+A 3000x3000 top-down 24 bit targa holds 48.0 MiB instead of 73.6 MiB and decodes
+in 29.1 ms against 33.9 ms by median; a 24 bit bitmap holds 48.0 MiB instead of
+73.5 MiB and decodes in 41.0 ms against 44.0 ms. Both 25.7 MiB files lose the
+file buffer exactly, every before sample being above 73.5 MiB and every after one
+below 48.1. Their tails overlap on time, so the memory is the result and 7 to 14%
+is the median. The pnm and png controls are unchanged over the same protocol.
+
+The planar tiff spelling was the largest of these. Its planes already arrive one
+per channel, so handing them over as planes is one linear copy each where
+interleaving them and letting the frame writer separate the channels again is a
+transpose either way: a 3000x3000 eight bit page decodes in 43.0 ms rather than
+138.8 ms by median, and the two distributions do not overlap at all (39.0 to 45.4
+against 122.3 to 154.3, seven fresh processes a side). The chunky spelling of the
+same picture is the control and is unchanged over eight interleaved pairs, three
+of which favour the old build, at 41.5 against 40.1 ms by median
+(`target/bench/decode-planar-tiff.txt`). Peak memory is unchanged, because
+splitting the decoder's buffer into planes is still a copy of it, which the
+leftover below records how to remove.
+
+Coverage note: neither the validator nor the routing check reads a netpbm, a
+targa or a bitmap, so the pixel side of these slices rests on two things. A unit
+test per format checks that the prepared rows are the raster or the padded pixel
+area byte for byte, and `target/bench/row-sink-parity.py` compares the plugin's
+three planes for the 3000x3000 corpus files against Pillow's own read of the
+targa and the bitmap and against the netpbm's own raster -- 0 of 3 wrong on both
+builds. A case for each in the validator is still where they belong.
 
 Artifacts: `target/bench/route-time.py`, `target/bench/accepted.py`,
 `target/bench/route-pair-fixtures.txt`, `target/bench/route-pair-common.txt`,

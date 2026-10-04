@@ -495,16 +495,6 @@ pub fn image_info(
     }))
 }
 
-/// A targa whose rows are already the frame's rows.
-///
-/// The shape is narrow on purpose: nothing run-length encoded, nothing to move
-/// in either direction, and three bytes a pixel in the decoded layout, so the
-/// file's row is the frame's row with blue and red exchanged and nothing else.
-/// The corpus file is exactly this. Everything else -- a palette, a stored
-/// sixteen bit word, a bottom-up image, an encoded one -- keeps the buffered
-/// path, which is the rule that a stream is only answered with when it can fill
-/// every frame of a call.
-
 /// A window the header of a targa is read through.
 ///
 /// The header is fixed at eighteen bytes plus the image id the file states, so
@@ -545,6 +535,16 @@ fn prepare(path: &Path) -> Result<Option<(Header, BufReader<File>)>> {
         .map_err(|e| image_error("open", path, e))?;
     Ok(Some((header, reader)))
 }
+
+/// A targa whose rows are already the frame's rows.
+///
+/// The shape is narrow on purpose: nothing run-length encoded, nothing to move
+/// in either direction, and three bytes a pixel in the decoded layout, so the
+/// file's row is the frame's row with blue and red exchanged and nothing else.
+/// The corpus file is exactly this. Everything else -- a palette, a stored
+/// sixteen bit word, a bottom-up image, an encoded one -- keeps the buffered
+/// path, which is the rule that a stream is only answered with when it can fill
+/// every frame of a call.
 #[derive(Debug)]
 pub struct Rows {
     path: std::path::PathBuf,
@@ -724,6 +724,25 @@ mod tests {
             .join("tests")
             .join("fixtures")
             .join(name)
+    }
+
+    /// The preparation leaves the reader at the raster, and the rows it reads are
+    /// that raster and nothing else. `tga-rgb24-topdown.tga` is the one fixture
+    /// whose shape the row sink takes.
+    #[test]
+    fn the_row_sink_reads_the_raster_a_row_at_a_time() {
+        let path = fixture("tga-rgb24-topdown.tga");
+        let (header, mut reader) = prepare(&path)
+            .expect("the fixture is readable")
+            .expect("a top-down 24 bit targa is a row sink");
+        let mut line = vec![0u8; header.width as usize * 3];
+        let mut rows = Vec::new();
+        for _ in 0..header.height {
+            reader.read_exact(&mut line).expect("a row of the raster");
+            rows.extend_from_slice(&line);
+        }
+        let file = std::fs::read(&path).expect("the fixture");
+        assert_eq!(rows, file[header.data_offset..], "the rows are the raster");
     }
 
     /// Every fixture, and the layout its header asks for. This is the table the

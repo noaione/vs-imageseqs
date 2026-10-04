@@ -91,9 +91,9 @@
   frames each went from a median of 49 ms to 3 ms, and 35 still pngs of 65.8 MiB
   are unchanged over the same protocol
 
-- A netpbm is read a row at a time rather than into a buffer the size of the
-  file: a 3000x3000 `P6` of 25.7 MiB holds 48 MiB rather than 74 MiB while it
-  decodes, and decodes about a tenth faster
+- A netpbm, a targa and a bitmap are read a row at a time rather than into a
+  buffer the size of the file: a 3000x3000 image of each holds 48 MiB rather
+  than 74 MiB while it decodes, and decodes 7 to 14% faster
 
 - PNG decoding hands each decoded row to the frame it belongs in instead of
   building the whole picture in a buffer the plugin then copies, which is one

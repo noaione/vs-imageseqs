@@ -29,7 +29,11 @@
 //! at: a `BITMAPCOREHEADER`, the one- and two-bit depths, `BI_JPEG` and
 //! `BI_PNG` compression, and the CMYK bit counts.
 
-use std::path::Path;
+use std::{
+    fs::File,
+    io::{BufReader, Read, Seek, SeekFrom},
+    path::Path,
+};
 
 use crate::{
     decoder::{
@@ -482,6 +486,64 @@ fn truncated() -> ImgSeqError {
     ImgSeqError::new("the bitmap is truncated")
 }
 
+/// A window the header of a bitmap is read through.
+///
+/// A header is at most a hundred and twenty-four bytes plus its masks, so this is
+/// far past any real one; a file whose header is larger is refused by the parse
+/// rather than read further.
+const HEAD_WINDOW: usize = 64 * 1024;
+
+/// Bytes of one padded row of pixels, and of the whole pixel area.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the area does not fit this build.
+fn geometry(header: &Header) -> Result<(usize, usize)> {
+    // Every uncompressed row is padded to a multiple of four bytes.
+    let row_bytes = (header.width as usize * header.bit_count as usize).div_ceil(32) * 4;
+    let needed = row_bytes
+        .checked_mul(header.height as usize)
+        .ok_or_else(|| ImgSeqError::new("the bitmap is too large"))?;
+    Ok((row_bytes, needed))
+}
+
+/// Opens `path` and reads its header, leaving the reader at the pixels.
+///
+/// Answers `None` for every shape the stream does not cover, so the caller falls
+/// back to [`decode`].
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the file cannot be read, its header cannot be
+/// parsed, or it holds fewer pixels than the header states.
+fn prepare(path: &Path) -> Result<Option<(Header, BufReader<File>)>> {
+    let mut reader = BufReader::new(File::open(path).map_err(|e| image_error("open", path, e))?);
+    let mut window = vec![0u8; HEAD_WINDOW];
+    let read = reader
+        .read(&mut window)
+        .map_err(|e| image_error("open", path, e))?;
+    window.truncate(read);
+    let header = header(&window, 0, true).map_err(|e| image_error("decode", path, e))?;
+    if header.has_alpha || matches!(header.image_type, ImageType::Rle4 | ImageType::Rle8) {
+        return Ok(None);
+    }
+    let (_, needed) = geometry(&header)?;
+    let length = reader
+        .seek(SeekFrom::End(0))
+        .map_err(|e| image_error("open", path, e))?;
+    let offset = u64::try_from(header.data_offset).unwrap_or(u64::MAX);
+    if offset.saturating_add(u64::try_from(needed).unwrap_or(u64::MAX)) > length {
+        return Err(ImgSeqError::new(format!(
+            "the file holds {} bytes of pixels where the header states {needed}",
+            length.saturating_sub(offset)
+        )));
+    }
+    reader
+        .seek(SeekFrom::Start(offset))
+        .map_err(|e| image_error("open", path, e))?;
+    Ok(Some((header, reader)))
+}
+
 /// A bitmap whose rows can be written straight into the frames.
 ///
 /// The rows are the frame's rows, only possibly in the other order: a bitmap
@@ -499,6 +561,39 @@ fn truncated() -> ImgSeqError {
 #[derive(Debug)]
 pub struct Rows {
     path: std::path::PathBuf,
+    /// What the header states, kept so a read does not parse it again.
+    header: Option<Header>,
+    /// The reader the preparation opened, positioned at the first byte of the
+    /// pixels. `None` is a stream that came from [`RowStream::duplicate`], which
+    /// prepares itself on its way into a fill: duplicating cannot report the
+    /// failure that opening and parsing can.
+    raster: Option<BufReader<File>>,
+}
+
+impl Rows {
+    /// The header and the reader positioned at the pixels, prepared here when
+    /// this stream is a duplicate that has not read anything yet.
+    fn raster(&mut self) -> Result<(&Header, &mut BufReader<File>)> {
+        if self.raster.is_none() {
+            let Some((header, reader)) = prepare(&self.path)? else {
+                return Err(ImgSeqError::new(format!(
+                    "'{}' is no longer a bitmap this reader walks a row at a time",
+                    self.path.display()
+                )));
+            };
+            self.header = Some(header);
+            self.raster = Some(reader);
+        }
+        let header = self
+            .header
+            .as_ref()
+            .ok_or_else(|| ImgSeqError::new("the raster header is missing"))?;
+        let reader = self
+            .raster
+            .as_mut()
+            .ok_or_else(|| ImgSeqError::new("the raster reader is missing"))?;
+        Ok((header, reader))
+    }
 }
 
 impl RowStream for Rows {
@@ -507,51 +602,42 @@ impl RowStream for Rows {
     }
 
     fn fill(&mut self, mut sink: RowSink<'_>) -> Result<DecodeTimings> {
-        let open_started = std::time::Instant::now();
-        let data = std::fs::read(&self.path).map_err(|e| image_error("open", &self.path, e))?;
-        let open = open_started.elapsed();
-        let header = header(&data, 0, true).map_err(|e| image_error("decode", &self.path, e))?;
-
         let read_started = std::time::Instant::now();
+        let (header, reader) = self.raster()?;
         let width = header.width as usize;
         let height = header.height as usize;
-        // Every uncompressed row is padded to a multiple of four bytes.
-        let row_bytes = (width * header.bit_count as usize).div_ceil(32) * 4;
-        let needed = row_bytes
-            .checked_mul(height)
-            .ok_or_else(|| ImgSeqError::new("the bitmap is too large"))?;
-        let body = data
-            .get(header.data_offset..header.data_offset + needed)
-            .ok_or_else(|| {
-                ImgSeqError::new(format!(
-                    "the file holds {} bytes of pixels where the header states {needed}",
-                    data.len().saturating_sub(header.data_offset)
-                ))
-            })?;
+        let (row_bytes, _) = geometry(header)?;
+        let mut source = vec![0u8; row_bytes];
         let mut line = vec![0u8; width * 3];
         for row in 0..height {
-            let source = &body[row * row_bytes..(row + 1) * row_bytes];
+            reader
+                .read_exact(&mut source)
+                .map_err(|_| ImgSeqError::new(format!("the bitmap ends in row {row}")))?;
             let target_row = if header.top_down {
                 row
             } else {
                 height - 1 - row
             };
-            unpack_row(&header, source, &mut line, width, 3);
+            unpack_row(header, &source, &mut line, width, 3);
             sink.place_rgb8(&line, target_row)
                 .ok_or_else(|| ImgSeqError::new("the frame holds no three colour planes"))?;
         }
-        let read = read_started.elapsed();
+        // A stream is read once. Letting the reader go here means a second fill
+        // starts from the pixels again rather than from where this one stopped.
+        self.raster = None;
         Ok(DecodeTimings {
-            open,
+            open: std::time::Duration::ZERO,
             metadata: std::time::Duration::ZERO,
             buffer: std::time::Duration::ZERO,
-            read,
+            read: read_started.elapsed(),
         })
     }
 
     fn duplicate(&self) -> Box<dyn RowStream> {
         Box::new(Self {
             path: self.path.clone(),
+            header: None,
+            raster: None,
         })
     }
 }
@@ -565,11 +651,9 @@ impl RowStream for Rows {
 ///
 /// Returns [`ImgSeqError`] when the header cannot be read back.
 pub fn stream(info: &ImageInfo) -> Result<Option<DecodedImage>> {
-    let data = image_head(&info.path).map_err(|e| image_error("open", &info.path, e))?;
-    let header = header(&data, 0, true).map_err(|e| image_error("decode", &info.path, e))?;
-    if header.has_alpha || matches!(header.image_type, ImageType::Rle4 | ImageType::Rle8) {
+    let Some((header, raster)) = prepare(&info.path)? else {
         return Ok(None);
-    }
+    };
     Ok(Some(DecodedImage {
         width: info.width,
         height: info.height,
@@ -577,6 +661,8 @@ pub fn stream(info: &ImageInfo) -> Result<Option<DecodedImage>> {
         transform: info.transform,
         pixels: Pixels::Stream(Box::new(Rows {
             path: info.path.clone(),
+            header: Some(header),
+            raster: Some(raster),
         })),
         timings: DecodeTimings {
             open: std::time::Duration::ZERO,
@@ -968,6 +1054,30 @@ mod tests {
             .join("tests")
             .join("fixtures")
             .join(name)
+    }
+
+    /// The preparation leaves the reader at the pixels, and the padded rows it
+    /// reads are that pixel area and nothing else.
+    #[test]
+    fn the_row_sink_reads_the_padded_rows() {
+        let path = fixture("bmp-depth24.bmp");
+        let (header, mut reader) = prepare(&path)
+            .expect("the fixture is readable")
+            .expect("a 24 bit bitmap is a row sink");
+        let (row_bytes, needed) = geometry(&header).expect("the area fits this build");
+        let mut source = vec![0u8; row_bytes];
+        let mut rows = Vec::new();
+        for _ in 0..header.height as usize {
+            reader.read_exact(&mut source).expect("a row of pixels");
+            rows.extend_from_slice(&source);
+        }
+        let file = std::fs::read(&path).expect("the fixture");
+        let start = header.data_offset;
+        assert_eq!(
+            rows,
+            file[start..start + needed],
+            "the rows are the pixel area"
+        );
     }
 
     /// The round-to-nearest expansion, against the values the upstream tables
