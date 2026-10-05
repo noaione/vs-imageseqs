@@ -24,7 +24,7 @@
 //!   and `image` read it through the same `icc_profile()` this module calls. A gif
 //!   that carries one therefore still reports `ImgSeqHasICC`.
 
-use std::{path::Path, sync::Arc};
+use std::{fs::File, io::BufReader, path::Path, sync::Arc};
 
 use crate::{
     animation::gif as composite,
@@ -57,6 +57,7 @@ pub fn image_info(
     path: &Path,
     _apply_rotation: bool,
     route: Option<crate::formats::identify::Format>,
+    file: &mut BufReader<File>,
 ) -> Result<Option<ImageInfo>> {
     if !route.map_or_else(
         || owns(path),
@@ -64,7 +65,7 @@ pub fn image_info(
     ) {
         return Ok(None);
     }
-    let (width, height, icc_profile) = composite::screen(path)?;
+    let (width, height, icc_profile) = composite::screen(file, path)?;
     let profile = icc_profile.map(Arc::<[u8]>::from);
     Ok(Some(ImageInfo {
         route: None,

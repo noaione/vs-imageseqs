@@ -32,7 +32,7 @@
 
 use std::{
     fs::File,
-    io::BufReader,
+    io::{BufReader, Seek},
     path::{Path, PathBuf},
 };
 
@@ -150,8 +150,12 @@ pub fn segment_info(
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file cannot be read or is not a gif.
-pub fn screen(path: &Path) -> Result<(u32, u32, Option<Vec<u8>>)> {
-    let decoder = open(path)?;
+pub fn screen(file: &mut BufReader<File>, path: &Path) -> Result<(u32, u32, Option<Vec<u8>>)> {
+    // The logical screen is at the front of the file, so the walk starts there
+    // whatever the caller left the reader at.
+    file.rewind()
+        .map_err(|error| image_error("open", path, error))?;
+    let decoder = open_with(&mut *file, path)?;
     Ok((
         u32::from(decoder.width()),
         u32::from(decoder.height()),
@@ -436,12 +440,18 @@ impl Source {
 /// Opens the file and reads its logical screen.
 fn open(path: &Path) -> Result<::gif::Decoder<BufReader<File>>> {
     let file = File::open(path).map_err(|error| image_error("open", path, error))?;
+    open_with(BufReader::new(file), path)
+}
+
+/// The same decoder over an open the caller already holds, which is what the
+/// probe hands this while it describes the logical screen.
+fn open_with<R: std::io::BufRead>(reader: R, path: &Path) -> Result<::gif::Decoder<R>> {
     let mut options = DecodeOptions::new();
     // The crate does the palette, transparency and interlacing work; this module
     // does the drawing, which is the part the crate does not offer.
     options.set_color_output(ColorOutput::RGBA);
     options
-        .read_info(BufReader::new(file))
+        .read_info(reader)
         .map_err(|error| image_error("create decoder for", path, error))
 }
 

@@ -872,7 +872,9 @@ fn describe(path: &Path, apply_rotation: bool, input: &mut Input) -> Result<Imag
         }
         // An icon is a directory of payloads, and which one is read is decided
         // by the directory rather than by the frame.
-        Some(Format::Ico) => formats::ico::image_info(path, apply_rotation, route)?,
+        Some(Format::Ico) => {
+            formats::ico::image_info(path, apply_rotation, route, input.reader()?)?
+        }
         // A targa states its layout in an eighteen byte header, and the two
         // direction bits in that header decide where the pixels go rather than
         // an orientation property.
@@ -912,10 +914,14 @@ fn describe(path: &Path, apply_rotation: bool, input: &mut Input) -> Result<Imag
         }
         // A jpeg is read here rather than through the generic decoder, whose
         // reader would parse the file's headers four times for one probe.
-        Some(Format::Jpeg) => formats::jpeg::image_info(path, apply_rotation, route)?,
+        Some(Format::Jpeg) => {
+            formats::jpeg::image_info(path, apply_rotation, route, input.reader()?)?
+        }
         // A gif is read here: the container states the logical screen and its one
         // frame draws a rectangle onto it, so a still gif has a reader of its own.
-        Some(Format::Gif) => formats::gif::image_info(path, apply_rotation, route)?,
+        Some(Format::Gif) => {
+            formats::gif::image_info(path, apply_rotation, route, input.reader()?)?
+        }
         // A webp is read here too: the container states the canvas, the alpha
         // flag, the orientation and the profile, so describing one no longer
         // costs a decode of the whole picture.
@@ -1133,6 +1139,59 @@ mod tests {
             1,
             "the header and the walk share the open the router made"
         );
+    }
+
+    /// A gif, an icon and a jpeg read their containers out of the open the router
+    /// made, and each reads it from the front.
+    ///
+    /// `Input::reader` rewinds before it hands the handle out, so a probe never
+    /// meets a moved reader -- which is exactly why nothing else in the suite
+    /// would notice if one of these lost its rewind. Each is therefore asked
+    /// directly with a reader left in the middle of the file, which is the state
+    /// a change to `reader` would hand it.
+    #[test]
+    fn a_probe_that_reads_from_the_front_ignores_where_the_reader_was_left() {
+        use std::io::{BufReader, Seek, SeekFrom};
+
+        let moved = |path: &Path| {
+            let file = std::fs::File::open(path).expect("the fixture opens");
+            let mut reader = BufReader::new(file);
+            reader
+                .seek(SeekFrom::Start(4096))
+                .expect("the reader moves");
+            reader
+        };
+
+        let gif = fixture("gif-still.gif");
+        let screen = crate::animation::gif::screen(&mut moved(&gif), &gif)
+            .expect("the logical screen is read from the front");
+        // Measured, not guessed: the fixture is a 4x4 logical screen.
+        assert_eq!((screen.0, screen.1), (4, 4));
+
+        let ico = fixture("ico-png.ico");
+        let info = crate::formats::ico::image_info(&ico, true, None, &mut moved(&ico))
+            .expect("the icon is described")
+            .expect("the icon is taken over");
+        assert!(
+            info.width > 0 && info.height > 0,
+            "the size comes from the payload"
+        );
+    }
+
+    /// A gif, an icon and a jpeg are described from the one open the router made.
+    #[test]
+    fn a_gif_icon_or_jpeg_probe_reads_from_the_routers_open() {
+        for name in ["gif-still.gif", "ico-png.ico", "animation.gif"] {
+            let path = fixture(name);
+            super::reset_input_opens();
+            let info = probe(&path, true, false).expect("the fixture probes");
+            assert!(info.width > 0 && info.height > 0, "{name} is described");
+            assert_eq!(
+                super::input_opens(),
+                1,
+                "{name}: the container comes out of the open the router made"
+            );
+        }
     }
 
     /// A jpeg 2000 and a webp read their containers out of the same open, and a

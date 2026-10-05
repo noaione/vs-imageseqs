@@ -33,7 +33,11 @@
 //! selected -- and a depth this reader has no alpha for would otherwise be
 //! handed out as a fully transparent picture.
 
-use std::path::Path;
+use std::{
+    fs::File,
+    io::{BufReader, Read, Seek},
+    path::Path,
+};
 
 use crate::{
     decoder::{DecodeTimings, DecodedImage, ImageInfo, Pixels, image_error},
@@ -214,6 +218,7 @@ pub fn image_info(
     path: &Path,
     _apply_rotation: bool,
     route: Option<crate::formats::identify::Format>,
+    file: &mut BufReader<File>,
 ) -> Result<Option<ImageInfo>> {
     if !route.map_or_else(
         || owns(path),
@@ -225,7 +230,14 @@ pub fn image_info(
     // in it and `entries` checks every offset against the buffer it was given, so a
     // truncated head reads as an icon shorter than its directory says. An icon is at
     // most 256x256, so there is nothing to save by reading less.
-    let data = std::fs::read(path).map_err(|error| image_error("open", path, error))?;
+    // Read to the end from the front: an icon's directory indexes payloads
+    // anywhere in it, so a reader left anywhere else would silently describe a
+    // shorter icon than the file holds.
+    file.rewind()
+        .map_err(|error| image_error("open", path, error))?;
+    let mut data = Vec::new();
+    file.read_to_end(&mut data)
+        .map_err(|error| image_error("open", path, error))?;
     // An icon directory starts with a zero word and a type of one or two. A
     // file that does not is not an icon however it is named.
     let reserved = u16::from_le_bytes([*data.first().unwrap_or(&1), *data.get(1).unwrap_or(&0)]);
@@ -291,6 +303,18 @@ fn png_dimensions(payload: &[u8], path: &Path) -> Result<(u32, u32)> {
 /// The header of a DIB payload, with the two adjustments an icon needs.
 fn dib_header(payload: &[u8], path: &Path) -> Result<bmp::Header> {
     bmp::header_ico(payload, 0).map_err(|error| image_error("identify", path, error))
+}
+
+/// The same, from an open of its own, which is what a caller that did not come
+/// through a probe has.
+#[cfg(test)]
+pub fn image_info_at(
+    path: &Path,
+    apply_rotation: bool,
+    route: Option<crate::formats::identify::Format>,
+) -> Result<Option<ImageInfo>> {
+    let file = File::open(path).map_err(|error| image_error("open", path, error))?;
+    image_info(path, apply_rotation, route, &mut BufReader::new(file))
 }
 
 /// Decodes an icon into one interleaved buffer.
@@ -432,14 +456,14 @@ mod tests {
         let path = fixture("ico-multi.ico");
         let data = std::fs::read(&path).expect("the fixture is read");
         let index = best_index(&entries(&data).expect("read")).expect("selected");
-        let info = image_info(&path, true, None)
+        let info = image_info_at(&path, true, None)
             .expect("read")
             .expect("taken over");
         assert_eq!(info.subimage, Some(index));
 
         // An index the directory does not hold is refused rather than silently
         // replaced, which is what says the decode reads the saved one at all.
-        let mut wrong = image_info(&path, true, None)
+        let mut wrong = image_info_at(&path, true, None)
             .expect("read")
             .expect("taken over");
         wrong.subimage = Some(entries(&data).expect("read").len());
@@ -447,7 +471,7 @@ mod tests {
         assert!(error.to_string().contains("out of range"), "{error}");
 
         // An `ImageInfo` no probe built selects one, and reaches the same pixels.
-        let mut hand_built = image_info(&path, true, None)
+        let mut hand_built = image_info_at(&path, true, None)
             .expect("read")
             .expect("taken over");
         hand_built.subimage = None;
@@ -479,7 +503,7 @@ mod tests {
                 (width, height),
                 "{name}"
             );
-            let info = image_info(&fixture(name), true, None)
+            let info = image_info_at(&fixture(name), true, None)
                 .unwrap_or_else(|error| panic!("{name}: {error}"))
                 .unwrap_or_else(|| panic!("{name} is taken over"));
             assert_eq!((info.width, info.height), (width, height), "{name}");
@@ -526,7 +550,7 @@ mod tests {
             ("ico-png.ico", 32, 32),
             ("ico-multi.ico", 48, 48),
         ] {
-            let info = image_info(&fixture(name), true, None)
+            let info = image_info_at(&fixture(name), true, None)
                 .expect("read")
                 .expect("taken over");
             let decoded = decode(&info).unwrap_or_else(|error| panic!("{name}: {error}"));
@@ -609,7 +633,7 @@ mod tests {
         assert!(owns(Path::new("a.ICO")));
         assert!(!owns(Path::new("a.png")));
         assert!(
-            image_info(&fixture("cicp-rgb8.png"), true, None)
+            image_info_at(&fixture("cicp-rgb8.png"), true, None)
                 .expect("a png is not ours")
                 .is_none()
         );

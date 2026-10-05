@@ -41,8 +41,6 @@ use zune_jpeg::JpegDecoder;
 /// reads exactly the bytes the headers occupy and stops. `image`'s reader did
 /// the same, so this keeps the memory the old path used rather than paying for
 /// the convenience of having the bytes to hand.
-type Stream = BufReader<File>;
-
 use crate::{
     color::Cicp,
     decoder::{DecodeTimings, DecodedImage, ImageInfo, Pixels, image_error},
@@ -112,9 +110,17 @@ fn read_file(path: &Path) -> Result<Vec<u8>> {
     std::fs::read(path).map_err(|error| image_error("open", path, error))
 }
 
-fn open_stream(path: &Path) -> Result<Stream> {
-    let file = File::open(path).map_err(|error| image_error("open", path, error))?;
-    Ok(BufReader::new(file))
+/// A stream over an open the caller already holds, rewound to the front.
+///
+/// A jpeg's markers start at byte zero, so a reader left anywhere else would
+/// answer about a different file. Nothing reads before the probe hands this over
+/// and `decoder::Input::reader` rewinds first, but the rewind is here because
+/// the header walk is the one thing in this file that cannot survive being moved.
+fn open_stream<'a>(file: &'a mut BufReader<File>, path: &Path) -> Result<&'a mut BufReader<File>> {
+    use std::io::Seek;
+    file.rewind()
+        .map_err(|error| image_error("open", path, error))?;
+    Ok(&mut *file)
 }
 
 /// Probes `path` without decoding its picture.
@@ -130,6 +136,7 @@ pub fn image_info(
     path: &Path,
     apply_rotation: bool,
     route: Option<crate::formats::identify::Format>,
+    file: &mut BufReader<File>,
 ) -> Result<Option<ImageInfo>> {
     if !route.map_or_else(
         || owns(path),
@@ -137,7 +144,7 @@ pub fn image_info(
     ) {
         return Ok(None);
     }
-    let decoder = read_headers(open_stream(path)?, path)?;
+    let decoder = read_headers(open_stream(file, path)?, path)?;
     let header = header(&decoder, path)?;
     Ok(Some(info(path, &header, apply_rotation)))
 }
