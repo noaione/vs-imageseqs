@@ -73,6 +73,11 @@
 - A webp is described from its own chunks rather than by `image`, so
   `ImgSeqOrientation` and `ImgSeqHasICC` come from the file, and a webp cut
   short is refused rather than described
+- A Targa colour map whose entries are fifteen or sixteen bits is read rather
+  than refused. The entries are five bits a channel, widened by the same
+  round-to-nearest table a direct sixteen bit image uses. A sixteen bit entry's
+  attribute bit at bit fifteen is the entry's alpha, and a fifteen bit entry
+  states none, so such an entry is opaque
 
 ### fixed
 

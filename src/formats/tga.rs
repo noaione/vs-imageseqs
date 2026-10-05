@@ -24,6 +24,12 @@
 //! A fifteen and sixteen bit image is widened by the same round-to-nearest table
 //! the bitmap reader uses: five bits of `3` become `25`, where a shift and or
 //! gives `24`. See [`crate::formats::bmp::expand`].
+//!
+//! A colour map whose entries are two bytes is widened by that table too, and
+//! that is the one thing here the `image` decoder did not do: it read maps of
+//! three and four byte entries and refused these. A sixteen bit entry states an
+//! attribute bit at bit fifteen, which is the entry's alpha, and a fifteen bit
+//! entry states none and can only be opaque.
 
 use std::{
     fs::File,
@@ -84,12 +90,16 @@ impl ImageType {
     }
 }
 
-/// A colour map, as the file stores it: entries of three or four bytes, blue
-/// first, beginning at an index the header states.
+/// A colour map, as the file stores it: entries of two, three or four bytes,
+/// blue first, beginning at an index the header states.
 #[derive(Debug)]
 struct ColorMap {
     start: usize,
+    /// Bytes one entry occupies in the file.
     entry_size: usize,
+    /// Bytes one entry occupies once expanded, which is three unless a two byte
+    /// entry states an attribute bit.
+    entry_channels: usize,
     bytes: Vec<u8>,
 }
 
@@ -100,6 +110,40 @@ impl ColorMap {
             .entry_size
             .checked_mul(index.checked_sub(self.start)?)?;
         self.bytes.get(at..at + self.entry_size)
+    }
+
+    /// The encoding the entries are stored in, which is the label the
+    /// `ImgSeqOriginalColorType` property reports for a mapped image.
+    const fn source(&self) -> SourceColorType {
+        match self.entry_size {
+            2 => SourceColorType::Rgb5x1,
+            4 => SourceColorType::Rgba8,
+            _ => SourceColorType::Rgb8,
+        }
+    }
+
+    /// Expands the entry for `index` into `out`, which is `entry_channels` long.
+    ///
+    /// A three or four byte entry is handed over as the file stores it. A two
+    /// byte entry is five bits a channel, widened by the same round-to-nearest
+    /// table a direct fifteen or sixteen bit image uses, and a sixteen bit entry
+    /// states an attribute bit as well, which is its alpha.
+    fn expand(&self, index: usize, out: &mut [u8]) -> Result<()> {
+        let entry = self
+            .get(index)
+            .ok_or_else(|| ImgSeqError::new("the targa states a colour map index out of range"))?;
+        if self.entry_size != 2 {
+            out.copy_from_slice(entry);
+            return Ok(());
+        }
+        let value = u16::from_le_bytes([entry[0], entry[1]]);
+        out[0] = bmp::expand(value & 0b1_1111, 5);
+        out[1] = bmp::expand((value >> 5) & 0b1_1111, 5);
+        out[2] = bmp::expand((value >> 10) & 0b1_1111, 5);
+        if let Some(alpha) = out.get_mut(3) {
+            *alpha = if value & 0x8000 != 0 { 255 } else { 0 };
+        }
+        Ok(())
     }
 }
 
@@ -220,11 +264,20 @@ pub fn header(data: &[u8]) -> Result<Header> {
             ));
         }
         let entry_size = map_entry_bits.div_ceil(8);
-        if !matches!(entry_size, 3 | 4) {
+        if !matches!(entry_size, 2 | 3 | 4) {
             return Err(ImgSeqError::new(format!(
                 "a colour map entry of {map_entry_bits} bits is not supported"
             )));
         }
+        // A two byte entry is five bits a channel, which has to be widened to
+        // the eight bit channels a frame holds. Sixteen bits states an attribute
+        // bit as well, which is the entry's alpha; fifteen bits states none, so
+        // such an entry can only be opaque.
+        let entry_channels = match (entry_size, map_entry_bits) {
+            (2, 16) => 4,
+            (2, _) => 3,
+            (size, _) => size,
+        };
         let start = HEADER + id_length;
         let length = map_length
             .checked_mul(entry_size)
@@ -236,6 +289,7 @@ pub fn header(data: &[u8]) -> Result<Header> {
         Some(ColorMap {
             start: map_first,
             entry_size,
+            entry_channels,
             bytes,
         })
     } else {
@@ -260,7 +314,7 @@ pub fn header(data: &[u8]) -> Result<Header> {
     // bits come from the descriptor and the rest is what the depth leaves.
     let attrib = (descriptor & ALPHA_BIT_MASK) as usize;
     let total_bits = match &color_map {
-        Some(map) => map.entry_size * 8,
+        Some(map) => map.entry_channels * 8,
         None => pixel_depth,
     };
     let other_bits = total_bits
@@ -274,8 +328,9 @@ pub fn header(data: &[u8]) -> Result<Header> {
         (0, 32, true) => (ColorType::Rgba8, SourceColorType::Rgba8),
         (8, 24, true) => (ColorType::Rgba8, SourceColorType::Rgba8),
         (0, 24, true) => (ColorType::Rgb8, SourceColorType::Rgb8),
-        // The attribute bit of a five bit channel is not an alpha channel and
-        // cannot be read as one.
+        // A direct image's attribute bit is not an alpha channel and cannot be
+        // read as one. A colour map's is, because the entry's own size states
+        // whether it has one; `ColorMap::expand` is what reads it.
         (1, 15, true) | (0, 15, true) | (0, 16, true) => (ColorType::Rgb8, SourceColorType::Rgb5x1),
         (8, 8, false) => (ColorType::La8, SourceColorType::La8),
         (0, 8, false) => (ColorType::L8, SourceColorType::L8),
@@ -286,6 +341,13 @@ pub fn header(data: &[u8]) -> Result<Header> {
                 "a targa of {pixel_depth} bits with {attrib} attribute bits is not supported"
             )));
         }
+    };
+
+    // A mapped image is labelled with the encoding its entries are stored in
+    // rather than the eight bit channels they widen to.
+    let source = match &color_map {
+        Some(map) => map.source(),
+        None => source,
     };
 
     Ok(Header {
@@ -402,17 +464,14 @@ fn expand(header: &Header, stored: &[u8]) -> Result<Vec<u8>> {
         let stride = header.raw_bytes_per_pixel;
         for (index, chunk) in stored
             .chunks_exact(stride)
-            .zip(out.chunks_exact_mut(map.entry_size))
+            .zip(out.chunks_exact_mut(map.entry_channels))
         {
             let value = if stride == 1 {
                 u16::from(index[0])
             } else {
                 u16::from_le_bytes([index[0], index[1]])
             };
-            let entry = map.get(value as usize).ok_or_else(|| {
-                ImgSeqError::new("the targa states a colour map index out of range")
-            })?;
-            chunk.copy_from_slice(entry);
+            map.expand(value as usize, chunk)?;
         }
     } else if header.source == SourceColorType::Rgb5x1 {
         // Fifteen or sixteen bits is five bits a channel, in two bytes.
@@ -821,6 +880,27 @@ mod tests {
                 SourceColorType::Rgb8,
             ),
             (
+                "tga-mapped8-555.tga",
+                37,
+                23,
+                ColorType::Rgba8,
+                SourceColorType::Rgb5x1,
+            ),
+            (
+                "tga-mapped8-555-opaque.tga",
+                37,
+                23,
+                ColorType::Rgb8,
+                SourceColorType::Rgb5x1,
+            ),
+            (
+                "tga-mapped8-555-widened.tga",
+                37,
+                23,
+                ColorType::Rgb8,
+                SourceColorType::Rgb8,
+            ),
+            (
                 "tga-rgb24-rle.tga",
                 37,
                 23,
@@ -884,6 +964,54 @@ mod tests {
         let alphas: std::collections::BTreeSet<u8> =
             buffer.as_chunks::<4>().0.iter().map(|px| px[3]).collect();
         assert!(alphas.contains(&64) && alphas.contains(&255), "{alphas:?}");
+    }
+
+    /// The decoded buffer of one fixture, which is what a widened colour map
+    /// has to be compared against byte for byte.
+    fn buffer_of(name: &str) -> Vec<u8> {
+        let info = image_info(&fixture(name), true, None)
+            .unwrap_or_else(|error| panic!("{name}: {error}"))
+            .unwrap_or_else(|| panic!("{name} is taken over"));
+        let decoded = decode(&info).unwrap_or_else(|error| panic!("{name}: {error}"));
+        let Pixels::Interleaved { buffer, .. } = decoded.pixels else {
+            panic!("a targa hands out one interleaved buffer");
+        };
+        buffer
+    }
+
+    /// The two byte colour map entries, which are five bits a channel widened by
+    /// the table a direct sixteen bit image uses. A sixteen bit entry states an
+    /// attribute bit as well and a fifteen bit one does not, which is the whole
+    /// difference between the two spellings.
+    #[test]
+    fn a_two_byte_colour_map_is_widened_and_a_sixteen_bit_entry_states_alpha() {
+        // The same picture three times: eight bit entries holding the values the
+        // five bit channels widen to, fifteen bit entries, and sixteen bit ones.
+        // Every index the picture uses reaches its entry -- the ramp reaches 255
+        // -- so a map read one entry short refuses rather than decoding.
+        let widened = buffer_of("tga-mapped8-555-widened.tga");
+        let opaque = buffer_of("tga-mapped8-555-opaque.tga");
+        assert_eq!(widened, opaque, "a fifteen bit entry states no alpha");
+
+        let stated = buffer_of("tga-mapped8-555.tga");
+        assert_eq!(stated.len(), widened.len() / 3 * 4);
+        let alphas: std::collections::BTreeSet<u8> = stated
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|pixel| pixel[3])
+            .collect();
+        // Both halves of the map are reached, so an attribute bit that was
+        // ignored, or read the wrong way round, would not show both.
+        assert_eq!(alphas, std::collections::BTreeSet::from([0, 255]));
+        for (packed, plain) in stated
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(widened.as_chunks::<3>().0)
+        {
+            assert_eq!(&packed[..3], plain, "the five bit channels widen alike");
+        }
     }
 
     /// The run-length forms decode to the same picture as the raw ones, which is

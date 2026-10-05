@@ -21,6 +21,12 @@ image whose descriptor states **zero attribute bits** is still handed out as
 ``Rgba8``, keeping its fourth byte as alpha. That is the opposite of the rule for
 a BMP, where the same fourth byte is dropped, and the two files exist to hold
 that difference still.
+
+The second case is the two byte colour map entry. ``tga-mapped8-555-widened.tga``
+holds the same indexed picture as ``tga-mapped8-555-opaque.tga``, whose map
+entries are fifteen bits, and as ``tga-mapped8-555.tga``, whose entries are
+sixteen bits and state an attribute bit at bit fifteen. The eight bit map holds
+the values the five bit channels widen to, so the three have to decode alike.
 """
 
 from __future__ import annotations
@@ -65,6 +71,23 @@ def samples() -> list[tuple[int, int, int, int]]:
 def palette() -> list[tuple[int, int, int]]:
     """A 256 entry colour map, so an eight bit index reaches a colour."""
     return [((i * 7) % 256, (i * 13) % 256, (i * 29) % 256) for i in range(256)]
+
+
+def widen(value: int, bits: int = 5) -> int:
+    """The round-to-nearest widening the reader shares with the bitmap reader."""
+    top = (1 << bits) - 1
+    return (value * 255 + top // 2) // top
+
+
+def five_bit_palette() -> list[tuple[int, int, int]]:
+    """A 256 entry map in five bit channels, which a two byte entry holds."""
+    return [((i * 7) % 32, (i * 13) % 32, (i * 29) % 32) for i in range(256)]
+
+
+def packed_entry(red: int, green: int, blue: int, attribute: int = 0) -> bytes:
+    """One two byte entry: five bits a channel and the attribute bit on top."""
+    value = (attribute << 15) | (red << 10) | (green << 5) | blue
+    return value.to_bytes(2, "little")
 
 
 def header(
@@ -216,6 +239,31 @@ def main() -> int:
           pixel_depth=8, descriptor=0,
           extra_header={"map_type": 1, "map_length": 256, "map_entry_size": 24},
           color_map=color_map)
+
+    # The same indexed picture with two byte map entries, which are five bits a
+    # channel. The eight bit map holds the values those channels widen to, so the
+    # pair decodes alike; the sixteen bit spelling states an attribute bit at bit
+    # fifteen, which is the entry's alpha, and the fifteen bit one states none
+    # and can only be opaque.
+    five = five_bit_palette()
+    write("tga-mapped8-555-widened.tga", TYPE_COLOR_MAPPED, indices,
+          pixel_depth=8, descriptor=0,
+          extra_header={"map_type": 1, "map_length": 256, "map_entry_size": 24},
+          color_map=b"".join(
+              bytes([widen(blue), widen(green), widen(red)])
+              for red, green, blue in five
+          ))
+    write("tga-mapped8-555-opaque.tga", TYPE_COLOR_MAPPED, indices,
+          pixel_depth=8, descriptor=0,
+          extra_header={"map_type": 1, "map_length": 256, "map_entry_size": 15},
+          color_map=b"".join(packed_entry(*entry) for entry in five))
+    write("tga-mapped8-555.tga", TYPE_COLOR_MAPPED, indices,
+          pixel_depth=8, descriptor=0,
+          extra_header={"map_type": 1, "map_length": 256, "map_entry_size": 16},
+          color_map=b"".join(
+              packed_entry(*entry, attribute=1 if index >= 128 else 0)
+              for index, entry in enumerate(five)
+          ))
 
     # ---- The same three again, run-length encoded.
     write("tga-rgb24-rle.tga", TYPE_TRUECOLOR_RLE,
