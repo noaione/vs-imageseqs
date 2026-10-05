@@ -13,7 +13,7 @@
 
 use std::{
     fs::File,
-    io::Read,
+    io::{BufReader, Read, Seek, SeekFrom},
     path::Path,
     sync::Arc,
     time::{Duration, Instant},
@@ -76,8 +76,12 @@ struct SizHeader {
 }
 
 /// Probe one JPEG 2000 image without asking OpenJPEG to decode its pixels.
-pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<ImageInfo> {
-    let header = read_description(path)?;
+pub fn image_info(
+    path: &Path,
+    _apply_rotation: bool,
+    file: &mut BufReader<File>,
+) -> Result<ImageInfo> {
+    let header = read_description(file, path)?;
     let (color_type, format) = output_format(&header, path)?;
 
     Ok(ImageInfo {
@@ -96,6 +100,14 @@ pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<ImageInfo> {
         transform: Transform::IDENTITY,
         format,
     })
+}
+
+/// The same, from an open of its own, which is what a caller that did not come
+/// through a probe has.
+#[cfg(test)]
+pub fn image_info_at(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
+    let file = File::open(path).map_err(|error| image_error("open", path, error))?;
+    image_info(path, apply_rotation, &mut BufReader::new(file))
 }
 
 /// Decode a JPEG 2000 image into an interleaved buffer or its coded yuv planes.
@@ -495,15 +507,21 @@ fn parse_header(data: &[u8], path: &Path) -> Result<Header> {
 ///
 /// Returns [`ImgSeqError`] when the file cannot be read or its header cannot be
 /// described.
-fn read_description(path: &Path) -> Result<Header> {
-    let length = std::fs::metadata(path)
-        .map_err(|error| image_error("open", path, error))?
-        .len();
+fn read_description(file: &mut BufReader<File>, path: &Path) -> Result<Header> {
+    let length = file
+        .seek(SeekFrom::End(0))
+        .map_err(|error| image_error("open", path, error))?;
     let mut window = PROBE_WINDOW.min(length);
     loop {
-        let file = File::open(path).map_err(|error| image_error("open", path, error))?;
+        // Each attempt reads the front of the file again out of the one open, so
+        // growing the window costs a seek and a read rather than another open.
+        // This loop used to reopen the file every time it grew, which is what
+        // made a header that outruns the first window cost a chain of opens.
+        file.seek(SeekFrom::Start(0))
+            .map_err(|error| image_error("open", path, error))?;
         let mut data = Vec::new();
-        file.take(window)
+        file.by_ref()
+            .take(window)
             .read_to_end(&mut data)
             .map_err(|error| image_error("read", path, error))?;
         match parse_header(&data, path) {
@@ -964,7 +982,7 @@ mod tests {
         // what a file padded before its header looks like.
         let past = jp2_file(64, 32, usize::try_from(PROBE_WINDOW).unwrap() + 1024);
         let path = write_temp("past-window.jp2", &past);
-        let info = image_info(&path, true).expect("a padded header to describe");
+        let info = image_info_at(&path, true).expect("a padded header to describe");
         assert_eq!((info.width, info.height), (64, 32));
         let _ = std::fs::remove_file(&path);
 
@@ -972,7 +990,7 @@ mod tests {
         // growth are covered.
         let inside = jp2_file(64, 32, 16);
         let path = write_temp("inside-window.jp2", &inside);
-        let info = image_info(&path, true).expect("a header in the window to describe");
+        let info = image_info_at(&path, true).expect("a header in the window to describe");
         assert_eq!((info.width, info.height), (64, 32));
         let _ = std::fs::remove_file(&path);
     }

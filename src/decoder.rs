@@ -848,7 +848,11 @@ fn describe(path: &Path, apply_rotation: bool, input: &mut Input) -> Result<Imag
         // These two answer with a description rather than with an option: the
         // route above is the check that used to come before the call.
         Some(Format::Jxl) => Some(formats::jxl::image_info(path, apply_rotation)?),
-        Some(Format::Jp2) => Some(formats::jp2::image_info(path, apply_rotation)?),
+        Some(Format::Jp2) => Some(formats::jp2::image_info(
+            path,
+            apply_rotation,
+            input.reader()?,
+        )?),
         // A quite ok image states its size and its channel count in fourteen
         // bytes, and a farbfeld's header is the same shape and just as cheap.
         Some(Format::Qoi) => {
@@ -915,7 +919,9 @@ fn describe(path: &Path, apply_rotation: bool, input: &mut Input) -> Result<Imag
         // A webp is read here too: the container states the canvas, the alpha
         // flag, the orientation and the profile, so describing one no longer
         // costs a decode of the whole picture.
-        Some(Format::Webp) => formats::webp::image_info(path, apply_rotation, route)?,
+        Some(Format::Webp) => {
+            formats::webp::image_info(path, apply_rotation, route, input.reader()?)?
+        }
         // A file no format here names is a file this plugin does not read. It
         // used to be the generic decoder's, which was the last thing `image`
         // was linked for; there is no generic decoder any more.
@@ -1127,6 +1133,24 @@ mod tests {
             1,
             "the header and the walk share the open the router made"
         );
+    }
+
+    /// A jpeg 2000 and a webp read their containers out of the same open, and a
+    /// webp's walk reads from the front of it rather than from wherever the
+    /// routing head left the reader.
+    #[test]
+    fn a_jpeg_2000_or_webp_probe_reads_its_container_from_the_routers_open() {
+        for name in ["alpha-jp2-rgb8.jp2", "lossy.webp", "orientation-6.webp"] {
+            let path = fixture(name);
+            super::reset_input_opens();
+            let info = probe(&path, true, false).expect("the fixture probes");
+            assert!(info.width > 0 && info.height > 0, "{name} is described");
+            assert_eq!(
+                super::input_opens(),
+                1,
+                "{name}: the container comes out of the open the router made"
+            );
+        }
     }
 
     /// A netpbm's preamble is a text window that grows while the parse needs

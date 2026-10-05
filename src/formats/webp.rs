@@ -61,7 +61,7 @@
 
 use std::{
     fs::File,
-    io::{Read, Seek, SeekFrom},
+    io::{BufReader, Read, Seek, SeekFrom},
     path::Path,
     sync::Arc,
     time::{Duration, Instant},
@@ -221,7 +221,7 @@ fn u24(bytes: &[u8]) -> u32 {
 }
 
 /// One chunk payload, which the caller has already checked fits in the file.
-fn payload(file: &mut File, size: u64) -> Option<Vec<u8>> {
+fn payload(file: &mut impl Read, size: u64) -> Option<Vec<u8>> {
     let mut bytes = vec![0; usize::try_from(size).ok()?];
     file.read_exact(&mut bytes).ok()?;
     Some(bytes)
@@ -231,9 +231,11 @@ fn payload(file: &mut File, size: u64) -> Option<Vec<u8>> {
 ///
 /// The size is the stored one, so an oriented file reports the size it holds and
 /// hands out the swap through its transform.
-fn probe_header(path: &Path) -> Option<ProbeHeader> {
-    let mut file = File::open(path).ok()?;
-    let length = file.metadata().ok()?.len();
+fn probe_header(file: &mut BufReader<File>) -> Option<ProbeHeader> {
+    file.rewind().ok()?;
+    // The container walk reads from the front whatever the caller left the reader
+    // at, because a chunk list that starts in the middle of one is not one.
+    let length = file.get_ref().metadata().ok()?.len();
     let mut riff = [0; 12];
     file.read_exact(&mut riff).ok()?;
     let end = container_end(&riff, length)?;
@@ -295,8 +297,8 @@ fn probe_header(path: &Path) -> Option<ProbeHeader> {
                 }
             }
             b"ALPH" => header.has_alpha = true,
-            b"ICCP" => header.icc_profile = payload(&mut file, size),
-            b"EXIF" => header.exif = payload(&mut file, size),
+            b"ICCP" => header.icc_profile = payload(file, size),
+            b"EXIF" => header.exif = payload(file, size),
             _ => {}
         }
         // Absolute rather than relative: a chunk whose payload was read is
@@ -323,6 +325,7 @@ pub fn image_info(
     path: &Path,
     apply_rotation: bool,
     route: Option<crate::formats::identify::Format>,
+    file: &mut BufReader<File>,
 ) -> Result<Option<ImageInfo>> {
     if !route.map_or_else(
         || owns(path),
@@ -330,7 +333,7 @@ pub fn image_info(
     ) {
         return Ok(None);
     }
-    let Some(header) = probe_header(path) else {
+    let Some(header) = probe_header(file) else {
         return Ok(None);
     };
     let color_type = if header.has_alpha {
@@ -881,6 +884,32 @@ mod tests {
         encoded
     }
 
+    /// The container walk through an open of its own, which is what a probe does
+    /// with the reader it already holds.
+    fn header_at(path: &Path) -> Option<ProbeHeader> {
+        let file = File::open(path).ok()?;
+        probe_header(&mut BufReader::new(file))
+    }
+
+    /// The walk reads from the front of the open it is handed, not from wherever
+    /// the caller left it.
+    ///
+    /// Nothing in this probe has read yet, so a walk that forgot to rewind would
+    /// still pass every other test here; this moves the reader first, which is
+    /// what a probe that had already grown its window hands over.
+    #[test]
+    fn the_container_walk_starts_at_the_front_of_the_open_it_is_given() {
+        let (path, _) = lossy_fixture();
+        let file = File::open(&path).expect("the fixture opens");
+        let mut reader = BufReader::new(file);
+        reader.seek(SeekFrom::Start(32)).expect("the reader moves");
+        let header = probe_header(&mut reader).expect("the container to describe");
+        assert!(
+            header.width > 0 && header.height > 0,
+            "the size is the one the container states, not the one found by accident"
+        );
+    }
+
     /// Writes bytes to a temp file named for this test process.
     fn write_temp(name: &str, bytes: &[u8]) -> PathBuf {
         let path = std::env::temp_dir().join(format!("imgseqs-webp-{}-{name}", std::process::id()));
@@ -981,7 +1010,7 @@ mod tests {
                 (b"ANIM", vec![0; 6]),
             ]),
         );
-        let header = probe_header(&path).expect("an extended container to describe");
+        let header = header_at(&path).expect("an extended container to describe");
         assert_eq!((header.width, header.height), (16, 16));
         assert!(header.has_alpha, "the VP8X alpha bit");
         assert_eq!(header.icc_profile.as_deref(), Some(&[1, 2, 3][..]));
@@ -994,7 +1023,7 @@ mod tests {
         lossy[6..8].copy_from_slice(&20_u16.to_le_bytes());
         lossy[8..10].copy_from_slice(&12_u16.to_le_bytes());
         let path = write_temp("probe-lossy.webp", &riff(&[(b"VP8 ", lossy)]));
-        let header = probe_header(&path).expect("a plain lossy still to describe");
+        let header = header_at(&path).expect("a plain lossy still to describe");
         assert_eq!((header.width, header.height), (20, 12));
         assert!(!header.has_alpha);
         assert!(header.icc_profile.is_none() && header.exif.is_none());
@@ -1006,7 +1035,7 @@ mod tests {
         let mut lossless = vec![0x2f];
         lossless.extend_from_slice(&word.to_le_bytes());
         let path = write_temp("probe-lossless.webp", &riff(&[(b"VP8L", lossless)]));
-        let header = probe_header(&path).expect("a plain lossless still to describe");
+        let header = header_at(&path).expect("a plain lossless still to describe");
         assert_eq!((header.width, header.height), (5, 7));
         assert!(header.has_alpha, "the VP8L alpha bit");
         let _ = std::fs::remove_file(&path);
@@ -1024,7 +1053,7 @@ mod tests {
         for length in 0..full.len() {
             let path = write_temp("probe-truncated.webp", &full[..length]);
             assert!(
-                probe_header(&path).is_none(),
+                header_at(&path).is_none(),
                 "a cut at {length} bytes still describes"
             );
             let _ = std::fs::remove_file(&path);
@@ -1033,7 +1062,7 @@ mod tests {
         // An animated file nests its frames, so the only canvas is inside an
         // `ANMF` payload this walk does not descend into.
         let path = write_temp("probe-animated.webp", &riff(&[(b"ANIM", vec![0; 6])]));
-        assert!(probe_header(&path).is_none());
+        assert!(header_at(&path).is_none());
         let _ = std::fs::remove_file(&path);
     }
 
