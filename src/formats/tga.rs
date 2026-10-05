@@ -32,14 +32,15 @@ use std::{
 };
 
 use crate::{
-    decoder::{
-        DecodeTimings, DecodedImage, ImageInfo, Pixels, RowSink, RowStream, image_error, image_head,
-    },
+    decoder::{DecodeTimings, DecodedImage, ImageInfo, Pixels, RowSink, RowStream, image_error},
     error::{ImgSeqError, Result},
     formats::bmp,
     layout::{ColorType, Orientation, SourceColorType},
     pixel::{PixelFormat, Transform},
 };
+
+#[cfg(test)]
+use crate::decoder::image_head;
 
 /// Bytes of the fixed header, before the image id and the colour map.
 const HEADER: usize = 18;
@@ -458,10 +459,32 @@ fn reverse_encoding(header: &Header, pixels: &mut [u8]) {
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file is one of ours and cannot be read.
+/// The path-taking form, which this module's own tests use. The probe asks
+/// through [`image_info_headed`] with a head it already holds, so this is not
+/// on the path a probe takes.
+#[cfg(test)]
 pub fn image_info(
     path: &Path,
     _apply_rotation: bool,
     route: Option<crate::formats::identify::Format>,
+) -> Result<Option<ImageInfo>> {
+    let data = image_head(path).map_err(|error| image_error("open", path, error))?;
+    image_info_headed(path, _apply_rotation, route, &data)
+}
+
+/// [`image_info`] from a head the caller has already read.
+///
+/// A targa's header is eighteen bytes and its colour map is the only thing past
+/// that, so the window covers everything this reader asks about.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the file is one of ours and cannot be read.
+pub fn image_info_headed(
+    path: &Path,
+    _apply_rotation: bool,
+    route: Option<crate::formats::identify::Format>,
+    data: &[u8],
 ) -> Result<Option<ImageInfo>> {
     if !route.map_or_else(
         || owns(path),
@@ -469,10 +492,9 @@ pub fn image_info(
     ) {
         return Ok(None);
     }
-    let data = image_head(path).map_err(|error| image_error("open", path, error))?;
     // A targa has no magic number to sniff, so a file whose header does not
     // parse is declined rather than refused, and something else may read it.
-    let Ok(header) = header(&data) else {
+    let Ok(header) = header(data) else {
         return Ok(None);
     };
     Ok(Some(ImageInfo {

@@ -29,13 +29,14 @@
 use std::{fs::File, io::Read, path::Path};
 
 use crate::{
-    decoder::{
-        DecodeTimings, DecodedImage, ImageInfo, Pixels, RowSink, RowStream, image_error, image_head,
-    },
+    decoder::{DecodeTimings, DecodedImage, ImageInfo, Pixels, RowSink, RowStream, image_error},
     error::{ImgSeqError, Result},
     layout::{ColorType, Orientation, SourceColorType},
     pixel::{PixelFormat, Transform},
 };
+
+#[cfg(test)]
+use crate::decoder::image_head;
 
 /// The eight bytes every farbfeld starts with.
 const MAGIC: &[u8; 8] = b"farbfeld";
@@ -83,10 +84,29 @@ fn pixel_bytes(width: u32, height: u32) -> Result<usize> {
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file is one of ours and cannot be read.
+/// The path-taking form, which this module's own tests use. The probe asks
+/// through [`image_info_headed`] with a head it already holds, so this is not
+/// on the path a probe takes.
+#[cfg(test)]
 pub fn image_info(
     path: &Path,
     _apply_rotation: bool,
     route: Option<crate::formats::identify::Format>,
+) -> Result<Option<ImageInfo>> {
+    let data = image_head(path).map_err(|error| image_error("open", path, error))?;
+    image_info_headed(path, _apply_rotation, route, &data)
+}
+
+/// [`image_info`] from a head the caller has already read.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the file is one of ours and cannot be read.
+pub fn image_info_headed(
+    path: &Path,
+    _apply_rotation: bool,
+    route: Option<crate::formats::identify::Format>,
+    data: &[u8],
 ) -> Result<Option<ImageInfo>> {
     if !route.map_or_else(
         || owns(path),
@@ -94,8 +114,7 @@ pub fn image_info(
     ) {
         return Ok(None);
     }
-    let data = image_head(path).map_err(|error| image_error("open", path, error))?;
-    let Some((width, height)) = dimensions(&data) else {
+    let Some((width, height)) = dimensions(data) else {
         return Ok(None);
     };
     if width == 0 || height == 0 {

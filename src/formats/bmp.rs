@@ -42,13 +42,14 @@ use std::{
 };
 
 use crate::{
-    decoder::{
-        DecodeTimings, DecodedImage, ImageInfo, Pixels, RowSink, RowStream, image_error, image_head,
-    },
+    decoder::{DecodeTimings, DecodedImage, ImageInfo, Pixels, RowSink, RowStream, image_error},
     error::{ImgSeqError, Result},
     layout::{ColorType, Orientation, SourceColorType},
     pixel::{PixelFormat, Transform},
 };
+
+#[cfg(test)]
+use crate::decoder::image_head;
 
 /// Byte counts that name a DIB header, from the size field inside it.
 const CORE_HEADER: u32 = 12;
@@ -975,10 +976,32 @@ fn rle(header: &Header, data: &[u8], out: &mut [u8]) -> Result<()> {
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file is one of ours and cannot be read.
+/// The path-taking form, which this module's own tests use. The probe asks
+/// through [`image_info_headed`] with a head it already holds, so this is not
+/// on the path a probe takes.
+#[cfg(test)]
 pub fn image_info(
     path: &Path,
     _apply_rotation: bool,
     route: Option<crate::formats::identify::Format>,
+) -> Result<Option<ImageInfo>> {
+    let data = image_head(path).map_err(|error| image_error("open", path, error))?;
+    image_info_headed(path, _apply_rotation, route, &data)
+}
+
+/// [`image_info`] from a head the caller has already read.
+///
+/// A bitmap's header, its masks and its palette are all inside the window, which
+/// is why this reader is one of the six that can take it.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the file is one of ours and cannot be read.
+pub fn image_info_headed(
+    path: &Path,
+    _apply_rotation: bool,
+    route: Option<crate::formats::identify::Format>,
+    data: &[u8],
 ) -> Result<Option<ImageInfo>> {
     if !route.map_or_else(
         || owns(path),
@@ -986,13 +1009,12 @@ pub fn image_info(
     ) {
         return Ok(None);
     }
-    let data = image_head(path).map_err(|error| image_error("open", path, error))?;
     // A `.bmp` that does not start with `BM` is not one however it is named, so
     // it is declined rather than refused: something else can still read it.
-    if data.len() < 2 || &data[..2] != b"BM" {
+    if data.len() < 2 || data[..2] != *b"BM" {
         return Ok(None);
     }
-    let header = header(&data, 0, true).map_err(|error| image_error("identify", path, error))?;
+    let header = header(data, 0, true).map_err(|error| image_error("identify", path, error))?;
     Ok(Some(ImageInfo {
         route: None,
         subimage: None,

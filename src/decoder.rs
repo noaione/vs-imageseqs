@@ -547,6 +547,7 @@ pub(crate) const PROBE_HEAD_BYTES: u64 = 64 * 1024;
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file cannot be opened or read.
+#[cfg(test)]
 pub(crate) fn image_head(path: &Path) -> Result<Vec<u8>> {
     use std::io::Read;
     let file = std::fs::File::open(path).map_err(|error| image_error("open", path, error))?;
@@ -555,6 +556,95 @@ pub(crate) fn image_head(path: &Path) -> Result<Vec<u8>> {
         .read_to_end(&mut data)
         .map_err(|error| image_error("open", path, error))?;
     Ok(data)
+}
+
+/// One file, opened once, and the leading bytes read from it at most once.
+///
+/// A probe asks two questions of a file -- which format owns it, and what that
+/// format states -- and until now each asked by opening it. This is the one open
+/// both ask through, with the leading bytes kept and grown on demand rather than
+/// read twice.
+///
+/// The window grows because the two questions want different amounts: the route
+/// needs sixteen bytes, and a module whose header is a bitmap's palette wants the
+/// [`PROBE_HEAD_BYTES`]. A module that opens for itself still may; what this
+/// removes is the read that answered the same question twice.
+#[derive(Debug)]
+pub struct Input {
+    path: PathBuf,
+    /// What has been read so far, which is the whole file when it is shorter.
+    head: Vec<u8>,
+}
+
+impl Input {
+    /// Opens `path` without reading anything.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ImgSeqError`] when the file cannot be opened.
+    pub fn open(path: &Path) -> Result<Self> {
+        std::fs::File::open(path).map_err(|error| image_error("open", path, error))?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            head: Vec::new(),
+        })
+    }
+
+    /// The first `want` bytes of the file, read once through the one open this holds.
+    ///
+    /// Asking for fewer than are already held answers from what is there rather than
+    /// re-reading, which is what makes the route's sixteen bytes free once a module has
+    /// asked for the window. Asking for more extends what is held from where it stops,
+    /// so the sixteen the route read first are not read a second time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ImgSeqError`] when the file cannot be read.
+    pub fn head(&mut self, want: usize) -> Result<&[u8]> {
+        if (self.head.len() as u64) < want as u64 {
+            use std::io::{Read, Seek, SeekFrom};
+            let mut file = std::fs::File::open(&self.path)
+                .map_err(|error| image_error("open", &self.path, error))?;
+            let first = self.head.is_empty();
+            if !first {
+                file.seek(SeekFrom::Start(self.head.len() as u64))
+                    .map_err(|error| image_error("open", &self.path, error))?;
+            }
+            let held = self.head.len();
+            let mut more = Vec::new();
+            file.take((want - held) as u64)
+                .read_to_end(&mut more)
+                .map_err(|error| image_error("open", &self.path, error))?;
+            self.head.extend_from_slice(&more);
+            // One read of the front per open, however many times it is asked for.
+            #[cfg(test)]
+            if first {
+                HEAD_READS.with(|count| count.set(count.get() + 1));
+            }
+        }
+        Ok(&self.head)
+    }
+}
+
+/// How many reads of a file's leading bytes a probe has made on this thread.
+///
+/// This is the measure [`crate::formats::identify::head_reads`] used to be, moved
+/// here: the routing read no longer opens the file itself, so a probe's one head
+/// read is made here, by the one input the whole probe asks through.
+#[cfg(test)]
+pub(crate) fn head_reads() -> usize {
+    HEAD_READS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+thread_local! {
+static HEAD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Starts [`head_reads`] from zero.
+#[cfg(test)]
+pub(crate) fn reset_head_reads() {
+    HEAD_READS.with(|count| count.set(0));
 }
 
 /// Describes one file without decoding it, for a call that may or may not want
@@ -648,7 +738,20 @@ fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
     // or not r,g,b, say -- is then followed by the generic decoder below, which
     // is what a chain of fifteen `owns` calls did before: with the content
     // deciding, no other module could have claimed it anyway.
-    let route = identify::route(path);
+    // One open answers both questions: the route reads sixteen bytes of it and
+    // the module below reads the window from the same input rather than opening the
+    // file a second time. A module that reads past the window still opens for itself,
+    // and those are listed in the plan as what is left.
+    let mut input = Input::open(path)?;
+    let route = {
+        let head = input.head(crate::formats::identify::HEAD_BYTES)?;
+        identify::route_from(head, path)
+    };
+    // A module that reads the window asks for it here, and the read is the same one
+    // the route would have made, so the two questions share it.
+    fn window(input: &mut Input) -> Result<&[u8]> {
+        input.head(PROBE_HEAD_BYTES as usize)
+    }
     let described = match route {
         // The two containers whose own reader answers a size without decoding
         // the picture at all.
@@ -662,23 +765,38 @@ fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
         Some(Format::Jp2) => Some(formats::jp2::image_info(path, apply_rotation)?),
         // A quite ok image states its size and its channel count in fourteen
         // bytes, and a farbfeld's header is the same shape and just as cheap.
-        Some(Format::Qoi) => formats::qoi::image_info(path, apply_rotation, route)?,
-        Some(Format::Farbfeld) => formats::farbfeld::image_info(path, apply_rotation, route)?,
+        Some(Format::Qoi) => {
+            let data = window(&mut input)?;
+            formats::qoi::image_info_headed(path, apply_rotation, route, data)?
+        }
+        Some(Format::Farbfeld) => {
+            let data = window(&mut input)?;
+            formats::farbfeld::image_info_headed(path, apply_rotation, route, data)?
+        }
         // A bitmap states its depth, its compression and its masks in a header
         // this module reads without touching a sample, and the alpha decision is
         // part of that header rather than of the samples.
-        Some(Format::Bmp) => formats::bmp::image_info(path, apply_rotation, route)?,
+        Some(Format::Bmp) => {
+            let data = window(&mut input)?;
+            formats::bmp::image_info_headed(path, apply_rotation, route, data)?
+        }
         // An icon is a directory of payloads, and which one is read is decided
         // by the directory rather than by the frame.
         Some(Format::Ico) => formats::ico::image_info(path, apply_rotation, route)?,
         // A targa states its layout in an eighteen byte header, and the two
         // direction bits in that header decide where the pixels go rather than
         // an orientation property.
-        Some(Format::Tga) => formats::tga::image_info(path, apply_rotation, route)?,
+        Some(Format::Tga) => {
+            let data = window(&mut input)?;
+            formats::tga::image_info_headed(path, apply_rotation, route, data)?
+        }
         // A surface states its compression in a four character code or in a
         // DXGI format number, and its size has to be a whole number of four by
         // four blocks.
-        Some(Format::Dds) => formats::dds::image_info(path, apply_rotation, route)?,
+        Some(Format::Dds) => {
+            let data = window(&mut input)?;
+            formats::dds::image_info_headed(path, apply_rotation, route, data)?
+        }
         // A netpbm states its magic, its size and its `MAXVAL` in a text
         // preamble, and that preamble is also where a comment is legal.
         Some(Format::Pnm) => formats::pnm::image_info(path, apply_rotation, route)?,
@@ -687,7 +805,10 @@ fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
         Some(Format::Tiff) => formats::tiff::image_info(path, apply_rotation, route)?,
         // A radiance picture states its layout in a resolution line and its
         // samples as four bytes a pixel.
-        Some(Format::Hdr) => formats::hdr::image_info(path, apply_rotation, route)?,
+        Some(Format::Hdr) => {
+            let data = window(&mut input)?;
+            formats::hdr::image_info_headed(path, apply_rotation, route, data)?
+        }
         // An openexr states its layers, their channels and their sample types in
         // its header, and the crate parses that header without decompressing a
         // block.
@@ -781,15 +902,15 @@ mod tests {
     /// route it saved rather than reading the head again.
     #[test]
     fn a_probe_reads_the_head_once_and_saves_the_route() {
-        use crate::formats::identify::{self, Format};
+        use crate::formats::identify::Format;
 
         let path = fixture("alpha-rgb8.png");
-        identify::reset_head_reads();
+        super::reset_head_reads();
         let segment =
             probe_segment(&path, Rate::from_fps(24, 1), true, false).expect("the fixture probes");
         // The route is the only read: the module the router chose takes the saved
         // answer instead of opening the file to ask the ownership question again.
-        assert_eq!(identify::head_reads(), 1, "one probe reads the head once");
+        assert_eq!(super::head_reads(), 1, "one probe reads the head once");
         assert_eq!(segment.info.route, Some(Format::Png));
     }
 
@@ -803,18 +924,52 @@ mod tests {
     /// that slice starts, and this test records the half that is already one.
     #[test]
     fn an_animation_probe_reads_the_routing_head_once() {
-        use crate::formats::identify;
-
         for name in ["animation.png", "animation.gif", "animation.webp"] {
             let path = fixture(name);
-            identify::reset_head_reads();
+            super::reset_head_reads();
             let segment = probe_segment(&path, Rate::from_fps(24, 1), true, false)
                 .expect("the fixture probes");
             assert!(segment.animated, "{name}");
-            assert_eq!(identify::head_reads(), 1, "{name}: the routing head read");
+            assert_eq!(super::head_reads(), 1, "{name}: the routing head read");
         }
     }
 
+    /// A probe asks the router and the module the same sixteen bytes of one file, and
+    /// it asks them once: the routing read and the module's window are the same read.
+    ///
+    /// The six readers whose whole header is inside the window -- a bitmap's palette,
+    /// a surface's magic, a farbfeld's sixteen bytes, a radiance preamble, a qoi
+    /// header and a targa's colour map -- take it from the one input rather than
+    /// opening the file again, which is what this asserts. A png and an exr still open
+    /// for themselves; the counter does not see those opens either way, and the plan
+    /// lists which are left.
+    #[test]
+    fn a_probe_reads_the_head_once_for_the_router_and_the_module() {
+        for name in [
+            "bmp-depth24.bmp",
+            "alpha-dds.dds",
+            "alpha-rgba16.ff",
+            "hdr-flat.hdr",
+            "qoi-rgb8.qoi",
+            "tga-rgb24.tga",
+        ] {
+            let path = fixture(name);
+            super::reset_head_reads();
+            crate::formats::identify::reset_head_reads();
+            let info = probe(&path, true, false).unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert!(info.width > 0, "{name} is described");
+            assert_eq!(
+                super::head_reads(),
+                1,
+                "{name}: one read of the head answers both questions"
+            );
+            assert_eq!(
+                crate::formats::identify::head_reads(),
+                0,
+                "{name}: the router reads the same bytes rather than opening the file"
+            );
+        }
+    }
     /// A probe of an animated file opens it once more for itself, and that one
     /// open is what the shared probe reader would remove.
     ///
@@ -865,18 +1020,12 @@ mod tests {
     /// The decode reads the route the probe saved instead of the head again.
     #[test]
     fn a_decode_reads_the_head_none() {
-        use crate::formats::identify;
-
         let path = fixture("alpha-rgb8.png");
         let info = probe(&path, true, false).expect("the fixture probes");
-        identify::reset_head_reads();
+        super::reset_head_reads();
         let decoded = super::decode(&info, super::Demand::COLOR).expect("the fixture decodes");
         assert!(decoded.width > 0);
-        assert_eq!(
-            identify::head_reads(),
-            0,
-            "the decode reuses the saved route"
-        );
+        assert_eq!(super::head_reads(), 0, "the decode reuses the saved route");
     }
 
     /// The fixture animations all state the same 600 ms of four pictures, so
