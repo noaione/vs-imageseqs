@@ -774,7 +774,9 @@ pub fn probe_segment(
         }
         // A jpeg xl's scan still opens for itself; the plan lists it with the rest
         // of the modules that do.
-        Some(Format::Jxl) => crate::animation::jxl::segment_info(path, info.clone(), fps)?,
+        Some(Format::Jxl) => {
+            crate::animation::jxl::segment_info(path, info.clone(), fps, input.reader()?)?
+        }
         // A webp whose bitstream is a still image stays on the libwebp path,
         // which is what hands a lossy file out as its own yuv planes. Only an
         // animated one is claimed here.
@@ -847,7 +849,11 @@ fn describe(path: &Path, apply_rotation: bool, input: &mut Input) -> Result<Imag
         // decoder for one, which it cannot: it has no jpeg xl format of its own.
         // These two answer with a description rather than with an option: the
         // route above is the check that used to come before the call.
-        Some(Format::Jxl) => Some(formats::jxl::image_info(path, apply_rotation)?),
+        Some(Format::Jxl) => Some(formats::jxl::image_info(
+            path,
+            apply_rotation,
+            input.reader()?,
+        )?),
         Some(Format::Jp2) => Some(formats::jp2::image_info(
             path,
             apply_rotation,
@@ -896,7 +902,9 @@ fn describe(path: &Path, apply_rotation: bool, input: &mut Input) -> Result<Imag
         }
         // A tagged format, whose directories this module walks without decoding
         // a sample.
-        Some(Format::Tiff) => formats::tiff::image_info(path, apply_rotation, route)?,
+        Some(Format::Tiff) => {
+            formats::tiff::image_info(path, apply_rotation, route, input.reader()?)?
+        }
         // A radiance picture states its layout in a resolution line and its
         // samples as four bytes a pixel.
         Some(Format::Hdr) => {
@@ -998,6 +1006,12 @@ mod tests {
             .join("tests")
             .join("fixtures")
             .join(name)
+    }
+
+    /// An open of a fixture, for the few tests that hand a reader to a module
+    /// directly rather than going through a probe.
+    fn opened(path: &Path) -> std::io::BufReader<std::fs::File> {
+        std::io::BufReader::new(std::fs::File::open(path).expect("the fixture opens"))
     }
 
     /// A probe reads a file's head once, and the timeline decision reads the
@@ -1178,6 +1192,65 @@ mod tests {
         );
     }
 
+    /// A tiff and a jpeg xl read their headers out of the open the router made,
+    /// and each reads from the front of it.
+    ///
+    /// A tiff is the sharper of the two: its directory can sit anywhere in the
+    /// file, so a signature read from the middle of one is a signature of
+    /// whatever happens to be at that offset rather than the format's own.
+    #[test]
+    fn a_tiff_or_jpeg_xl_probe_reads_its_header_from_the_front() {
+        use std::io::{Seek, SeekFrom};
+
+        let moved = |path: &Path| {
+            let mut reader = opened(path);
+            reader
+                .seek(SeekFrom::Start(4096))
+                .expect("the reader moves");
+            reader
+        };
+
+        let tiff = fixture("tiff-rgb8.tiff");
+        let info = crate::formats::tiff::image_info(&tiff, true, None, &mut moved(&tiff))
+            .expect("the tiff is described")
+            .expect("the tiff is taken over");
+        assert!(
+            info.width > 0 && info.height > 0,
+            "the tiff size comes from its directory"
+        );
+
+        let jxl = fixture("alpha-rgba8.jxl");
+        let info = crate::formats::jxl::image_info(&jxl, true, &mut moved(&jxl))
+            .expect("the codestream is described");
+        assert!(
+            info.width > 0 && info.height > 0,
+            "the codestream size is read from its front"
+        );
+    }
+
+    /// A tiff and a jpeg xl are described from the one open the router made, and
+    /// a jpeg xl's animation answer is read from the same one rather than a
+    /// second.
+    #[test]
+    fn a_tiff_or_jpeg_xl_probe_reads_from_the_routers_open() {
+        for name in [
+            "tiff-rgb8.tiff",
+            "tiff-planar.tiff",
+            "alpha-rgba8.jxl",
+            "animation.jxl",
+        ] {
+            let path = fixture(name);
+            super::reset_input_opens();
+            let info = probe(&path, true, false).expect("the fixture probes");
+            assert!(info.width > 0 && info.height > 0, "{name} is described");
+            assert_eq!(
+                super::input_opens(),
+                1,
+                "{name}: the header comes out of the open the router made"
+            );
+        }
+    }
+
     /// A gif, an icon and a jpeg are described from the one open the router made.
     #[test]
     fn a_gif_icon_or_jpeg_probe_reads_from_the_routers_open() {
@@ -1334,12 +1407,16 @@ mod tests {
     /// is what keeps a still jpeg xl off the frame scan.
     #[test]
     fn only_an_animated_jpeg_xl_states_a_timeline() {
-        let animated = crate::formats::jxl::states_animation(&fixture("animation.jxl"))
-            .expect("the fixture reads");
+        let animated = crate::formats::jxl::states_animation(
+            &mut opened(&fixture("animation.jxl")),
+            &fixture("animation.jxl"),
+        )
+        .expect("the fixture reads");
         assert!(animated, "the fixture holds four pictures");
         for name in ["alpha-rgba8.jxl", "jxl-gray10.jxl"] {
             let still =
-                crate::formats::jxl::states_animation(&fixture(name)).expect("the fixture reads");
+                crate::formats::jxl::states_animation(&mut opened(&fixture(name)), &fixture(name))
+                    .expect("the fixture reads");
             assert!(!still, "{name}");
         }
     }

@@ -335,9 +335,13 @@ const fn orientation_of(orientation: JxlOrientation) -> Orientation {
 /// Every jpeg xl file is this module's, so a file it cannot read is an error
 /// rather than a fall back to the `image` decoder, which has none for the
 /// format.
-pub fn image_info(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
-    let opened = open_header(path)?;
-    let header = Header::read(&opened.decoder, path)?;
+pub fn image_info(
+    path: &Path,
+    apply_rotation: bool,
+    file: &mut BufReader<File>,
+) -> Result<ImageInfo> {
+    let decoder = header_over(file, path)?;
+    let header = Header::read(&decoder, path)?;
     Ok(ImageInfo {
         route: None,
         subimage: None,
@@ -368,6 +372,14 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
             .format()
             .ok_or_else(|| unsupported(header.color_type, path))?,
     })
+}
+
+/// The same, from an open of its own, which is what a caller that did not come
+/// through a probe has.
+#[cfg(test)]
+pub fn image_info_at(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
+    let file = File::open(path).map_err(|error| image_error("open", path, error))?;
+    image_info(path, apply_rotation, &mut BufReader::new(file))
 }
 
 /// Decodes one jpeg xl image into the interleaved buffer its color type needs.
@@ -504,6 +516,24 @@ fn open_header(path: &Path) -> Result<Opened> {
     })
 }
 
+/// The file header, out of an open the caller already holds.
+///
+/// A probe reads the header and nothing else, so it has no use for the reader
+/// once the header is in -- which is what lets it share the probe's one open
+/// rather than make one whose lifetime is the header's. [`open_header`] is the
+/// decode's form and still owns its reader, because the decode goes on reading.
+fn header_over(
+    file: &mut BufReader<File>,
+    path: &Path,
+) -> Result<JxlDecoder<states::WithImageInfo>> {
+    // The signatures are at the front of the file and the decoder is handed the
+    // same reader below, so it needs the file from its first byte.
+    std::io::Seek::rewind(file).map_err(|error| image_error("open", path, error))?;
+    check_signature(file, path)?;
+    let decoder = JxlDecoder::<states::Initialized>::new(JxlDecoderOptions::default());
+    to_image_info(decoder, file, path)
+}
+
 /// Whether a jpeg xl codestream states that it holds a timeline.
 ///
 /// [`image_info`] reads the same header for the facts a probe reports, and the
@@ -515,9 +545,9 @@ fn open_header(path: &Path) -> Result<Opened> {
 ///
 /// Returns [`ImgSeqError`] when the file cannot be opened or its header cannot
 /// be read.
-pub(crate) fn states_animation(path: &Path) -> Result<bool> {
-    let opened = open_header(path)?;
-    Ok(opened.decoder.basic_info().animation.is_some())
+pub(crate) fn states_animation(file: &mut BufReader<File>, path: &Path) -> Result<bool> {
+    let decoder = header_over(file, path)?;
+    Ok(decoder.basic_info().animation.is_some())
 }
 
 /// Reads the two signatures a jpeg xl file starts with, without using the bytes
@@ -746,7 +776,7 @@ mod tests {
     #[test]
     fn an_oriented_file_states_its_code_and_hands_out_the_display_picture() {
         let path = write_temp("oriented.jxl", ORIENTED);
-        let info = image_info(&path, true).expect("the fixture to probe");
+        let info = image_info_at(&path, true).expect("the fixture to probe");
         assert_eq!((info.width, info.height), (3, 4), "the display size");
         assert_eq!(info.orientation, Orientation::Rotate90, "the code");
         assert_eq!(info.format, PixelFormat::Gray8);
@@ -763,7 +793,7 @@ mod tests {
 
         // Turning rotation off undoes it instead, and the frame is the stored
         // picture: same code, the other size, the other rearrange.
-        let stored = image_info(&path, false).expect("the fixture to probe");
+        let stored = image_info_at(&path, false).expect("the fixture to probe");
         assert_eq!(stored.orientation, Orientation::Rotate90);
         assert_eq!(
             (stored.width, stored.height),
@@ -792,7 +822,7 @@ mod tests {
     #[test]
     fn an_alpha_channel_comes_through_the_color_buffer() {
         let path = write_temp("alpha.jxl", ALPHA);
-        let info = image_info(&path, true).expect("the fixture to probe");
+        let info = image_info_at(&path, true).expect("the fixture to probe");
         assert_eq!((info.width, info.height), (3, 2));
         assert_eq!(info.color_type, ColorType::Rgba8);
         assert_eq!(info.orientation, Orientation::NoTransforms);
@@ -807,7 +837,7 @@ mod tests {
     #[test]
     fn a_file_that_is_not_jpeg_xl_is_refused() {
         let path = write_temp("not-jxl.jxl", b"not a jpeg xl image at all");
-        let error = image_info(&path, true).expect_err("a file without a signature");
+        let error = image_info_at(&path, true).expect_err("a file without a signature");
         assert!(error.to_string().contains("jpeg xl"), "{error}");
         let _ = std::fs::remove_file(&path);
     }
@@ -815,7 +845,7 @@ mod tests {
     #[test]
     fn a_truncated_file_is_reported() {
         let path = write_temp("truncated.jxl", &ORIENTED[..40]);
-        let error = image_info(&path, true).expect_err("a file that ends early");
+        let error = image_info_at(&path, true).expect_err("a file that ends early");
         assert!(error.to_string().contains("ended before"), "{error}");
         let _ = std::fs::remove_file(&path);
     }
@@ -950,7 +980,7 @@ mod tests {
         // function, which is primaries 1 and transfer 13, and neither carries an
         // icc profile: a codestream states one or the other, not both.
         let color =
-            image_info(Path::new("tests/fixtures/alpha-rgba8.jxl"), true).expect("the fixture");
+            image_info_at(Path::new("tests/fixtures/alpha-rgba8.jxl"), true).expect("the fixture");
         assert_eq!(
             color.cicp,
             Some(Cicp {
@@ -964,8 +994,8 @@ mod tests {
 
         // A gray colour space is a transfer function and a white point, so it
         // has no primaries to state.
-        let gray =
-            image_info(Path::new("tests/fixtures/orientation-6.jxl"), true).expect("the fixture");
+        let gray = image_info_at(Path::new("tests/fixtures/orientation-6.jxl"), true)
+            .expect("the fixture");
         assert_eq!(
             gray.cicp,
             Some(Cicp {
