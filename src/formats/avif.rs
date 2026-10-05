@@ -162,6 +162,7 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
 /// refuses a file whose alpha item is broken, which is the point rather than an
 /// accident: the item is not part of what such a call hands out, and
 /// [`crate::formats::avif::decode`]'s own checks are about the picture.
+#[inline(never)]
 pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
     let open_started = Instant::now();
     let mut file =

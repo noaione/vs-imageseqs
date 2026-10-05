@@ -102,6 +102,7 @@ pub fn image_info(
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file cannot be read or is malformed.
+#[inline(never)]
 pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     // The compositor qualifies its own errors with the path already, so there is
     // nothing to add here: wrapping them would read "failed to decode image 'x':

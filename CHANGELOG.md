@@ -69,6 +69,13 @@
 
 ### fixed
 
+- The musllinux wheel no longer crashes on a TIFF (or an AVIF with no picture)
+  read on a VapourSynth worker thread. musl gives such a thread 128 KiB of
+  stack, and the format dispatcher had grown a 100 KiB frame because every
+  format's decoder was inlined into it. Each format's `decode` and `stream`
+  entry point is now a call of its own, so the dispatcher's frame is small and
+  only the format being read uses its own
+
 - Windows builds enable libheif's built-in dav1d decoder, so animated AVIF
   sequences decode instead of failing with `NoMatchingDecoderInstalled`.
   libheif's default features stay disabled, and no additional codec is selected.

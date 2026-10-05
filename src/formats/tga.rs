@@ -652,6 +652,7 @@ impl RowStream for Rows {
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the header cannot be read back.
+#[inline(never)]
 pub fn stream(info: &ImageInfo) -> Result<Option<DecodedImage>> {
     let Some((header, raster)) = prepare(&info.path)? else {
         return Ok(None);
@@ -680,6 +681,7 @@ pub fn stream(info: &ImageInfo) -> Result<Option<DecodedImage>> {
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file cannot be read or is malformed.
+#[inline(never)]
 pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     let open_started = std::time::Instant::now();
     let data = std::fs::read(&info.path).map_err(|error| image_error("open", &info.path, error))?;

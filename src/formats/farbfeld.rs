@@ -276,6 +276,7 @@ impl RowStream for Rows {
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file cannot be opened or read.
+#[inline(never)]
 pub fn stream(info: &ImageInfo) -> Result<DecodedImage> {
     let (header, file) = prepare(&info.path)?;
     if (header.width, header.height) != (info.width, info.height) {

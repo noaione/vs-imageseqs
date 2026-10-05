@@ -99,6 +99,7 @@ pub fn image_info(path: &Path, _apply_rotation: bool) -> Result<ImageInfo> {
 }
 
 /// Decode a JPEG 2000 image into an interleaved buffer or its coded yuv planes.
+#[inline(never)]
 pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     let open_started = Instant::now();
     let data = std::fs::read(&info.path).map_err(|error| image_error("open", &info.path, error))?;

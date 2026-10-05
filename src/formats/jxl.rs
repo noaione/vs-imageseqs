@@ -371,6 +371,7 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
 }
 
 /// Decodes one jpeg xl image into the interleaved buffer its color type needs.
+#[inline(never)]
 pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     let mut opened = open_header(&info.path)?;
     let header = Header::read(&opened.decoder, &info.path)?;

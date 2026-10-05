@@ -539,6 +539,7 @@ pub(crate) fn decode_rgba(data: &[u8]) -> std::result::Result<(u32, u32, Vec<u8>
 }
 
 /// Decodes one webp image into an interleaved buffer.
+#[inline(never)]
 pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     let open_started = Instant::now();
     // libwebp decodes from memory, so the file is read once here and the decode

@@ -251,6 +251,7 @@ pub fn image_info(
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file cannot be read or is malformed.
+#[inline(never)]
 pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     let alpha = info.color_type.has_alpha();
     let slots = if alpha { 4 } else { 3 };

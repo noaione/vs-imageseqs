@@ -299,6 +299,7 @@ fn dib_header(payload: &[u8], path: &Path) -> Result<bmp::Header> {
 ///
 /// Returns [`ImgSeqError`] when the file cannot be read, or when its payload is
 /// a subtype this reader does not implement.
+#[inline(never)]
 pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     let open_started = std::time::Instant::now();
     let data = std::fs::read(&info.path).map_err(|error| image_error("open", &info.path, error))?;

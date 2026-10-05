@@ -252,6 +252,7 @@ fn info(path: &Path, header: &Header, apply_rotation: bool) -> ImageInfo {
 ///
 /// Returns [`ImgSeqError`] when the file cannot be read, no longer matches what
 /// it probed as, or cannot be decoded.
+#[inline(never)]
 pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     let open_started = Instant::now();
     let mut decoder = read_headers(ZCursor::new(read_file(&info.path)?), &info.path)?;

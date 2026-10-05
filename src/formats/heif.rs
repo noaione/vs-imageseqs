@@ -401,6 +401,7 @@ impl H273Code for MatrixCoefficients {
 /// the wrapper has no way to suppress it — so what a colour-only call saves here
 /// is the buffer and the copy that would carry the plane into a frame: see
 /// [`crate::decoder::Demand`].
+#[inline(never)]
 pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
     let open_started = Instant::now();
     let path = info.path.to_str().ok_or_else(|| {

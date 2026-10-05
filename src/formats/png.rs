@@ -455,6 +455,7 @@ impl std::fmt::Debug for Rows {
 ///
 /// Everything refused here is refused for the whole file, not for one frame, so
 /// a sequence of them decides once per path.
+#[inline(never)]
 pub fn stream(info: &ImageInfo) -> Option<Pixels> {
     if !identify::route_agrees(info.route, Format::Png, &info.path)
         || info.transform != Transform::IDENTITY
@@ -508,6 +509,7 @@ pub fn stream(info: &ImageInfo) -> Option<Pixels> {
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file is interlaced and cannot be decoded.
+#[inline(never)]
 pub fn decode(info: &ImageInfo) -> Result<Option<DecodedImage>> {
     if !identify::route_agrees(info.route, Format::Png, &info.path) {
         return Ok(None);
