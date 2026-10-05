@@ -25,7 +25,11 @@
 //! canvas around it, which the reader this replaces filled with transparent
 //! black, is not reconstructed here.
 
-use std::{io::Read, path::Path};
+use std::{
+    fs::File,
+    io::{BufReader, Read, Seek},
+    path::Path,
+};
 
 use exr::{
     meta::MetaData,
@@ -109,8 +113,11 @@ pub fn owns(path: &Path) -> bool {
 /// A file too short to hold the four bytes is not one either, so it is declined
 /// rather than refused at this step: the magic is what decides whether this
 /// module owns a `.exr`, and the extension only decides whether it is asked.
-fn is_exr(path: &Path) -> Result<bool> {
-    let mut file = std::fs::File::open(path).map_err(|error| image_error("open", path, error))?;
+fn is_exr(file: &mut BufReader<File>, path: &Path) -> Result<bool> {
+    // The magic is the first bytes of the file, so this reads from the front
+    // whatever the caller left the reader at.
+    file.rewind()
+        .map_err(|error| image_error("open", path, error))?;
     let mut magic = [0u8; MAGIC.len()];
     match file.read_exact(&mut magic) {
         Ok(()) => Ok(magic == MAGIC),
@@ -169,8 +176,8 @@ fn frame_size(width: usize, height: usize) -> Result<(u32, u32)> {
 ///
 /// Returns [`ImgSeqError`] when the file cannot be read or its header cannot be
 /// parsed.
-fn header(path: &Path) -> Result<Option<Header>> {
-    if !is_exr(path)? {
+fn header(file: &mut BufReader<File>, path: &Path) -> Result<Option<Header>> {
+    if !is_exr(file, path)? {
         return Ok(None);
     }
     let metadata = MetaData::read_from_file(path, false)
@@ -197,6 +204,7 @@ pub fn image_info(
     path: &Path,
     _apply_rotation: bool,
     route: Option<crate::formats::identify::Format>,
+    file: &mut BufReader<File>,
 ) -> Result<Option<ImageInfo>> {
     if !route.map_or_else(
         || owns(path),
@@ -204,7 +212,7 @@ pub fn image_info(
     ) {
         return Ok(None);
     }
-    let Some(header) = header(path)? else {
+    let Some(header) = header(file, path)? else {
         return Ok(None);
     };
     Ok(Some(ImageInfo {
@@ -226,6 +234,18 @@ pub fn image_info(
         transform: Transform::IDENTITY,
         format: header.format(),
     }))
+}
+
+/// The same, from an open of its own, which is what a caller that did not come
+/// through a probe has.
+#[cfg(test)]
+pub fn image_info_at(
+    path: &Path,
+    apply_rotation: bool,
+    route: Option<crate::formats::identify::Format>,
+) -> Result<Option<ImageInfo>> {
+    let file = File::open(path).map_err(|error| image_error("open", path, error))?;
+    image_info(path, apply_rotation, route, &mut BufReader::new(file))
 }
 
 /// Decodes a picture into one interleaved buffer of native-endian floats.
@@ -390,7 +410,7 @@ mod tests {
     /// writer takes them. The tests below compare pictures rather than the shape
     /// the reader chose; [`one_buffer_holds_a_plane_a_channel`] asserts the shape.
     fn read(name: &str) -> (ImageInfo, Vec<Vec<u8>>) {
-        let info = image_info(&fixture(name), true, None)
+        let info = image_info_at(&fixture(name), true, None)
             .unwrap_or_else(|error| panic!("{name}: {error}"))
             .unwrap_or_else(|| panic!("{name} is taken over"));
         let decoded = decode(&info).unwrap_or_else(|error| panic!("{name}: {error}"));
@@ -452,7 +472,7 @@ mod tests {
             ("exr-zips.exr", ColorType::Rgb32F, SourceColorType::Rgb32F),
             ("exr-piz.exr", ColorType::Rgb32F, SourceColorType::Rgb32F),
         ] {
-            let info = image_info(&fixture(name), true, None)
+            let info = image_info_at(&fixture(name), true, None)
                 .unwrap_or_else(|error| panic!("{name}: {error}"))
                 .unwrap_or_else(|| panic!("{name} is taken over"));
             assert_eq!((info.width, info.height), (37, 23), "{name}");
@@ -552,7 +572,7 @@ mod tests {
             ("exr-half-rgba.exr", true),
             ("exr-multipart-z-rgb.exr", false),
         ] {
-            let info = image_info(&fixture(name), true, None)
+            let info = image_info_at(&fixture(name), true, None)
                 .unwrap_or_else(|error| panic!("{name}: {error}"))
                 .unwrap_or_else(|| panic!("{name} is taken over"));
             let decoded = decode(&info).unwrap_or_else(|error| panic!("{name}: {error}"));
@@ -595,12 +615,18 @@ mod tests {
         assert!(owns(Path::new("a.exr")));
         assert!(owns(Path::new("a.EXR")));
         assert!(
-            image_info(&fixture("cicp-rgb8.png"), true, None)
+            image_info_at(&fixture("cicp-rgb8.png"), true, None)
                 .expect("a png is not ours")
                 .is_none()
         );
         assert!(
-            !is_exr(&fixture("cicp-rgb8.png")).expect("the png's first bytes are read"),
+            !is_exr(
+                &mut BufReader::new(
+                    File::open(fixture("cicp-rgb8.png")).expect("the fixture opens")
+                ),
+                &fixture("cicp-rgb8.png")
+            )
+            .expect("the png's first bytes are read"),
             "a png does not start with the openexr magic"
         );
     }

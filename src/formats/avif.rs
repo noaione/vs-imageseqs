@@ -23,7 +23,7 @@
 
 use std::{
     fs::File,
-    io::{Read, Seek, SeekFrom},
+    io::{BufReader, Read, Seek, SeekFrom},
     ops::Range,
     path::Path,
     sync::Arc,
@@ -55,6 +55,14 @@ const ALPHA_AUX_TYPES: [&[u8]; 2] = [
     b"urn:mpeg:hevc:2015:auxid:1",
 ];
 
+/// The same, from an open of its own, which is what a caller that did not come
+/// through a probe has.
+#[cfg(test)]
+pub fn image_info_at(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
+    let file = File::open(path).ok()?;
+    image_info(path, apply_rotation, &mut BufReader::new(file))
+}
+
 /// What the container of an avif states about its image, when this module can
 /// describe the file from it.
 ///
@@ -63,10 +71,16 @@ const ALPHA_AUX_TYPES: [&[u8]; 2] = [
 /// describe. A file this answers with an r,g,b format is described but not
 /// decoded here, and its format correction is read from the same boxes by
 /// [`output_format`].
-pub fn image_info(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
-    let mut file = File::open(path).ok()?;
-    let file_len = file_length(&file).ok()?;
-    let boxes = leading_boxes(&mut file)?;
+pub fn image_info(
+    path: &Path,
+    apply_rotation: bool,
+    file: &mut BufReader<File>,
+) -> Option<ImageInfo> {
+    // The container walk starts at the front of the file, whatever the caller
+    // left the reader at.
+    file.rewind().ok()?;
+    let file_len = file_length(file.get_ref()).ok()?;
+    let boxes = leading_boxes(&mut *file)?;
     if !has_avif_brand(&boxes) {
         return None;
     }
@@ -84,7 +98,7 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
     // hands out. [`handles`] reads the same walk, so the probe and the decode
     // cannot disagree about which library owns the file.
     if !meta.native_eligible() {
-        return super::heif::describe(path, apply_rotation);
+        return super::heif::describe(path, apply_rotation, &mut *file);
     }
     let header = AvifHeader::read(&meta.primary_properties()?)?;
     let (width, height) = (header.width, header.height);
@@ -106,8 +120,12 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
     // `avifenc` writes one, and a lot of other writers state the codes in the
     // bitstream alone.
     let cicp = header.cicp.or_else(|| {
-        let payload =
-            read_ranges(&mut file, &meta.primary_ranges(SEQUENCE_HEADER_LIMIT).ok()?).ok()?;
+        let payload = read_ranges(
+            &mut *file,
+            file_len as u64,
+            &meta.primary_ranges(SEQUENCE_HEADER_LIMIT).ok()?,
+        )
+        .ok()?;
         sequence_header_cicp(&payload)
     });
 
@@ -118,7 +136,7 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
     // is where the path had always been; see
     // `docs/improvements/05-monochrome-heif.md`.
     if header.monochrome {
-        return super::heif::describe(path, apply_rotation);
+        return super::heif::describe(path, apply_rotation, &mut *file);
     }
 
     // The samples are yuv when the container states a matrix the frame
@@ -133,7 +151,7 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
         .filter(|cicp| usable_matrix(cicp.matrix))
         .and_then(|_| yuv_format(header.chroma, header.depth))
     else {
-        return super::heif::describe(path, apply_rotation);
+        return super::heif::describe(path, apply_rotation, &mut *file);
     };
     let color_type = header.colour_color_type(has_alpha);
     Some(ImageInfo {
@@ -227,8 +245,12 @@ pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
             yuv_format(header.chroma, header.depth).map(PixelFormat::name),
         )));
     }
-    let coded = read_ranges(&mut file, &meta.primary_ranges(usize::MAX)?)
-        .map_err(|error| image_error("read", &info.path, error))?;
+    let coded = read_ranges(
+        &mut file,
+        file_len as u64,
+        &meta.primary_ranges(usize::MAX)?,
+    )
+    .map_err(|error| image_error("read", &info.path, error))?;
     let expects_alpha = crate::pixel::alpha_channel(info.color_type).is_some() && demand.alpha;
     let alpha_coded = if expects_alpha {
         Some(
@@ -241,7 +263,7 @@ pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
                     )
                 })
                 .and_then(|ranges| {
-                    read_ranges(&mut file, &ranges)
+                    read_ranges(&mut file, file_len as u64, &ranges)
                         .map_err(|error| image_error("read", &info.path, error))
                 })?,
         )
@@ -672,10 +694,12 @@ fn orientation_of(properties: &[Property<'_>]) -> Orientation {
 /// applies a container's `irot` and `imir` as it decodes but the `libheif-rs`
 /// wrapper exposes no getter for them, so the plugin cannot otherwise tell what
 /// it has been handed.
-pub(crate) fn container_orientation(path: &Path) -> Option<Orientation> {
-    let mut file = File::open(path).ok()?;
-    let file_len = file_length(&file).ok()?;
-    let boxes = leading_boxes(&mut file)?;
+pub(crate) fn container_orientation(file: &mut BufReader<File>) -> Option<Orientation> {
+    // The `irot` and `imir` items are among the leading boxes, so this reads the
+    // same prefix the probe above reads, out of the same open.
+    file.rewind().ok()?;
+    let file_len = file_length(file.get_ref()).ok()?;
+    let boxes = leading_boxes(&mut *file)?;
     let meta = Meta::read(&boxes, file_len)?;
     Some(orientation_of(&meta.primary_properties()?))
 }
@@ -1594,7 +1618,11 @@ fn file_length(file: &File) -> std::io::Result<usize> {
 /// container, so joining it is a concatenation in the order `iloc` lists them.
 /// Every range is checked against the file before it is read, exactly as a
 /// single range is, and the total is checked before anything is allocated.
-fn read_ranges(file: &mut File, ranges: &[Range<usize>]) -> std::io::Result<Vec<u8>> {
+fn read_ranges(
+    file: &mut (impl Read + Seek),
+    length: u64,
+    ranges: &[Range<usize>],
+) -> std::io::Result<Vec<u8>> {
     let total = ranges
         .iter()
         .try_fold(0usize, |total, range| {
@@ -1608,7 +1636,7 @@ fn read_ranges(file: &mut File, ranges: &[Range<usize>]) -> std::io::Result<Vec<
         })?;
     let mut out = Vec::with_capacity(total);
     for range in ranges {
-        out.extend_from_slice(&read_range(file, range.clone())?);
+        out.extend_from_slice(&read_range(&mut *file, length, range.clone())?);
     }
     Ok(out)
 }
@@ -1618,9 +1646,13 @@ fn read_ranges(file: &mut File, ranges: &[Range<usize>]) -> std::io::Result<Vec<
 /// The range is checked against the file before the buffer is allocated, so a
 /// container that states a length the file does not hold is an error rather than
 /// a large allocation.
-fn read_range(file: &mut File, range: Range<usize>) -> std::io::Result<Vec<u8>> {
+fn read_range(
+    file: &mut (impl Read + Seek),
+    length: u64,
+    range: Range<usize>,
+) -> std::io::Result<Vec<u8>> {
     let end = u64::try_from(range.end).unwrap_or(u64::MAX);
-    if end > file.metadata()?.len() {
+    if end > length {
         return Err(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
             format!(
@@ -2333,13 +2365,14 @@ mod tests {
         let path = Path::new("tests/fixtures/avif-yuv420p.avif");
         let mut file = File::open(path).expect("the fixture opens");
         let length = file_length(&file).expect("the fixture has a length");
-        let error = read_range(&mut file, 0..usize::MAX).expect_err("the range is past the end");
+        let error = read_range(&mut file, length as u64, 0..usize::MAX)
+            .expect_err("the range is past the end");
         assert!(
             error.to_string().contains("past the end of the file"),
             "{error}"
         );
         assert_eq!(
-            read_range(&mut file, 0..4).expect("the file holds it"),
+            read_range(&mut file, length as u64, 0..4).expect("the file holds it"),
             b"\0\0\0\x20"
         );
         assert!(length > 4);
@@ -2428,7 +2461,7 @@ mod tests {
             ),
         ] {
             let path = Path::new("tests/fixtures").join(name);
-            let info = image_info(&path, true).expect("the container describes it");
+            let info = image_info_at(&path, true).expect("the container describes it");
             assert_eq!(info.format, format, "{name}");
             assert_eq!(info.color_type, color_type, "{name}");
             assert!(claimed(&path), "{name}");
@@ -2454,7 +2487,7 @@ mod tests {
     #[test]
     fn a_yuv_fixture_with_an_alpha_item_is_probed_as_the_page_and_its_alpha() {
         let path = Path::new("tests/fixtures/alpha-yuv420p.avif");
-        let info = image_info(path, true).expect("the container describes it");
+        let info = image_info_at(path, true).expect("the container describes it");
         assert_eq!((info.width, info.height), (4, 4));
         assert_eq!(info.format, PixelFormat::Yuv420P8);
         assert_eq!(info.color_type, ColorType::Rgba8);
@@ -2470,7 +2503,7 @@ mod tests {
         // samples are r,g,b, so neither is handed out as yuv.
         for name in ["cicp-rgb8.avif", "alpha-rgba8.avif"] {
             let path = Path::new("tests/fixtures").join(name);
-            let info = image_info(&path, true).expect("the container describes it");
+            let info = image_info_at(&path, true).expect("the container describes it");
             assert_eq!(info.format, PixelFormat::Rgb8, "{name}");
             // This module claims the file either way and hands it to libheif,
             // which reads the r,g,b planes; the hand-off has to produce the
@@ -2500,7 +2533,7 @@ mod tests {
     #[test]
     fn a_monochrome_fixture_keeps_its_gray_format() {
         let path = Path::new("tests/fixtures/mono-alpha.avif");
-        let info = image_info(path, true).expect("the container describes it");
+        let info = image_info_at(path, true).expect("the container describes it");
         assert_eq!(info.format, PixelFormat::Gray8);
         // The item holds one sample per pixel plus an alpha plane, which is
         // what libheif reports for it: `La8`, not the `Rgba8` the `image`
@@ -2524,15 +2557,15 @@ mod tests {
 
     #[test]
     fn another_container_is_not_described_here() {
-        assert!(image_info(Path::new("tests/fixtures/alpha-rgba8.heic"), true).is_none());
-        assert!(image_info(Path::new("tests/fixtures/alpha-rgba8.jxl"), true).is_none());
-        assert!(image_info(Path::new("tests/fixtures/nowhere.avif"), true).is_none());
+        assert!(image_info_at(Path::new("tests/fixtures/alpha-rgba8.heic"), true).is_none());
+        assert!(image_info_at(Path::new("tests/fixtures/alpha-rgba8.jxl"), true).is_none());
+        assert!(image_info_at(Path::new("tests/fixtures/nowhere.avif"), true).is_none());
     }
 
     #[test]
     fn a_probed_fixture_decodes_into_the_planes_its_format_describes() {
         let path = Path::new("tests/fixtures/avif-yuv420p.avif");
-        let info = image_info(path, true).expect("the container describes it");
+        let info = image_info_at(path, true).expect("the container describes it");
         let decoded = decode(&info, Demand::ALL).expect("the item is decoded");
         let Pixels::Planar { planes, alpha } = decoded.pixels else {
             panic!("a yuv page is handed out as planes");
@@ -2551,7 +2584,7 @@ mod tests {
     #[test]
     fn the_planes_of_an_alpha_fixture_are_the_ones_its_source_holds() {
         let path = Path::new("tests/fixtures/alpha-yuv420p.avif");
-        let info = image_info(path, true).expect("the container describes it");
+        let info = image_info_at(path, true).expect("the container describes it");
         let decoded = decode(&info, Demand::ALL).expect("the item is decoded");
         let Pixels::Planar { planes, alpha } = decoded.pixels else {
             panic!("a yuv page is handed out as planes");
@@ -2582,7 +2615,7 @@ mod tests {
     #[test]
     fn a_colour_only_decode_does_not_read_the_alpha_item() {
         let path = Path::new("tests/fixtures/alpha-yuv420p.avif");
-        let info = image_info(path, true).expect("the container describes it");
+        let info = image_info_at(path, true).expect("the container describes it");
         let wanted = decode(&info, Demand::ALL).expect("the item is decoded");
         let Pixels::Planar {
             planes: wanted_planes,
@@ -2608,7 +2641,7 @@ mod tests {
     #[test]
     fn a_colour_only_decode_reads_a_file_whose_alpha_item_is_broken() {
         let path = Path::new("tests/fixtures/avif-broken-alpha.avif");
-        let info = image_info(path, true).expect("the container describes it");
+        let info = image_info_at(path, true).expect("the container describes it");
         assert_eq!((info.width, info.height), (64, 48));
         assert_eq!(info.format, PixelFormat::Yuv420P8);
         // The file states an alpha item, so the colour type says it has one.
@@ -2622,7 +2655,7 @@ mod tests {
         // The same picture the file this one was cut from holds, which is the
         // check that the colour item is the one that was copied in.
         let source = Path::new("tests/fixtures/avif-yuv420p.avif");
-        let source_info = image_info(source, true).expect("the container describes it");
+        let source_info = image_info_at(source, true).expect("the container describes it");
         let Pixels::Planar {
             planes: source_planes,
             ..
@@ -2775,6 +2808,7 @@ mod tests {
         let meta = Meta::read(&boxes, file_len).expect("the item boxes are walked");
         read_ranges(
             &mut file,
+            file_len as u64,
             &meta.primary_ranges(usize::MAX).expect("located"),
         )
         .expect("the item is read")
@@ -2826,7 +2860,7 @@ mod tests {
     #[test]
     fn a_valid_item_hands_its_picture_back_on_the_first_call() {
         let path = Path::new("tests/fixtures/avif-yuv420p.avif");
-        let info = image_info(path, true).expect("the container describes it");
+        let info = image_info_at(path, true).expect("the container describes it");
         let picture = decode_item(&fixture_payload(path), &info).expect("the item is decoded");
         assert_eq!(
             (picture.width(), picture.height()),
@@ -3054,7 +3088,7 @@ mod tests {
             ),
         ] {
             let path = Path::new("tests/fixtures").join(name);
-            let shown_info = image_info(&path, true).expect("the container describes it");
+            let shown_info = image_info_at(&path, true).expect("the container describes it");
             assert_eq!(shown_info.orientation, code, "{name}");
             // Only a yuv container is this reader's, and it hands the stored
             // picture over with the transform that reaches the shown one beside
@@ -3079,7 +3113,7 @@ mod tests {
                 "{name}"
             );
 
-            let stored_info = image_info(&path, false).expect("the container describes it");
+            let stored_info = image_info_at(&path, false).expect("the container describes it");
             assert_eq!(stored_info.orientation, code, "{name}");
             assert_eq!(
                 (stored_info.output_width(), stored_info.output_height()),
@@ -3113,7 +3147,7 @@ mod tests {
             ),
         ] {
             let path = Path::new("tests/fixtures").join(name);
-            let info = image_info(&path, true).expect("the container describes it");
+            let info = image_info_at(&path, true).expect("the container describes it");
             assert_eq!(info.transform, Transform::from_orientation(code), "{name}");
             let decoded = decode(&info, Demand::ALL).expect("the item is decoded");
             assert_eq!(decoded.transform, info.transform, "{name}");
@@ -3129,8 +3163,8 @@ mod tests {
     #[test]
     fn an_unrotated_container_is_unchanged_by_the_rotation_policy() {
         let path = Path::new("tests/fixtures/orientation-avif-none.avif");
-        let shown = image_info(path, true).expect("the container describes it");
-        let stored = image_info(path, false).expect("the container describes it");
+        let shown = image_info_at(path, true).expect("the container describes it");
+        let stored = image_info_at(path, false).expect("the container describes it");
         assert_eq!(shown.transform, Transform::IDENTITY);
         assert_eq!(stored.transform, Transform::IDENTITY);
         assert_eq!((shown.width, shown.height), (stored.width, stored.height));
@@ -3142,7 +3176,7 @@ mod tests {
     #[test]
     fn the_no_picture_fixture_is_described_and_then_ends_with_an_error() {
         let path = Path::new("tests/fixtures/avif-no-picture.avif");
-        let info = image_info(path, true).expect("the container describes it");
+        let info = image_info_at(path, true).expect("the container describes it");
         assert_eq!((info.width, info.height), (3, 2));
         assert_eq!(info.format, PixelFormat::Yuv444P8);
         assert!(claimed(path));

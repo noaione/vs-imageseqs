@@ -134,10 +134,9 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   hands the same handle out rewound to the front for the container walk that
   finds a timeline, so the route, the module that describes the file and the
   animation adapters all read one open. a module that reads past the window takes
-  the same handle -- a png, a netpbm, a jpeg 2000, a webp, a gif, an icon, a
-  jpeg, a tiff and a jpeg xl all do -- and only the arms of `describe` that hand
-  the file to a crate taking a path still open for themselves; the plan lists
-  which.
+  the same handle -- which every arm of `describe` now takes, including the ones
+  that read past the window. two opens remain and cannot be shared, because
+  `libheif` and the `exr` crate each open the path themselves.
   [`Pixels`] is what a buffered decode produced, and `RowStream` is the decode
   that has not read its picture yet because it can write each row into the frame;
   a format answers with one only when it can fill every frame of the call.

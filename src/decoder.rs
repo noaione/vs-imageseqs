@@ -843,8 +843,10 @@ fn describe(path: &Path, apply_rotation: bool, input: &mut Input) -> Result<Imag
     let described = match route {
         // The two containers whose own reader answers a size without decoding
         // the picture at all.
-        Some(Format::Heif) => formats::heif::image_info(path, apply_rotation, route),
-        Some(Format::Avif) => formats::avif::image_info(path, apply_rotation),
+        Some(Format::Heif) => {
+            formats::heif::image_info(path, apply_rotation, route, input.reader()?)
+        }
+        Some(Format::Avif) => formats::avif::image_info(path, apply_rotation, input.reader()?),
         // A jpeg xl is read here whether or not the `image` crate could reach a
         // decoder for one, which it cannot: it has no jpeg xl format of its own.
         // These two answer with a description rather than with an option: the
@@ -914,7 +916,9 @@ fn describe(path: &Path, apply_rotation: bool, input: &mut Input) -> Result<Imag
         // An openexr states its layers, their channels and their sample types in
         // its header, and the crate parses that header without decompressing a
         // block.
-        Some(Format::Exr) => formats::exr::image_info(path, apply_rotation, route)?,
+        Some(Format::Exr) => {
+            formats::exr::image_info(path, apply_rotation, route, input.reader()?)?
+        }
         // A png is read here for the same reason a jpeg is, and one thing more:
         // the `cICP` chunk is not something the `image` decoder exposes at all.
         Some(Format::Png) => {
@@ -1226,6 +1230,82 @@ mod tests {
             info.width > 0 && info.height > 0,
             "the codestream size is read from its front"
         );
+    }
+
+    /// An avif, a heif and an openexr read what they can from the front of the
+    /// open they are handed.
+    ///
+    /// These are the three whose readers take a path rather than a handle, so
+    /// what is pinned here is the part each of them *could* give up: the avif's
+    /// own box walk, the heif's `irot`/`imir` walk, and the openexr's magic.
+    #[test]
+    fn a_container_or_magic_read_from_the_front_ignores_where_the_reader_was() {
+        use std::io::{Seek, SeekFrom};
+
+        let moved = |path: &Path| {
+            let mut reader = opened(path);
+            reader
+                .seek(SeekFrom::Start(4096))
+                .expect("the reader moves");
+            reader
+        };
+
+        let avif = fixture("avif-yuv420p.avif");
+        let info = crate::formats::avif::image_info(&avif, true, &mut moved(&avif))
+            .expect("the container describes it");
+        assert!(
+            info.width > 0 && info.height > 0,
+            "the avif size comes from its boxes"
+        );
+
+        let heic = fixture("alpha-rgba8.heic");
+        let info = crate::formats::heif::describe(&heic, true, &mut moved(&heic))
+            .expect("libheif describes it");
+        assert!(
+            info.width > 0 && info.height > 0,
+            "the heic size comes from libheif"
+        );
+
+        let exr = fixture("exr-none.exr");
+        // `Some`, not merely `Ok`: an openexr whose magic was read from the
+        // middle of the file is not one this reader declines, it is one this
+        // reader has never seen, and only the second shows up as a missing file
+        // in a clip.
+        let info = crate::formats::exr::image_info(&exr, true, None, &mut moved(&exr))
+            .expect("the probe reads the file")
+            .expect("the magic is read from the front, so the probe still knows the format");
+        assert!(
+            info.width > 0 && info.height > 0,
+            "the openexr size comes from its header"
+        );
+    }
+
+    /// An avif, a heif and an openexr are described from the one open the router
+    /// made.
+    ///
+    /// The open count is `input_opens`, which counts opens through `Input`. The
+    /// two that remain are the ones that cannot be shared and are *not* counted
+    /// here: `libheif` and the `exr` crate each open the path themselves, which
+    /// is why this slice was worth less for a heif and an openexr than it was for
+    /// an avif.
+    #[test]
+    fn an_avif_heif_or_exr_probe_starts_from_the_routers_open() {
+        for name in [
+            "avif-yuv420p.avif",
+            "alpha-rgba8.heic",
+            "animation.avif",
+            "exr-none.exr",
+        ] {
+            let path = fixture(name);
+            super::reset_input_opens();
+            let info = probe(&path, true, false).expect("the fixture probes");
+            assert!(info.width > 0 && info.height > 0, "{name} is described");
+            assert_eq!(
+                super::input_opens(),
+                1,
+                "{name}: the container starts from the open the router made"
+            );
+        }
     }
 
     /// A tiff and a jpeg xl are described from the one open the router made, and

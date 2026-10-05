@@ -28,6 +28,8 @@
 //! the honest answer for a container this tree cannot read.
 use std::{path::Path, sync::Arc, time::Instant};
 
+use std::{fs::File, io::BufReader};
+
 use crate::layout::{ColorType, Orientation};
 use libheif_rs::{
     Chroma, ColorPrimaries, ColorProfile, ColorSpace, HeifContext, ImageHandle, LibHeif,
@@ -52,6 +54,7 @@ pub fn image_info(
     path: &Path,
     apply_rotation: bool,
     route: Option<crate::formats::identify::Format>,
+    file: &mut BufReader<File>,
 ) -> Option<ImageInfo> {
     if !route.map_or_else(
         || owns(path),
@@ -59,7 +62,26 @@ pub fn image_info(
     ) {
         return None;
     }
-    describe(path, apply_rotation)
+    describe(path, apply_rotation, file)
+}
+
+/// [`image_info`] from an open of its own, which is what a caller that did not
+/// come through a probe has.
+#[cfg(test)]
+pub fn image_info_at(
+    path: &Path,
+    apply_rotation: bool,
+    route: Option<crate::formats::identify::Format>,
+) -> Option<ImageInfo> {
+    let file = File::open(path).ok()?;
+    image_info(path, apply_rotation, route, &mut BufReader::new(file))
+}
+
+/// [`describe`] from an open of its own, for the same reason.
+#[cfg(test)]
+pub fn describe_at(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
+    let file = File::open(path).ok()?;
+    describe(path, apply_rotation, &mut BufReader::new(file))
 }
 
 /// Whether this module owns a file: the container says heif, the name is a hint.
@@ -87,7 +109,11 @@ pub fn owns(path: &Path) -> bool {
 ///
 /// Returning `None` means libheif will not open the file either, and the
 /// `image` decoder keeps whatever it makes of it.
-pub fn describe(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
+pub fn describe(
+    path: &Path,
+    apply_rotation: bool,
+    file: &mut BufReader<File>,
+) -> Option<ImageInfo> {
     let handle = heif_handle(path)?;
     let header = HeifHeader::read(&handle)?;
     // The container's own `irot` and `imir`, which `libheif` applies as it
@@ -97,7 +123,7 @@ pub fn describe(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
     // orientation is unknown, which is what the property has always said for a
     // container-only transform.
     let orientation =
-        crate::formats::avif::container_orientation(path).unwrap_or(Orientation::NoTransforms);
+        crate::formats::avif::container_orientation(file).unwrap_or(Orientation::NoTransforms);
     Some(ImageInfo {
         route: None,
         subimage: None,
@@ -747,7 +773,7 @@ mod tests {
         if !path.is_file() {
             return;
         }
-        let info = image_info(&path, true, None).expect("a colour heic");
+        let info = image_info_at(&path, true, None).expect("a colour heic");
         assert_eq!((info.width, info.height), (3, 2));
         assert_eq!(info.format, PixelFormat::Yuv420P8);
         assert_eq!(info.color_type, ColorType::Rgba8);
@@ -793,14 +819,14 @@ mod tests {
             if !path.is_file() {
                 return;
             }
-            let rotated = image_info(&path, true, None).expect("a rotated heic");
+            let rotated = image_info_at(&path, true, None).expect("a rotated heic");
             assert_eq!(rotated.orientation, code, "{name}");
             // `libheif` hands the displayed picture over, so the size the decoder
             // produced is the displayed one and there is nothing left to apply.
             assert_eq!((rotated.width, rotated.height), shown, "{name}");
             assert_eq!(rotated.transform, Transform::IDENTITY, "{name}");
 
-            let stored_info = image_info(&path, false, None).expect("a rotated heic");
+            let stored_info = image_info_at(&path, false, None).expect("a rotated heic");
             assert_eq!(stored_info.orientation, code, "{name}");
             assert_eq!((stored_info.width, stored_info.height), shown, "{name}");
             assert_eq!(
@@ -825,7 +851,7 @@ mod tests {
         if !path.is_file() {
             return;
         }
-        let info = image_info(&path, false, None).expect("a rotated heic");
+        let info = image_info_at(&path, false, None).expect("a rotated heic");
         assert_eq!((info.output_width(), info.output_height()), (4, 3));
         assert_eq!(
             info.transform,
@@ -846,7 +872,7 @@ mod tests {
         if !path.is_file() {
             return;
         }
-        let info = image_info(&path, true, None).expect("a monochrome heic");
+        let info = image_info_at(&path, true, None).expect("a monochrome heic");
         assert_eq!((info.width, info.height), (7, 5));
         assert_eq!(info.format, PixelFormat::Gray8);
         // The alpha item is a channel of the file, not of the gray frame it is
@@ -861,7 +887,10 @@ mod tests {
             "tests/fixtures/mono-alpha.png",
             "tests/fixtures/alpha-rgba8.jxl",
         ] {
-            assert!(image_info(Path::new(path), true, None).is_none(), "{path}");
+            assert!(
+                image_info_at(Path::new(path), true, None).is_none(),
+                "{path}"
+            );
         }
     }
 
@@ -1054,7 +1083,7 @@ mod tests {
             "animation.avif",
         ] {
             let path = std::path::PathBuf::from("tests/fixtures").join(name);
-            let info = describe(&path, true).unwrap_or_else(|| panic!("{name} is described"));
+            let info = describe_at(&path, true).unwrap_or_else(|| panic!("{name} is described"));
             assert!(
                 matches!(info.format.color_family(), ColorFamily::RGB),
                 "{name} is r,g,b: {:?}",
@@ -1091,7 +1120,7 @@ mod tests {
     #[test]
     fn a_rotated_rgb_container_arrives_already_turned() {
         let path = Path::new("tests/fixtures/orientation-avif-rgb-irot-1.avif");
-        let info = describe(path, true).expect("libheif describes it");
+        let info = describe_at(path, true).expect("libheif describes it");
         assert_eq!(info.format, PixelFormat::Rgb8);
         // `irot` one is a quarter turn, which swaps the sides; libheif has
         // already done it, so the frame is built at this size.
@@ -1100,7 +1129,7 @@ mod tests {
         // Asking for the stored picture is what undoes it, the same shape
         // [`crate::formats::jxl`] has for the other decoder that applies a
         // file's orientation itself.
-        let stored = describe(path, false).expect("libheif describes it");
+        let stored = describe_at(path, false).expect("libheif describes it");
         assert_ne!(stored.transform, Transform::IDENTITY);
     }
 }
