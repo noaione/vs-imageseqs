@@ -17,62 +17,45 @@ crate-type = ["cdylib"]
 [dependencies]
 # The decompressors are named rather than inherited, so what this reader can
 # read is visible here: `deflate`, `fax`, `jpeg` and `lzw` are the crate's
-# defaults and `zstd` is not one of them. `webp`, its last feature, is left out
-# because a tiff is never a webp.
+# defaults.
 tiff = { version = "0.11.3", default-features = false, features = [
     "deflate",
     "fax",
     "jpeg",
     "lzw",
-    "zstd",
 ] }
 vapoursynth4-rs = { version = "0.5.1", default-features = false, features = [
     "vs-42", # >=R74
     "vsscript-43" # >=R79
 ] }
 
-# `image` is not a dependency any more: every format it used to read has a
-# reader of its own under `src/formats/`, and several of those modules are
-# ports of its readers, so its licence texts stay in `LICENSES/` and it stays
-# named in `THIRD_PARTY_NOTICES`. The `jpeg` flag on the `tiff` dependency
-# above is unrelated and still needed: a tiff strip can hold a jpeg.
-# openexr is read here rather than by `image`, whose adapter decodes into an
-# f32 image of its own and then copies its bytes to the generic buffer; see
-# `src/formats/exr.rs`
+# openexr is read here, whose adapter decodes into an f32 image of its own and
+# then copies its bytes to the generic buffer; see `src/formats/exr.rs`
 exr = "1.74.2"
 libheif-rs = { version = "3.0.0", default-features = false, features = [
-    # `image` is deliberately not enabled: this tree reads every heif and avif
-    # through this crate's own API, and the integration that taught `image` to
-    # read one was the last thing that needed it.
     "v1_23", # target libheif v1.23.x
     "embedded-libheif" # build on linux (v1.23.0)
 ] }
 jxl = { version = "0.7.4", default-features = false, features = [
-    "all-simd" # the same vector paths the image integration enabled
+    "all-simd"
 ] }
-# the av1 decoder `image` already links for avif, used directly so that the
-# planes the bitstream holds are handed out instead of r,g,b; see
-# `docs/improvements/12-heif-avif-yuv-output.md`
 dav1d = { version = "0.11.1", default-features = false }
 jpeg2k = { version = "0.10.1", default-features = false, features = [
     "openjpeg-sys"
 ] }
-# animated png is composed here rather than by `image`, whose APNG compositor
-# refuses every 16-bit colour type; see `src/animation/apng.rs`
 png = { version = "0.18.1", default-features = false }
-# a jpeg is decoded here rather than by `image`, whose reader parses the file's
-# headers four times for one probe and one decode, and whose EXIF and ICC
-# accessors each rebuild it; see `src/formats/jpeg.rs`. `zune-core` is the
-# colorspace and options type the two crates share, and it is named directly so
-# that a decoder is built by this module's own options rather than a default.
+# a jpeg is decoder, whose reader parses the file's headers four times
+# for one probe and one decode, and whose EXIF and ICC accessors each rebuild
+# it; see `src/formats/jpeg.rs`. `zune-core` is the colorspace and options
+# type the two crates share, and it is named directly so that a decoder is
+# built by this module's own options rather than a default.
 zune-core = { version = "0.5.3", default-features = false, features = ["std"] }
 zune-jpeg = { version = "0.5.15", default-features = false, features = ["std"] }
-# animated gif is composed here rather than by `image`, whose compositor is
-# the one this replaces and whose frame iterator decodes every picture to find
-# the timeline; see `src/animation/gif.rs`
+# animated gif is composed here, whose compositor is the one this replaces and whose
+# frame iterator decodes every picture to find the timeline; see `src/animation/gif.rs`
 gif = { version = "0.14.2", default-features = false, features = ["std"] }
-# quite ok image is read here rather than by `image`, whose qoi adapter parses
-# the header a second time for every accessor; see `src/formats/qoi.rs`
+# quite ok image is read here, whose qoi adapter parses the header a second
+# time for every accessor; see `src/formats/qoi.rs`
 qoi = { version = "0.4.1", default-features = false, features = ["std"] }
 
 # native stuff: find libwebp, see build.rs

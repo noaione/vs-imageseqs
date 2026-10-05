@@ -46,8 +46,6 @@
   signature check accepted only the classic version word
 - A PAM whose `MAXVAL` is above a byte but which names no `TUPLTYPE` is read at
   the width its `MAXVAL` states, instead of coming back rescaled as eight bit
-- A tiff compressed with zstd decodes, which links libzstd -- see
-  `LICENSES/zstd-COPYING.txt`
 - A radiance hdr that states an orientation other than the common `-Y ... +X`
   decodes rather than being refused
 - An OpenEXR whose first part holds no colour channel decodes: the probe and the

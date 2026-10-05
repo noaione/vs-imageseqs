@@ -10,7 +10,7 @@
 //!
 //! - **The decompressors are named in `Cargo.toml`, not inherited.** The crate's
 //!   defaults are `deflate`, `fax`, `jpeg` and `lzw`; this tree takes the crate
-//!   without its defaults and names all four plus `zstd`, which is not a default.
+//!   without its defaults and names all four, which is not a default.
 //!   Naming them makes what this reader can read visible in one place, and the
 //!   one feature left out is `webp`, because a tiff is never a webp.
 //! - **A four channel file maps to the format of its own depth.** `Rgba8` is
@@ -1691,7 +1691,7 @@ mod tests {
 
     /// A compressed file reads to the same picture as an uncompressed one,
     /// which is what says the decompressor ran rather than that the header was
-    /// parsed. Zstd is the one whose feature is opted into by hand.
+    /// parsed.
     #[test]
     fn every_compression_reads_to_the_same_picture() {
         let plain = read("tiff-none.tiff");
@@ -1700,7 +1700,6 @@ mod tests {
             "tiff-deflate.tiff",
             "tiff-packbits.tiff",
             "tiff-tiled.tiff",
-            "tiff-zstd.tiff",
         ] {
             assert_eq!(read(name), plain, "{name}");
         }

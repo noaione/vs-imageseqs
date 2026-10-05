@@ -943,9 +943,8 @@ and for these formats `_Primaries` and `_Transfer` are unset throughout, because
 no step-5 still states a colour, which is worth knowing rather than assuming.
 
 Four files are newly readable and that is the intended widening: the three HDR
-orientations the plan asks for (in `CHANGELOG.md`) and `tiff-zstd.tiff`, which is
-a new fixture rather than a behaviour change. Their properties are new lines, not
-changed ones.
+orientations the plan asks for (in `CHANGELOG.md`), which is a new fixture rather
+than a behaviour change. Their properties are new lines, not changed ones.
 
 ### the licence obligation, checked against the modules
 
