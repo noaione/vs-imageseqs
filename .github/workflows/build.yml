@@ -251,68 +251,13 @@ jobs:
           restore-keys: |
             vcpkg-${{ runner.os }}-${{ runner.arch }}-x64-windows-static-md-
 
-      - name: install windows dependencies
+      - name: build Windows wheel
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          $workspace = $env:GITHUB_WORKSPACE
-          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
-          if ([string]::IsNullOrWhiteSpace($vcpkgRoot)) {
-            $vcpkgRoot = 'C:\vcpkg'
-          }
-
-          $vcpkg = Join-Path $vcpkgRoot 'vcpkg.exe'
-          if (-not (Test-Path -LiteralPath $vcpkg)) {
-            throw "vcpkg was not found at $vcpkg"
-          }
-
-          $installRoot = Join-Path $workspace 'vcpkg_installed'
-          & $vcpkg install `
-            --triplet x64-windows-static-md `
-            --x-manifest-root=$workspace `
-            --x-install-root=$installRoot
-          if ($LASTEXITCODE -ne 0) {
-            throw "vcpkg install failed with exit code $LASTEXITCODE"
-          }
-
-          # pkgconf is a build-time tool used by dav1d-sys on Windows.
-          & $vcpkg install pkgconf:x64-windows --classic --x-install-root=$installRoot
-          if ($LASTEXITCODE -ne 0) {
-            throw "vcpkg pkgconf install failed with exit code $LASTEXITCODE"
-          }
-
-          # libheif-sys uses vcpkg-rs, while dav1d-sys discovers dav1d with
-          # pkg-config. The adapter keeps both crates on the same local tree.
-          $adapter = Join-Path $workspace 'target\vcpkg-root'
-          $installed = $installRoot
-          New-Item -ItemType Directory -Force -Path $adapter | Out-Null
-          New-Item -ItemType File -Force -Path (Join-Path $adapter '.vcpkg-root') | Out-Null
-          # A restored Rust target cache can contain a stale file or junction
-          # at this path. Remove it before creating the adapter junction.
-          $adapterInstalled = Join-Path $adapter 'installed'
-          $existingAdapterInstalled = Get-Item -LiteralPath $adapterInstalled -Force -ErrorAction SilentlyContinue
-          if ($null -ne $existingAdapterInstalled) {
-            Remove-Item -LiteralPath $adapterInstalled -Force -Recurse
-          }
-          New-Item -ItemType Junction -Force `
-            -Path $adapterInstalled `
-            -Target $installed | Out-Null
-
-          $pkgconf = Join-Path $installed 'x64-windows\tools\pkgconf'
-          $pkgconfExecutable = Join-Path $pkgconf 'pkgconf.exe'
-          if (-not (Test-Path -LiteralPath $pkgconfExecutable)) {
-            throw "pkgconf was not found at $pkgconfExecutable"
-          }
-          $pkgconf | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-          @(
-            "VCPKG_ROOT=$adapter"
-            'VCPKGRS_TRIPLET=x64-windows-static-md'
-            "PKG_CONFIG=$pkgconfExecutable"
-            "PKG_CONFIG_PATH=$(Join-Path $installed 'x64-windows-static-md\lib\pkgconfig')"
-          ) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        run: ./tools/build-windows.ps1 -InstallRoot "$env:GITHUB_WORKSPACE\vcpkg_installed" -OutputDirectory dist
 
       - name: install build tools
+        if: runner.os == 'macOS'
         run: python -m pip install --upgrade pip build
 
       - name: install macOS wheel repair tool
@@ -320,6 +265,7 @@ jobs:
         run: python -m pip install delocate==0.13.0
 
       - name: clear the previous build output
+        if: runner.os == 'macOS'
         run: python tools/build_output.py clear dist
 
       - name: clear cached libheif configuration
@@ -327,6 +273,7 @@ jobs:
         run: cargo clean --release --package libheif-sys
 
       - name: build wheel
+        if: runner.os == 'macOS'
         run: python -m build --wheel --outdir dist
         env:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
