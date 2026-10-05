@@ -169,15 +169,46 @@ fn output_format(header: &Header, path: &Path) -> Result<(ColorType, PixelFormat
         .components
         .first()
         .map_or(0, |component| component.precision);
-    if depth == 0
-        || header
-            .components
-            .iter()
-            .any(|component| component.precision != depth || component.signed)
+    if depth == 0 {
+        return Err(ImgSeqError::new(format!(
+            "image '{}' states no JPEG 2000 component precision",
+            path.display()
+        )));
+    }
+    // VapourSynth has no signed integer format, so a signed component cannot be
+    // handed out as the samples it holds: a frame that carried them would be
+    // saying the numbers are unsigned, which is a different picture rather than a
+    // shifted one. This is a refusal at the probe, so a clip is never created for
+    // a file no frame could be produced from.
+    if let Some((index, component)) = header
+        .components
+        .iter()
+        .enumerate()
+        .find(|(_, component)| component.signed)
     {
         return Err(ImgSeqError::new(format!(
-            "image '{}' has unsupported JPEG 2000 component precision or signed samples",
-            path.display()
+            "image '{}' has a signed JPEG 2000 component (component {} of {}, {} bits signed), and VapourSynth has no signed integer format",
+            path.display(),
+            index + 1,
+            header.components.len(),
+            component.precision
+        )));
+    }
+    // A frame's format names one depth, so components of two widths would have to
+    // be widened into it. That is exact but it is not what the file states, and
+    // nothing has asked for it, so the file is refused by name rather than
+    // converted silently.
+    if let Some((index, component)) = header
+        .components
+        .iter()
+        .enumerate()
+        .find(|(_, component)| component.precision != depth)
+    {
+        return Err(ImgSeqError::new(format!(
+            "image '{}' has JPEG 2000 components of different precision (component 1 is {depth} bits, component {} is {} bits)",
+            path.display(),
+            index + 1,
+            component.precision
         )));
     }
 
@@ -926,6 +957,83 @@ mod tests {
                 "depth={depth}, chroma={chroma:?}"
             );
         }
+    }
+
+    /// A signed component, and components of two widths, are refused by name.
+    ///
+    /// VapourSynth has no signed integer format, so a signed component cannot be
+    /// handed out as the numbers it holds, and a frame's format names one depth,
+    /// so components of two widths would have to be widened into it. Both are
+    /// refusals at the probe, and both messages say which component and which
+    /// width, because one sentence covering both leaves a user no way to tell
+    /// them apart or to find the component.
+    #[test]
+    fn a_signed_or_mixed_precision_page_is_refused_by_name() {
+        let base = Header {
+            width: 2,
+            height: 2,
+            components: vec![
+                ComponentHeader {
+                    precision: 8,
+                    signed: false,
+                    dx: 1,
+                    dy: 1,
+                },
+                ComponentHeader {
+                    precision: 8,
+                    signed: false,
+                    dx: 1,
+                    dy: 1,
+                },
+                ComponentHeader {
+                    precision: 8,
+                    signed: false,
+                    dx: 1,
+                    dy: 1,
+                },
+            ],
+            color: EnumeratedColor::Srgb,
+            has_icc_profile: false,
+            icc_profile: None,
+        };
+
+        let signed = Header {
+            components: base
+                .components
+                .iter()
+                .enumerate()
+                .map(|(index, component)| ComponentHeader {
+                    signed: index == 1,
+                    ..*component
+                })
+                .collect(),
+            ..base.clone()
+        };
+        let said = output_format(&signed, Path::new("signed.jp2"))
+            .expect_err("a signed component has no VapourSynth format")
+            .to_string();
+        assert!(said.contains("component 2 of 3"), "{said}");
+        assert!(said.contains("signed"), "{said}");
+        assert!(said.contains("no signed integer format"), "{said}");
+
+        let mixed = Header {
+            components: base
+                .components
+                .iter()
+                .enumerate()
+                .map(|(index, component)| ComponentHeader {
+                    precision: if index == 2 { 12 } else { 8 },
+                    ..*component
+                })
+                .collect(),
+            ..base.clone()
+        };
+        let said = output_format(&mixed, Path::new("mixed.jp2"))
+            .expect_err("components of two widths are refused")
+            .to_string();
+        assert!(said.contains("different precision"), "{said}");
+        assert!(said.contains("component 1 is 8 bits"), "{said}");
+        assert!(said.contains("component 3 is 12 bits"), "{said}");
     }
 
     /// A box with `kind` and `payload`, as the container writes one.

@@ -76,6 +76,9 @@
 
 ### fixed
 
+- A signed JPEG 2000 page, or one whose components state two widths, is refused
+  with a message that names the component, its width and what is wrong with it,
+  where a single sentence used to cover both cases
 - The musllinux wheel no longer crashes on a TIFF (or an AVIF with no picture)
   read on a VapourSynth worker thread. musl gives such a thread 128 KiB of
   stack, and the format dispatcher had grown a 100 KiB frame because every

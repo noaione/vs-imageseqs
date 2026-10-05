@@ -607,8 +607,9 @@ const fn nominal_depth(format: PixelFormat) -> usize {
 /// The yuv format a subsampled layout of `depth` bits is handed out as.
 ///
 /// A depth with no format of its own - twelve bit 4:2:0, say - keeps the r,g,b
-/// the `image` decoder produces, which is why this answers `None` rather than
-/// rounding the samples into a format that would misstate them.
+/// this reader builds from the item's own planes, which is why this answers
+/// `None` rather than rounding the samples into a format that would misstate
+/// them.
 const fn yuv_format(chroma: u8, depth: u8) -> Option<PixelFormat> {
     match (chroma, depth) {
         (2, 8) => Some(PixelFormat::Yuv420P8),

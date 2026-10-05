@@ -14,8 +14,10 @@
 //!   character code names the first three; `DX10` names them again by DXGI
 //!   format number, where BC1 is 70 to 72, BC2 73 to 75 and BC3 76 to 78. A
 //!   code or a number outside those is refused.
-//! - **The width and height must be multiples of four.** A block is four pixels
-//!   square, so a surface that is not is refused before anything is read.
+//! - **A surface that is not a whole number of four by four blocks is clipped.**
+//!   The stored surface is the ceiling of that division, so the pixels hanging
+//!   over the edge are decoded and dropped, which is the permissive extra
+//!   `texconv` warns a Direct3D block compressed surface never is.
 //! - **Mipmaps, other cube faces and other volume slices are ignored, not
 //!   refused.** A header that states them is read, and only the first surface is
 //!   decoded, which is what makes a cubemap or a mipped file usable at all.

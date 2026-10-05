@@ -143,6 +143,15 @@ open plus frames to 4.99 s.
 
 ## plans
 
+### unsupported subtypes — 2026-10-06
+
+[36 unsupported subtypes](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/36-unsupported-subtypes.md)
+collects the refused subtypes it takes up: what the container states, where the
+change lands, the fixture it needs
+and the check that would accept it. Nothing is implemented. Ten routes are
+worked out, one more is written as the decision it needed first, and
+the refused set is unchanged.
+
 ### wpd WebP decoder — 2026-10-04
 
 [35 wpd WebP decoder](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/35-wpd-webp-decoder.md)
@@ -157,18 +166,18 @@ all-wpd animation path is optional future work.
 ### input routing and planar decoding — 2026-10-04
 
 [34 input routing and planar decoding](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/34-input-routing-and-planar-decode.md)
-is partly implemented and remains open. Content-based still/animation routing
-and image-rs removal have landed; current checks pass 0 of 76 renamed copies
-and 0 of 7 renamed timelines. Its status table separates those results from
-the historical 59-of-84 cohort and lists the remaining saved-plan, shared-reader,
-planar-output and timing work. PNM/TGA/BMP row sinks do not yet mean incremental
-file reads. The original inventory and benchmarks are labeled historical.
+is closed in substance. Content-based still/animation routing, image-rs removal,
+the shared probe input, the planar and row writes and the timing repairs have all
+landed, and its status table separates those results from the historical 59-of-84
+cohort. Current checks pass 0 of 76 renamed copies and 0 of 7 renamed timelines.
+The one named item left is its DXT SIMD proposal at the end, which waits for a
+quiet machine; its `dds` row is settled rather than open. The original inventory
+and benchmarks are labeled historical.
 
-Plan 34's candidate table has since lost its low-bit gray TIFF row: a gray
-page of one, two or four bits a sample is read and expanded to `Gray8` rather
-than refused, with six fixtures, a `tests/readalpha.vpy` section that reads
-them and a Pillow parity check that agrees with every one of them. What is
-left in plan 34 is its DXT SIMD proposal at the end.
+Plan 34's candidate table has since lost its low-bit gray TIFF row: a gray page
+of one, two or four bits a sample is read and expanded to `Gray8` rather than
+refused, with six fixtures, a `tests/readalpha.vpy` section that reads them and a
+Pillow parity check that agrees with every one of them.
 
 ### image-rs removal goal — 2026-10-03
 
@@ -238,6 +247,7 @@ second Linux wheel, built in the Alpine pypa image.
 
 | plan | touches | expected | risk | status |
 | --- | --- | --- | --- | --- |
+| [37 Linux build caching](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/37-linux-build-caching.md) | Linux wheel CI, build/setup scripts, native cache checker, source packaging | reuse compiled codecs and Cargo dependencies, plus musl Rust and Python downloads | low: exact native keys and complete-install checks, repair and clean-container validation still run | implemented; local checks pass, CI cache reuse and timings pending |
 | [33 musllinux wheel](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/33-musllinux-wheel.md) | `tools/build-musllinux.sh`, `tools/make-linux-source-bundle.sh`, `tools/check-linux-wheel.py`, CI, notices, `tests/check-packaging-tools.py` | a `musllinux_1_2_x86_64` wheel beside the manylinux one, with the same three plugin libraries and the C++ runtime the musl policy does not promise the host | low: it adds a wheel, and no frame, format, property or argument changes | written and locally checked; the container build and its validation run in CI |
 | [32 host-safe CPU variant builds](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/32-host-safe-cpu-variant-builds.md) | `hatch_build.py`, `tests/check-packaging-tools.py` | an explicit Cargo target keeps AVX2/AVX512 flags out of build scripts and procedural macros that run on CI | low: target dependencies keep their CPU flags, wheel layout unchanged | implemented, Windows wheel, all variants and Cargo isolation validated |
 | [31 stage bundled runtime libraries](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/31-stage-bundled-runtime-libraries.md) | `tools/stage-native.py`, `tests/check-packaging-tools.py` | macOS/Linux runtime dependencies under `imageseqs/lib/` stage without being mistaken for plugin variants | low: plugin validation stays at the manifest directory, wheel contents unchanged | implemented, local platform-layout regression checks |
@@ -498,12 +508,13 @@ decodes to a buffer by construction.
   ([11](11-jxl-direct.md)).
 - **`pclr`, `cdef`, `res`/`resc` and the `uuid` boxes of a jp2**
   ([06](06-jpeg-2000-backend.md)).
-- **the tiles of a grid avif.** `dimg` names them and the probe already reads
-  that reference; what is missing is each tile's own coding record and the
-  placement of the decoded tiles into a picture of the grid's size. a tiled avif
-  is read by neither this reader nor the `image` decoder it falls back to, which
-  accepts the item type and then hands the grid descriptor to `dav1d`
-  ([17](17-avif-container-robustness.md)).
+- **the tiles of a grid avif, in this reader.** `dimg` names them and the probe
+  already reads that reference; what is missing is each tile's own coding record
+  and the placement of the decoded tiles into a picture of the grid's size. A grid
+  is read today by `libheif`, which the walk hands a container it refuses, and
+  `tests/readalpha.vpy`'s `test_avif_grid` checks the joined picture's four cells;
+  reading it here is what would remove that fallback, not what would make a grid
+  readable ([17](17-avif-container-robustness.md)).
 - **a heic that stores av1**: the `ispe`/`av1C` read would apply to it and
   nothing in the corpus is one ([05](05-monochrome-heif.md)).
 
@@ -536,6 +547,18 @@ decodes to a buffer by construction.
   in 0.7.4 and is read nowhere, and if a later version honours it, it must stay
   `true` ([11](11-jxl-direct.md)).
 
+**a pass over the present-tense `image` references**
+
+118 mentions of the `image` crate remain in `src/`, and most are provenance
+rather than a claim about today -- a module says it is a port of that crate's
+reader, which is what `CHANGELOG.md` says the notices are for. A few asserted
+current behaviour instead: `dds.rs`'s header said a surface must be a multiple of
+four where the code clips an odd one, and `avif.rs`'s `yuv_format` said a depth
+with no format keeps the rgb "the `image` decoder produces". Both are corrected.
+The remaining mentions have not been read one by one, and the distinction to
+apply is whether the sentence is about where the code came from or about what it
+does now.
+
 ## validating a change
 
 `cargo test --locked` plus the bench on two sets. the png set is the control:
@@ -566,8 +589,10 @@ C:/vcpkg/vcpkg.exe install --triplet x64-windows-static-md --x-manifest-root="$P
 
 - **intra-frame threading of the pure rust webp decoder.** ffmpeg spreads one
   vp8 frame over every core and that is most of why bestsource wins on webp.
-  `image-webp` exposes no threading hooks and owns no slice parallelism, so
-  this would need to happen upstream. not a change this repository can make.
+  the decoder is not this repository's — `image-webp` when this was written, and
+  `wpd` ([35](35-wpd-webp-decoder.md)) as its selected replacement — so slice
+  parallelism inside one frame is upstream work either way. not a change this
+  repository can make.
 - **a thread budget for the avif decoder.** [19](19-avif-thread-budget.md) is
   the measurement that closed it: dav1d already defaults to one thread per
   core, the default `prefetch=4` already uses 8.8 of this machine's ten cores,
@@ -581,6 +606,13 @@ C:/vcpkg/vcpkg.exe install --triplet x64-windows-static-md --x-manifest-root="$P
 - **ffmpeg as a dependency.** it would match bestsource's decoder behaviour,
   but it is a large build and licence surface for one format when libwebp is a
   smaller step with the same yuv entry point.
+- **DDS BC6 and BC7, and a cubemap or a volume as more than one frame.** the
+  reader takes DXT1, DXT3 and DXT5 and their DX10 equivalents, and a cubemap's
+  other faces, a volume's other slices and anything past the top mip are ignored
+  rather than refused, because one frame a file is the contract. BC7 would be a
+  second per-block decoder for surfaces nothing here has a corpus for, and BC6H
+  is half-float HDR, which would need a tone-mapping policy this plugin does not
+  have
 - **raising `AUTO_MAX_WORKERS` above four by default.** the memory question no
   longer blocks it, because the budget scales with the window
   ([01](01-lookahead-scheduling.md)), but the measured answer is still no: the
