@@ -25,9 +25,15 @@
 //!   upstream decoder reports `L8` for an indexed bitmap; the reader that feeds
 //!   a frame asks for colour, so the palette lookup happens here.
 //!
+//! `BITMAPCOREHEADER` is read here too. It is the older of the format's two
+//! headers and differs in three places that matter: both dimensions are signed
+//! sixteen bit values, there is no compression field so only the uncompressed
+//! form exists, and a palette entry is three bytes rather than four. It
+//! cannot be stored top-down, and a negative height there is refused by name.
+//!
 //! Subtypes the corpus does not show are refused by name rather than guessed
-//! at: a `BITMAPCOREHEADER`, the one- and two-bit depths, `BI_JPEG` and
-//! `BI_PNG` compression, and the CMYK bit counts.
+//! at: the one- and two-bit depths, `BI_JPEG` and `BI_PNG` compression, and the
+//! CMYK bit counts.
 
 use std::{
     fs::File,
@@ -205,6 +211,13 @@ fn u16_at(data: &[u8], offset: usize) -> Option<u16> {
     Some(u16::from_le_bytes([bytes[0], bytes[1]]))
 }
 
+/// Reads a little-endian `i16` at `offset`, which is how the older
+/// `BITMAPCOREHEADER` stores both of its dimensions.
+fn i16_at(data: &[u8], offset: usize) -> Option<i16> {
+    let bytes = data.get(offset..offset + 2)?;
+    Some(i16::from_le_bytes([bytes[0], bytes[1]]))
+}
+
 /// Reads a little-endian `u32` at `offset`.
 fn u32_at(data: &[u8], offset: usize) -> Option<u32> {
     let bytes = data.get(offset..offset + 4)?;
@@ -236,21 +249,28 @@ pub fn header(data: &[u8], start: usize, file_header: bool) -> Result<Header> {
 
     let header_size =
         u32_at(data, offset).ok_or_else(|| ImgSeqError::new("the bitmap is truncated"))?;
-    if header_size == CORE_HEADER {
-        return Err(ImgSeqError::new(
-            "a BITMAPCOREHEADER bitmap is not supported",
-        ));
-    }
-    if header_size < INFO_HEADER {
+    // The format has two headers. `BITMAPCOREHEADER` is twelve bytes: two signed
+    // sixteen bit dimensions, a plane count and a bit count, with no compression
+    // field, no mask offsets and no colour count. `BITMAPINFOHEADER` and its
+    // longer successors start at forty and carry all three.
+    let core = header_size == CORE_HEADER;
+    if !core && header_size < INFO_HEADER {
         return Err(ImgSeqError::new(format!(
             "the bitmap header states {header_size} bytes, which is too small"
         )));
     }
 
-    let (width, stored_height) = (
-        i32_at(data, offset + 4).ok_or_else(truncated)?,
-        i32_at(data, offset + 8).ok_or_else(truncated)?,
-    );
+    let (width, stored_height) = if core {
+        (
+            i32::from(i16_at(data, offset + 4).ok_or_else(truncated)?),
+            i32::from(i16_at(data, offset + 6).ok_or_else(truncated)?),
+        )
+    } else {
+        (
+            i32_at(data, offset + 4).ok_or_else(truncated)?,
+            i32_at(data, offset + 8).ok_or_else(truncated)?,
+        )
+    };
     if width <= 0 || stored_height == 0 {
         return Err(ImgSeqError::new("the header states no pixels"));
     }
@@ -259,16 +279,29 @@ pub fn header(data: &[u8], start: usize, file_header: bool) -> Result<Header> {
             "the header states a size no decoder accepts",
         ));
     }
+    // A top-down bitmap came with the information header; the older one cannot
+    // state one, so a negative height there is refused rather than guessed at.
     let top_down = stored_height < 0;
+    if core && top_down {
+        return Err(ImgSeqError::new(
+            "a BITMAPCOREHEADER bitmap cannot be stored top-down",
+        ));
+    }
     let height = stored_height.unsigned_abs();
 
-    let planes = u16_at(data, offset + 12).ok_or_else(truncated)?;
+    let (planes_at, bits_at) = if core { (8, 10) } else { (12, 14) };
+    let planes = u16_at(data, offset + planes_at).ok_or_else(truncated)?;
     if planes != 1 {
         return Err(ImgSeqError::new("the header states more than one plane"));
     }
-    let bit_count = u16_at(data, offset + 14).ok_or_else(truncated)?;
-    let compression = u32_at(data, offset + 16).ok_or_else(truncated)?;
-
+    let bit_count = u16_at(data, offset + bits_at).ok_or_else(truncated)?;
+    // The older header has no compression field, and the format defines only
+    // the uncompressed form for it.
+    let compression = if core {
+        BI_RGB
+    } else {
+        u32_at(data, offset + 16).ok_or_else(truncated)?
+    };
     // A top-down bitmap cannot be compressed, except by the bitfields method,
     // which is not compression in the run-length sense.
     if top_down && compression != BI_RGB && compression != BI_BITFIELDS {
@@ -388,7 +421,10 @@ pub fn header(data: &[u8], start: usize, file_header: bool) -> Result<Header> {
         image_type,
         ImageType::Palette | ImageType::Rle4 | ImageType::Rle8
     ) {
-        let entries = if header_size >= INFO_HEADER {
+        // The core header has no colour count, so a palette page states its depth
+        // and every entry follows; the information header has one and a writer may
+        // leave it at zero.
+        let entries = if !core && header_size >= INFO_HEADER {
             let stated = u32_at(data, offset + 32).ok_or_else(truncated)?;
             if stated == 0 {
                 1usize << bit_count
@@ -401,14 +437,17 @@ pub fn header(data: &[u8], start: usize, file_header: bool) -> Result<Header> {
         if entries > 256 {
             return Err(ImgSeqError::new("the palette states more than 256 entries"));
         }
+        // A core header's entries are blue, green and red. An information header's
+        // are the same three with a fourth reserved byte after them, and a table
+        // read as the other would step a byte at a time and land on nothing.
+        let entry_bytes = if core { 3 } else { 4 };
         let mut at = palette_start;
         for _ in 0..entries {
             let entry = data
-                .get(at..at + 4)
+                .get(at..at + entry_bytes)
                 .ok_or_else(|| ImgSeqError::new("the palette is truncated"))?;
-            // The entries are blue, green, red, unused.
             palette.push([entry[2], entry[1], entry[0]]);
-            at += 4;
+            at += entry_bytes;
         }
         // An empty palette still has to answer, so a file that states none gets
         // the default grey ramp the format implies.
@@ -1082,6 +1121,52 @@ mod tests {
         );
     }
 
+    /// The older header reads as the picture it holds, in both of the shapes it
+    /// differs from the information header in: signed sixteen bit dimensions and
+    /// a three byte palette table. The eight bit file is the one that would fail
+    /// first if the table were read four bytes at a time.
+    ///
+    /// The expected pixels are the ones Pillow reads from the same two files,
+    /// which is the only independent answer there is for a format this tree
+    /// wrote itself.
+    #[test]
+    fn a_core_header_bitmap_reads_as_the_picture_it_holds() {
+        for (name, width, height, bit_count, expected) in [
+            ("bmp-core-24.bmp", 1, 1, 24, vec![3, 5, 7]),
+            (
+                "bmp-core-4.bmp",
+                2,
+                2,
+                4,
+                // Top row first, which is the order Pillow hands the same
+                // file back in.
+                vec![
+                    200, 200, 200, 90, 0, 0, //
+                    0, 60, 0, 0, 0, 30, //
+                ],
+            ),
+        ] {
+            let path = fixture(name);
+            let (header, _reader) = prepare(&path)
+                .expect("the fixture is readable")
+                .expect("a core header bitmap is a row sink");
+            assert_eq!((header.width, header.height), (width, height), "{name}");
+            assert_eq!(header.bit_count, bit_count, "{name}");
+            assert!(
+                !header.top_down,
+                "{name}: the older header cannot be top-down"
+            );
+            assert!(!header.has_alpha, "{name}: there is no mask to hand out");
+
+            let file = std::fs::read(&path).expect("the fixture is readable");
+            assert_eq!(
+                pixels(&header, &file).expect("the rows decode"),
+                expected,
+                "{name}: the picture is the one Pillow reads"
+            );
+        }
+    }
+
     /// The round-to-nearest expansion, against the values the upstream tables
     /// hold. Five bits of three is the case that separates this from a shift
     /// and or, which gives 24.
@@ -1180,13 +1265,20 @@ mod tests {
     /// unported subtype is refused by name rather than guessed at.
     #[test]
     fn an_unported_subtype_is_refused_by_name() {
-        // A BITMAPCOREHEADER.
+        // A core header stored top-down, which the format does not define.
         let mut core = b"BM".to_vec();
         core.extend_from_slice(&[0u8; 12]);
         core.extend_from_slice(&12u32.to_le_bytes());
+        core.extend_from_slice(&1i16.to_le_bytes());
+        core.extend_from_slice(&(-1i16).to_le_bytes());
+        core.extend_from_slice(&1u16.to_le_bytes());
+        core.extend_from_slice(&24u16.to_le_bytes());
         core.extend_from_slice(&[0u8; 8]);
-        let error = header(&core, 0, true).expect_err("a core header is refused");
-        assert!(error.to_string().contains("BITMAPCOREHEADER"), "{error}");
+        let error = header(&core, 0, true).expect_err("a core header cannot be top-down");
+        assert!(
+            error.to_string().contains("cannot be stored top-down"),
+            "{error}"
+        );
 
         // A png named as a bitmap is declined, not refused.
         assert!(

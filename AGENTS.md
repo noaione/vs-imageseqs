@@ -145,7 +145,9 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   includes expanding a palette page's indices itself — and
   `bmp.rs` for Windows bitmaps, whose palette, run-length and bitfield paths are a
   port of the `image` reader and whose alpha rule is the format's rather than the
-  obvious one, `ico.rs` for Windows icons, which picks a directory entry and hands
+  obvious one -- and which reads both of the format's headers, the twelve byte
+  `BITMAPCOREHEADER` with its three byte palette entries as well as the
+  information header, `ico.rs` for Windows icons, which picks a directory entry and hands
   its payload to `bmp.rs` or to the `png` crate,
   `tga.rs` for Truevision Targa, whose eleven image types, three run-length forms
   and two descriptor directions are a port of the `image` reader, and whose

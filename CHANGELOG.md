@@ -9,6 +9,13 @@
   here is refused with `no reader here knows its format` rather than sent to it.
   The plugin is about 435 KB smaller. Several of those readers are ports of that
   crate's, so its licence texts and notices stay where they were
+- A bitmap with the older `BITMAPCOREHEADER` is read instead of being refused.
+  The three places it differs from the header this plugin already read are handled
+  directly: its dimensions are signed sixteen bit values, it has no compression
+  field so only the uncompressed form exists, and a palette entry is three bytes
+  rather than four. A core header has no colour count either, so a palette page of
+  one carries an entry for every index its depth names. It cannot be stored
+  top-down, and one that says so is refused by name
 - Support cmyk tiff is read again, and a cmyk tiff with an alpha channel is read for
   the first time. Both are handed out as rgb by the same formula of
   `(maximum - ink) * (maximum - k) / maximum` in `f32` with the same

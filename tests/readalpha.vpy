@@ -132,9 +132,7 @@ def samples(frame, plane: int = 0) -> list:
 
 
 def almost(actual: list, expected: list, tolerance: float = 1e-6) -> bool:
-    return len(actual) == len(expected) and all(
-        abs(a - b) <= tolerance for a, b in zip(actual, expected)
-    )
+    return len(actual) == len(expected) and all(abs(a - b) <= tolerance for a, b in zip(actual, expected))
 
 
 def test_rgba8() -> None:
@@ -239,8 +237,7 @@ def test_qoi() -> None:
     check(frame.format.name == "Gray8", f"qoi: alpha clip is Gray8 (got {frame.format.name})")
     check(
         clip.get_frame(0).props.get("ImgSeqOriginalColorType") == "Rgb8",
-        "qoi: a three channel file is labelled Rgb8 "
-        f"(got {clip.get_frame(0).props.get('ImgSeqOriginalColorType')})",
+        f"qoi: a three channel file is labelled Rgb8 (got {clip.get_frame(0).props.get('ImgSeqOriginalColorType')})",
     )
     # The ramp: each column pair is one step, so red falls 255, 255, 191, 191
     # and blue rises 0, 0, 64, 64; green steps by 40 a row, which is why the
@@ -259,8 +256,7 @@ def test_qoi() -> None:
     frame = alpha.get_frame(0)
     check(
         clip.get_frame(0).props.get("ImgSeqOriginalColorType") == "Rgba8",
-        "qoi: a four channel file is labelled Rgba8 "
-        f"(got {clip.get_frame(0).props.get('ImgSeqOriginalColorType')})",
+        f"qoi: a four channel file is labelled Rgba8 (got {clip.get_frame(0).props.get('ImgSeqOriginalColorType')})",
     )
     check(samples(color, 0)[:4] == [255, 255, 191, 191], "qoi: the same red plane")
     check(samples(frame)[:4] == [40, 44, 48, 52], "qoi: the alpha plane is the file's")
@@ -280,8 +276,10 @@ def test_qoi() -> None:
         "qoi: nor the alpha plane",
     )
     check(
-        (linear.get_frame(0).props.get("ImgSeqOriginalColorType")
-         == plain.get_frame(0).props.get("ImgSeqOriginalColorType")),
+        (
+            linear.get_frame(0).props.get("ImgSeqOriginalColorType")
+            == plain.get_frame(0).props.get("ImgSeqOriginalColorType")
+        ),
         "qoi: nor the source label",
     )
     for name in ("_Transfer", "_Primaries", "_Matrix"):
@@ -389,9 +387,7 @@ def test_read_is_unchanged() -> None:
 
 def test_prefetch_variants() -> None:
     for workers in (0, 1, 2, 4):
-        clip, alpha = read_alpha(
-            files=[fixture("alpha-rgba16.png")], prefetch=workers
-        )
+        clip, alpha = read_alpha(files=[fixture("alpha-rgba16.png")], prefetch=workers)
         check(
             samples(alpha.get_frame(0)) == [100, 200, 300, 400, 500, 600],
             f"prefetch={workers}: alpha plane",
@@ -528,16 +524,8 @@ def depth_samples(depth: int) -> tuple[list[int], list[int]]:
     """Return the gray and alpha samples in a native-depth fixture."""
     maximum = (1 << depth) - 1
     return (
-        [
-            maximum // 4 + 17 * x + 31 * y
-            for y in range(MONO_HEIGHT)
-            for x in range(MONO_WIDTH)
-        ],
-        [
-            maximum - 13 * x - 29 * y
-            for y in range(MONO_HEIGHT)
-            for x in range(MONO_WIDTH)
-        ],
+        [maximum // 4 + 17 * x + 31 * y for y in range(MONO_HEIGHT) for x in range(MONO_WIDTH)],
+        [maximum - 13 * x - 29 * y for y in range(MONO_HEIGHT) for x in range(MONO_WIDTH)],
     )
 
 
@@ -558,9 +546,7 @@ def test_monochrome_containers() -> None:
     monochrome AVIF correction at twelve bits.
     """
     grey = [8 + 11 * x + 23 * y for y in range(MONO_HEIGHT) for x in range(MONO_WIDTH)]
-    alpha_plane = [
-        240 - 9 * x - 13 * y for y in range(MONO_HEIGHT) for x in range(MONO_WIDTH)
-    ]
+    alpha_plane = [240 - 9 * x - 13 * y for y in range(MONO_HEIGHT) for x in range(MONO_WIDTH)]
     cases = [
         ("mono-alpha.heic", "heic", "Gray8", lambda value: value),
         ("mono-alpha.avif", "avif", "Gray8", lambda value: value),
@@ -743,8 +729,7 @@ def test_yuv_containers() -> None:
         )
         check(
             (frame.width, frame.height) == (width, height),
-            f"yuv {name}: the clip is {width}x{height} "
-            f"(got {frame.width}x{frame.height})",
+            f"yuv {name}: the clip is {width}x{height} (got {frame.width}x{frame.height})",
         )
         check(
             len(samples(frame, 1)) == (width // step_x) * (height // step_y),
@@ -752,13 +737,11 @@ def test_yuv_containers() -> None:
         )
         check(
             frame.props.get("_Matrix") == 6,
-            f"yuv {name}: the bt.601 matrix the file states "
-            f"(got {frame.props.get('_Matrix')})",
+            f"yuv {name}: the bt.601 matrix the file states (got {frame.props.get('_Matrix')})",
         )
         check(
             frame.props.get("_Range") == 1,
-            f"yuv {name}: the full range the file states "
-            f"(got {frame.props.get('_Range')})",
+            f"yuv {name}: the full range the file states (got {frame.props.get('_Range')})",
         )
         check(
             "_ChromaLocation" not in frame.props,
@@ -790,8 +773,22 @@ def test_yuv_containers() -> None:
     check(
         samples(color)
         == [
-            0, 0, 0, 0, 72, 72, 72, 72,
-            144, 144, 144, 144, 216, 216, 216, 216,
+            0,
+            0,
+            0,
+            0,
+            72,
+            72,
+            72,
+            72,
+            144,
+            144,
+            144,
+            144,
+            216,
+            216,
+            216,
+            216,
         ],
         "yuv alpha-yuv420p: the luma plane is the four rows of the source",
     )
@@ -869,15 +866,13 @@ def test_no_picture() -> None:
         except subprocess.TimeoutExpired:
             check(
                 False,
-                f"no picture: a frame request at prefetch={prefetch} ends within "
-                f"{NO_PICTURE_TIMEOUT}s",
+                f"no picture: a frame request at prefetch={prefetch} ends within {NO_PICTURE_TIMEOUT}s",
             )
             continue
         output = f"{result.stdout.strip()} {result.stderr.strip()}".strip()
         check(
             result.returncode == 0 and "holds no picture" in output,
-            f"no picture: a frame request at prefetch={prefetch} fails instead of "
-            f"hanging ({output})",
+            f"no picture: a frame request at prefetch={prefetch} fails instead of hanging ({output})",
         )
 
 
@@ -925,8 +920,7 @@ def test_avif_extents() -> None:
     for plane in range(frame.format.num_planes):
         check(
             samples(frame, plane) == samples(other, plane),
-            f"extents: plane {plane} is the one the whole file holds "
-            f"({len(samples(frame, plane))} samples)",
+            f"extents: plane {plane} is the one the whole file holds ({len(samples(frame, plane))} samples)",
         )
     check(
         [samples(frame, plane)[0] for plane in range(3)] == [74, 126, 128],
@@ -936,13 +930,10 @@ def test_avif_extents() -> None:
 
     # Both files are one format now, so a sequence holding the two needs no
     # `mismatch` and is one frame per file.
-    both = core.imgseqs.Read(
-        files=[fixture("avif-split-extents.avif"), fixture("avif-yuv420p.avif")]
-    )
+    both = core.imgseqs.Read(files=[fixture("avif-split-extents.avif"), fixture("avif-yuv420p.avif")])
     check(
         both.num_frames == 2,
-        f"extents: the two are one format, so a sequence holds both "
-        f"(got {both.num_frames} frames)",
+        f"extents: the two are one format, so a sequence holds both (got {both.num_frames} frames)",
     )
     check(
         both.format.name == "YUV420P8",
@@ -999,8 +990,7 @@ def test_alpha_demand() -> None:
     clip = core.imgseqs.Read(files=[fixture("avif-broken-alpha.avif")])
     check(
         clip.format.name == "YUV420P8",
-        f"demand: a colour-only read of a file with a broken alpha item is yuv "
-        f"(got {clip.format.name})",
+        f"demand: a colour-only read of a file with a broken alpha item is yuv (got {clip.format.name})",
     )
     check(
         (clip.width, clip.height) == (64, 48),
@@ -1126,9 +1116,7 @@ def quadrant_values(frame) -> list:
     plane = samples(frame)
     width, height = frame.width, frame.height
     centres = [
-        (width // 4 + column * width // 2, height // 4 + row * height // 2)
-        for row in range(2)
-        for column in range(2)
+        (width // 4 + column * width // 2, height // 4 + row * height // 2) for row in range(2) for column in range(2)
     ]
     return [plane[y * width + x] for x, y in centres]
 
@@ -1154,8 +1142,7 @@ def test_orientation_yuv() -> None:
         clip, _ = read_alpha(files=[fixture(f"orientation-{orientation}.webp")])
         check(
             (clip.width, clip.height) == (width, height),
-            f"exif webp {orientation}: the clip is {width}x{height} "
-            f"(got {clip.width}x{clip.height})",
+            f"exif webp {orientation}: the clip is {width}x{height} (got {clip.width}x{clip.height})",
         )
         frame = clip.get_frame(0)
         check(
@@ -1170,8 +1157,7 @@ def test_orientation_yuv() -> None:
         for first in range(4):
             for second in range(first + 1, 4):
                 check(
-                    (observed[first] < observed[second])
-                    == (expected[first] < expected[second]),
+                    (observed[first] < observed[second]) == (expected[first] < expected[second]),
                     f"exif webp {orientation}: quadrant {first} against {second}",
                 )
         check(
@@ -1211,8 +1197,7 @@ def test_orientation_jxl() -> None:
     check(samples(frame) == display_flat, "jxl: the picture the file states")
     check(
         frame.props["ImgSeqOrientation"] == 6,
-        f"jxl: ImgSeqOrientation is the code the file states "
-        f"(got {frame.props.get('ImgSeqOrientation')})",
+        f"jxl: ImgSeqOrientation is the code the file states (got {frame.props.get('ImgSeqOrientation')})",
     )
     check(
         samples(alpha.get_frame(0)) == [255] * len(display_flat),
@@ -1227,9 +1212,7 @@ def test_orientation_jxl() -> None:
         samples(reference.get_frame(0)) == samples(frame),
         "jxl: the same picture as the png of the same code",
     )
-    together = core.imgseqs.Read(
-        files=[fixture("orientation-6.png"), fixture("orientation-6.jxl")]
-    )
+    together = core.imgseqs.Read(files=[fixture("orientation-6.png"), fixture("orientation-6.jxl")])
     check(len(together) == 2, "jxl: the png and the jxl are one sequence")
 
     # The stored picture, which is the code undone rather than applied.
@@ -1335,8 +1318,7 @@ def test_color_metadata() -> None:
         )
         check(
             props.get("ImgSeqHasICC", 0) == 0,
-            f"colour {name}: a file with no icc profile reports none "
-            f"(got {props.get('ImgSeqHasICC')})",
+            f"colour {name}: a file with no icc profile reports none (got {props.get('ImgSeqHasICC')})",
         )
 
     # The heic states a smpte 170m matrix beside those primaries, which is the
@@ -1378,8 +1360,7 @@ def test_color_metadata() -> None:
     webp = core.imgseqs.Read(files=[fixture("lossy.webp")]).get_frame(0)
     check(
         webp.props.get("_Matrix") == 5 and webp.props.get("_Range") == 0,
-        f"colour webp: the assumed matrix and range "
-        f"(got {webp.props.get('_Matrix')} and {webp.props.get('_Range')})",
+        f"colour webp: the assumed matrix and range (got {webp.props.get('_Matrix')} and {webp.props.get('_Range')})",
     )
     check(
         "_Primaries" not in webp.props and "_Transfer" not in webp.props,
@@ -1428,13 +1409,11 @@ def test_icc_profile_properties() -> None:
     color = result["clip"].get_frame(0)
     alpha = result["alpha"].get_frame(0)
     check(
-        color.props.get("ICCProfile") == expected
-        and alpha.props.get("ICCProfile") == expected,
+        color.props.get("ICCProfile") == expected and alpha.props.get("ICCProfile") == expected,
         "icc: ReadAlpha copies the profile to both frames",
     )
     check(
-        samples(color) == samples(plain[0].get_frame(0))
-        and samples(alpha) == samples(plain[1].get_frame(0)),
+        samples(color) == samples(plain[0].get_frame(0)) and samples(alpha) == samples(plain[1].get_frame(0)),
         "icc: ReadAlpha export does not change either clip",
     )
 
@@ -1445,8 +1424,7 @@ def test_icc_profile_properties() -> None:
 # encoded from is the same four by three grid of twelve distinct samples as the
 # exif fixtures, so the picture each code produces is the one `shown` states.
 CONTAINER_STORED = [
-    [row * ORIENTATION_WIDTH + column + 7 for column in range(ORIENTATION_WIDTH)]
-    for row in range(ORIENTATION_HEIGHT)
+    [row * ORIENTATION_WIDTH + column + 7 for column in range(ORIENTATION_WIDTH)] for row in range(ORIENTATION_HEIGHT)
 ]
 
 # (fixture, the exif code its container transform is, the format it is handed
@@ -1493,8 +1471,7 @@ def test_orientation_container() -> None:
         )
         check(
             (clip.width, clip.height) == (width, height),
-            f"container {name}: the clip is {width}x{height} "
-            f"(got {clip.width}x{clip.height})",
+            f"container {name}: the clip is {width}x{height} (got {clip.width}x{clip.height})",
         )
         frame = clip.get_frame(0)
         check(
@@ -1503,15 +1480,13 @@ def test_orientation_container() -> None:
         )
         check(
             frame.props["ImgSeqOrientation"] == code,
-            f"container {name}: ImgSeqOrientation is the code it describes "
-            f"(got {frame.props['ImgSeqOrientation']})",
+            f"container {name}: ImgSeqOrientation is the code it describes (got {frame.props['ImgSeqOrientation']})",
         )
 
         unrotated = core.imgseqs.Read(files=[fixture(name)], prefetch=0, apply_rotation=False)
         check(
             (unrotated.width, unrotated.height) == (len(stored[0]), len(stored)),
-            f"container {name}: apply_rotation=False keeps the stored size "
-            f"(got {unrotated.width}x{unrotated.height})",
+            f"container {name}: apply_rotation=False keeps the stored size (got {unrotated.width}x{unrotated.height})",
         )
         stored_frame = unrotated.get_frame(0)
         check(
@@ -1532,8 +1507,7 @@ def test_orientation_container() -> None:
     except Exception as error:
         check(
             "3x4" in str(error) and "4x3" in str(error),
-            f"container: a rotated page beside an upright one is rejected "
-            f"({str(error).strip()})",
+            f"container: a rotated page beside an upright one is rejected ({str(error).strip()})",
         )
     else:
         check(False, "container: a rotated page beside an upright one is rejected")
@@ -1646,10 +1620,7 @@ def test_animation() -> None:
     animated = core.imgseqs.ReadAlpha(files=[fixture("animation.png")])
     colour, alpha = animated["clip"], animated["alpha"]
     check(colour.num_frames == alpha.num_frames, "animation: both clips have the same length")
-    alpha_hashes = {
-        frame_hash(alpha.get_frame(index))
-        for index in range(alpha.num_frames)
-    }
+    alpha_hashes = {frame_hash(alpha.get_frame(index)) for index in range(alpha.num_frames)}
     check(len(alpha_hashes) > 1, "animation: the alpha clip varies between presentations")
 
     # A list that mixes a still with an animation adds up, and the still keeps
@@ -1670,9 +1641,7 @@ def test_animation() -> None:
             "expected frame 0" in str(error),
             "animation: a mixed-size list is refused without mismatch",
         )
-    variable = core.imgseqs.Read(
-        files=[fixture("animation.gif"), fixture("alpha-rgb8.png")], mismatch=1
-    )
+    variable = core.imgseqs.Read(files=[fixture("animation.gif"), fixture("alpha-rgb8.png")], mismatch=1)
     check(
         variable.num_frames == 16,
         f"animation: mismatch allows a still after an animation (got {variable.num_frames})",
@@ -1807,9 +1776,10 @@ def test_png_feature_sets() -> None:
             f"{name} names the grey it widens to",
         )
 
+
 def test_separated_inks() -> None:
     """A cmyk tiff is the colour its four inks state, converted by this reader.
- 
+
     The inks are the ones `make-tiff-cmyk-fixtures.py` writes and the expected
     samples are `(255 - ink) * (255 - k) / 255` worked out by hand. The fifth
     pixel is the one worth reading twice: its `k` is 128 and every other ink is
@@ -1845,7 +1815,7 @@ def test_separated_inks() -> None:
         samples(alpha.get_frame(0)) == [255] * 8,
         "cmyk8: four inks and no alpha is an opaque clip",
     )
- 
+
     # The same inks at sixteen bits, so the conversion scales with the sample
     # rather than reusing the byte one. The fifth pixel is the same truncation
     # one word up: 32638 where the exact product is 32639.
@@ -1865,7 +1835,7 @@ def test_separated_inks() -> None:
         wide_label == "Cmyk16",
         f"cmyk16: the label names the ink model (got {wide_label})",
     )
- 
+
     # A planar file is the same picture as the chunky one, which is what says
     # the four links were reordered: every sample is present either way, so only
     # their order tells the two apart.
@@ -1876,7 +1846,7 @@ def test_separated_inks() -> None:
             samples(planar_frame, plane) == samples(frame, plane),
             f"cmyk8 planar: plane {plane} is the chunky file's",
         )
- 
+
     # A fifth sample is alpha and not a fifth ink: the colour of every pixel is
     # the four ink file's, so the sample never reached the conversion.
     five, five_alpha = read_alpha(files=[fixture("tiff-cmyka8.tiff")])
@@ -1907,8 +1877,7 @@ def test_planar_pages() -> None:
     planar_frame = planar.get_frame(0)
     chunky_frame = chunky.get_frame(0)
     check(
-        (planar_frame.width, planar_frame.height)
-        == (chunky_frame.width, chunky_frame.height),
+        (planar_frame.width, planar_frame.height) == (chunky_frame.width, chunky_frame.height),
         f"planar: the picture is the chunky file's size (got {planar_frame.width}x{planar_frame.height})",
     )
     for plane in range(3):
@@ -1921,9 +1890,64 @@ def test_planar_pages() -> None:
         "planar rgb8: the alpha clip is the chunky file's",
     )
 
+
+def test_core_header_bitmaps() -> None:
+    """A `BITMAPCOREHEADER` bitmap is read, which it was refused for by name.
+
+    The older header is the same format with three differences that all show up
+    here: signed sixteen bit dimensions, no compression field at all, and a
+    palette entry of three bytes where the information header's is four. The 4
+    bit file is the one that fails first if the table is stepped four bytes at a
+    time, so it is here as well as the 1x1 24 bit file the gaps table names.
+
+    The expected samples are what Pillow reads from the same two files, which is
+    the only independent answer for a format this tree wrote itself.
+    """
+    cases = [
+        ("bmp-core-24.bmp", (1, 1), [3, 5, 7]),
+        (
+            "bmp-core-4.bmp",
+            (2, 2),
+            # Top row first, which is the order the picture is stored in.
+            [
+                200,
+                200,
+                200,
+                90,
+                0,
+                0,
+                0,
+                60,
+                0,
+                0,
+                0,
+                30,
+            ],
+        ),
+    ]
+    for name, size, expected in cases:
+        clip, alpha = read_alpha(files=[fixture(name)])
+        check(clip.format.name == "RGB24", f"{name}: color clip is RGB24 (got {clip.format.name})")
+        check(alpha.format.name == "Gray8", f"{name}: alpha clip is Gray8 (got {alpha.format.name})")
+        frame = clip.get_frame(0)
+        check(
+            (frame.width, frame.height) == size,
+            f"{name}: the size is the one the core header states (got {frame.width}x{frame.height})",
+        )
+        for plane in range(3):
+            check(
+                samples(frame, plane) == expected[plane::3],
+                f"{name}: plane {plane} is the colour Pillow reads (got {samples(frame, plane)})",
+            )
+        check(
+            set(samples(alpha.get_frame(0))) == {255},
+            f"{name}: a core header states no alpha, so the clip is opaque",
+        )
+
+
 def test_palette_pages() -> None:
     """A palette page is expanded through its colour table.
- 
+
     The indices are read from the strips by the plugin rather than by the pinned
     decoder, which refuses this photometric before it can describe a chunk, so
     the bit order and the row padding are this tree's own: a row of indices is
@@ -1931,7 +1955,7 @@ def test_palette_pages() -> None:
     above the one before it. Each width is checked against the colours libtiff
     hands Pillow for the same file at the same positions, at (0, 0), (1, 5) and
     (18, 11), which is what says the expansion is the one the format means.
- 
+
     A palette reports the layout its samples expand to rather than naming its
     indices, which is what a palette png already reports here, and the four
     widths are the ones a byte divides into.
@@ -1970,13 +1994,13 @@ def test_palette_pages() -> None:
             samples(alpha.get_frame(0)) == [255] * 37 * 23,
             f"{name}: a palette has no alpha, so the clip is opaque",
         )
- 
+
     # A width a byte does not divide into is refused by the probe rather than
     # promised by it, which is what says the refusal is not only in the decode.
     try:
         read_alpha(files=[fixture("tiff-palette-3bit.tiff")])
         check(False, "palette: three bits an index is refused")
-    except Exception as error:  # noqa: BLE001 - the refusal is the check
+    except Exception as error:
         check(
             "3 bit" in str(error),
             f"palette: the refusal names the width (got {error})",
@@ -1985,7 +2009,7 @@ def test_palette_pages() -> None:
 
 def test_ycbcr_pages() -> None:
     """A ycbcr page is handed out as its own planes at the sampling it states.
- 
+
     The three fixtures hold the same luma, stepping by eight across and
     thirty-two down, and a flat chroma of 128, so a unit read in the wrong
     order, a unit row read at the wrong stride or a chroma plane of the wrong
@@ -1993,7 +2017,7 @@ def test_ycbcr_pages() -> None:
     that merely looks off. libtiff's own tiff2rgba reads the same three to
     neutral greys at exactly these levels, which is what says the packing is
     the format's and not this reader's.
- 
+
     The coefficients and the reference levels decide `_Matrix` and `_Range`, and
     a page that states neither is bt.601 at full range, which is what the
     specification gives it: an absent tag is a value rather than an unknown.
@@ -2043,7 +2067,7 @@ def test_ycbcr_pages() -> None:
             samples(alpha.get_frame(0)) == [255] * (size[0] * size[1]),
             f"{name}: a ycbcr page has no alpha, so the clip is opaque",
         )
- 
+
     # A page whose coefficients name another matrix, and one whose reference
     # levels leave headroom, which is the only thing that moves these two.
     for name, matrix, full_range in [
@@ -2079,7 +2103,7 @@ def test_ycbcr_pages() -> None:
         )
     check(frame.props["_Matrix"] == 0, "ycbcr: an rgb frame states no matrix")
     check(frame.props["_Range"] == 1, "ycbcr: an rgb frame is full range")
- 
+
     # Every page this reader cannot take is refused by the *probe*, so the
     # probe never promises a frame the decode would not produce.
     for name, said in [
@@ -2089,11 +2113,12 @@ def test_ycbcr_pages() -> None:
         try:
             read_alpha(files=[fixture(name)])
             check(False, f"ycbcr: {name} is refused")
-        except Exception as error:  # noqa: BLE001 - the refusal is the check
+        except Exception as error:
             check(
                 said in str(error),
                 f"ycbcr: {name} names why (got {error})",
             )
+
 
 def main() -> None:
     for test in (
@@ -2133,6 +2158,7 @@ def main() -> None:
         test_planar_pages,
         test_palette_pages,
         test_ycbcr_pages,
+        test_core_header_bitmaps,
     ):
         print(f"--- {test.__name__}")
         test()
