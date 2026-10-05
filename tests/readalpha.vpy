@@ -2007,6 +2007,89 @@ def test_palette_pages() -> None:
         )
 
 
+def test_narrow_gray_pages() -> None:
+    """A gray page of one, two or four bits a sample is widened to eight.
+
+    The pinned decoder hands these over packed, so the walk that unpacks them
+    is this tree's own: a row of samples is padded to a byte and held most
+    significant bit first, and each sample is widened by
+    `value * 255 / (2**bits - 1)`, which is libtiff's own widening. That is
+    what puts one bit at 0 and 255 rather than at 0 and 1, and what leaves a
+    bilevel page black and white rather than nearly black.
+
+    The samples are what Pillow reads from the same files at the first
+    sample, the first sample of the fifth byte, the last sample of the first
+    row, and the first sample of the second row -- the last of which is what
+    says the walk stepped by the row stride rather than reading the first row
+    for every row, which is the one way this walk can be wrong without
+    changing the row it is checked on.
+
+    `tiff-gray1-lzw.tiff` is the bilevel page round tripped through libtiff
+    with LZW selected, so the compressed path is the same picture.
+    """
+    expected = {
+        "tiff-gray1.tiff": (255, 0, 0, 255),
+        "tiff-gray1-lzw.tiff": (255, 0, 0, 255),
+        "tiff-gray2.tiff": (0, 0, 255, 85),
+        "tiff-gray4.tiff": (0, 136, 255, 17),
+    }
+    for name, (first, at_eight, last, second_row) in expected.items():
+        clip, alpha = read_alpha(files=[fixture(name)])
+        check(
+            clip.format.name == "Gray8",
+            f"{name}: a narrow gray page is handed out at eight bits (got {clip.format.name})",
+        )
+        check(
+            (clip.width, clip.height) == (16, 8),
+            f"{name}: the size is the one the header states (got {clip.width}x{clip.height})",
+        )
+        frame = clip.get_frame(0)
+        plane = samples(frame)
+        for index, want in ((0, first), (8, at_eight), (15, last), (16, second_row)):
+            check(
+                plane[index] == want,
+                f"{name}: sample {index} is {want} (got {plane[index]})",
+            )
+        check(
+            str(frame.props["ImgSeqOriginalColorType"]) == "L8",
+            f"{name}: the label is the width the samples arrive at (got {frame.props['ImgSeqOriginalColorType']})",
+        )
+        check(
+            samples(alpha.get_frame(0)) == [255] * 16 * 8,
+            f"{name}: a gray page has no alpha, so the clip is opaque",
+        )
+
+    # The two bilevel fixtures differ in `PhotometricInterpretation` and in
+    # nothing else, and the pinned decoder inverts the page that says zero is
+    # white itself -- so a reader that expanded the samples and then forgot
+    # the tag would hand out its twin's picture, which is the one way this
+    # tag can be lost without any other check in this file noticing.
+    black, _ = read_alpha(files=[fixture("tiff-gray1.tiff")])
+    white, _ = read_alpha(files=[fixture("tiff-gray1-white.tiff")])
+    black_samples = samples(black.get_frame(0))
+    white_samples = samples(white.get_frame(0))
+    check(
+        black_samples != white_samples,
+        "gray1: a page that says zero is white is not its twin's picture",
+    )
+    check(
+        all(a == 255 - b for a, b in zip(black_samples, white_samples, strict=True)),
+        "gray1: a page that says zero is white is the inverse of its twin",
+    )
+
+    # A sub-byte page carrying a predictor the reader cannot apply is refused
+    # by the probe, naming the tag, rather than described and then refused at
+    # the decode -- which is the shape `probe-agreement.py` exists to check.
+    try:
+        read_alpha(files=[fixture("tiff-gray1-pred.tiff")])
+        check(False, "gray1: a sub-byte page with a predictor is refused")
+    except Exception as error:
+        check(
+            "predictor" in str(error),
+            f"gray1: the refusal names the tag (got {error})",
+        )
+
+
 def test_ycbcr_pages() -> None:
     """A ycbcr page is handed out as its own planes at the sampling it states.
 
@@ -2156,6 +2239,7 @@ def main() -> None:
         test_png_feature_sets,
         test_separated_inks,
         test_planar_pages,
+        test_narrow_gray_pages,
         test_palette_pages,
         test_ycbcr_pages,
         test_core_header_bitmaps,

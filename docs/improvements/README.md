@@ -164,6 +164,12 @@ the historical 59-of-84 cohort and lists the remaining saved-plan, shared-reader
 planar-output and timing work. PNM/TGA/BMP row sinks do not yet mean incremental
 file reads. The original inventory and benchmarks are labeled historical.
 
+Plan 34's candidate table has since lost its low-bit gray TIFF row: a gray
+page of one, two or four bits a sample is read and expanded to `Gray8` rather
+than refused, with six fixtures, a `tests/readalpha.vpy` section that reads
+them and a Pillow parity check that agrees with every one of them. What is
+left in plan 34 is its DXT SIMD proposal at the end.
+
 ### image-rs removal goal — 2026-10-03
 
 These four plans record the research that preceded image-rs removal. The

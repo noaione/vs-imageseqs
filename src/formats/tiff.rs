@@ -69,6 +69,10 @@ struct Layout {
     /// rather than colours. The pinned decoder refuses this photometric before it
     /// will name a colour type, so the reader expands the table itself.
     palette: Option<u8>,
+    /// The width of one gray sample when the file states fewer than eight bits, which
+    /// is the case the pinned decoder hands over packed rather than unpacked.
+    /// `None` for every page whose samples are already a whole number of bytes.
+    narrow: Option<u8>,
     /// The chroma sampling of a ycbcr page, as the two numbers the file states:
     /// how many pixels share one chroma pair. The pinned decoder refuses a
     /// subsampled page and upsamples the ones it does take, so the raster is read
@@ -100,6 +104,12 @@ fn layout(kind: tiff::ColorType) -> Result<Layout> {
     // The sample width is the number the colour type carries, and it is the only
     // thing that decides how wide a sample is.
     let (bits, channels, color_type, source, separated) = match kind {
+        // One, two and four bits a sample are expanded to eight by the pinned
+        // decoder, which is the width every other gray page here is handed out at
+        // and the only narrow width a frame can hold. The eight below is the
+        // width the samples arrive at, not the width the file states; the file's
+        // own width is what [`layout_gray`] read to decide that.
+        Tiff::Gray(1 | 2 | 4) => (8, 1, ColorType::L8, SourceColorType::L8, false),
         Tiff::Gray(bits @ (8 | 16 | 32)) => {
             let (color, source) = match bits {
                 8 => (ColorType::L8, SourceColorType::L8),
@@ -170,6 +180,7 @@ fn layout(kind: tiff::ColorType) -> Result<Layout> {
         float: bits == 32,
         separated,
         palette: None,
+        narrow: None,
         ycbcr: None,
         cicp: None,
     })
@@ -195,12 +206,21 @@ fn layout_of<R: std::io::Read + std::io::Seek>(
     // type the pinned decoder names for the shapes read here: it refuses a
     // palette outright, and it refuses a subsampled ycbcr page or upsamples the
     // ones it does take.
-    match decoder
+    let photometric_tag = decoder
         .get_tag_unsigned::<u16>(tiff::tags::Tag::PhotometricInterpretation)
-        .ok()
-    {
+        .ok();
+    match photometric_tag {
         Some(3) => return layout_palette(decoder, path, action),
         Some(6) => return layout_ycbcr(decoder, path, action),
+        // 0 is `WhiteIsZero` and 1 is `BlackIsZero`; the narrow gray pages are
+        // recognised from the directory rather than from the colour type,
+        // because the pinned decoder's error for a predictor it cannot apply is
+        // not one this reader should hand out at the decode.
+        Some(0) | Some(1) => {
+            if let Some(layout) = layout_gray(decoder, path, action)? {
+                return Ok(layout);
+            }
+        }
         _ => {}
     }
     layout(
@@ -209,6 +229,74 @@ fn layout_of<R: std::io::Read + std::io::Seek>(
             .map_err(|error| image_error(action, path, error))?,
     )
     .map_err(|error| image_error(action, path, error))
+}
+
+/// The layout of a gray page of one, two or four bits a sample.
+///
+/// Returns `None` for a page eight bits or wider, which is left to
+/// [`layout`] because the pinned decoder names those without help and this has
+/// nothing to add to them.
+///
+/// `PhotometricInterpretation` decides which end of the range is black, and the
+/// pinned decoder applies that itself while it unpacks, so the two fixtures that
+/// differ only in this tag differ only in their picture -- which is what makes
+/// the tag worth a fixture rather than a comment.
+///
+/// `Predictor` is the reason this exists as its own function. A horizontal
+/// predictor over a page narrower than a byte is a thing the pinned decoder
+/// refuses, and a probe that described it would be promising a frame the decode
+/// would not deliver, so it is refused here where the error can name the tag.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] for a narrow gray page that states a predictor this
+/// reader cannot read, or a width of zero.
+fn layout_gray<R: std::io::Read + std::io::Seek>(
+    decoder: &mut tiff::decoder::Decoder<R>,
+    path: &Path,
+    action: &str,
+) -> Result<Option<Layout>> {
+    let bits = decoder
+        .get_tag_unsigned::<u16>(tiff::tags::Tag::BitsPerSample)
+        .map_err(|error| image_error(action, path, error))?;
+    if !matches!(bits, 1 | 2 | 4) {
+        return Ok(None);
+    }
+    let samples = decoder
+        .get_tag_unsigned::<u16>(tiff::tags::Tag::SamplesPerPixel)
+        .unwrap_or(1);
+    if samples != 1 {
+        return Err(image_error(
+            action,
+            path,
+            format!("a gray page of {samples} samples at {bits} bits is not one this reader reads"),
+        ));
+    }
+    let predictor = decoder
+        .get_tag_unsigned::<u16>(tiff::tags::Tag::Predictor)
+        .unwrap_or(1);
+    if predictor != 1 {
+        return Err(image_error(
+            action,
+            path,
+            format!(
+                "a gray page of {bits} bits with predictor {predictor} is not one this reader decodes"
+            ),
+        ));
+    }
+    Ok(Some(Layout {
+        channels: 1,
+        // The unpacking is to eight bits, whatever the file states.
+        sample_bytes: 1,
+        color_type: ColorType::L8,
+        source: SourceColorType::L8,
+        float: false,
+        separated: false,
+        palette: None,
+        narrow: Some(bits as u8),
+        ycbcr: None,
+        cicp: None,
+    }))
 }
 
 /// The layout of a palette page, from the two tags that describe it.
@@ -266,6 +354,7 @@ fn layout_palette<R: std::io::Read + std::io::Seek>(
         float: false,
         separated: false,
         palette: Some(bits),
+        narrow: None,
         ycbcr: None,
         cicp: None,
     })
@@ -434,6 +523,7 @@ fn layout_ycbcr<R: std::io::Read + std::io::Seek>(
         float: false,
         separated: false,
         palette: None,
+        narrow: None,
         ycbcr: Some(subsampling),
         cicp,
     })
@@ -844,6 +934,17 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
             .read_image_to_buffer(&mut result)
             .map_err(|error| image_error("decode", &info.path, error))?;
         let expected = (width as usize) * (height as usize) * layout.channels;
+        let result = match layout.narrow {
+            None => result,
+            Some(bits) => expand_narrow(
+                result,
+                bits,
+                width,
+                height,
+                preference.row_stride.map_or(0, std::num::NonZeroUsize::get),
+                &info.path,
+            )?,
+        };
         let mut buffer = to_bytes(result, &layout, expected)
             .map_err(|error| image_error("decode", &info.path, error))?;
         if preference.planes > 1 {
@@ -919,7 +1020,75 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     })
 }
 
-/// Turns the crate's samples into the native-endian bytes a frame is written
+/// Expands a gray page of fewer than eight bits a sample to eight.
+///
+/// The pinned decoder hands such a page over **packed**: a 16x8 bilevel page
+/// arrives as sixteen bytes, one per eight pixels, where a hundred and twenty
+/// eight samples belong. `target/bench/probe-agreement.py` says so in its own
+/// words -- "the raster holds 16 samples where 128 belong" -- which is what makes
+/// this a row walk rather than a match arm in [`layout`].
+///
+/// A sample of `n` bits is widened by `value * 255 / (2**n - 1)`, which is what
+/// puts one bit at 0 or 255 rather than 0 or 1. libtiff widens the same way, and
+/// it is the only widening that leaves the two values of a bilevel page where a
+/// viewer expects them.
+///
+/// `PhotometricInterpretation` needs nothing here. The pinned decoder inverts a
+/// page that says zero is white on this path as on every other, and an earlier
+/// version of this function inverted a second time on the belief that it did
+/// not -- which `tests/fixtures/tiff-gray1-white.tiff` caught, because that
+/// fixture differs from its black-is-zero twin in this tag alone.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the packed buffer is shorter than the stride and
+/// the row count account for, or when the decoder hands such a page over as
+/// something other than bytes.
+fn expand_narrow(
+    result: tiff::decoder::DecodingResult,
+    bits: u8,
+    width: u32,
+    height: u32,
+    row_stride: usize,
+    path: &Path,
+) -> Result<tiff::decoder::DecodingResult> {
+    use tiff::decoder::DecodingResult as D;
+
+    let D::U8(packed) = result else {
+        return Err(image_error(
+            "decode",
+            path,
+            format!("a page of {bits} bit samples is not handed over as bytes"),
+        ));
+    };
+    let pixels = usize::try_from(width).unwrap_or(0);
+    let rows = usize::try_from(height).unwrap_or(0);
+    let per_byte = usize::from(8 / bits);
+    let row_bytes = pixels.div_ceil(per_byte).max(1).min(row_stride);
+    if packed.len() < row_bytes * rows {
+        return Err(ImgSeqError::new(format!(
+            "a page of {bits} bit samples is {} bytes where {} belong",
+            packed.len(),
+            row_bytes * rows
+        )));
+    }
+    let max = (1u16 << bits) - 1;
+    let mut samples = Vec::with_capacity(pixels * rows);
+    for row in 0..rows {
+        let start = row * row_stride;
+        for pixel in 0..pixels {
+            let byte = packed[start + pixel / per_byte];
+            let offset = u32::try_from(pixel % per_byte).unwrap_or(0);
+            let shift = 8 - u32::from(bits) * (offset + 1);
+            let value = (u16::from(byte) >> shift) & max;
+            let wide = (value * 255 / max) as u8;
+            samples.push(wide);
+        }
+    }
+    Ok(D::U8(samples))
+}
+
+/// Turns the crate samples into the native-endian bytes a frame is written
 /// from.
 ///
 /// # Errors
@@ -1521,6 +1690,98 @@ mod tests {
         }
     }
 
+    /// A page of one, two or four bits a sample is expanded to the eight bits a
+    /// frame holds, and the expansion is the widening libtiff does.
+    ///
+    /// The fixture is a 16x8 page over every value its width can hold, so a
+    /// packed read, a widening that saturates instead of scales, or a row that
+    /// starts at the wrong stride all show up as different numbers rather than as
+    /// a plausible picture. The expected values are what Pillow and libtiff read
+    /// from the same files, which `target/bench/lowbit-gray-parity.py` checks
+    /// against the library rather than against this tree.
+    #[test]
+    fn a_narrow_gray_page_is_expanded_to_the_width_libtiff_widens_it_to() {
+        for (name, first, at_eight, last, second_row) in [
+            ("tiff-gray1.tiff", 255u8, 0, 0, 255),
+            ("tiff-gray1-lzw.tiff", 255, 0, 0, 255),
+            ("tiff-gray2.tiff", 0, 0, 255, 85),
+            ("tiff-gray4.tiff", 0, 136, 255, 17),
+        ] {
+            let info = image_info_at(&fixture(name), true, None)
+                .unwrap_or_else(|error| panic!("{name}: {error}"))
+                .unwrap_or_else(|| panic!("{name} is taken over"));
+            assert_eq!((info.width, info.height), (16, 8), "{name}");
+            assert_eq!(
+                info.format.name(),
+                "Gray8",
+                "{name} is handed out at eight bits"
+            );
+            let picture = read(name);
+            assert_eq!(picture.len(), 16 * 8, "{name}: one sample a pixel");
+            assert_eq!(picture[0], first, "{name}: the first sample");
+            assert_eq!(
+                picture[8], at_eight,
+                "{name}: the first sample of the fifth byte"
+            );
+            assert_eq!(
+                picture[15], last,
+                "{name}: the last sample of the first row"
+            );
+            // The row stride is the one thing this walk can get wrong without
+            // disturbing the first row, because every row is read from
+            // `row * row_stride`. A walk that read row 0 for every row would
+            // pass all three assertions above, which is what this one is for.
+            assert_eq!(
+                picture[16], second_row,
+                "{name}: the first sample of the second row"
+            );
+        }
+    }
+
+    /// A page that says zero is white is inverted, and the pinned decoder does
+    /// that itself rather than leaving it to this reader.
+    ///
+    /// This fixture differs from `tiff-gray1.tiff` in one tag and nothing else,
+    /// which is what makes it worth a file: a reader that expands the samples and
+    /// then forgets the tag produces the *same picture as its twin*, and no
+    /// comparison against this tree would notice. An earlier version of
+    /// `expand_narrow` inverted a second time on the belief that the pinned
+    /// decoder did not, and this is the fixture that said otherwise.
+    #[test]
+    fn a_narrow_gray_page_that_says_zero_is_white_comes_back_inverted() {
+        let black = read("tiff-gray1.tiff");
+        let white = read("tiff-gray1-white.tiff");
+        assert_ne!(black, white, "the tag changes the picture");
+        assert_eq!(white[0], 0, "a one where the black-is-zero twin is white");
+        assert_eq!(
+            white[15], 255,
+            "a zero where the black-is-zero twin is black"
+        );
+        for (index, (a, b)) in black.iter().zip(white.iter()).enumerate() {
+            assert_eq!(
+                (a, b),
+                (&(255 - b), &(255 - a)),
+                "sample {index} is the inverse"
+            );
+        }
+    }
+
+    /// A narrow gray page the pinned decoder cannot read is refused by the probe,
+    /// naming the tag, rather than described and then refused at the decode.
+    ///
+    /// This is the shape every refusal in this file has to take: a probe that
+    /// describes a page the decode will not deliver is the one failure the
+    /// `probe-agreement` check exists to catch.
+    #[test]
+    fn a_narrow_gray_page_with_a_predictor_is_refused_by_the_probe() {
+        let error = image_info_at(&fixture("tiff-gray1-pred.tiff"), true, None)
+            .expect_err("a horizontal predictor over a sub-byte page is refused");
+        assert!(
+            error.to_string().contains("predictor"),
+            "the error names the tag: {error}"
+        );
+    }
+
     /// The picture one fixture decodes to, in one buffer. A decode hands over
     /// either that buffer or the planes it already was, and the tests here
     /// compare pictures rather than the shape a format chose.
@@ -1887,6 +2148,7 @@ mod tests {
             float: false,
             separated: true,
             palette: None,
+            narrow: None,
             ycbcr: None,
             cicp: None,
         };
@@ -1909,6 +2171,7 @@ mod tests {
             float: false,
             separated: false,
             palette: None,
+            narrow: None,
             ycbcr: None,
             cicp: None,
         };

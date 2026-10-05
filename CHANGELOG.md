@@ -30,6 +30,15 @@
   coefficients name no matrix VapourSynth has a code for is converted to rgb
   with the coefficients it states. Eight bit samples, uncompressed, and
   libtiff's own `tiff2rgba` gives the same samples for every fixture
+- A gray tiff of one, two or four bits a sample is read rather than refused.
+  The decoder hands such a page over packed -- a 16x8 bilevel page arrives as
+  sixteen bytes where a hundred and twenty-eight samples belong -- so the
+  samples are unpacked here and widened by `value * 255 / (2**bits - 1)`,
+  which is libtiff's own widening and is what leaves a bilevel page black and
+  white rather than nearly black. The page is handed out as `Gray8` whatever
+  width it states, `PhotometricInterpretation` still decides which end is
+  black, and a page of one, two or four bits that states a predictor is still
+  refused, by name
 - Whether a file plays a timeline is decided by its bytes now, like its format
   already was, so an animated gif, webp, avif or heic under a name that does
   not say so plays its timeline instead of a single still. The dispatch is one
