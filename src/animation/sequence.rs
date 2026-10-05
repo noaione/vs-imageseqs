@@ -24,7 +24,7 @@
 
 use std::{
     fs::File,
-    io::{Read, Seek, SeekFrom},
+    io::{BufReader, Read, Seek, SeekFrom},
     path::Path,
 };
 
@@ -138,9 +138,7 @@ pub struct Sequence {
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file holds a movie box that cannot be read.
-pub fn read(path: &Path) -> Result<Option<Sequence>> {
-    crate::animation::count_timeline_read();
-    let mut file = File::open(path).map_err(|error| image_error("open", path, error))?;
+pub fn read(file: &mut BufReader<File>, path: &Path) -> Result<Option<Sequence>> {
     let length = file
         .seek(SeekFrom::End(0))
         .map_err(|error| image_error("read", path, error))?;
@@ -151,7 +149,7 @@ pub fn read(path: &Path) -> Result<Option<Sequence>> {
     // file rather than read whole; see [`fill_structure`].
     let wanted = length.min(METADATA_LIMIT);
     let mut data = vec![0u8; usize::try_from(wanted).unwrap_or(0)];
-    fill_structure(&mut file, &mut data, path)?;
+    fill_structure(file, &mut data, path)?;
 
     let Some(moov) = child(
         &data,
@@ -209,7 +207,7 @@ pub fn read(path: &Path) -> Result<Option<Sequence>> {
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the file cannot be read.
-fn fill_structure(file: &mut File, data: &mut [u8], path: &Path) -> Result<()> {
+fn fill_structure(file: &mut BufReader<File>, data: &mut [u8], path: &Path) -> Result<()> {
     let end = u64::try_from(data.len()).unwrap_or(u64::MAX);
     let mut at = 0u64;
     while at + 8 <= end {
@@ -561,9 +559,14 @@ const MAX_SAMPLES: usize = 1 << 22;
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::{
+        fs::File,
+        io::BufReader,
+        path::{Path, PathBuf},
+    };
 
-    use super::{Crop, read};
+    use super::{Crop, Sequence, read};
+    use crate::{decoder::image_error, error::Result};
 
     fn fixture(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -572,11 +575,17 @@ mod tests {
             .join(name)
     }
 
+    /// The walk through an open of its own, which is what a probe hands it.
+    fn read_file(path: &Path) -> Result<Option<Sequence>> {
+        let file = File::open(path).map_err(|error| image_error("open", path, error))?;
+        read(&mut BufReader::new(file), path)
+    }
+
     /// An avif sequence states four samples whose durations are the ones the
     /// `stts` box holds, which is what the embedded libheif reports wrongly.
     #[test]
     fn an_avif_sequence_states_its_own_sample_timing() {
-        let sequence = read(&fixture("animation.avif"))
+        let sequence = read_file(&fixture("animation.avif"))
             .expect("the fixture reads")
             .expect("the fixture is a sequence");
         assert_eq!(sequence.timing.timescale, 1000);
@@ -589,7 +598,7 @@ mod tests {
     /// its coded picture is larger than the aperture it presents.
     #[test]
     fn a_heic_sequence_states_its_aperture() {
-        let sequence = read(&fixture("animation.heic"))
+        let sequence = read_file(&fixture("animation.heic"))
             .expect("the fixture reads")
             .expect("the fixture is a sequence");
         assert_eq!(sequence.timing.timescale, 1000);
@@ -626,7 +635,10 @@ mod tests {
             if !path.exists() {
                 continue;
             }
-            assert!(read(&path).expect("the fixture reads").is_none(), "{name}");
+            assert!(
+                read_file(&path).expect("the fixture reads").is_none(),
+                "{name}"
+            );
         }
     }
 }

@@ -23,7 +23,7 @@
 
 use std::{
     fs::File,
-    io::Read,
+    io::{BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
@@ -336,14 +336,15 @@ pub fn segment_info(
     path: &Path,
     info: crate::decoder::ImageInfo,
     fps: Rate,
+    file: &mut BufReader<File>,
 ) -> Result<Option<SegmentInfo>> {
     // A still is the common case, and the walk below reads the whole file to
     // find that out. The container states it in the flags of its `VP8X` header,
     // so a file that cannot be animated never reaches the walk.
-    if !header_states_animation(path)? {
+    if !header_states_animation(file)? {
         return Ok(None);
     }
-    let Some(animation) = walk(path)? else {
+    let Some(animation) = walk(file, path)? else {
         return Ok(None);
     };
     if !animation.is_animated() {
@@ -496,14 +497,22 @@ impl AnimationDecoder for Source {
 ///
 /// Returns [`ImgSeqError`] when the file cannot be read or its container is
 /// malformed.
-pub fn walk(path: &Path) -> Result<Option<Animation>> {
-    let data = std::fs::read(path).map_err(|error| {
-        ImgSeqError::new(format!(
-            "failed to open image '{}': {error}",
-            path.display()
-        ))
-    })?;
+pub fn walk(file: &mut BufReader<File>, path: &Path) -> Result<Option<Animation>> {
+    let data = read_whole(file, path)?;
     parse(&data, path)
+}
+
+/// Reads the probe's open from its front.
+///
+/// The header check above leaves the reader partway into the file, so the whole
+/// read starts over rather than continuing from wherever that stopped.
+fn read_whole(file: &mut BufReader<File>, path: &Path) -> Result<Vec<u8>> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| image_error("open", path, error))?;
+    let mut data = Vec::new();
+    file.read_to_end(&mut data)
+        .map_err(|error| image_error("read", path, error))?;
+    Ok(data)
 }
 
 /// Whether a webp's container states that it is animated.
@@ -517,9 +526,7 @@ pub fn walk(path: &Path) -> Result<Option<Animation>> {
 /// Anything else -- a chunk order the format does not write, a header too short
 /// to read -- answers `true`, which leaves the refusal to [`walk`], the same walk
 /// that made it before this check existed.
-fn header_states_animation(path: &Path) -> Result<bool> {
-    crate::animation::count_timeline_read();
-    let mut file = File::open(path).map_err(|error| image_error("open", path, error))?;
+fn header_states_animation(file: &mut BufReader<File>) -> Result<bool> {
     let mut riff = [0; 12];
     let mut header = [0; CHUNK_HEADER];
     if file.read_exact(&mut riff).is_err() || !is_container(&riff) {
@@ -796,7 +803,7 @@ mod tests {
     /// canvas, alpha, no ICC, no exif, and a background of all zeros.
     #[test]
     fn the_fixture_container_is_read_as_libwebp_reads_it() {
-        let animation = walk(&fixture("animation.webp"))
+        let animation = walk_file(&fixture("animation.webp"))
             .expect("the fixture is read")
             .expect("a webp is taken over");
         assert_eq!((animation.width, animation.height), (16, 12));
@@ -814,7 +821,7 @@ mod tests {
     /// the origin with blend off and no disposal.
     #[test]
     fn every_frame_is_read_as_libwebp_reads_it() {
-        let animation = walk(&fixture("animation.webp"))
+        let animation = walk_file(&fixture("animation.webp"))
             .expect("the fixture is read")
             .expect("a webp is taken over");
         let rectangles: Vec<_> = animation
@@ -1086,12 +1093,12 @@ mod tests {
             "header-still.webp",
             &riff(&[(b"VP8X", vp8x(4, 4, 0x10)), (b"VP8 ", vec![0; 8])]),
         );
-        assert!(!header_states_animation(&extended).expect("the header to be read"));
-        assert!(matches!(walk(&extended), Ok(None)));
+        assert!(!header_states(&extended).expect("the header to be read"));
+        assert!(matches!(walk_file(&extended), Ok(None)));
         let _ = std::fs::remove_file(&extended);
 
         let plain = write_temp("header-plain.webp", &riff(&[(b"VP8L", vec![0; 8])]));
-        assert!(!header_states_animation(&plain).expect("the header to be read"));
+        assert!(!header_states(&plain).expect("the header to be read"));
         let _ = std::fs::remove_file(&plain);
     }
 
@@ -1104,9 +1111,22 @@ mod tests {
             &riff(&[(b"VP8X", vp8x(4, 4, 0x10)), (b"VP8X", vec![0; 3])]),
         );
         // A second `VP8X` too short to hold flags, which the walk refuses.
-        assert!(walk(&path).is_err());
-        assert!(!header_states_animation(&path).expect("the header to be read"));
+        assert!(walk_file(&path).is_err());
+        assert!(!header_states(&path).expect("the header to be read"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The header check through an open of its own, which is what a probe does
+    /// with the reader it already holds.
+    fn header_states(path: &Path) -> Result<bool> {
+        let file = File::open(path).map_err(|error| image_error("open", path, error))?;
+        header_states_animation(&mut BufReader::new(file))
+    }
+
+    /// The walk through an open of its own, for the same reason.
+    fn walk_file(path: &Path) -> Result<Option<Animation>> {
+        let file = File::open(path).map_err(|error| image_error("open", path, error))?;
+        walk(&mut BufReader::new(file), path)
     }
 
     /// Writes bytes to a temp file named for this test process.

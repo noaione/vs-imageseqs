@@ -27,7 +27,11 @@
 //! the file and replays the samples before it. Only the last presentation is
 //! held, which is what bounds memory independently of a sequence's length.
 
-use std::path::{Path, PathBuf};
+use std::{
+    fs::File,
+    io::BufReader,
+    path::{Path, PathBuf},
+};
 
 use libheif_rs::{ColorSpace, HeifContext, Plane, Track};
 
@@ -52,8 +56,9 @@ pub fn segment_info(
     path: &Path,
     info: crate::decoder::ImageInfo,
     fps: Rate,
+    file: &mut BufReader<File>,
 ) -> Result<Option<SegmentInfo>> {
-    let Some(sequence) = super::sequence::read(path)? else {
+    let Some(sequence) = super::sequence::read(file, path)? else {
         return Ok(None);
     };
     if sequence.timing.samples() < 2 {

@@ -13,7 +13,7 @@
 
 use std::{
     fs::File,
-    io::{BufReader, Read, Seek, SeekFrom},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
@@ -77,27 +77,32 @@ pub fn segment_info(
     path: &Path,
     info: crate::decoder::ImageInfo,
     fps: Rate,
+    file: &mut BufReader<File>,
 ) -> Result<Option<SegmentInfo>> {
-    let reader = open(path)?;
-    let Some(animation) = reader.info().animation_control() else {
-        return Ok(None);
+    // The `png` crate's reader borrows the probe's open, so what it states is
+    // copied out of it before the chunk walk below wants the same handle.
+    let (frames, canvas) = {
+        let reader = open_over(file, path)?;
+        let Some(animation) = reader.info().animation_control() else {
+            return Ok(None);
+        };
+        // A file whose default image is not the first presentation hands that image
+        // over first, with no frame control of its own. It is what a reader that
+        // does not know APNG would show, and `image` calls it a thumbnail; it is
+        // not part of the displayed timeline.
+        // Whether the default image is a poster rather than the first presentation
+        // decides how many frames the file yields, which is only needed by the
+        // timing pass that walks them.
+        if animation.num_frames == 0 {
+            return Err(ImgSeqError::new(format!(
+                "animated image '{}' states no frames",
+                path.display()
+            )));
+        }
+        (animation.num_frames as usize, reader.info().size())
     };
-    // A file whose default image is not the first presentation hands that image
-    // over first, with no frame control of its own. It is what a reader that
-    // does not know APNG would show, and `image` calls it a thumbnail; it is
-    // not part of the displayed timeline.
-    // Whether the default image is a poster rather than the first presentation
-    // decides how many frames the file yields, which is only needed by the
-    // timing pass that walks them.
-    if animation.num_frames == 0 {
-        return Err(ImgSeqError::new(format!(
-            "animated image '{}' states no frames",
-            path.display()
-        )));
-    }
 
-    let (rate, presentations) = timing(path, animation.num_frames as usize)?;
-    let canvas = reader.info().size();
+    let (rate, presentations) = timing(file, path, frames)?;
     let source = std::sync::Arc::new(AnimationSource::new(
         path.to_path_buf(),
         Box::new(PngDecoder::open(path, canvas, info.transform, info.format)?),
@@ -125,9 +130,11 @@ pub fn segment_info(
 ///
 /// Returns [`ImgSeqError`] when the file cannot be read or states fewer frames
 /// than that chunk counted.
-fn timing(path: &Path, expected: usize) -> Result<(Rate, Vec<Presentation>)> {
-    crate::animation::count_timeline_read();
-    let mut file = File::open(path).map_err(|error| image_error("open", path, error))?;
+fn timing(
+    file: &mut BufReader<File>,
+    path: &Path,
+    expected: usize,
+) -> Result<(Rate, Vec<Presentation>)> {
     let length = file
         .seek(SeekFrom::End(0))
         .map_err(|error| image_error("read", path, error))?;
@@ -262,13 +269,32 @@ fn delay_ms(num: u16, denominator: u16) -> i64 {
     (i64::from(num) * 1000) / i64::from(denominator)
 }
 
+/// Opens the file for the decoder, which replays it from its beginning.
+///
+/// A stream with no index keeps this reader for the life of the source rather than
+/// for the length of a description, so it opens for itself.
 fn open(path: &Path) -> Result<Reader<BufReader<File>>> {
     let file = File::open(path).map_err(|error| image_error("open", path, error))?;
-    // `Decoder::new` keeps the default `Transformations::IDENTITY`, which is
-    // what hands back the file's own colour type and bit depth. That is the
-    // whole reason this reader is here: every other transform changes one or
-    // both, and any of them would narrow a 16-bit file.
-    Decoder::new(BufReader::new(file))
+    read_info(BufReader::new(file), path)
+}
+
+/// The same reader over an open the caller already holds, which is what the probe
+/// hands this adapter while it looks for a timeline.
+fn open_over<'a>(
+    file: &'a mut BufReader<File>,
+    path: &Path,
+) -> Result<Reader<&'a mut BufReader<File>>> {
+    read_info(file, path)
+}
+
+/// Reads what the file states, over any reader.
+///
+/// `Decoder::new` keeps the default `Transformations::IDENTITY`, which is what
+/// hands back the file's own colour type and bit depth. That is the whole reason
+/// this reader is here: every other transform changes one or both, and any of them
+/// would narrow a 16-bit file.
+fn read_info<R: BufRead + Seek>(file: R, path: &Path) -> Result<Reader<R>> {
+    Decoder::new(file)
         .read_info()
         .map_err(|error| image_error("decode", path, error))
 }

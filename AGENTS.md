@@ -129,6 +129,12 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   file has one is the `ImgSeqHasICC` fact — but keeps its bytes only when the
   caller asked to export them, because a sequence whose files each carry a large
   profile would otherwise hold one copy per file for the life of the clip.
+  [`Input`] is the one open a probe makes: it holds the file and the leading
+  bytes read from it, `head` grows that window from where it stops, and `reader`
+  hands the same handle out rewound to the front for the container walk that
+  finds a timeline, so the route, the module that describes the file and the
+  animation adapters all read one open. a module that reads past the window
+  still opens for itself, and the plan lists which.
   [`Pixels`] is what a buffered decode produced, and `RowStream` is the decode
   that has not read its picture yet because it can write each row into the frame;
   a format answers with one only when it can fill every frame of the call.

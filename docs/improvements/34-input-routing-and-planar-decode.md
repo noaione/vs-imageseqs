@@ -26,8 +26,8 @@ This documentation update implements no decoder changes.
 | original phase | current status | remaining work |
 | --- | --- | --- |
 | 1. Consistent routing, saved plan and sample/subimage invariants | **Content-routing slice landed, and the route is saved and threaded.** `2b02f64` routes stills by content, `c206944` does the same for animation, and the saved-route slices record what the router named on `ImageInfo` and pass it to every module's probe entry, so a file is identified with one read. EXR selection, PAM word width and TIFF metadata/sample handling have also received fixes. | `ImageInfo` saves an icon's selected directory entry as `subimage`, and the decode reads that entry instead of scoring the directory again; the EXR part and the heif/avif backend are *stated* as the same predicate by the probe and the decode rather than saved as an index, because the `exr` crate selects a layer by its channels and has no by-index form, and `exr.rs`'s `the_part_the_probe_chose_is_the_part_that_is_decoded` pins that agreement, while `ico.rs`'s `the_probe_records_the_entry_its_decode_reads` pins what a saved index buys, and the broader error/sample invariants now have their own check: `target/bench/probe-agreement.py` asks every fixture and the step-5 corpus whether anything is described as readable and then refused, and names the two files whose *raster* is what is wrong rather than a header, so a new promise broken by a well-formed file fails it. |
-| 2. Combine metadata passes | **Partly landed: the front of the file answers, and a timeline is not rendered to describe it.** PNG, GIF and WebP no longer require image-rs for metadata or fallback pixels; a webp's or jpeg xl's animation adapter answers from the file header, a jpeg 2000 probe reads a window over the front that grows only while the header is incomplete, an avif or heif sequence walk seeks over media data rather than reading it, and an animated png's delays come from its own `fcTL` chunks instead of a rendered frame each. | **The measuring step is finished, and what it measured is that every one of these costs exactly one open.** `animation::timeline_reads` sits beside `identify::head_reads`, is per thread like it, and is bumped by all four readers that open a file for themselves: `apng::timing`, `gif::timings`, `webp::header_states_animation` and the avif/heif sequence walk. `decoder.rs`'s `an_animation_probe_reads_the_front_of_the_file_once_for_its_timeline` reads the number for every animated fixture: one each for `png`, `gif`, `webp`, `avif` and `heic`, and **none** for `jxl`, whose adapter already answers from the codestream header its own probe read. Those counts were run, not predicted -- a guessed expected count is how a suite goes red for the wrong reason. What is left is the reader itself: giving those four the front the routing read already fetched takes every one of them to the `jxl` line, and that test is what will say so. |
-| 3. Retain initialized readers and preserve planes | **Mostly landed.** Eligible PNG, binary RGB8 PNM/PAM, TGA and BMP have row sinks; TIFF has a native YCbCr plane path (`8cf7b06`) and hands a planar RGB page over as the planes it already is rather than interleaving it; and the netpbm, targa and bitmap sinks keep the reader their preparation opened and read one row at a time instead of buffering the file. **A separate-planar page is now handed over with the decoder's own strides instead of being split**: `decoder::Pixels` grew a `Strided` variant carrying the plane count, the row stride and the plane stride, `pixel::write_decoded_planes` takes a `PlaneSource` that is either one buffer a plane or that one buffer read by stride, and `tiff.rs`'s three channel planar page hands its decoder buffer straight over. `split_planes` is gone and `interleave` still serves the separated inks, which are not three channels. **Farbfeld is a row sink now too, and its buffered `decode` is deleted rather than kept**: `Rows` opens the file, checks the length against the header, and each row goes straight into the frame through `RowSink::place_rgba16`. **EXR writes its planes too**, into one plane-major buffer with its strides attached rather than one interleaved `f32` picture the writer had to separate; an `A` channel is the last plane of that buffer, which is what `Strided`'s `alpha` flag and `PlaneSource::Strided`'s `first` are for. **The png row walk carries its reader**: `walkable` hands the reader it opened back with its answer, so a still page is opened and its header parsed once rather than twice; a palette page still opens twice, because it is expanded here rather than by the decoder and the fill needs the `IDENTITY` reader. **The probe and the module that describes the file now share one open**: `decoder::Input` holds the file and the leading bytes it has read, the route takes its sixteen from there, and the six readers whose whole header is inside the window -- a bitmap, a surface, a farbfeld, a radiance preamble, a qoi header and a targa -- take theirs from the same read rather than opening again. | Two probes still open more than they need: a png's probe and its row walk read the header separately, and the netpbm's walk grows its own window. The nine modules that read past the window -- heif, avif, jpeg xl, jpeg 2000, icon, netpbm, tiff, openexr, png and webp -- still open for themselves. **The four measurements are what make this row useful, and they do not agree with each other.** The planar slice removed a copy and moved nothing: 47.5 ms median (40.8 to 83.1, peak 86.8 MiB) against 49.8 ms (44.5 to 66.1, peak 86.8 MiB). Farbfeld removed two whole buffers and moved everything: 96.5 ms (78.8 to 158.4, peak 185.2 MiB) against 37.3 ms (30.7 to 62.3, peak 73.8 MiB), 2.6x and 111 MiB, the two peak distributions not overlapping at all. EXR removed a pass rather than a buffer: 83.8 ms against 69.6 ms, 1.20x and no peak change. The png reader removed neither a buffer nor a pass and still moved: 71.6 ms against 51.7 ms over 300 small pages, 1.39x, while one 3000x3000 page was unchanged at 124.0 against 122.8 ms. **So there are two kinds of win and they want different corpora**: a removed buffer is bytes and wants one big picture, a removed open is a fixed cost per file and wants many small ones. QOI, HDR and the core BMP still hold a whole-file buffer at *decode* time; the preparation/fill pair in the bitmap and targa readers no longer opens twice. |
+| 2. Combine metadata passes | **Partly landed: the front of the file answers, and a timeline is not rendered to describe it.** PNG, GIF and WebP no longer require image-rs for metadata or fallback pixels; a webp's or jpeg xl's animation adapter answers from the file header, a jpeg 2000 probe reads a window over the front that grows only while the header is incomplete, an avif or heif sequence walk seeks over media data rather than reading it, and an animated png's delays come from its own `fcTL` chunks instead of a rendered frame each. | **The measuring step is finished, and the reader it asked for is in.** `animation::timeline_reads` sat beside `identify::head_reads`, was per thread like it, and was bumped by all four readers that opened a file for themselves: `apng::timing`, `gif::timings`, `webp::header_states_animation` and the avif/heif sequence walk. `decoder.rs`'s `an_animation_probe_reads_the_front_of_the_file_once_for_its_timeline` read the number for every animated fixture: one each for `png`, `gif`, `webp`, `avif` and `heic`, and **none** for `jxl`, whose adapter already answered from the codestream header its own probe read. Those counts were run, not predicted -- a guessed expected count is how a suite goes red for the wrong reason. **All four read `decoder::Input`'s open now**, so there is no read of their own left to count: the counter and its test are gone, and `decoder::input_opens` takes their place, counting the opens a probe itself makes. `an_animation_probe_opens_the_file_once_for_its_timeline` pins one for every animated fixture, `jxl` included for the first time. What is left is the modules that open for themselves rather than the animation adapters -- see the phase 3 row. |
+| 3. Retain initialized readers and preserve planes | **Mostly landed.** Eligible PNG, binary RGB8 PNM/PAM, TGA and BMP have row sinks; TIFF has a native YCbCr plane path (`8cf7b06`) and hands a planar RGB page over as the planes it already is rather than interleaving it; and the netpbm, targa and bitmap sinks keep the reader their preparation opened and read one row at a time instead of buffering the file. **A separate-planar page is now handed over with the decoder's own strides instead of being split**: `decoder::Pixels` grew a `Strided` variant carrying the plane count, the row stride and the plane stride, `pixel::write_decoded_planes` takes a `PlaneSource` that is either one buffer a plane or that one buffer read by stride, and `tiff.rs`'s three channel planar page hands its decoder buffer straight over. `split_planes` is gone and `interleave` still serves the separated inks, which are not three channels. **Farbfeld is a row sink now too, and its buffered `decode` is deleted rather than kept**: `Rows` opens the file, checks the length against the header, and each row goes straight into the frame through `RowSink::place_rgba16`. **EXR writes its planes too**, into one plane-major buffer with its strides attached rather than one interleaved `f32` picture the writer had to separate; an `A` channel is the last plane of that buffer, which is what `Strided`'s `alpha` flag and `PlaneSource::Strided`'s `first` are for. **The png row walk carries its reader**: `walkable` hands the reader it opened back with its answer, so a still page is opened and its header parsed once rather than twice; a palette page still opens twice, because it is expanded here rather than by the decoder and the fill needs the `IDENTITY` reader. **The probe and the module that describes the file now share one open**: `decoder::Input` holds the file and the leading bytes it has read, the route takes its sixteen from there, and the six readers whose whole header is inside the window -- a bitmap, a surface, a farbfeld, a radiance preamble, a qoi header and a targa -- take theirs from the same read rather than opening again. **The four animation adapters read it too**: `Input::reader` hands the same open rewound to the front, and `apng`, `gif`, `webp` and the avif/heif sequence walk find their timelines through it. | Two probes still open more than they need: a png's probe and its row walk read the header separately, and the netpbm's walk grows its own window. The nine modules that read past the window -- heif, avif, jpeg xl, jpeg 2000, icon, netpbm, tiff, openexr, png and webp -- still open for themselves. **The four measurements are what make this row useful, and they do not agree with each other.** The planar slice removed a copy and moved nothing: 47.5 ms median (40.8 to 83.1, peak 86.8 MiB) against 49.8 ms (44.5 to 66.1, peak 86.8 MiB). Farbfeld removed two whole buffers and moved everything: 96.5 ms (78.8 to 158.4, peak 185.2 MiB) against 37.3 ms (30.7 to 62.3, peak 73.8 MiB), 2.6x and 111 MiB, the two peak distributions not overlapping at all. EXR removed a pass rather than a buffer: 83.8 ms against 69.6 ms, 1.20x and no peak change. The png reader removed neither a buffer nor a pass and still moved: 71.6 ms against 51.7 ms over 300 small pages, 1.39x, while one 3000x3000 page was unchanged at 124.0 against 122.8 ms. **So there are two kinds of win and they want different corpora**: a removed buffer is bytes and wants one big picture, a removed open is a fixed cost per file and wants many small ones. QOI, HDR and the core BMP still hold a whole-file buffer at *decode* time; the preparation/fill pair in the bitmap and targa readers no longer opens twice. |
 | 4. Timing and selected subtype repairs | **Complete.** BigTIFF/RGBE recognition, PAM MAXVAL interpretation, TIFF orientation/ICC and EXR flat-RGB part selection have landed; an APNG's timeline is placed on the lowest common denominator of the fractions it states rather than on rounded milliseconds; an animation segment contributes the output sample instants before its end rather than the whole output ticks it covers; a DirectDraw surface whose size is not a whole number of blocks is read with the pixels that hang over its edge clipped; and a netpbm whose header outruns the window it was read through is read, growing that window while the parse needs more. Palette and CMYK(A)/YCbCr TIFF coverage has since expanded too. **Core BMP has landed as well**, which was the last named subtype restriction: a `BITMAPCOREHEADER` is read rather than refused, and the three places it differs from the information header are handled directly -- signed sixteen bit dimensions, no compression field at all, and a palette entry of three bytes where the information header's is four. | Nothing named remains open. The other candidates in the table further down -- bare DIB and CUR, Targa 15/16-bit palettes, DDS masks and raw surfaces, low-bit TIFF gray, JP2 gray+alpha, 12-bit subsampled AVIF, ISO sequence offsets and edit lists -- each need an individual decision and evidence, and the table is where they are listed. |
 | 5. Remove image-rs | **Landed.** `d431764` removes `image`, `8682c2f` removes leftover layout helpers, and `src/still.rs` is deleted. Cargo.toml and Cargo.lock contain no `image` dependency. | This does not finish phases 1–4. Ported code's notices remain applicable; codec dependencies such as libwebp are independent of image-rs. |
 
@@ -403,6 +403,55 @@ stay unrollable. Written with a bound the compiler cannot see -- the clipped
 rows and columns -- it cost 25% on an aligned DXT5 surface, and only a
 whole-block fast path in the original shape brought it back.
 
+### the same open, one container walk further
+
+The slice above removed a second *open*. The four readers that go looking for a
+timeline each opened the file a second time: `apng`'s `fcTL` walk, `gif`'s scan,
+`webp`'s RIFF window and the avif/heif sequence walk. `Input` now holds its
+`BufReader<File>` rather than reopening for every extension of the window, and
+`Input::reader` hands that same handle out rewound to the front of the file, so a
+timeline reader reads the container through the open the route and the describing
+module already used.
+
+`head` seeks absolutely rather than from wherever the reader happens to be, which
+is what makes handing the handle out safe: a caller may leave it anywhere and the
+next window still starts where the window stopped rather than where they did.
+`webp`'s walk reads the whole file, so it rewinds first and does not continue from
+where the header check left it.
+
+The counter went with them. `animation::timeline_reads` measured four call sites,
+and once none of them opened anything there was nothing left for it to measure --
+so it is deleted rather than kept as a number that can only be zero, and
+`decoder::input_opens` takes its place: a thread-local count of the opens a probe
+makes through `Input`, which is the number a probe cannot get below.
+`an_animation_probe_opens_the_file_once_for_its_timeline` pins one for every
+animated fixture.
+
+**Measured**: clip creation over a corpus of many small animated files, which is
+the corpus a removed open wants -- a fixed cost per file, not bytes. The corpus is
+each of the seven animation fixtures 250 times at the first size and 500 at the
+second, each copy named `.dat` so that only the bytes decide what it is read as
+(`target/bench/make-timeline-corpus.py`).
+
+| files | before | after | per file |
+| --- | --- | --- | --- |
+| 1750 | 147.2 ms (119.5 to 261.5) | 125.4 ms (99.3 to 183.9) | 12.4 us |
+| 3500 | 337.9 ms (276.0 to 549.9) | 276.5 ms (237.8 to 767.1) | 17.6 us |
+
+Eight alternating blocks of three fresh processes a side at 1750 files, six of two
+at 3500 (`target/bench/ab-timeline.py`, artifacts in
+`target/bench/ab-timeline-{1750,3500}.txt`). Both builds report the same 11500
+output frames over the 3500-file corpus, so nothing about a timeline moved.
+
+The ranges overlap, as they do on this box for every measurement in this plan, so
+the medians are reported with the whole sorted sample beside them rather than
+alone. At 1750 files the two distributions separate: a rank-sum over the 24 samples
+a side gives z = 3.71. At 3500 the two outliers on the new side pull the
+separation back to z = 1.33, but the median gap is the larger of the two and it
+grows with the file count, which is what a per-file cost does. Twelve to eighteen
+microseconds is the size of one `CreateFile` on this box, so the shape of the
+result agrees with what was removed.
+
 ### proposal: the DXT colour block in SIMD
 The decode is compute-bound, not memory-bound: a 3000x3000 DXT1 page is 4.5 MiB
 in and 27 MiB out, about 32 MiB of traffic, and it decodes in roughly 42 ms, an
@@ -488,16 +537,18 @@ uncontrolled machine load. These same-binary timings do not establish a runtime
 regression or improvement. Logs are
 `target/research-plan34-status-{release-final,validator-final,bench-before,bench-after}.log`.
 
-The seven slices recorded above -- the timeline-read measure, the in-place planar
-planes, the farbfeld rows, the exr planes, the carried png reader, core BMP and the
-shared probe input --
+The eight slices recorded above -- the timeline-read measure, the in-place planar
+planes, the farbfeld rows, the exr planes, the carried png reader, core BMP, the
+shared probe input and the shared timeline reader --
 were closed against release build SHA-256
-`9B2B4C6277CC0DD5880A6C07E194D6499A777AAA708187DB03300F72FE768767`: 308
+`2588582D04C9315F4AF337471FB7BA5BF6A4562A758B4A061BE8923C513C7FD4`: 307
 unit tests pass, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check`
 are clean, the validator passes with `test_planar_pages` and `test_core_header_bitmaps` in it, `tests/routing.py`
 reports 0 of 76 renamed copies differing, and `target/bench/probe-agreement.py`
-reports nothing promised that a decode will not produce over 202 fixtures and the
-step-5 corpus. The measurement artifacts are
+reports nothing promised that a decode will not produce over 201 fixtures and the
+step-5 corpus. The tree that build came from also carries the maintainer's
+`59c8069` ("Remove tiff zstd support"), which landed beside this slice, so the
+hash above is that tree's build and not only this slice's. The measurement artifacts are
 `target/bench/decode-planar-tiff-inplace.txt`,
 `target/bench/decode-farbfeld-stream.txt`,
 `target/bench/decode-exr-planes.txt`,
@@ -507,8 +558,9 @@ step-5 corpus. The measurement artifacts are
 `target/bench/ab-png-alpha-{before,after}.txt`,
 `target/bench/decode-png-reader.txt`,
 `target/bench/probe-one-open.txt`,
-`target/bench/ab-inplace-planes.py`, `ab-frame-hash.py` and
-`make-farbfeld-corpus.py`.
+`target/bench/ab-timeline-{1750,3500}.txt`,
+`target/bench/ab-inplace-planes.py`, `ab-frame-hash.py`,
+`make-farbfeld-corpus.py` and `make-timeline-corpus.py`.
 
 ## recommendation
 

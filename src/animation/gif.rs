@@ -67,16 +67,14 @@ struct Timing {
 ///
 /// Returns [`ImgSeqError`] when the file cannot be read or its stream is
 /// malformed.
-fn timings(path: &Path) -> Result<Vec<Timing>> {
-    crate::animation::count_timeline_read();
-    let file = File::open(path).map_err(|error| image_error("open", path, error))?;
+fn timings(file: &mut BufReader<File>, path: &Path) -> Result<Vec<Timing>> {
     let mut options = DecodeOptions::new();
     options.set_color_output(ColorOutput::RGBA);
     // The whole point of this pass: the frame graph is walked, the LZW streams
     // are not run.
     options.skip_frame_decoding(true);
     let mut decoder = options
-        .read_info(BufReader::new(file))
+        .read_info(file)
         .map_err(|error| image_error("create decoder for", path, error))?;
 
     let mut timings = Vec::new();
@@ -104,8 +102,9 @@ pub fn segment_info(
     path: &Path,
     info: crate::decoder::ImageInfo,
     fps: Rate,
+    file: &mut BufReader<File>,
 ) -> Result<Option<SegmentInfo>> {
-    let frames = timings(path)?;
+    let frames = timings(file, path)?;
     // A still gif is declined here, before anything is held, which is what keeps
     // a plain gif on the path it always took. One frame is one picture however
     // long it says it is displayed.

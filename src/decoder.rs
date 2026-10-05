@@ -572,6 +572,9 @@ pub(crate) fn image_head(path: &Path) -> Result<Vec<u8>> {
 #[derive(Debug)]
 pub struct Input {
     path: PathBuf,
+    /// The open itself, held rather than reopened, so the window below and the
+    /// container walk that follows it are one open of the file.
+    reader: std::io::BufReader<std::fs::File>,
     /// What has been read so far, which is the whole file when it is shorter.
     head: Vec<u8>,
 }
@@ -583,9 +586,12 @@ impl Input {
     ///
     /// Returns [`ImgSeqError`] when the file cannot be opened.
     pub fn open(path: &Path) -> Result<Self> {
-        std::fs::File::open(path).map_err(|error| image_error("open", path, error))?;
+        let file = std::fs::File::open(path).map_err(|error| image_error("open", path, error))?;
+        #[cfg(test)]
+        INPUT_OPENS.with(|count| count.set(count.get() + 1));
         Ok(Self {
             path: path.to_path_buf(),
+            reader: std::io::BufReader::new(file),
             head: Vec::new(),
         })
     }
@@ -603,16 +609,19 @@ impl Input {
     pub fn head(&mut self, want: usize) -> Result<&[u8]> {
         if (self.head.len() as u64) < want as u64 {
             use std::io::{Read, Seek, SeekFrom};
-            let mut file = std::fs::File::open(&self.path)
-                .map_err(|error| image_error("open", &self.path, error))?;
+            #[cfg(test)]
             let first = self.head.is_empty();
-            if !first {
-                file.seek(SeekFrom::Start(self.head.len() as u64))
-                    .map_err(|error| image_error("open", &self.path, error))?;
-            }
             let held = self.head.len();
+            // The window grows from where it stops, so the sixteen bytes the route
+            // read are not read a second time. The seek is absolute, which is what
+            // lets a caller have moved the reader before asking again.
+            self.reader
+                .seek(SeekFrom::Start(held as u64))
+                .map_err(|error| image_error("open", &self.path, error))?;
             let mut more = Vec::new();
-            file.take((want - held) as u64)
+            self.reader
+                .by_ref()
+                .take((want - held) as u64)
                 .read_to_end(&mut more)
                 .map_err(|error| image_error("open", &self.path, error))?;
             self.head.extend_from_slice(&more);
@@ -623,6 +632,25 @@ impl Input {
             }
         }
         Ok(&self.head)
+    }
+
+    /// The open this holds, rewound to the front of the file.
+    ///
+    /// A timeline reader wants the container rather than the window the route and
+    /// the describing module asked for, so it reads the same open at its start
+    /// instead of opening the file a second time. Where the reader is left is the
+    /// caller's until it asks again, which is why [`Self::head`] seeks absolutely
+    /// rather than from wherever the reader happens to be.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ImgSeqError`] when the file cannot be rewound.
+    pub fn reader(&mut self) -> Result<&mut std::io::BufReader<std::fs::File>> {
+        use std::io::{Seek, SeekFrom};
+        self.reader
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| image_error("open", &self.path, error))?;
+        Ok(&mut self.reader)
     }
 }
 
@@ -645,6 +673,30 @@ static HEAD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 #[cfg(test)]
 pub(crate) fn reset_head_reads() {
     HEAD_READS.with(|count| count.set(0));
+}
+
+/// How many times this thread has opened a file through [`Input`].
+///
+/// This is the measure the animation adapters used to have a number for: each of
+/// the four that went looking for a timeline opened the file for itself, on top of
+/// the open the probe had already made. They read this input now, so what is left
+/// here is the one open a probe cannot do without. A module that still opens for
+/// itself is invisible to this counter by construction; the plan under
+/// `docs/improvements/34-input-routing-and-planar-decode.md` lists which.
+#[cfg(test)]
+pub(crate) fn input_opens() -> usize {
+    INPUT_OPENS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+thread_local! {
+    static INPUT_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Starts [`input_opens`] from zero.
+#[cfg(test)]
+pub(crate) fn reset_input_opens() {
+    INPUT_OPENS.with(|count| count.set(0));
 }
 
 /// Describes one file without decoding it, for a call that may or may not want
@@ -697,7 +749,13 @@ pub fn probe_segment(
     apply_rotation: bool,
     export_icc_profile: bool,
 ) -> Result<Segment> {
-    let info = probe(path, apply_rotation, export_icc_profile)?;
+    // One open answers the whole probe: which module owns the file, what that
+    // module states about it, and what its container says about a timeline. Which
+    // of them reads the file is still each one's own choice, but it is opened here
+    // once, and the adapters that used to open it again read this instead.
+    let mut input = Input::open(path)?;
+    let mut info = describe(path, apply_rotation, &mut input)?;
+    keep_profile(&mut info, export_icc_profile);
     // An animated file is described by its own container: the delay of every
     // picture and how to replay it. Whether a file is one is the container's
     // answer, and the probe has already asked it: this reads the route the
@@ -705,16 +763,24 @@ pub fn probe_segment(
     // adapter finds no timeline is a still, which is one frame and no decoder
     // at all.
     let animated = match info.route {
-        Some(Format::Png) => crate::animation::apng::segment_info(path, info.clone(), fps)?,
-        Some(Format::Gif) => crate::animation::gif::segment_info(path, info.clone(), fps)?,
-        Some(Format::Avif | Format::Heif) => {
-            crate::animation::heif::segment_info(path, info.clone(), fps)?
+        Some(Format::Png) => {
+            crate::animation::apng::segment_info(path, info.clone(), fps, input.reader()?)?
         }
+        Some(Format::Gif) => {
+            crate::animation::gif::segment_info(path, info.clone(), fps, input.reader()?)?
+        }
+        Some(Format::Avif | Format::Heif) => {
+            crate::animation::heif::segment_info(path, info.clone(), fps, input.reader()?)?
+        }
+        // A jpeg xl's scan still opens for itself; the plan lists it with the rest
+        // of the modules that do.
         Some(Format::Jxl) => crate::animation::jxl::segment_info(path, info.clone(), fps)?,
         // A webp whose bitstream is a still image stays on the libwebp path,
         // which is what hands a lossy file out as its own yuv planes. Only an
         // animated one is claimed here.
-        Some(Format::Webp) => crate::animation::webp::segment_info(path, info.clone(), fps)?,
+        Some(Format::Webp) => {
+            crate::animation::webp::segment_info(path, info.clone(), fps, input.reader()?)?
+        }
         _ => None,
     };
     match animated {
@@ -723,15 +789,36 @@ pub fn probe_segment(
     }
 }
 
+/// Describes one file and nothing else, which is the form a caller that wants a
+/// description rather than a timeline uses.
+///
+/// The clip path does not come through here: [`probe_segment`] needs the open the
+/// description was made through, because the container walk that follows reads it
+/// too, and a probe that threw the open away would make the adapters reopen.
+#[cfg(test)]
 pub fn probe(path: &Path, apply_rotation: bool, export_icc_profile: bool) -> Result<ImageInfo> {
-    let mut info = describe(path, apply_rotation)?;
-    if !export_icc_profile {
-        info.icc_profile = None;
-    }
+    let mut input = Input::open(path)?;
+    let mut info = describe(path, apply_rotation, &mut input)?;
+    keep_profile(&mut info, export_icc_profile);
     Ok(info)
 }
 
-fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
+/// Keeps an embedded ICC profile only for a caller that asked to export it.
+///
+/// Whether a file has one is a fact `ImgSeqHasICC` reports either way; what this
+/// decides is whether the bytes are retained for the life of the clip.
+fn keep_profile(info: &mut ImageInfo, export_icc_profile: bool) {
+    if !export_icc_profile {
+        info.icc_profile = None;
+    }
+}
+
+/// Describes one file through the open the caller holds.
+///
+/// The route and the module that describes the file read one window out of it,
+/// and a caller that also wants a timeline reads that from the same open; see
+/// [`probe_segment`].
+fn describe(path: &Path, apply_rotation: bool, input: &mut Input) -> Result<ImageInfo> {
     // One read of the head answers which module can describe this file, and it
     // is the same call the decode makes: see [`identify::route`]. A module that
     // declines a file its own bytes name -- an openexr whose every layer is deep
@@ -742,7 +829,6 @@ fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
     // the module below reads the window from the same input rather than opening the
     // file a second time. A module that reads past the window still opens for itself,
     // and those are listed in the plan as what is left.
-    let mut input = Input::open(path)?;
     let route = {
         let head = input.head(crate::formats::identify::HEAD_BYTES)?;
         identify::route_from(head, path)
@@ -766,18 +852,18 @@ fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
         // A quite ok image states its size and its channel count in fourteen
         // bytes, and a farbfeld's header is the same shape and just as cheap.
         Some(Format::Qoi) => {
-            let data = window(&mut input)?;
+            let data = window(input)?;
             formats::qoi::image_info_headed(path, apply_rotation, route, data)?
         }
         Some(Format::Farbfeld) => {
-            let data = window(&mut input)?;
+            let data = window(input)?;
             formats::farbfeld::image_info_headed(path, apply_rotation, route, data)?
         }
         // A bitmap states its depth, its compression and its masks in a header
         // this module reads without touching a sample, and the alpha decision is
         // part of that header rather than of the samples.
         Some(Format::Bmp) => {
-            let data = window(&mut input)?;
+            let data = window(input)?;
             formats::bmp::image_info_headed(path, apply_rotation, route, data)?
         }
         // An icon is a directory of payloads, and which one is read is decided
@@ -787,14 +873,14 @@ fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
         // direction bits in that header decide where the pixels go rather than
         // an orientation property.
         Some(Format::Tga) => {
-            let data = window(&mut input)?;
+            let data = window(input)?;
             formats::tga::image_info_headed(path, apply_rotation, route, data)?
         }
         // A surface states its compression in a four character code or in a
         // DXGI format number, and its size has to be a whole number of four by
         // four blocks.
         Some(Format::Dds) => {
-            let data = window(&mut input)?;
+            let data = window(input)?;
             formats::dds::image_info_headed(path, apply_rotation, route, data)?
         }
         // A netpbm states its magic, its size and its `MAXVAL` in a text
@@ -806,7 +892,7 @@ fn describe(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
         // A radiance picture states its layout in a resolution line and its
         // samples as four bytes a pixel.
         Some(Format::Hdr) => {
-            let data = window(&mut input)?;
+            let data = window(input)?;
             formats::hdr::image_info_headed(path, apply_rotation, route, data)?
         }
         // An openexr states its layers, their channels and their sample types in
@@ -970,38 +1056,36 @@ mod tests {
             );
         }
     }
-    /// A probe of an animated file opens it once more for itself, and that one
-    /// open is what the shared probe reader would remove.
+    /// A probe of an animated file opens the file once, and its timeline is read
+    /// through that same open.
     ///
-    /// Beside the routing head read -- already pinned as one by
-    /// [`an_animation_probe_reads_the_routing_head_once`] -- this is the number a
-    /// format spends finding a timeline: `apng`'s chunk walk, `gif`'s scan,
-    /// `webp`'s RIFF window and the avif/heif sequence walk each open the file for
-    /// itself, so each costs one. A jpeg xl is the control that already spends
-    /// none, because its animation adapter answers from the codestream header its
-    /// own probe read.
+    /// This is the number the four adapters that went looking for a timeline used
+    /// to spend one each -- `apng`'s chunk walk, `gif`'s scan, `webp`'s RIFF
+    /// window and the avif/heif sequence walk each opened the file for itself, on
+    /// top of the open the probe had already made for the route and the describing
+    /// module. They read the probe's input now, so what a probe leaves here is the
+    /// one open it cannot do without, whatever the container is.
     ///
-    /// The counts were measured by running this loop, not predicted:
-    /// `png`/`gif`/`webp`/`avif`/`heic` one each, `jxl` none. A future slice that
-    /// gives those four a shared reader moves them to the `jxl` line, and this
-    /// test is what says so.
+    /// A jpeg xl is on the same line as the other four for the first time. Its
+    /// adapter always answered from the codestream header its own probe read, and
+    /// this count no longer tells the two cases apart -- it counts opens the probe
+    /// made, not reads the adapters made. What each adapter spends is on top of
+    /// this, and the plan lists the modules that still open for themselves.
+    ///
+    /// The count was measured by running this loop rather than predicted.
     #[test]
-    fn an_animation_probe_reads_the_front_of_the_file_once_for_its_timeline() {
-        use crate::animation;
-
-        let spends = [
-            ("animation.png", 1usize),
-            ("animation-rgba16.png", 1),
-            ("animation.gif", 1),
-            ("animation.webp", 1),
-            ("animation.avif", 1),
-            ("animation.heic", 1),
-            ("animation.jxl", 0),
-        ];
-
-        for (name, expected) in spends {
+    fn an_animation_probe_opens_the_file_once_for_its_timeline() {
+        for name in [
+            "animation.png",
+            "animation-rgba16.png",
+            "animation.gif",
+            "animation.webp",
+            "animation.avif",
+            "animation.heic",
+            "animation.jxl",
+        ] {
             let path = fixture(name);
-            animation::reset_timeline_reads();
+            super::reset_input_opens();
             let segment = probe_segment(&path, Rate::from_fps(24, 1), true, false)
                 .expect("the fixture probes");
             assert!(segment.animated, "{name}: the fixture is an animation");
@@ -1010,9 +1094,9 @@ mod tests {
                 "{name}: has presentations"
             );
             assert_eq!(
-                animation::timeline_reads(),
-                expected,
-                "{name}: front reads a format spends finding a timeline"
+                super::input_opens(),
+                1,
+                "{name}: the timeline is read from the open the probe made"
             );
         }
     }

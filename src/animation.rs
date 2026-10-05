@@ -38,55 +38,12 @@ use crate::{
     error::{ImgSeqError, Result},
 };
 
-/// Counts one read of the front of a file to find a timeline.
-///
-/// [`crate::formats::identify::head_reads`] counts the routing read; this counts
-/// the reads the animation modules make for themselves -- `apng`'s chunk walk,
-/// `gif`'s scan, `webp`'s RIFF window and the avif/heif sequence walk -- which is
-/// what one shared probe reader would unify. It is per thread like its sibling,
-/// so a test can read a number while other tests run beside it. A release build
-/// calls nothing: the body compiles away and the call is inlined into the caller.
-#[inline]
-pub(crate) fn count_timeline_read() {
-    #[cfg(test)]
-    TIMELINE_READS.with(|count| count.set(count.get() + 1));
-}
-
-/// How many times this thread's formats have read the front of a file to find a
-/// timeline.
-#[cfg(test)]
-pub(crate) fn timeline_reads() -> usize {
-    TIMELINE_READS.with(std::cell::Cell::get)
-}
-
-/// Starts [`timeline_reads`] from zero.
-#[cfg(test)]
-pub(crate) fn reset_timeline_reads() {
-    TIMELINE_READS.with(|count| count.set(0));
-}
-
-#[cfg(test)]
-thread_local! {
-    static TIMELINE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-mod timeline_read_tests {
-    use super::*;
-
-    /// The counter counts and the reset forgets, so a number a probe reports is
-    /// this one plus whatever the modules it reached called.
-    #[test]
-    fn the_timeline_read_counter_counts_and_resets() {
-        reset_timeline_reads();
-        assert_eq!(timeline_reads(), 0);
-        count_timeline_read();
-        count_timeline_read();
-        assert_eq!(timeline_reads(), 2);
-        reset_timeline_reads();
-        assert_eq!(timeline_reads(), 0);
-    }
-}
+// The four adapters that used to open a file for themselves -- `apng`'s chunk
+// walk, `gif`'s scan, `webp`'s RIFF window and the avif/heif sequence walk -- read
+// the open [`crate::decoder::Input`] already holds, so there is no read here left
+// to count. The number a probe of an animated file makes instead is
+// `decoder::input_opens`, which is what
+// `an_animation_probe_opens_the_file_once_for_its_timeline` asserts.
 
 /// A rate as an exact rational: `num` units per `den` seconds.
 ///
