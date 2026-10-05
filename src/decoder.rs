@@ -885,7 +885,9 @@ fn describe(path: &Path, apply_rotation: bool, input: &mut Input) -> Result<Imag
         }
         // A netpbm states its magic, its size and its `MAXVAL` in a text
         // preamble, and that preamble is also where a comment is legal.
-        Some(Format::Pnm) => formats::pnm::image_info(path, apply_rotation, route)?,
+        Some(Format::Pnm) => {
+            formats::pnm::image_info(path, apply_rotation, route, input.reader()?)?
+        }
         // A tagged format, whose directories this module walks without decoding
         // a sample.
         Some(Format::Tiff) => formats::tiff::image_info(path, apply_rotation, route)?,
@@ -901,7 +903,9 @@ fn describe(path: &Path, apply_rotation: bool, input: &mut Input) -> Result<Imag
         Some(Format::Exr) => formats::exr::image_info(path, apply_rotation, route)?,
         // A png is read here for the same reason a jpeg is, and one thing more:
         // the `cICP` chunk is not something the `image` decoder exposes at all.
-        Some(Format::Png) => formats::png::image_info(path, apply_rotation, route)?,
+        Some(Format::Png) => {
+            formats::png::image_info(path, apply_rotation, route, input.reader()?)?
+        }
         // A jpeg is read here rather than through the generic decoder, whose
         // reader would parse the file's headers four times for one probe.
         Some(Format::Jpeg) => formats::jpeg::image_info(path, apply_rotation, route)?,
@@ -1099,6 +1103,50 @@ mod tests {
                 "{name}: the timeline is read from the open the probe made"
             );
         }
+    }
+
+    /// A png probe answers its header and its `cICP` out of the one open the
+    /// router made, and the second read starts at the front rather than where the
+    /// first left off.
+    ///
+    /// The png reader stops after the header chunks, which is well past the
+    /// signature a `cICP` walk starts from, so a walk that did not rewind would
+    /// find nothing and hand back a file that states no colour at all. The open
+    /// count is the other half of the claim: one, where this probe spent three --
+    /// the input, the png reader and the walk.
+    #[test]
+    fn a_png_probe_reads_its_cicp_from_the_same_open_as_its_header() {
+        let path = fixture("cicp-rgb8.png");
+        super::reset_input_opens();
+        let info = probe(&path, true, false).expect("the fixture probes");
+        let cicp = info.cicp.expect("a stated colour");
+        assert_eq!((cicp.primaries, cicp.transfer, cicp.matrix), (9, 18, 0));
+        assert!(cicp.full_range);
+        assert_eq!(
+            super::input_opens(),
+            1,
+            "the header and the walk share the open the router made"
+        );
+    }
+
+    /// A netpbm's preamble is a text window that grows while the parse needs
+    /// more, and it grows out of the open the router made rather than one of its
+    /// own.
+    #[test]
+    fn a_netpbm_probe_reads_its_preamble_from_the_open_the_router_made() {
+        let path = fixture("pnm-comment.pgm");
+        super::reset_input_opens();
+        let info = probe(&path, true, false).expect("the fixture probes");
+        assert_eq!(
+            (info.width, info.height),
+            (37, 23),
+            "the size is the one the preamble states, comments and all"
+        );
+        assert_eq!(
+            super::input_opens(),
+            1,
+            "the window that grows is grown from the open the router made"
+        );
     }
 
     /// The decode reads the route the probe saved instead of the head again.

@@ -655,18 +655,10 @@ fn raster(header: &Header, data: &[u8]) -> Result<Vec<u8>> {
 const HEAD_WINDOW: usize = 64 * 1024;
 const HEAD_LIMIT: usize = 1024 * 1024;
 
-/// Reads the header of `path`, growing the window while the parse needs more.
+/// Reads a header from an open, growing the window while the parse needs more.
 ///
-/// # Errors
-///
-/// Returns [`ImgSeqError`] when the file cannot be read or its header cannot be
-/// parsed within [`HEAD_LIMIT`].
-fn head(path: &Path) -> Result<Vec<u8>> {
-    let mut reader = BufReader::new(File::open(path).map_err(|e| image_error("open", path, e))?);
-    head_from(&mut reader, path)
-}
-
-/// The same, from an open reader, which is left after the window it read.
+/// The reader is rewound rather than read from wherever the caller left it,
+/// because a header that starts in the middle of a comment is not one.
 ///
 /// # Errors
 ///
@@ -849,6 +841,7 @@ pub fn image_info(
     path: &Path,
     _apply_rotation: bool,
     route: Option<crate::formats::identify::Format>,
+    file: &mut BufReader<File>,
 ) -> Result<Option<ImageInfo>> {
     if !route.map_or_else(
         || owns(path),
@@ -856,7 +849,7 @@ pub fn image_info(
     ) {
         return Ok(None);
     }
-    let data = head(path).map_err(|error| image_error("open", path, error))?;
+    let data = head_from(file, path)?;
     // A file whose magic is not one of the seven is declined rather than
     // refused, so something else may still read it.
     if data.get(..2).and_then(magic).is_none() {
@@ -879,6 +872,18 @@ pub fn image_info(
         transform: Transform::IDENTITY,
         format: header.format(),
     }))
+}
+
+/// The same, from an open of its own, which is what a caller that did not come
+/// through a probe has.
+#[cfg(test)]
+pub fn image_info_at(
+    path: &Path,
+    apply_rotation: bool,
+    route: Option<crate::formats::identify::Format>,
+) -> Result<Option<ImageInfo>> {
+    let file = File::open(path).map_err(|error| image_error("open", path, error))?;
+    image_info(path, apply_rotation, route, &mut BufReader::new(file))
 }
 
 /// Decodes a netpbm into one interleaved buffer.
@@ -975,7 +980,7 @@ mod tests {
             .expect("a P6 at MAXVAL 255 is a row sink");
         assert_eq!((header.width, header.height), (37, 23));
 
-        let info = image_info(&path, true, None)
+        let info = image_info_at(&path, true, None)
             .expect("the file is readable")
             .expect("a P6 at MAXVAL 255 is ours");
         assert_eq!((info.width, info.height), (37, 23));
@@ -988,7 +993,7 @@ mod tests {
     }
 
     fn decoded(name: &str) -> Vec<u8> {
-        let info = image_info(&fixture(name), true, None)
+        let info = image_info_at(&fixture(name), true, None)
             .unwrap_or_else(|error| panic!("{name}: {error}"))
             .unwrap_or_else(|| panic!("{name} is taken over"));
         match decode(&info)
@@ -1076,7 +1081,7 @@ mod tests {
                 SourceColorType::L8,
             ),
         ] {
-            let info = image_info(&fixture(name), true, None)
+            let info = image_info_at(&fixture(name), true, None)
                 .unwrap_or_else(|error| panic!("{name}: {error}"))
                 .unwrap_or_else(|| panic!("{name} is taken over"));
             assert_eq!((info.width, info.height), (width, height), "{name}");
@@ -1131,14 +1136,14 @@ mod tests {
     #[test]
     fn a_comment_is_legal_in_the_preamble_and_not_in_an_ascii_raster() {
         // Two comments, one whole line and one between two fields.
-        let with = image_info(&fixture("pnm-comment.pgm"), true, None)
+        let with = image_info_at(&fixture("pnm-comment.pgm"), true, None)
             .expect("read")
             .expect("taken over");
         assert_eq!((with.width, with.height), (37, 23));
         assert!(decode(&with).is_ok());
 
         let error = decode(
-            &image_info(&fixture("pnm-ascii-comment.pgm"), true, None)
+            &image_info_at(&fixture("pnm-ascii-comment.pgm"), true, None)
                 .expect("read")
                 .expect("taken over"),
         )
@@ -1161,7 +1166,7 @@ mod tests {
         assert!(owns(Path::new("a.pgm")));
         assert!(owns(Path::new("a.PPM")));
         assert!(
-            image_info(&fixture("cicp-rgb8.png"), true, None)
+            image_info_at(&fixture("cicp-rgb8.png"), true, None)
                 .expect("a png is not ours")
                 .is_none()
         );

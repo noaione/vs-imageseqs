@@ -17,7 +17,7 @@
 
 use std::{
     fs::File,
-    io::{BufReader, Read},
+    io::{BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -60,10 +60,14 @@ pub fn owns(path: &Path) -> bool {
 }
 
 /// The `cICP` chunk of a file this module has already established is a png,
-/// which is what keeps [`image_info`] from asking the ownership question a
-/// second time and with a second read.
-fn cicp_of_file(path: &Path) -> Option<Cicp> {
-    cicp_from(File::open(path).ok()?)
+/// read from the open it was given rather than from another one.
+///
+/// The png reader has the file partway through its header by now and the walk
+/// below reads chunks from the signature, so this rewinds first: a chunk list
+/// that starts in the middle of one is not a chunk list.
+fn cicp_of(file: &mut BufReader<File>) -> Option<Cicp> {
+    file.seek(SeekFrom::Start(0)).ok()?;
+    cicp_from(&mut *file)
 }
 
 /// Reads chunks until the image data starts, and answers what a `cICP` among
@@ -137,6 +141,7 @@ pub fn image_info(
     path: &Path,
     apply_rotation: bool,
     route: Option<crate::formats::identify::Format>,
+    file: &mut BufReader<File>,
 ) -> Result<Option<ImageInfo>> {
     // The content decides, not the name. This asked the extension, which is the
     // one thing plan 34 is about: the decode next door answered from the bytes, so
@@ -148,41 +153,52 @@ pub fn image_info(
     ) {
         return Ok(None);
     }
-    let file = File::open(path).map_err(|error| image_error("open", path, error))?;
-    let mut decoder = png::Decoder::new(BufReader::new(file));
-    // The one transformation `image`'s own png decoder sets, so the layout this
-    // probe reports is the layout that decoder produces. It is what widens a
-    // palette index to r,g,b, turns a `tRNS` into an alpha channel, and takes a
-    // one, two or four bit grey page up to eight bits.
-    decoder.set_transformations(png::Transformations::EXPAND);
-    let reader = decoder
-        .read_info()
-        .map_err(|error| image_error("create decoder for", path, error))?;
-    let header = reader.info();
-    let color_type = expanded_color_type(reader.output_color_type(), path)?;
-    let orientation = header
-        .exif_metadata
-        .as_deref()
-        .and_then(orientation_of)
-        .unwrap_or(Orientation::NoTransforms);
+    // The png reader borrows the open it is handed, so what it states is copied
+    // out of it before the `cICP` walk below wants the same handle again. A png
+    // probe spent three opens -- one for the input, one for this reader and one
+    // for the walk -- and it now spends the one the router already made.
+    let (width, height, color_type, has_icc_profile, icc_profile, orientation) = {
+        let mut decoder = png::Decoder::new(&mut *file);
+        // The one transformation `image`'s own png decoder sets, so the layout this
+        // probe reports is the layout that decoder produces. It is what widens a
+        // palette index to r,g,b, turns a `tRNS` into an alpha channel, and takes a
+        // one, two or four bit grey page up to eight bits.
+        decoder.set_transformations(png::Transformations::EXPAND);
+        let reader = decoder
+            .read_info()
+            .map_err(|error| image_error("create decoder for", path, error))?;
+        let header = reader.info();
+        (
+            header.width,
+            header.height,
+            expanded_color_type(reader.output_color_type(), path)?,
+            header.icc_profile.is_some(),
+            header
+                .icc_profile
+                .as_ref()
+                .map(|profile| std::sync::Arc::from(profile.as_ref())),
+            header
+                .exif_metadata
+                .as_deref()
+                .and_then(orientation_of)
+                .unwrap_or(Orientation::NoTransforms),
+        )
+    };
 
     Ok(Some(ImageInfo {
         route: None,
         subimage: None,
         path: path.to_path_buf(),
-        width: header.width,
-        height: header.height,
+        width,
+        height,
         color_type,
         // The `image` png decoder does not override this, so the label a png
         // reports is the name of the layout its samples decode to. That is
         // why a palette page reads `Rgb8` rather than naming its indices.
         original_color_type: SourceColorType::from(color_type),
-        has_icc_profile: header.icc_profile.is_some(),
-        icc_profile: header
-            .icc_profile
-            .as_ref()
-            .map(|profile| std::sync::Arc::from(profile.as_ref())),
-        cicp: cicp_of_file(path),
+        has_icc_profile,
+        icc_profile,
+        cicp: cicp_of(file),
         // A png states no chroma sample position: it is grey or r,g,b.
         chroma_location: None,
         orientation,
@@ -198,6 +214,18 @@ pub fn image_info(
             ))
         })?,
     }))
+}
+
+/// The same, from an open of its own, which is what a caller that did not come
+/// through a probe has.
+#[cfg(test)]
+pub fn image_info_at(
+    path: &Path,
+    apply_rotation: bool,
+    route: Option<crate::formats::identify::Format>,
+) -> Result<Option<ImageInfo>> {
+    let file = File::open(path).map_err(|error| image_error("open", path, error))?;
+    image_info(path, apply_rotation, route, &mut BufReader::new(file))
 }
 
 /// The layout the png crate's expanded output is written as.
@@ -1004,7 +1032,7 @@ mod tests {
             .join("tests")
             .join("fixtures")
             .join("alpha-rgb8.png");
-        let info = image_info(&path, true, None)
+        let info = image_info_at(&path, true, None)
             .expect("the header is read")
             .expect("a png is taken over");
         let Pixels::Stream(rows) = stream(&info).expect("this png is walked") else {

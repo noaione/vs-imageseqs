@@ -133,8 +133,10 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   bytes read from it, `head` grows that window from where it stops, and `reader`
   hands the same handle out rewound to the front for the container walk that
   finds a timeline, so the route, the module that describes the file and the
-  animation adapters all read one open. a module that reads past the window
-  still opens for itself, and the plan lists which.
+  animation adapters all read one open. a module that reads past the window takes
+  the same handle -- a png and a netpbm both do -- and only the arms of `describe`
+  that need more of the file than a reader walks still open for themselves; the
+  plan lists which.
   [`Pixels`] is what a buffered decode produced, and `RowStream` is the decode
   that has not read its picture yet because it can write each row into the frame;
   a format answers with one only when it can fill every frame of the call.
