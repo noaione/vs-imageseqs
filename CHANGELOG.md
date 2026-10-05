@@ -78,6 +78,11 @@
   round-to-nearest table a direct sixteen bit image uses. A sixteen bit entry's
   attribute bit at bit fifteen is the entry's alpha, and a fifteen bit entry
   states none, so such an entry is opaque
+- A bare device-independent bitmap is read: a `.dib` holds no `BM` file header at
+  all, so its bytes start at the DIB header. The name selects the bitmap reader
+  and a strict probe confirms the file is one -- a header size the reader walks,
+  a depth it reads and a compression code it takes -- so a file renamed `.dib`
+  that is not a bitmap is still refused
 
 ### fixed
 

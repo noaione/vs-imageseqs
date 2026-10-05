@@ -27,9 +27,10 @@ use std::path::Path;
 
 /// A leading-bytes length that covers every signature here.
 ///
-/// The longest is the 12 byte ISO base media and JPEG 2000 brand, so a prefix of
-/// sixteen is enough for all of them and keeps the read to one small chunk.
-pub const HEAD_BYTES: usize = 16;
+/// The longest signature is the 12 byte ISO base media and JPEG 2000 brand, and
+/// the longest *field* is a bare DIB's compression code, which ends at byte
+/// twenty. A prefix of twenty covers both and keeps the read to one small chunk.
+pub const HEAD_BYTES: usize = 20;
 
 /// The formats this tree routes stills to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,9 +91,10 @@ impl Format {
     /// extension is not a hint but the whole answer. The icon family is the other,
     /// and not for want of magic -- `\0\0\1\0` and `\0\0\2\0` are a Targa type 1
     /// or type 2 header as much as they are an icon, so the two collide and the
-    /// extension is what separates them. A bare DIB is the third, and the plan
-    /// gives it "a distinct extension-assisted structural probe" rather than a
-    /// signature.
+    /// extension is what separates them. A bare DIB is the third, and it is not
+    /// this predicate's business: a bitmap *does* have a signature, and a bare
+    /// DIB is the shape that has none, so [`is_bare_dib`] is what answers for it
+    /// and [`route_from`] is where the two are put together.
     #[must_use]
     pub const fn has_signature(self) -> bool {
         !matches!(self, Self::Tga | Self::Ico)
@@ -133,6 +135,64 @@ pub fn from_extension(path: &Path) -> Option<Format> {
             .iter()
             .any(|known| extension.eq_ignore_ascii_case(known))
     })
+}
+
+/// The DIB header sizes this tree's bitmap reader walks, from the size word
+/// every one of them begins with.
+const DIB_HEADERS: [u32; 6] = [12, 40, 52, 56, 108, 124];
+
+/// Whether these bytes are the header of a bare device-independent bitmap.
+///
+/// Plan 34 asks for "a distinct extension-assisted structural probe" for this
+/// third family, and this is it. A bare DIB has no `BM` file header, so its
+/// first four bytes are the DIB header's own length rather than a magic: a name
+/// selects the bitmap reader and this is what confirms the file is one.
+///
+/// It is strict on purpose, because a small number is the first four bytes of a
+/// great many files. The header size has to be one the reader walks, the depth
+/// one it reads and the compression code one it takes; anything else is not
+/// claimed here, which leaves the file to whatever else names it.
+#[must_use]
+pub fn is_bare_dib(head: &[u8]) -> bool {
+    let word = |at: usize| {
+        let bytes = head.get(at..at + 4)?;
+        Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    };
+    let half = |at: usize| {
+        let bytes = head.get(at..at + 2)?;
+        Some(u16::from_le_bytes([bytes[0], bytes[1]]))
+    };
+    let Some(header_size) = word(0) else {
+        return false;
+    };
+    if !DIB_HEADERS.contains(&header_size) {
+        return false;
+    }
+    // The core header states its depth at ten and has no compression field at
+    // all, so the format defines only the uncompressed form for it; the
+    // information header and its successors state the depth at fourteen and a
+    // code at sixteen.
+    let core = header_size == 12;
+    let Some(bit_count) = half(if core { 10 } else { 14 }) else {
+        return false;
+    };
+    let compression = if core {
+        0
+    } else {
+        let Some(compression) = word(16) else {
+            return false;
+        };
+        compression
+    };
+    // The depths and codes `bmp.rs` takes, so a file this probe claims is one
+    // the decode reads rather than refuses.
+    match compression {
+        0 => matches!(bit_count, 1 | 2 | 4 | 8 | 16 | 24 | 32),
+        1 => bit_count == 8,
+        2 => bit_count == 4,
+        3 => matches!(bit_count, 16 | 32),
+        _ => false,
+    }
 }
 
 /// The format a file's leading bytes are, or `None` when they say nothing.
@@ -286,9 +346,24 @@ pub fn route(path: &Path) -> Option<Format> {
 }
 
 /// [`route`] for a caller that has already read a file's leading bytes.
+///
+/// The one thing this does beyond [`identify`] and [`from_extension`] is the
+/// bare DIB: the extension selects the bitmap reader and [`is_bare_dib`] is what
+/// confirms the bytes are one, because a bare DIB has no signature to do it.
 #[must_use]
 pub fn route_from(head: &[u8], path: &Path) -> Option<Format> {
-    identify(head).or_else(|| from_extension(path))
+    if let Some(identified) = identify(head) {
+        return Some(identified);
+    }
+    let named = from_extension(path)?;
+    // A bare DIB is the third family plan 34 names, and the only one whose name
+    // is a claim a probe has to confirm: it has no `BM` file header, so there is
+    // no signature to win with. A `.dib` whose bytes are not one is not a
+    // bitmap, which is why a renamed file gives this probe nothing to assist.
+    if named == Format::Bmp && !is_bare_dib(head) {
+        return None;
+    }
+    Some(named)
 }
 
 /// Whether a format owns a file: the content decides, the extension is the hint.
@@ -296,8 +371,11 @@ pub fn route_from(head: &[u8], path: &Path) -> Option<Format> {
 /// This is the rule plan 34 states in one place -- "strong signatures win over
 /// extensions" -- and it is what every still module's `owns` delegates to. A
 /// format with a signature of its own claims a file only when that signature is
-/// there, however the file is named; a format without one falls back on the name,
-/// which is Targa and a bare DIB and nothing else.
+/// there, however the file is named. A format without one falls back on the name,
+/// which is Targa and the icon family and nothing else. A bare DIB is neither:
+/// the name selects the bitmap reader and [`is_bare_dib`] is what confirms the
+/// bytes, because a file with no header of its own has nothing else to be
+/// confirmed by.
 ///
 /// It is [`route_from`] against one format, so the question has one answer here
 /// rather than two.
@@ -346,7 +424,13 @@ mod tests {
             let Some(named) = from_extension(&path) else {
                 continue;
             };
-            if !named.has_signature() {
+            // A `.dib` is the one name here a signature cannot confirm: a bare
+            // DIB has no file header at all, so `is_bare_dib` is what answers for
+            // it and `route_from` is where the two are put together.
+            let bare_dib = path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("dib"));
+            if !named.has_signature() || bare_dib {
                 skipped.push(
                     path.file_name()
                         .unwrap_or_default()
@@ -370,6 +454,82 @@ mod tests {
                 .iter()
                 .any(|known| name.to_lowercase().ends_with(known))),
             "a format without a signature turned up that was not expected: {skipped:?}"
+        );
+    }
+
+    /// The header of a bare DIB, with the three fields the probe reads stated:
+    /// the header size, the depth and the compression code.
+    fn dib_head(header_size: u32, bit_count: u16, compression: u32) -> Vec<u8> {
+        let mut head = header_size.to_le_bytes().to_vec();
+        head.extend_from_slice(&1u32.to_le_bytes()); // width
+        head.extend_from_slice(&1u32.to_le_bytes()); // height
+        head.extend_from_slice(&1u16.to_le_bytes()); // planes
+        head.extend_from_slice(&bit_count.to_le_bytes());
+        head.extend_from_slice(&compression.to_le_bytes());
+        head
+    }
+
+    /// The same for the twelve byte core header, which has no compression field
+    /// and states its depth two bytes earlier.
+    fn dib_core(bit_count: u16) -> Vec<u8> {
+        let mut head = 12u32.to_le_bytes().to_vec();
+        head.extend_from_slice(&1i16.to_le_bytes());
+        head.extend_from_slice(&1i16.to_le_bytes());
+        head.extend_from_slice(&1u16.to_le_bytes());
+        head.extend_from_slice(&bit_count.to_le_bytes());
+        head
+    }
+
+    #[test]
+    fn a_bare_dib_is_a_header_size_a_depth_and_a_compression_code() {
+        assert!(is_bare_dib(&dib_head(40, 24, 0)));
+        assert!(is_bare_dib(&dib_head(108, 32, 3)));
+        assert!(is_bare_dib(&dib_head(52, 16, 0)));
+        assert!(is_bare_dib(&dib_core(8)));
+        assert!(is_bare_dib(&dib_core(1)));
+        assert!(
+            !is_bare_dib(&dib_head(41, 24, 0)),
+            "a size the reader does not walk"
+        );
+        assert!(
+            !is_bare_dib(&dib_head(40, 7, 0)),
+            "a depth it does not read"
+        );
+        assert!(
+            !is_bare_dib(&dib_head(40, 24, 1)),
+            "a code it does not take there"
+        );
+        assert!(
+            !is_bare_dib(&dib_head(40, 8, 11)),
+            "a cmyk bitmap, refused by name"
+        );
+        let short = dib_head(40, 24, 0);
+        assert!(
+            !is_bare_dib(&short[..16]),
+            "a file that stops before the code"
+        );
+        assert!(
+            !is_bare_dib(b"BM"),
+            "a bitmap with a file header is not a bare one"
+        );
+        assert!(!is_bare_dib(b""), "an empty file states nothing");
+    }
+
+    #[test]
+    fn a_name_alone_does_not_claim_a_bare_dib() {
+        let dib = dib_head(40, 24, 0);
+        assert_eq!(route_from(&dib, Path::new("a.dib")), Some(Format::Bmp));
+        assert_eq!(route_from(&dib, Path::new("a.bmp")), Some(Format::Bmp));
+        // The name is what selects the reader, so a bare DIB under a name that
+        // means something else is that something else -- and the module it names
+        // declines it, which is the refusal this probe exists to leave alone.
+        assert_eq!(route_from(&dib, Path::new("a.png")), Some(Format::Png));
+        // A `.dib` that is not a DIB is not a bitmap at all.
+        assert_eq!(route_from(b"not an image at all", Path::new("a.dib")), None);
+        // A bitmap with its file header is claimed however the file is named.
+        assert_eq!(
+            route_from(b"BM\x00\x00\x00", Path::new("a.dib")),
+            Some(Format::Bmp)
         );
     }
 

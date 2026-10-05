@@ -30,6 +30,12 @@ exercises it.
 
 The source is a PNG this script also writes, so the fixtures depend on no other
 script having run. It is removed afterwards.
+
+A bare DIB is written here too, which is the third thing this script makes: the
+same picture with no ``BM`` file header at all, beside the bitmap that holds it.
+``dib-depth24.dib`` and ``dib-depth4.dib`` are the pair the validator compares
+against ``bmp-depth24.bmp`` and ``bmp-depth4.bmp``. ``dib-not-a-dib.dib`` is the
+text file the same name has to refuse.
 """
 
 from __future__ import annotations
@@ -244,8 +250,7 @@ def dib_header(
     return header + extra
 
 
-def write_bmp(
-    path: str,
+def bmp_parts(
     pixels: list[tuple[int, int, int, int]],
     *,
     bpp: int,
@@ -253,8 +258,13 @@ def write_bmp(
     dib: int = 40,
     top_down: bool = False,
     alpha_mask: int = 0,
-) -> None:
-    """Writes one BMP, bottom-up unless `top_down`."""
+) -> tuple[bytes, bytes, bytes]:
+    """The header, the palette and the pixel data of one bitmap.
+
+    They are returned apart because a `.bmp` and a bare DIB hold exactly the
+    same three: the only difference between the two files is the fourteen byte
+    file header the bare one does not have.
+    """
     palette = b""
     body = bytearray()
 
@@ -325,10 +335,28 @@ def write_bmp(
 
     height = -HEIGHT if top_down else HEIGHT
     header = dib_header(bpp, compression, len(body), height, dib, alpha_mask)
+    return header, palette, bytes(body)
+
+
+def write_bmp(path: str, pixels: list[tuple[int, int, int, int]], **options: object) -> None:
+    """Writes one BMP, bottom-up unless `top_down`."""
+    header, palette, body = bmp_parts(pixels, **options)  # pyright: ignore[reportArgumentType]
     offset = 14 + len(header) + len(palette)
     file_header = struct.pack("<2sIHHI", b"BM", offset + len(body), 0, 0, offset)
     with open(path, "wb") as handle:
-        handle.write(file_header + header + palette + bytes(body))
+        handle.write(file_header + header + palette + body)
+
+
+def write_dib(path: str, pixels: list[tuple[int, int, int, int]], **options: object) -> None:
+    """Writes the DIB alone, with no `BM` file header at all.
+
+    That is what a `.dib` file holds and what an icon's directory entry points
+    at: the file starts at the DIB header, which is the same header walk with
+    `file_header` false.
+    """
+    header, palette, body = bmp_parts(pixels, **options)  # pyright: ignore[reportArgumentType]
+    with open(path, "wb") as handle:
+        handle.write(header + palette + body)
 
 
 def png_payload_ico(path: str, payload: str) -> None:
@@ -395,6 +423,23 @@ def main() -> int:
     emit("bmp-v5-bitfields32.bmp", bpp=32, compression=BI_BITFIELDS, dib=124,
          alpha_mask=MASK_8888[3])
     emit("bmp-bitfields16.bmp", bpp=16, compression=BI_BITFIELDS, dib=40)
+
+    def emit_dib(name: str, **options: object) -> None:
+        target = fixture(name)
+        write_dib(target, pixels, **options)  # pyright: ignore[reportArgumentType]
+        print(f"  + {name} ({os.path.getsize(target)} bytes)")
+
+    # ---- A bare DIB: the same picture as the bitmaps above with no `BM` file
+    # header at all, so the file starts at the DIB header. The palette one is
+    # the case that catches an offset still counting the fourteen bytes that
+    # are not there, and both are the shape a `.dib` file has.
+    emit_dib("dib-depth24.dib", bpp=24)
+    emit_dib("dib-depth4.dib", bpp=4)
+    # The negative case: the name alone is not a claim, so a `.dib` that holds no
+    # DIB header is refused rather than read as a bitmap.
+    with open(fixture("dib-not-a-dib.dib"), "wb") as handle:
+        handle.write(b"this is not a device-independent bitmap at all\n")
+    print(f"  + dib-not-a-dib.dib ({os.path.getsize(fixture('dib-not-a-dib.dib'))} bytes)")
 
     # ---- ICO. The directory is what decides which entry is read, and the
     # payload is sniffed as PNG or as a DIB.

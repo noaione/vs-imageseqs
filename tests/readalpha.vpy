@@ -2203,6 +2203,52 @@ def test_ycbcr_pages() -> None:
             )
 
 
+def test_bare_dib() -> None:
+    """A bare DIB is read, which the `BM` check used to decline.
+
+    A bare DIB is a bitmap with no file header at all: the file starts at the DIB
+    header, which is the shape a `.dib` holds and the shape an icon's directory
+    entry points at. The pair is the acceptance -- the fourteen bytes of file
+    header are the only difference between the two files -- and the palette one
+    fails first if an offset still counts those fourteen bytes. The last file is
+    the negative case: the name is a claim a probe confirms, so a `.dib` that
+    holds no DIB header is refused rather than read as a bitmap.
+    """
+    for dib, bmp in (
+        ("dib-depth24.dib", "bmp-depth24.bmp"),
+        ("dib-depth4.dib", "bmp-depth4.bmp"),
+    ):
+        bare_clip, bare_alpha = read_alpha(files=[fixture(dib)])
+        whole_clip, whole_alpha = read_alpha(files=[fixture(bmp)])
+        check(
+            bare_clip.format.name == whole_clip.format.name,
+            f"{dib}: the colour clip is the format {bmp} hands out"
+            f" (got {bare_clip.format.name})",
+        )
+        check(
+            (bare_clip.width, bare_clip.height)
+            == (whole_clip.width, whole_clip.height),
+            f"{dib}: the size is the one {bmp} states",
+        )
+        bare_frame = bare_clip.get_frame(0)
+        whole_frame = whole_clip.get_frame(0)
+        for plane in range(bare_clip.format.num_planes):
+            check(
+                samples(bare_frame, plane) == samples(whole_frame, plane),
+                f"{dib}: plane {plane} is the one {bmp} hands out",
+            )
+        check(
+            samples(bare_alpha.get_frame(0)) == samples(whole_alpha.get_frame(0)),
+            f"{dib}: the alpha clip is the one {bmp} hands out",
+        )
+    try:
+        core.imgseqs.ReadAlpha(files=[fixture("dib-not-a-dib.dib")])
+    except Exception as error:
+        check(True, f"a text file named .dib is refused ({str(error).strip()})")
+    else:
+        check(False, "a text file named .dib is refused")
+
+
 def main() -> None:
     for test in (
         test_rgba8,
@@ -2243,6 +2289,7 @@ def main() -> None:
         test_palette_pages,
         test_ycbcr_pages,
         test_core_header_bitmaps,
+        test_bare_dib,
     ):
         print(f"--- {test.__name__}")
         test()

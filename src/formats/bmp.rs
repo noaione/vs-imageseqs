@@ -31,6 +31,14 @@
 //! form exists, and a palette entry is three bytes rather than four. It
 //! cannot be stored top-down, and a negative height there is refused by name.
 //!
+//! A **bare DIB** is read too: a bitmap with no `BM` file header at all, where
+//! the file starts at the DIB header. That is the shape a `.dib` has and the
+//! shape an icon's directory entry points at. It is the one format here whose
+//! name is a claim a probe confirms rather than a signature, so
+//! [`identify::is_bare_dib`](crate::formats::identify::is_bare_dib) is what
+//! decides whether the bytes are one, and the raster has to fit inside the file
+//! because a file with no header of its own has nothing else to be checked by.
+//!
 //! Subtypes the corpus does not show are refused by name rather than guessed
 //! at: the one- and two-bit depths, `BI_JPEG` and `BI_PNG` compression, and the
 //! CMYK bit counts.
@@ -547,6 +555,22 @@ fn geometry(header: &Header) -> Result<(usize, usize)> {
     Ok((row_bytes, needed))
 }
 
+/// Whether the raster a header states fits inside a file of `length` bytes.
+///
+/// Only the uncompressed forms can be measured this way: a run-length bitmap's
+/// stored size is not the size its rows would take, and its packets are bounds
+/// checked as they are read instead.
+fn raster_fits(header: &Header, length: u64) -> bool {
+    if matches!(header.image_type, ImageType::Rle4 | ImageType::Rle8) {
+        return true;
+    }
+    let Ok((_, needed)) = geometry(header) else {
+        return false;
+    };
+    let offset = u64::try_from(header.data_offset).unwrap_or(u64::MAX);
+    offset.saturating_add(u64::try_from(needed).unwrap_or(u64::MAX)) <= length
+}
+
 /// Opens `path` and reads its header, leaving the reader at the pixels.
 ///
 /// Answers `None` for every shape the stream does not cover, so the caller falls
@@ -563,7 +587,10 @@ fn prepare(path: &Path) -> Result<Option<(Header, BufReader<File>)>> {
         .read(&mut window)
         .map_err(|e| image_error("open", path, e))?;
     window.truncate(read);
-    let header = header(&window, 0, true).map_err(|e| image_error("decode", path, e))?;
+    // A bare DIB has no file header at all, so the same probe the route used
+    // decides which of the format's two headers to read here.
+    let file_header = !crate::formats::identify::is_bare_dib(&window);
+    let header = header(&window, 0, file_header).map_err(|e| image_error("decode", path, e))?;
     if header.has_alpha || matches!(header.image_type, ImageType::Rle4 | ImageType::Rle8) {
         return Ok(None);
     }
@@ -1011,11 +1038,25 @@ pub fn image_info_headed(
         return Ok(None);
     }
     // A `.bmp` that does not start with `BM` is not one however it is named, so
-    // it is declined rather than refused: something else can still read it.
-    if data.len() < 2 || data[..2] != *b"BM" {
+    // it is declined rather than refused: something else can still read it. A
+    // bare DIB is the exception the plan names, and it is the same probe the
+    // route used that decides whether the bytes are one.
+    let file_header = if data.len() >= 2 && data[..2] == *b"BM" {
+        true
+    } else if crate::formats::identify::is_bare_dib(data) {
+        false
+    } else {
+        return Ok(None);
+    };
+    let header =
+        header(data, 0, file_header).map_err(|error| image_error("identify", path, error))?;
+    // A bare DIB is a claim about a file that has no signature to confirm it, so
+    // the raster has to fit as well: a decode that found it short would refuse a
+    // file the probe had already promised a frame for.
+    let length = std::fs::metadata(path).map(|data| data.len()).unwrap_or(0);
+    if !file_header && !raster_fits(&header, length) {
         return Ok(None);
     }
-    let header = header(data, 0, true).map_err(|error| image_error("identify", path, error))?;
     Ok(Some(ImageInfo {
         route: None,
         subimage: None,
@@ -1074,7 +1115,9 @@ pub(crate) fn decode_dib(
     };
     let open = open_started.elapsed();
 
-    let file_header = payload.is_none();
+    // A bare DIB has no file header, which is the same question the probe asked;
+    // an icon payload is always one.
+    let file_header = payload.is_none() && !crate::formats::identify::is_bare_dib(data);
     let header =
         header(data, 0, file_header).map_err(|error| image_error("decode", path, error))?;
     if (header.width, header.height) != (info.width, info.height) {
@@ -1285,6 +1328,43 @@ mod tests {
         assert_eq!(buffer.len(), 37 * 23 * 3);
     }
 
+    /// A bare DIB is the same picture as the bitmap that holds it, with the file
+    /// header the `.bmp` has and the `.dib` does not.
+    ///
+    /// The pair is the acceptance: the fourteen bytes of file header are the only
+    /// difference between the two files, so every plane, the alpha decision and
+    /// the label have to agree. The palette file is the one that fails first if
+    /// an offset still counts those fourteen bytes.
+    #[test]
+    fn a_bare_dib_reads_as_the_bitmap_that_holds_the_same_picture() {
+        for (dib, bmp) in [
+            ("dib-depth24.dib", "bmp-depth24.bmp"),
+            ("dib-depth4.dib", "bmp-depth4.bmp"),
+        ] {
+            let bare = image_info(&fixture(dib), true, None)
+                .expect("read")
+                .expect("a bare DIB is taken over");
+            let whole = image_info(&fixture(bmp), true, None)
+                .expect("read")
+                .expect("taken over");
+            assert_eq!(
+                (bare.width, bare.height),
+                (whole.width, whole.height),
+                "{dib}"
+            );
+            assert_eq!(bare.color_type, whole.color_type, "{dib}");
+            assert_eq!(bare.original_color_type, whole.original_color_type, "{dib}");
+            assert_eq!(bare.format, whole.format, "{dib}");
+            let (Pixels::Interleaved { buffer: a, .. }, Pixels::Interleaved { buffer: b, .. }) = (
+                decode(&bare).expect("the bare DIB decodes").pixels,
+                decode(&whole).expect("the bitmap decodes").pixels,
+            ) else {
+                panic!("a bitmap hands out one interleaved buffer");
+            };
+            assert_eq!(a, b, "{dib} against {bmp}");
+        }
+    }
+
     /// A file that is not a bitmap is declined, and one whose header names an
     /// unported subtype is refused by name rather than guessed at.
     #[test]
@@ -1311,8 +1391,10 @@ mod tests {
                 .is_none()
         );
         assert!(!owns(Path::new("a.png")));
-        assert!(owns(Path::new("a.bmp")));
-        assert!(owns(Path::new("a.BMP")));
-        assert!(owns(Path::new("a.dib")));
+        // A name alone is not a claim: neither `.bmp` nor `.dib` owns a file
+        // whose bytes are not a bitmap header at all.
+        assert!(!owns(Path::new("a.bmp")));
+        assert!(!owns(Path::new("a.BMP")));
+        assert!(!owns(Path::new("a.dib")));
     }
 }
