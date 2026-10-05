@@ -264,7 +264,7 @@ pub fn header(data: &[u8]) -> Result<Header> {
             ));
         }
         let entry_size = map_entry_bits.div_ceil(8);
-        if !matches!(entry_size, 2 | 3 | 4) {
+        if !matches!(entry_size, 2..=4) {
             return Err(ImgSeqError::new(format!(
                 "a colour map entry of {map_entry_bits} bits is not supported"
             )));
