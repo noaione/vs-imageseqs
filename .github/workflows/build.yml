@@ -16,6 +16,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  IMGSEQS_RUST_TOOLCHAIN: "1.99.0"
 permissions:
   contents: read
 concurrency:
@@ -39,12 +40,42 @@ jobs:
 
       - name: set up rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.IMGSEQS_RUST_TOOLCHAIN }}
 
-      - name: install assembler
-        run: dnf install --assumeyes nasm
+      - name: cache Python build downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pip
+          key: manylinux-pip-v1-${{ hashFiles('tools/setup-linux-build.sh', '.github/workflows/build.yml') }}
+
+      - name: prepare Linux build environment
+        id: setup
+        run: sh tools/setup-linux-build.sh
+        env:
+          IMGSEQS_LINUX_PLATFORM: manylinux
+          IMGSEQS_WRITE_GITHUB_ENV: "1"
+
+      - name: cache native codec libraries
+        id: native-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/manylinux/prefix
+            target/manylinux/archives
+          key: ${{ steps.setup.outputs.native-key }}
+
+      - name: cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target/manylinux/cargo"
+          key: ${{ steps.setup.outputs.native-key }}
+          env-vars: "CARGO CC CXX CFLAGS CXXFLAGS CPPFLAGS LDFLAGS CMAKE RUST PKG_CONFIG LD_LIBRARY_PATH"
 
       - name: build and repair Linux wheel
         run: bash tools/build-manylinux.sh
+        env:
+          IMGSEQS_NATIVE_CACHE_HIT: ${{ steps.native-cache.outputs.cache-hit }}
 
       - name: upload repaired wheel
         uses: actions/upload-artifact@v7
@@ -112,8 +143,8 @@ jobs:
     name: linux-x86_64 (musllinux)
     runs-on: ubuntu-26.04
     # The musl counterpart of the manylinux job above, from the Alpine-based
-    # image of the same policy. It runs the image's own shell, and the build
-    # script installs the toolchain the image does not carry.
+    # image of the same policy. Setup runs before the compiled dependency cache
+    # so its key sees the musl toolchain and the same environment as the build.
     container: quay.io/pypa/musllinux_1_2_x86_64@sha256:ff786af69d772d7ac3e318c00a2b682428a352cc822d6175f6a0d4b431c0d44d
     defaults:
       run:
@@ -122,8 +153,48 @@ jobs:
       - name: check out source
         uses: actions/checkout@v7
 
+      - name: cache musl Rust toolchain
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup
+            ~/.cargo/bin
+            ~/.cargo/env
+          key: musllinux-rustup-v1-${{ env.IMGSEQS_RUST_TOOLCHAIN }}-${{ hashFiles('.github/workflows/build.yml') }}
+
+      - name: cache Python build downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pip
+          key: musllinux-pip-v1-${{ hashFiles('tools/setup-linux-build.sh', '.github/workflows/build.yml') }}
+
+      - name: prepare Linux build environment
+        id: setup
+        run: sh tools/setup-linux-build.sh
+        env:
+          IMGSEQS_LINUX_PLATFORM: musllinux
+          IMGSEQS_WRITE_GITHUB_ENV: "1"
+
+      - name: cache native codec libraries
+        id: native-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/musllinux/prefix
+            target/musllinux/archives
+          key: ${{ steps.setup.outputs.native-key }}
+
+      - name: cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target/musllinux/cargo"
+          key: ${{ steps.setup.outputs.native-key }}
+          env-vars: "CARGO CC CXX CFLAGS CXXFLAGS CPPFLAGS LDFLAGS CMAKE RUST PKG_CONFIG LD_LIBRARY_PATH"
+
       - name: build and repair musllinux wheel
         run: sh tools/build-musllinux.sh
+        env:
+          IMGSEQS_NATIVE_CACHE_HIT: ${{ steps.native-cache.outputs.cache-hit }}
 
       - name: upload repaired wheel
         uses: actions/upload-artifact@v7
@@ -214,6 +285,19 @@ jobs:
 
       - name: set up rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.IMGSEQS_RUST_TOOLCHAIN }}
+
+      - name: install NASM assembler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nasm --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $nasmDirectory = Join-Path $env:ProgramFiles 'NASM'
+          $nasmDirectory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $env:PATH = "$nasmDirectory;$env:PATH"
+          nasm -v
 
       - name: cache rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -398,7 +482,9 @@ jobs:
           for file in \
             build.rs Cargo.toml Cargo.lock vcpkg.json hatch_build.py \
             pyproject.toml CHANGELOG.md tools/build-macos-native.sh \
-            tools/build-musllinux.sh tools/make-linux-source-bundle.sh \
+            tools/build-manylinux.sh tools/build-musllinux.sh \
+            tools/setup-linux-build.sh tools/linux-native-cache.py \
+            tools/make-linux-source-bundle.sh \
             tools/macos-libheif-toolchain.cmake tools/package-macos-wheel.py \
             tools/vcpkg-ports/libheif/vcpkg.json \
             tools/vcpkg-ports/libheif/portfile.cmake; do

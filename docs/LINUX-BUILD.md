@@ -23,6 +23,19 @@ with rustup because the image carries none. It builds the plugin for
 cdylib that linked musl statically would carry a second libc, its allocator
 and its thread-local storage into the process that loaded it.
 
+CI prepares the build environment before restoring caches. Each platform
+caches its installed native prefix and checked source archives separately from
+Cargo's compiled dependencies. An exact native cache hit skips codec builds
+only when its completion stamp and required installation files are present.
+Compiler, container and native build-option changes invalidate that cache.
+Wheel assembly, repair, source-bundle generation and clean-container validation
+still run every time. The wheel jobs pin Rust to 1.99.0 through the workflow's
+top-level `IMGSEQS_RUST_TOOLCHAIN` environment variable; musllinux also caches
+that toolchain, and both jobs cache Python downloads. Direct invocations of
+either build script still prepare their own environment. See
+[37](improvements/37-linux-build-caching.md) for the cache boundaries and CI
+timing checks.
+
 Auditwheel checks the requested ABI baseline and bundles the non-system shared
 libraries with rewritten names. What counts as a system library is the
 platform's policy, and the two differ: on glibc the C++ runtime the embedded

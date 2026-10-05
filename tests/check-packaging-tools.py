@@ -20,6 +20,8 @@ The build hook and packaging tools are covered against release failures:
   and what it leaves alone.
 - ``hatch_build.py``: CPU flags reach target dependencies while Cargo's host
   build scripts and proc macros remain runnable on the build machine.
+- ``tools/linux-native-cache.py``: an incomplete native prefix cannot skip a
+  build, and container, compiler and build-option changes invalidate its cache.
 
 The scratch tree is ``target/check-packaging-tools`` rather than the system
 temporary directory, because the repository's ignored build tree is the one
@@ -645,6 +647,70 @@ def check_build_targets() -> None:
             check(False, "build: missing host information must be refused")
 
 
+def check_linux_native_cache() -> None:
+    prefix = SCRATCH / "native-cache" / "prefix"
+    key = "linux-native-v1-manylinux-test"
+    result = run("linux-native-cache.py", "mark", str(prefix), key)
+    check(result.returncode != 0, "native cache: an incomplete install cannot be marked ready")
+    spec = importlib.util.spec_from_file_location("linux_native_cache", TOOLS / "linux-native-cache.py")
+    assert spec and spec.loader
+    cache = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cache)
+    for name in cache.REQUIRED:
+        path = prefix / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"native fixture")
+    result = run("linux-native-cache.py", "check", str(prefix), key)
+    check(result.returncode != 0, "native cache: files without a completed build stamp are a miss")
+    result = run("linux-native-cache.py", "mark", str(prefix), key)
+    check(result.returncode == 0, "native cache: a complete install can be marked ready")
+    result = run("linux-native-cache.py", "check", str(prefix), key)
+    check(result.returncode == 0, "native cache: the exact completed install can be reused")
+    result = run("linux-native-cache.py", "check", str(prefix), key + "-changed")
+    check(result.returncode != 0, "native cache: a previous build key cannot skip compilation")
+    (prefix / "lib/libwebp.a").unlink()
+    result = run("linux-native-cache.py", "check", str(prefix), key)
+    check(result.returncode != 0, "native cache: a missing static library invalidates a stamped prefix")
+
+    root = SCRATCH / "native-cache" / "root"
+    workflow = root / ".github/workflows/build.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text("container: first-image", encoding="utf-8")
+    script = root / "tools/build-manylinux.sh"
+    script.parent.mkdir()
+    script.write_text("native build options", encoding="utf-8")
+    version = subprocess.CompletedProcess([], 0, "tool version 1\n", "")
+    with patch.object(cache, "ROOT", root), patch.dict(os.environ, {}, clear=True), \
+            patch.object(cache.subprocess, "run", return_value=version):
+        original = cache.fingerprint("manylinux")
+        check(cache.fingerprint("manylinux") == original, "native cache: unchanged inputs keep the key")
+        check(cache.fingerprint("musllinux") != original, "native cache: glibc and musl cannot share a key")
+        workflow.write_text("container: second-image", encoding="utf-8")
+        check(cache.fingerprint("manylinux") != original, "native cache: changing the container invalidates the key")
+        workflow.write_text("container: first-image", encoding="utf-8")
+        script.write_text("different native build options", encoding="utf-8")
+        check(cache.fingerprint("manylinux") != original, "native cache: changing the native recipe invalidates the key")
+        script.write_text("native build options", encoding="utf-8")
+        with patch.dict(os.environ, {"CFLAGS": "-march=native"}):
+            check(cache.fingerprint("manylinux") != original, "native cache: changing compiler flags invalidates the key")
+        with patch.object(cache.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "tool version 2", "")):
+            check(cache.fingerprint("manylinux") != original, "native cache: changing installed tools invalidates the key")
+
+    github_files = {name: str(SCRATCH / "native-cache" / name)
+                    for name in ("GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT")}
+    result = run("linux-native-cache.py", "github-env", env={
+        **github_files, "IMGSEQS_NATIVE_CACHE_KEY": key, "RUSTFLAGS": "-C target-feature=-crt-static",
+        "CARGO_TARGET_DIR": "target/musllinux/cargo", "IMGSEQS_LINUX_SETUP": "1",
+    })
+    check(result.returncode == 0, "native cache: setup can export the CI build environment")
+    exported = Path(github_files["GITHUB_ENV"]).read_text(encoding="utf-8")
+    check("RUSTFLAGS=-C target-feature=-crt-static\n" in exported,
+          "native cache: Cargo caching receives the musl compiler flags")
+    check("IMGSEQS_LINUX_SETUP=1\n" in exported, "native cache: the build knows setup has completed")
+    check(Path(github_files["GITHUB_OUTPUT"]).read_text(encoding="utf-8") == f"native-key={key}\n",
+          "native cache: native restore uses setup's exact key")
+
+
 def prepare_scratch() -> None:
     """Makes the scratch tree empty, without clearing anyone else's.
 
@@ -668,7 +734,7 @@ def main() -> None:
     prepare_scratch()
     try:
         for test in (check_changelog, check_staging, check_variants, check_bundled_staging,
-                     check_linux_wheel, check_clearing, check_build_targets):
+                     check_linux_wheel, check_clearing, check_build_targets, check_linux_native_cache):
             print(f"--- {test.__name__}")
             test()
     finally:
