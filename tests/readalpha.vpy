@@ -2249,6 +2249,54 @@ def test_bare_dib() -> None:
         check(False, "a text file named .dib is refused")
 
 
+def test_cursor() -> None:
+    """A cursor is read, which its type word used to be mistaken for a depth.
+
+    A cursor's directory is the icon's with two fields moved: where an icon states
+    its colour planes and its bit depth, a cursor states the hot spot. The payload
+    is the same one and the AND mask follows the icon's rule -- a set bit clears
+    alpha and a clear one leaves what the payload stated -- so the alpha plane is
+    the payload's own alpha multiplied by the mask rather than either one alone.
+    ``ico-masked.ico`` and ``cur-masked.cur`` hold the same picture, so the pair
+    is what says the two directories read alike.
+    """
+    icon_clip, icon_alpha = read_alpha(files=[fixture("ico-masked.ico")])
+    cursor_clip, cursor_alpha = read_alpha(files=[fixture("cur-masked.cur")])
+    check(
+        cursor_clip.format.name == icon_clip.format.name,
+        f"cursor: the colour clip is the format its icon twin hands out"
+        f" (got {cursor_clip.format.name})",
+    )
+    check(
+        (cursor_clip.width, cursor_clip.height)
+        == (icon_clip.width, icon_clip.height),
+        "cursor: the size is the one the directory states",
+    )
+    cursor_frame = cursor_clip.get_frame(0)
+    icon_frame = icon_clip.get_frame(0)
+    for plane in range(cursor_clip.format.num_planes):
+        check(
+            samples(cursor_frame, plane) == samples(icon_frame, plane),
+            f"cursor: plane {plane} is the one its icon twin hands out",
+        )
+    # The mask clears the leftmost eight columns and the payload states 64 on the
+    # left half and 255 on the right, so all three values have to be here.
+    alpha = samples(cursor_alpha.get_frame(0))
+    row = [
+        0 if x < 8 else (255 if x >= cursor_clip.width // 2 else 64)
+        for x in range(cursor_clip.width)
+    ]
+    check(
+        alpha == row * cursor_clip.height,
+        "cursor: the alpha plane is the payload's alpha times the mask"
+        f" (got {sorted(set(alpha))})",
+    )
+    check(
+        alpha == samples(icon_alpha.get_frame(0)),
+        "cursor: the alpha clip is the one its icon twin hands out",
+    )
+
+
 def main() -> None:
     for test in (
         test_rgba8,
@@ -2290,6 +2338,7 @@ def main() -> None:
         test_ycbcr_pages,
         test_core_header_bitmaps,
         test_bare_dib,
+        test_cursor,
     ):
         print(f"--- {test.__name__}")
         test()

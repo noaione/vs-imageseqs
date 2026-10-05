@@ -7,6 +7,12 @@
 //! adjustments that are the whole of what makes an icon different from a
 //! bitmap.
 //!
+//! A **cursor** is read too, which is the same file with a type 2 directory: the
+//! entry is the same sixteen bytes, and only what two of them mean changes. An
+//! icon states its colour planes and its bit depth where a cursor states the hot
+//! spot, which this plugin has no property for, so a cursor is selected on area
+//! alone. The payload, the alpha rule and the two icon adjustments are the same.
+//!
 //! [upstream]: https://github.com/image-rs/image/blob/v0.25.10/src/codecs/ico/decoder.rs
 //!
 //! Five behaviours are inherited rather than invented:
@@ -71,8 +77,9 @@ pub struct Entry {
     pub width: u8,
     /// The stored height, where zero means 256.
     pub height: u8,
-    /// The depth the directory claims. It is what the search scores on, and it
-    /// is not necessarily what the payload holds.
+    /// The depth the directory claims, or zero for a cursor, which states a hot
+    /// spot where an icon states this. It is what the search scores on, and it is
+    /// not necessarily what the payload holds.
     pub bits_per_pixel: u16,
     /// How many bytes the payload occupies.
     pub length: u32,
@@ -111,13 +118,46 @@ impl Entry {
     }
 }
 
-/// Reads the directory, and reports what each entry claims.
+/// Which of the two directories a file holds.
+///
+/// They are the same container: an icon and a cursor share the six byte
+/// directory, the sixteen byte entry and everything after it, and differ only in
+/// what two of the entry's fields mean. The type word is what says which.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// A type 1 directory: colour planes and a bit depth.
+    Icon,
+    /// A type 2 directory: a hot spot where an icon states those two.
+    Cursor,
+}
+
+/// Which directory a file holds, from the type word it states.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the directory is truncated or states a type
+/// that is neither an icon nor a cursor.
+pub fn kind(data: &[u8]) -> Result<Kind> {
+    let header = data
+        .get(..DIRECTORY)
+        .ok_or_else(|| ImgSeqError::new("the icon is truncated"))?;
+    match u16::from_le_bytes([header[2], header[3]]) {
+        1 => Ok(Kind::Icon),
+        2 => Ok(Kind::Cursor),
+        other => Err(ImgSeqError::new(format!(
+            "a directory type of {other} is neither an icon nor a cursor"
+        ))),
+    }
+}
+
+/// Reads the directory, and reports which kind it is and what each entry claims.
 ///
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] when the directory is truncated or states no
 /// entries.
-pub fn entries(data: &[u8]) -> Result<Vec<Entry>> {
+pub fn entries(data: &[u8]) -> Result<(Kind, Vec<Entry>)> {
+    let kind = kind(data)?;
     let header = data
         .get(..DIRECTORY)
         .ok_or_else(|| ImgSeqError::new("the icon is truncated"))?;
@@ -131,9 +171,15 @@ pub fn entries(data: &[u8]) -> Result<Vec<Entry>> {
         let entry = data
             .get(at..at + ENTRY)
             .ok_or_else(|| ImgSeqError::new("the icon directory is truncated"))?;
-        let bits_per_pixel = u16::from_le_bytes([entry[6], entry[7]]);
-        // 256 is the largest an entry can state, and anything larger would be a
-        // hot spot rather than a depth: this reader takes no cursor files.
+        // An icon states its colour planes and then a bit depth. A cursor states
+        // a hot spot in those two words instead, and a hot spot is not a depth:
+        // this plugin has no property for it, so a cursor is scored on area alone
+        // and the depth it reports is zero.
+        let bits_per_pixel = match kind {
+            Kind::Icon => u16::from_le_bytes([entry[6], entry[7]]),
+            Kind::Cursor => 0,
+        };
+        // 256 is the largest a depth can be, and anything larger is not one.
         if bits_per_pixel > 256 {
             return Err(ImgSeqError::new(
                 "an icon entry states a bit depth no image has",
@@ -147,7 +193,7 @@ pub fn entries(data: &[u8]) -> Result<Vec<Entry>> {
             offset: u32::from_le_bytes([entry[12], entry[13], entry[14], entry[15]]),
         });
     }
-    Ok(out)
+    Ok((kind, out))
 }
 
 /// The entry an icon's picture comes from: the deepest, then the largest.
@@ -244,7 +290,7 @@ pub fn image_info(
     if reserved != 0 || data.len() < DIRECTORY {
         return Ok(None);
     }
-    let entries = entries(&data).map_err(|error| image_error("identify", path, error))?;
+    let (_, entries) = entries(&data).map_err(|error| image_error("identify", path, error))?;
     let index = best_index(&entries).map_err(|error| image_error("identify", path, error))?;
     let entry = entries[index];
     let payload = payload(&data, entry, path)?;
@@ -329,7 +375,7 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     let data = std::fs::read(&info.path).map_err(|error| image_error("open", &info.path, error))?;
     let open = open_started.elapsed();
 
-    let entries = entries(&data).map_err(|error| image_error("decode", &info.path, error))?;
+    let (_, entries) = entries(&data).map_err(|error| image_error("decode", &info.path, error))?;
     // The probe recorded which entry it described, so a decode of that
     // `ImageInfo` reads the same payload rather than scoring the directory
     // again; an `ImageInfo` built by hand has none and selects one here.
@@ -455,7 +501,7 @@ mod tests {
     fn the_probe_records_the_entry_its_decode_reads() {
         let path = fixture("ico-multi.ico");
         let data = std::fs::read(&path).expect("the fixture is read");
-        let index = best_index(&entries(&data).expect("read")).expect("selected");
+        let index = best_index(&entries(&data).expect("read").1).expect("selected");
         let info = image_info_at(&path, true, None)
             .expect("read")
             .expect("taken over");
@@ -466,7 +512,7 @@ mod tests {
         let mut wrong = image_info_at(&path, true, None)
             .expect("read")
             .expect("taken over");
-        wrong.subimage = Some(entries(&data).expect("read").len());
+        wrong.subimage = Some(entries(&data).expect("read").1.len());
         let error = decode(&wrong).expect_err("an entry that is not there is refused");
         assert!(error.to_string().contains("out of range"), "{error}");
 
@@ -512,7 +558,7 @@ mod tests {
     }
 
     fn entries_of(data: &[u8]) -> Vec<Entry> {
-        entries(data).expect("the directory reads")
+        entries(data).expect("the directory reads").1
     }
 
     /// Depth dominates area, and a tie keeps the last entry.
@@ -573,7 +619,7 @@ mod tests {
     #[test]
     fn a_clear_mask_leaves_the_payload_alpha_alone() {
         let data = std::fs::read(fixture("ico-dib32.ico")).expect("the fixture is read");
-        let entry = best_entry(&entries(&data).expect("read")).expect("selected");
+        let entry = best_entry(&entries(&data).expect("read").1).expect("selected");
         let payload = payload(&data, entry, Path::new("ico-dib32.ico")).expect("the payload");
         let header = bmp::header_ico(payload, 0).expect("the header reads");
         let decoded = decode_dib(payload, Path::new("ico-dib32.ico")).expect("decodes");
@@ -605,7 +651,7 @@ mod tests {
     #[test]
     fn a_set_mask_bit_clears_alpha_and_leaves_the_colour() {
         let data = std::fs::read(fixture("ico-dib32.ico")).expect("the fixture is read");
-        let entry = best_entry(&entries(&data).expect("read")).expect("selected");
+        let entry = best_entry(&entries(&data).expect("read").1).expect("selected");
         let payload = payload(&data, entry, Path::new("ico-dib32.ico")).expect("the payload");
         let header = bmp::header_ico(payload, 0).expect("the header reads");
         let pixel_row = header.width as usize * 4;
@@ -626,11 +672,73 @@ mod tests {
         assert_eq!(cleared[4..], plain[4..], "and no other pixel moved");
     }
 
+    /// A cursor is the same file one type word away, and its mask is multiplied
+    /// with the payload's own alpha rather than replacing it.
+    ///
+    /// `ico-masked.ico` and `cur-masked.cur` hold the same payload, so the two
+    /// have to decode to the same bytes: the only difference between the files is
+    /// the type word and the two fields it moves. The mask clears the leftmost
+    /// eight columns and the payload states 64 on the left half and 255 on the
+    /// right, so the alpha plane shows all three of 0, 64 and 255.
+    #[test]
+    fn a_cursor_is_the_icon_directory_one_type_word_away() {
+        let icon_data = std::fs::read(fixture("ico-masked.ico")).expect("the fixture is read");
+        let cursor_data = std::fs::read(fixture("cur-masked.cur")).expect("the fixture is read");
+        assert_eq!(kind(&icon_data).expect("read"), Kind::Icon);
+        assert_eq!(kind(&cursor_data).expect("read"), Kind::Cursor);
+
+        let (icon_kind, icon_entries) = entries(&icon_data).expect("read");
+        let (cursor_kind, cursor_entries) = entries(&cursor_data).expect("read");
+        assert_eq!(icon_kind, Kind::Icon);
+        assert_eq!(cursor_kind, Kind::Cursor);
+        // An icon states its depth there and a cursor states a hot spot, so the
+        // two entries differ in exactly that one field.
+        assert_eq!(icon_entries[0].bits_per_pixel, 32);
+        assert_eq!(cursor_entries[0].bits_per_pixel, 0);
+
+        let icon = image_info_at(&fixture("ico-masked.ico"), true, None)
+            .expect("read")
+            .expect("taken over");
+        let cursor = image_info_at(&fixture("cur-masked.cur"), true, None)
+            .expect("read")
+            .expect("taken over");
+        assert_eq!((cursor.width, cursor.height), (icon.width, icon.height));
+        assert_eq!(cursor.color_type, ColorType::Rgba8);
+
+        let (Pixels::Interleaved { buffer: a, .. }, Pixels::Interleaved { buffer: b, .. }) = (
+            decode(&icon).expect("the icon decodes").pixels,
+            decode(&cursor).expect("the cursor decodes").pixels,
+        ) else {
+            panic!("an icon hands out one interleaved buffer");
+        };
+        assert_eq!(a, b, "the cursor and its icon twin hold the same picture");
+
+        // The mask's bit clears alpha and a clear one leaves what the payload
+        // stated, so the plane is the payload's own alpha multiplied by it.
+        let alphas: std::collections::BTreeSet<u8> =
+            b.as_chunks::<4>().0.iter().map(|pixel| pixel[3]).collect();
+        assert_eq!(alphas, std::collections::BTreeSet::from([0, 64, 255]));
+        let width = cursor.width as usize;
+        for y in 0..cursor.height as usize {
+            for x in 0..width {
+                let expected = if x < 8 {
+                    0
+                } else if x >= width / 2 {
+                    255
+                } else {
+                    64
+                };
+                assert_eq!(b[(y * width + x) * 4 + 3], expected, "alpha at {x},{y}");
+            }
+        }
+    }
+
     /// A file that is not an icon is declined.
     #[test]
     fn only_an_icon_is_taken_over() {
         assert!(owns(Path::new("a.ico")));
         assert!(owns(Path::new("a.ICO")));
+        assert!(owns(Path::new("a.cur")));
         assert!(!owns(Path::new("a.png")));
         assert!(
             image_info_at(&fixture("cicp-rgb8.png"), true, None)

@@ -28,6 +28,11 @@ points at DIB bytes, not at a PNG signature. So the PNG arm of the payload
 sniffer was never exercised by the research, and ``ico-png.ico`` is what
 exercises it.
 
+``ico-masked.ico`` and ``cur-masked.cur`` are written here too, because neither
+``magick`` nor the research corpus has a cursor: the two are the same sixteen byte
+entry with two fields moved, over a payload whose AND mask clears its left
+columns.
+
 The source is a PNG this script also writes, so the fixtures depend on no other
 script having run. It is removed afterwards.
 
@@ -359,6 +364,52 @@ def write_dib(path: str, pixels: list[tuple[int, int, int, int]], **options: obj
         handle.write(header + palette + body)
 
 
+def icon_payload(pixels: list[tuple[int, int, int, int]], *, mask_columns: int = 8) -> bytes:
+    """The bare DIB an icon or cursor entry points at, with its AND mask.
+
+    Two icon conventions are in the header: the stored height is doubled to
+    account for the mask that follows the pixels, and a thirty-two bit ``BI_RGB``
+    payload keeps its fourth byte because the reader is told to add an alpha
+    channel. The mask clears the leftmost `mask_columns` columns, so the alpha the
+    reader hands out is the payload's own alpha multiplied by the mask rather
+    than either of the two alone.
+    """
+    rows = []
+    for y in range(HEIGHT):
+        row = bytearray()
+        for x in range(WIDTH):
+            red, green, blue, alpha = pixels[y * WIDTH + x]
+            row += bytes([blue, green, red, alpha])
+        rows.append(pad(bytes(row)))
+    body = b"".join(reversed(rows))
+    mask_row = (WIDTH + 31) // 32 * 4
+    mask = bytearray()
+    for _ in range(HEIGHT):
+        bits = bytearray(mask_row)
+        for x in range(mask_columns):
+            bits[x // 8] |= 0x80 >> (x % 8)
+        mask += bits
+    header = dib_header(32, BI_RGB, len(body), 2 * HEIGHT, 40, 0)
+    return header + body + bytes(mask)
+
+
+def write_icon_file(
+    path: str, kind: int, payload: bytes, *, hotspot: tuple[int, int] = (0, 0)
+) -> None:
+    """Writes an icon (type 1) or a cursor (type 2) around one payload.
+
+    The two directories are the same sixteen byte entry with two fields moved: an
+    icon states its colour planes and its bit depth there, and a cursor states the
+    hot spot. Everything after the entry is identical, which is what makes a
+    cursor the same reader one type word away.
+    """
+    planes, depth = hotspot if kind == 2 else (1, 32)
+    directory = struct.pack("<HHH", 0, kind, 1)
+    entry = struct.pack("<BBBBHHII", WIDTH, HEIGHT, 0, 0, planes, depth, len(payload), 6 + 16)
+    with open(path, "wb") as handle:
+        handle.write(directory + entry + payload)
+
+
 def png_payload_ico(path: str, payload: str) -> None:
     """Writes a one-entry icon whose payload is the PNG at `payload`."""
     with open(payload, "rb") as handle:
@@ -440,6 +491,16 @@ def main() -> int:
     with open(fixture("dib-not-a-dib.dib"), "wb") as handle:
         handle.write(b"this is not a device-independent bitmap at all\n")
     print(f"  + dib-not-a-dib.dib ({os.path.getsize(fixture('dib-not-a-dib.dib'))} bytes)")
+
+    # ---- A cursor, and the icon that holds the same picture. The two directories
+    # are the same sixteen byte entry with two fields moved, and the payload is a
+    # DIB whose AND mask clears its left columns: the alpha handed out is the
+    # payload's own multiplied by the mask, not either one alone.
+    masked = icon_payload(pixels)
+    write_icon_file(fixture("ico-masked.ico"), 1, masked)
+    print(f"  + ico-masked.ico ({os.path.getsize(fixture('ico-masked.ico'))} bytes)")
+    write_icon_file(fixture("cur-masked.cur"), 2, masked, hotspot=(7, 11))
+    print(f"  + cur-masked.cur ({os.path.getsize(fixture('cur-masked.cur'))} bytes)")
 
     # ---- ICO. The directory is what decides which entry is read, and the
     # payload is sniffed as PNG or as a DIB.

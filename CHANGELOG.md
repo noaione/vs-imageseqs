@@ -83,6 +83,12 @@
   and a strict probe confirms the file is one -- a header size the reader walks,
   a depth it reads and a compression code it takes -- so a file renamed `.dib`
   that is not a bitmap is still refused
+- A Windows cursor is read, which its type word used to be mistaken for a bit
+  depth and refused for. A cursor's directory is the icon's with two fields
+  moved -- an icon states its colour planes and its depth where a cursor states
+  the hot spot -- so it is selected on area alone, and the payload and the AND
+  mask rule are the icon's: the alpha clip is the payload's own alpha multiplied
+  by the mask
 
 ### fixed
 
