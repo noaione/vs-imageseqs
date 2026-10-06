@@ -2,6 +2,10 @@
 
 ## unreleased
 
+### added
+
+- `ImgSeqAnimationIndex` names the displayed picture's position within its own file, and is written on frames from an animated file
+
 ### changed
 
 - **The `image` crate is gone.** Every format this plugin reads has a reader of its own under `src/formats/`, and a file whose bytes and extension both name no format here is refused with `no reader here knows its format`. The plugin is about 435 KB smaller, and several of those readers are ports of that crate's, so its licence texts and notices stay
@@ -25,6 +29,7 @@
 
 ### fixed
 
+- `ImgSeqIndex` reports the path's position in `files` rather than the output frame number, which an animation pushed out of step for every file after it
 - A signed JPEG 2000 page, or one whose components state two widths, is refused with a message that names the component, its width and what is wrong with it
 - The musllinux wheel no longer crashes on a TIFF (or an AVIF with no picture) read on a VapourSynth worker thread: each format's `decode` and `stream` is a call of its own, so the dispatcher no longer grows a 100 KiB frame past musl's 128 KiB stack
 - Windows builds enable libheif's built-in dav1d decoder, so animated AVIF sequences decode instead of failing with `NoMatchingDecoderInstalled`; libheif's default features stay disabled

@@ -19,7 +19,7 @@ use vapoursynth4_rs::{
 
 use crate::{
     animation::{AnimationSource, SegmentTable},
-    color::set_frame_properties,
+    color::{SourceIndices, set_frame_properties},
     decoder::{self, DecodeTimings, DecodedImage, Demand, ImageInfo, Pixels, PlaneRows, RowSink},
     error::{ImgSeqError, Result},
     pixel::{
@@ -191,7 +191,7 @@ impl ClipFrames {
         core: &Core,
         clips: &Arc<[Clip]>,
         image: &ImageInfo,
-        index: usize,
+        indices: SourceIndices,
         mut decoded: DecodedImage,
         export_icc_profile: bool,
     ) -> Result<Self> {
@@ -259,7 +259,7 @@ impl ClipFrames {
             set_frame_properties(
                 frame,
                 image,
-                index,
+                indices,
                 format,
                 clip.alpha_marker(),
                 export_icc_profile,
@@ -367,6 +367,13 @@ impl Prepare for FrameBuilder {
     fn produce(&self, index: usize) -> Result<Self::Payload> {
         let frame = self.segments.resolve(index)?;
         let image = &frame.segment.info;
+        // What the source-property names report: the path's position in the
+        // list, and the picture's position within that file. An animated file
+        // keeps its own index however long its timeline is.
+        let indices = SourceIndices {
+            file: frame.file,
+            animation: frame.segment.animated.then_some(frame.presentation),
+        };
         let decoded = decode_frame(
             image,
             frame.segment.decoder(),
@@ -377,7 +384,7 @@ impl Prepare for FrameBuilder {
             self.core.core(),
             &self.clips,
             image,
-            index,
+            indices,
             decoded,
             self.export_icc_profile,
         )

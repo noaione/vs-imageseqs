@@ -144,7 +144,7 @@ output frame shows whatever the file displays at that instant:
 Timing uses exact rational arithmetic, so a fractional rate and a delay that
 does not divide it both land where the file says they should. A file's loop
 count is ignored: each listed path plays once, and every frame keeps its own
-file's path and metadata.
+file's path, `ImgSeqIndex` and `ImgSeqAnimationIndex`.
 
 `ReadAlpha` returns the logical canvas a viewer would show, including pixels
 cleared by a frame's disposal. One exception: a colour-only read of a HEIF or
@@ -217,8 +217,9 @@ extend the picture. `CropAbs` accepts variable-size clips, while `Crop` and
 | property | meaning |
 | --- | --- |
 | `ImgSeqPath` | Source file path. |
-| `ImgSeqIndex` | File's position in the input list. |
-| `ImgSeqOriginalColorType` | Color type reported by the decoder. |
+| `ImgSeqIndex` | Position of the file in `files`. |
+| `ImgSeqAnimationIndex` | Position of the displayed picture within its file. Only written for animated files. |
+| `ImgSeqOriginalColorType` | Color type the source file states. |
 | `ImgSeqOrientation` | Orientation code stored in the source. |
 | `ImgSeqHasICC` | Whether the source contains an ICC profile. |
 | `ICCProfile` | Raw profile bytes when `icc_profile=True`. |

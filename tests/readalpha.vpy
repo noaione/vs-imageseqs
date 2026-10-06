@@ -1828,6 +1828,97 @@ def test_animation() -> None:
     )
 
 
+def test_source_indices() -> None:
+    """The two source-index names describe where a frame comes from.
+
+    `ImgSeqIndex` is the file's position in `files`, so every frame a file
+    contributes reports the same number, and `ImgSeqAnimationIndex` is the
+    picture's position within that file, which only an animated file has.
+    They cannot be one property: an animation contributes several output
+    frames, so the output frame number is neither of them once anything
+    precedes the file in the list.
+    """
+    stills = [fixture("alpha-rgb8.png"), fixture("icc-rgb8.png")]
+    clip, alpha = read_alpha(files=stills, mismatch=True)
+    check(clip.num_frames == 2, f"indices: two stills are two frames (got {clip.num_frames})")
+    for position in range(2):
+        color = clip.get_frame(position)
+        frame = alpha.get_frame(position)
+        check(
+            color.props.get("ImgSeqIndex") == position,
+            f"indices: still {position} is file {position}",
+        )
+        check(frame.props.get("ImgSeqIndex") == position, f"indices: still {position} alpha keeps it")
+        check(
+            "ImgSeqAnimationIndex" not in color.props,
+            f"indices: still {position} has no picture position",
+        )
+        check(
+            "ImgSeqAnimationIndex" not in frame.props,
+            f"indices: still {position} alpha has none either",
+        )
+
+    # `animation.webp` shows four pictures at output frames 0, 2, 6 and 9 of
+    # its 15, so each one is held across several ticks and repeats its
+    # position, while the file's own index stays the same for all of them.
+    starts = [0, 2, 6, 9]
+    clip, alpha = read_alpha(
+        files=[fixture("animation.webp"), fixture("alpha-rgb8.png")],
+        mismatch=True,
+    )
+    check(
+        clip.num_frames == 16,
+        f"indices: an animation and a still are 16 frames (got {clip.num_frames})",
+    )
+    ends = [*starts[1:], 15]
+    for picture, (start, end) in enumerate(zip(starts, ends)):
+        for number in range(start, end):
+            color = clip.get_frame(number)
+            frame = alpha.get_frame(number)
+            check(
+                color.props.get("ImgSeqIndex") == 0,
+                f"indices: animation frame {number} is file 0",
+            )
+            check(
+                frame.props.get("ImgSeqIndex") == 0,
+                f"indices: animation frame {number} alpha keeps it",
+            )
+            check(
+                color.props.get("ImgSeqAnimationIndex") == picture,
+                f"indices: animation frame {number} shows picture {picture}",
+            )
+    last = clip.get_frame(15)
+    check(last.props.get("ImgSeqIndex") == 1, "indices: the still after an animation is file 1")
+    check(
+        "ImgSeqAnimationIndex" not in last.props,
+        "indices: the still after an animation has no picture position",
+    )
+
+    # The other order, which is where the output frame number used to leak in:
+    # the animation's frames are file 1 from its first frame to its last.
+    clip = core.imgseqs.Read(
+        files=[fixture("alpha-rgb8.png"), fixture("animation.webp")],
+        mismatch=True,
+    )
+    check(
+        clip.get_frame(0).props.get("ImgSeqIndex") == 0,
+        "indices: the still before an animation is file 0",
+    )
+    for number in range(1, 16):
+        check(
+            clip.get_frame(number).props.get("ImgSeqIndex") == 1,
+            f"indices: reversed animation frame {number} is file 1",
+        )
+    check(
+        clip.get_frame(1).props.get("ImgSeqAnimationIndex") == 0,
+        "indices: the animation starts at its first picture",
+    )
+    check(
+        clip.get_frame(3).props.get("ImgSeqAnimationIndex") == 1,
+        "indices: and shows its second picture next",
+    )
+
+
 def test_gif_stills() -> None:
     """A gif is read here now, and it is the *logical screen* that is handed out.
 
@@ -2856,6 +2947,7 @@ def main() -> None:
         test_avif_grid,
         test_alpha_demand,
         test_animation,
+        test_source_indices,
         test_gif_stills,
         test_png_feature_sets,
         test_separated_inks,

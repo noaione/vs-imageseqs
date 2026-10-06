@@ -142,6 +142,18 @@ of clip creation, 183 ms per file, to 2 ms, and reading that set from 11.92 s of
 open plus frames to 4.99 s.
 
 ## plans
+
+### frame source indices — 2026-10-07
+
+[40 frame source indices](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/40-frame-source-indices.md)
+is implemented: `ImgSeqIndex` names the path's position in `files` rather than
+the output frame number, which an animation shifted for every file after it,
+and a new `ImgSeqAnimationIndex` names the displayed picture's position within
+its own file, written on animated files only. The two cannot be one property,
+because an animation contributes several output frames. The validator's
+`test_source_indices` holds both, including the ordering an animation's length
+used to get wrong.
+
 ### removing libwebp — 2026-10-06
 
 [39 removing libwebp](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/39-libwebp-removal.md)

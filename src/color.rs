@@ -129,15 +129,27 @@ pub const fn chroma_location(position: u8) -> Option<ffi::VSChromaLocation> {
     }
 }
 
+/// Which source picture a frame was built from.
+///
+/// `file` is the path's position in the `files` list the clip was created
+/// from, and `animation` is the picture's position within that file, which is
+/// only meaningful for an animated one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceIndices {
+    pub file: usize,
+    pub animation: Option<usize>,
+}
+
 /// Attaches the source metadata of `image` to a frame of `format`.
 ///
 /// `format` is the pixel format of the clip that owns the frame, so an alpha
-/// clip is never described as RGB, and `alpha_marker` is only set when the
-/// frame belongs to an alpha clip.
+/// clip is never described as RGB, `indices` is what the source-property names
+/// report, and `alpha_marker` is only set when the frame belongs to an alpha
+/// clip.
 pub fn set_frame_properties(
     frame: &mut VideoFrame,
     image: &ImageInfo,
-    index: usize,
+    indices: SourceIndices,
     format: PixelFormat,
     alpha_marker: Option<bool>,
     export_icc_profile: bool,
@@ -146,15 +158,34 @@ pub fn set_frame_properties(
         return Err(ImgSeqError::new("VapourSynth frame has no property map"));
     };
     let path = image.path.to_string_lossy();
-    let index = i64::try_from(index)
-        .map_err(|_| ImgSeqError::new("frame index does not fit in an Int property"))?;
+    let file = i64::try_from(indices.file)
+        .map_err(|_| ImgSeqError::new("the file index does not fit in an Int property"))?;
+    let animation = indices
+        .animation
+        .map(|animation| {
+            i64::try_from(animation).map_err(|_| {
+                ImgSeqError::new("the animation index does not fit in an Int property")
+            })
+        })
+        .transpose()?;
     let original_color_type = image.original_color_type.label();
     properties
         .set(key!(c"ImgSeqPath"), Value::Utf8(&path), AppendMode::Replace)
         .map_err(ImgSeqError::from_display)?;
     properties
-        .set(key!(c"ImgSeqIndex"), Value::Int(index), AppendMode::Replace)
+        .set(key!(c"ImgSeqIndex"), Value::Int(file), AppendMode::Replace)
         .map_err(ImgSeqError::from_display)?;
+    // Only an animated file has a picture position within it to report: a still
+    // contributes one frame, which the file's own index already names.
+    if let Some(animation) = animation {
+        properties
+            .set(
+                key!(c"ImgSeqAnimationIndex"),
+                Value::Int(animation),
+                AppendMode::Replace,
+            )
+            .map_err(ImgSeqError::from_display)?;
+    }
     properties
         .set(
             key!(c"ImgSeqOriginalColorType"),

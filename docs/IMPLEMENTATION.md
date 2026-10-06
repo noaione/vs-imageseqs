@@ -1332,12 +1332,13 @@ say different things about the same file.
 
 # Image-Specific Frame Properties
 
-Useful custom properties — all seven are written, and the last one only on an
+Useful custom properties — all eight are written, and the last one only on an
 alpha clip:
 
 ```text
 ImgSeqPath               the file this frame was read from
 ImgSeqIndex              its position in the list
+ImgSeqAnimationIndex     the picture's position within that file, animated files only
 ImgSeqOriginalColorType  the decoder's own colour type, before any correction
 ImgSeqHasICC             whether the file carries an icc profile
 ICCProfile               raw icc bytes when icc_profile is enabled

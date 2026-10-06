@@ -444,6 +444,7 @@ impl SegmentTable {
         let segment = &self.segments[index];
         let presentation = segment.presentation(frame - self.starts[index])?;
         Ok(FrameRef {
+            file: index,
             segment,
             presentation,
             local: frame - self.starts[index],
@@ -461,9 +462,13 @@ impl SegmentTable {
     }
 }
 
-/// One resolved output frame: the segment it comes from and its presentation.
+/// One resolved output frame: the file it comes from, the segment that file
+/// contributes, and the presentation this frame samples.
 #[derive(Clone, Copy, Debug)]
 pub struct FrameRef<'a> {
+    /// The segment's position in the table, which is the path's position in the
+    /// `files` list the clip was created from.
+    pub file: usize,
     pub segment: &'a Segment,
     /// Index into [`Segment::presentations`].
     pub presentation: usize,
@@ -961,8 +966,15 @@ mod tests {
             PathBuf::from("last.png")
         );
         let resolved = table.resolve(3).unwrap();
+        assert_eq!(resolved.file, 1);
         assert_eq!(resolved.presentation, 2);
         assert_eq!(resolved.local, 2);
+        // The file is the path's position in the list, not the output frame
+        // number: the animation at index 1 owns every one of its own frames.
+        assert_eq!(table.resolve(0).unwrap().file, 0);
+        assert_eq!(table.resolve(4).unwrap().file, 1);
+        assert_eq!(table.resolve(4).unwrap().presentation, 3);
+        assert_eq!(table.resolve(5).unwrap().file, 2);
         assert_eq!(table.animated_segments(), 1);
         assert!(table.resolve(6).is_err());
     }
