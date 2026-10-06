@@ -148,10 +148,10 @@ open plus frames to 4.99 s.
 [36 unsupported subtypes](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/36-unsupported-subtypes.md)
 collects the refused subtypes it takes up: what the container states, where the
 change lands, the fixture it needs
-and the check that would accept it. Six of the ten routes are implemented -- the
+and the check that would accept it. Seven of the ten routes are implemented -- the
 TGA two byte map entries, the bare DIB, cursors, the gray+alpha TIFF, the flat
-gray EXR and twelve bit subsampled AVIF/HEIF -- and the four the order puts last
-are still routes: a heic storing av1, the ISO composition boxes, JP2 `cdef` and
+gray EXR, twelve bit subsampled AVIF/HEIF and a heic storing av1 -- and the three
+the order puts last are still routes: the ISO composition boxes, JP2 `cdef` and
 `pclr`, and TIFF WebP. The one refusal that stays a decision is JP2 signed or
 mixed-precision samples.
 

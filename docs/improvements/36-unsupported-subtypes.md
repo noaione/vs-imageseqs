@@ -1,11 +1,12 @@
 # unsupported subtypes, and the route to each one
 
-Status: **the first six routes are implemented, the last four are research.**
+Status: **the first seven routes are implemented, the last three are research.**
 Written 2026-10-06 against the tree plan 34 left, and worked through in the order
 at the end of this page: the TGA two byte map entries, the bare DIB, cursors, the
-gray+alpha TIFF, the flat gray EXR and twelve bit subsampled AVIF/HEIF are in the
-tree with their fixtures and their checks, and the four the order puts last are
-still the routes below.
+gray+alpha TIFF, the flat gray EXR, twelve bit subsampled AVIF/HEIF and a heic
+storing av1 are in the tree with their fixtures and their checks -- the last of
+them as a fixture alone, because the path already worked -- and the three the
+order puts last are still the routes below.
 
 [34](34-input-routing-and-planar-decode.md)'s phase-4 row and the plan-34
 candidate table are where these items were listed as "each need an individual
@@ -289,6 +290,17 @@ already exists.
 **Acceptance.** The derived heic decodes to the same samples as the avif it came
 from, through both `Read` and `ReadAlpha`, and `ImgSeqOriginalColorType` is the
 label the plane layout implies.
+
+**Landed, and the answer is that nothing was wrong.** `heic-av1.heic` is the coded
+item of `avif-yuv420p.avif` in a container branded `heic`, so the router sends it
+to `heif.rs` and libheif's dav1d backend decodes the av1 item; the plugin needed
+no brand test at all, and the fixture is the whole change. The one thing that did
+have to be fixed is the container's `av1C`: the hand-written property boxes of
+the split-extent fixture padded it to seven bytes, and the three bytes after the
+four the format defines are read as config OBUs. The plugin's own avif reader
+looks at the flags byte alone, so the padding never mattered there -- but libheif
+reads them and refused the file with `Unknown OBU type 0 of size 264`, which is
+how a container that lied about its bitstream was caught.
 
 ## ISO composition offsets, edit lists and fragments
 

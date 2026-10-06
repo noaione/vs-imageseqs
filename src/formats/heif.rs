@@ -857,6 +857,45 @@ mod tests {
         assert_eq!(samples(&planes[2]), vec![2048u16; 12]);
     }
 
+    /// A heic whose primary item is av1 is read through libheif's dav1d backend.
+    ///
+    /// `heic-av1.heic` is the coded item of `avif-yuv420p.avif` in a container
+    /// branded `heic`, written by `tests/make-alpha-fixtures.py`: the item is the
+    /// same `av01` payload and only the major brand changes, which is what routes
+    /// the file here rather than to the avif reader. So this is a working path
+    /// that had no file to prove it, and the proof is the strongest one there is:
+    /// the two files are the same bytes through two libraries, plane for plane.
+    #[test]
+    fn a_heic_that_stores_av1_decodes_through_libheif() {
+        let path = PathBuf::from("tests/fixtures/heic-av1.heic");
+        let info = image_info_at(&path, true, None).expect("a heic");
+        assert_eq!((info.width, info.height), (64, 48));
+        assert_eq!(info.format, PixelFormat::Yuv420P8);
+        assert_eq!(info.original_color_type, SourceColorType::Rgb8);
+
+        let decoded = decode(&info, Demand::ALL).expect("the image is decoded");
+        let Pixels::Planar { planes, alpha } = decoded.pixels else {
+            panic!("a yuv page is handed out as planes");
+        };
+        assert!(alpha.is_none());
+        assert_eq!(
+            planes.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![64 * 48, 32 * 24, 32 * 24]
+        );
+
+        // The file it was cut from, read by the avif reader: the same payload, so
+        // the same samples.
+        let avif =
+            crate::decoder::probe(Path::new("tests/fixtures/avif-yuv420p.avif"), true, false)
+                .expect("the avif describes it");
+        let from_avif =
+            crate::formats::avif::decode(&avif, Demand::ALL).expect("the avif is decoded");
+        let Pixels::Planar { planes: source, .. } = from_avif.pixels else {
+            panic!("a yuv page is handed out as planes");
+        };
+        assert_eq!(planes, source);
+    }
+
     /// A heic whose container rotates it: `libheif` applies the rotation as it
     /// decodes, so rotation on is the identity at the displayed size and
     /// rotation off is what undoes it, at the stored size.

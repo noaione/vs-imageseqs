@@ -1735,7 +1735,7 @@ mod tests {
 
     /// The coding record of an item whose `av1C` flags byte is `flags`.
     fn av1c(flags: u8) -> Vec<u8> {
-        vec![0x81, 0x10, flags, 0, 0, 0, 0]
+        vec![0x81, 0x00, flags, 0]
     }
 
     /// An `nclx` colour box payload.

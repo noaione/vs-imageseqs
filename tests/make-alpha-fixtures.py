@@ -90,6 +90,13 @@ as the format that decoder hands back rather than as the yuv its samples are.
 The metadata is written by this script, so re-running it needs that fixture to
 exist first.
 
+``heic-av1.heic`` is the same trick one container further out: the coded item of
+``avif-yuv420p.avif`` in a container whose major brand is ``heic``. Nothing about
+the item changes -- it is an ``av01`` payload either way -- so the file answers
+the question of whether a heic that stores av1 is a working path or a hole in
+the reader, and the picture has to be the one the avif it was cut from holds.
+It reads ``avif-yuv420p.avif`` too, so that fixture has to exist first.
+
 ``avif-grid.avif`` is the one fixture no decoder in this tree can read yet, and
 it is committed as the lock on that: a 2x2 grid of tiles written by ``avifenc
 -g 2x2`` from ``avif-grid-source.png``, which this script writes. The source
@@ -335,7 +342,13 @@ def avif_metadata(iloc: bytes) -> bytes:
     ipco = (
         avif_box(b"ispe", bytes(4) + struct.pack(">II", 64, 48))
         + avif_box(b"pixi", bytes(4) + bytes((3, 8, 8, 8)))
-        + avif_box(b"av1C", bytes((0x81, 0x10, 0x0C, 0, 0, 0, 0)))
+        # The coding record is the four bytes the format defines and then the
+        # config OBUs, of which there are none: the sequence header is in the
+        # item's own payload, which is what `avifenc` writes too. Bytes after
+        # these four are read as OBUs, so padding them was a container that lied
+        # about its bitstream -- the plugin's own reader never looked, but
+        # `libheif` reads them and refuses the file.
+        + avif_box(b"av1C", bytes((0x81, 0x00, 0x0C, 0x00)))
         + avif_box(b"colr", b"nclx" + struct.pack(">3H", 1, 13, 6) + bytes((0x80,)))
     )
     ipma = (
@@ -402,6 +415,39 @@ def avif_split_extents(source: str, path: str) -> None:
         handle.write(ftyp + meta(offset) + avif_box(b"mdat", coded))
 
 
+def heic_storing_av1(source: str, path: str) -> None:
+    """Writes the coded item of `source` into a container branded ``heic``.
+
+    The item is the same ``av01`` payload and the only thing that changes is the
+    major brand of the file type box: a ``heic`` brand is what routes the file to
+    the heif reader rather than to the avif one, and libheif's own dav1d backend
+    is what decodes an av1 item. So the question the plan asks -- whether a heic
+    that stores av1 is a working path with no file to prove it -- is answered by
+    this file rather than by an encoder, and the picture has to be the one the
+    avif it was cut from holds, plane for plane, because the payload is the same
+    bytes.
+    """
+    with open(source, "rb") as handle:
+        data = handle.read()
+    coded = next(payload for kind, payload in avif_boxes(data) if kind == b"mdat")
+
+    def meta(offset: int) -> bytes:
+        iloc = avif_box(
+            b"iloc",
+            bytes((0, 0, 0, 0, 0x44, 0x00))
+            + struct.pack(">H", 1)
+            + struct.pack(">HHH", 1, 0, 1)
+            + struct.pack(">II", offset, len(coded)),
+        )
+        return avif_box(b"meta", avif_metadata(iloc))
+
+    ftyp = avif_box(b"ftyp", b"heic" + bytes(4) + b"heicmif1miaf")
+    # The extent offset is an offset into the file, so the metadata has to be
+    # built once to know where the media data box starts.
+    offset = len(ftyp) + len(meta(0)) + 8
+    with open(path, "wb") as handle:
+        handle.write(ftyp + meta(offset) + avif_box(b"mdat", coded))
+
 def avif_broken_alpha(source: str, path: str) -> None:
     """Writes the container of `source` with an alpha item that holds no frame.
 
@@ -435,7 +481,9 @@ def avif_broken_alpha(source: str, path: str) -> None:
         ipco = (
             avif_box(b"ispe", bytes(4) + struct.pack(">II", 64, 48))
             + avif_box(b"pixi", bytes(4) + bytes((3, 8, 8, 8)))
-            + avif_box(b"av1C", bytes((0x81, 0x10, 0x0C, 0, 0, 0, 0)))
+            # The same four bytes the other hand-written container's coding
+            # record is; see `avif_metadata` for why they are not padded.
+            + avif_box(b"av1C", bytes((0x81, 0x00, 0x0C, 0x00)))
             + avif_box(b"colr", b"nclx" + struct.pack(">3H", 1, 13, 6) + bytes((0x80,)))
             + avif_box(b"auxC", b"urn:mpeg:mpegB:cicp:systems:auxiliary:alpha\0")
         )
@@ -681,6 +729,13 @@ def main() -> None:
     avif_split_extents(
         write("avif-yuv420p.avif"),
         write("avif-split-extents.avif"),
+    )
+    # The same coded item once more, in a container branded `heic`: the item is an
+    # av01 payload either way, so this is the file that says whether a heic
+    # storing av1 is a path the heif reader already has.
+    heic_storing_av1(
+        write("avif-yuv420p.avif"),
+        write("heic-av1.heic"),
     )
     # The same coded item again, with an alpha item beside it that holds no
     # frame: a colour-only read never asks for that item, so this is the file the

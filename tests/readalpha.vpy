@@ -2516,6 +2516,39 @@ def test_twelve_bit_pages() -> None:
     check(samples(frame, 2) == [2048] * 12, "heic-yuv420p12: the second chroma plane")
 
 
+def test_heic_storing_av1() -> None:
+    """A heic whose primary item is av1 is read, which was a path with no file.
+
+    ``heic-av1.heic`` is the coded item of ``avif-yuv420p.avif`` in a container
+    whose major brand is ``heic``, written by ``tests/make-alpha-fixtures.py``:
+    the item is the same ``av01`` payload and the brand is what routes the file to
+    the heif reader rather than to the avif one. libheif's own dav1d backend
+    decodes an av1 item, so the file answers the plan's question -- whether this
+    is a working path or a hole -- and the answer is that the picture is the one
+    the avif it was cut from holds, plane for plane, through two libraries.
+    """
+    clip, alpha_clip = read_alpha(files=[fixture("heic-av1.heic")])
+    check(
+        clip.format.name == "YUV420P8",
+        f"heic-av1: the colour clip is YUV420P8 (got {clip.format.name})",
+    )
+    check(
+        (clip.width, clip.height) == (64, 48),
+        f"heic-av1: the clip is 64x48 (got {clip.width}x{clip.height})",
+    )
+    frame = clip.get_frame(0)
+    source = core.imgseqs.Read(files=[fixture("avif-yuv420p.avif")]).get_frame(0)
+    for plane in range(3):
+        check(
+            samples(frame, plane) == samples(source, plane),
+            f"heic-av1: plane {plane} is the one the avif it was cut from holds",
+        )
+    check(
+        set(samples(alpha_clip.get_frame(0))) == {255},
+        "heic-av1: a file with no alpha item hands out an opaque alpha clip",
+    )
+
+
 def main() -> None:
     for test in (
         test_rgba8,
@@ -2561,6 +2594,7 @@ def main() -> None:
         test_gray_alpha_pages,
         test_gray_exr,
         test_twelve_bit_pages,
+        test_heic_storing_av1,
     ):
         print(f"--- {test.__name__}")
         test()
