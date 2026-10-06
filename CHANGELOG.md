@@ -98,6 +98,10 @@
   alpha clip, which is the same rule the r,g,b channel set already followed, and
   `ImgSeqOriginalColorType` is `L32F` or `La32F`. A layer that states neither
   set is still declined rather than described wrongly
+- A twelve bit avif or heic whose samples are subsampled is handed out as its
+  own yuv planes. `YUV420P12` and `YUV422P12` are the two formats the table
+  gained, where a twelve bit 4:2:0 or 4:2:2 page used to keep the r,g,b the
+  reader builds
 
 ### fixed
 

@@ -53,6 +53,21 @@ samples are the decoder's rgb of the crop re-encoded as yuv:
     magick "sandbox/hitokage-sample/avif-yuv444p10le.avif[32x24+0+0]" crop.png
     avifenc -q 100 -d 10 --cicp 1/13/6 -r full --yuv 444 crop.png tests/fixtures/avif-yuv444p10.avif
 
+The two twelve bit ones are encoded from the y4m sources this script writes,
+because a png input would be converted to yuv by the encoder and the samples
+would be its arithmetic rather than this script's; ``-q 100`` is libavif's
+lossless setting, so the planes come back exactly as written:
+
+    avifenc -q 100 -d 12 --cicp 1/13/6 -r full -o tests/fixtures/avif-yuv420p12.avif tests/fixtures/yuv420p12.y4m
+    avifenc -q 100 -d 12 --cicp 1/13/6 -r full -o tests/fixtures/avif-yuv422p12.avif tests/fixtures/yuv422p12.y4m
+
+The twelve bit heic is encoded from the sixteen bit png below: ``heif-enc``
+takes the top ``--bit-depth`` bits of a sixteen bit input, so the twelve bit
+sample is shifted up by four. The encoder still converts r,g,b to yuv, so its
+planes are the encoder's arithmetic rather than this script's:
+
+    heif-enc -q 100 --bit-depth 12 -o tests/fixtures/heic-yuv420p12.heic tests/fixtures/heic-rgb12.png
+
 The alpha fixture is the four by four source below, encoded as the yuv page it
 is the alpha of, so that the validator can state its planes: the samples are
 neutral, which makes the two chroma planes 128 everywhere, and the alpha of the
@@ -149,6 +164,12 @@ YUV_HEIGHT = 4
 # the eight bits and the sixteen a png can: four numbers wide and three tall, so
 # the twelve samples one to twelve can be stated by position.
 JXL_WIDTH = 4
+
+# Size of the twelve bit y4m sources of the two twelve bit subsampled avif
+# fixtures: eight wide and six tall, so the luma is 0..47 along the row and the
+# chroma planes are four wide by three or six tall.
+YUV12_WIDTH = 8
+YUV12_HEIGHT = 6
 JXL_HEIGHT = 3
 
 # PNG color types.
@@ -524,6 +545,34 @@ def netpbm(path: str, maximum: int, rows: list[list[int]], depth: int = 1) -> No
         handle.write(header.encode("ascii") + payload)
 
 
+def yuv12_y4m(path: str, tag: str, half_height: bool) -> None:
+    """Writes one twelve bit y4m, which is the only avifenc input that is yuv.
+
+    The luma runs 0..47 along the row and the two chroma planes differ from each
+    other as well as along the row, so a plane that was swapped, subsampled the
+    wrong way or shifted is a different picture rather than a plausible one.
+    """
+    width, height = YUV12_WIDTH, YUV12_HEIGHT
+    chroma_width = width // 2
+    chroma_height = height // 2 if half_height else height
+
+    def plane(values: list[int]) -> bytes:
+        return b"".join(struct.pack("<H", value) for value in values)
+
+    def chroma(offset: int) -> list[int]:
+        return [
+            offset + 100 * ((x + y) % 2)
+            for y in range(chroma_height)
+            for x in range(chroma_width)
+        ]
+
+    header = f"YUV4MPEG2 W{width} H{height} F25:1 Ip A1:1 {tag}\n".encode()
+    luma = [row * width + column for row in range(height) for column in range(width)]
+    body = b"FRAME\n" + plane(luma) + plane(chroma(100)) + plane(chroma(300))
+    with open(path, "wb") as handle:
+        handle.write(header + body)
+
+
 def tiff_rgba32f(path: str, pixels: list[list[float]]) -> None:
     """Writes an uncompressed 32 bit float RGBA TIFF."""
     payload = b"".join(struct.pack("<4f", *pixel) for pixel in pixels)
@@ -799,6 +848,26 @@ def main() -> None:
             width=MONO_WIDTH,
             height=MONO_HEIGHT,
         )
+    yuv12_y4m(write("yuv420p12.y4m"), "C420p12", True)
+    yuv12_y4m(write("yuv422p12.y4m"), "C422p12", False)
+    # The sixteen bit source of the twelve bit heic. heif-enc takes the top bits
+    # of a sixteen bit png, so the twelve bit sample is shifted up by four, and
+    # the source is neutral: the encoder's r,g,b-to-yuv conversion of a neutral
+    # pixel is exact, so the luma plane is the sample itself and both chroma
+    # planes are 128 at twelve bits. The luma runs 256..3616, which is a value
+    # an eight bit word cannot hold, so a plane that arrived left aligned in a
+    # sixteen bit word is not merely a different picture but an impossible one.
+    png(
+        write("heic-rgb12.png"),
+        RGB,
+        16,
+        [
+            [sample for x in range(YUV12_WIDTH) for sample in ((256 + 480 * x) << 4,) * 3]
+            for _ in range(YUV12_HEIGHT)
+        ],
+        width=YUV12_WIDTH,
+        height=YUV12_HEIGHT,
+    )
     print(f"wrote the alpha fixtures to {FIXTURES}")
 
 

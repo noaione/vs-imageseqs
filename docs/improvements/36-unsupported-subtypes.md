@@ -1,10 +1,11 @@
 # unsupported subtypes, and the route to each one
 
-Status: **the first five routes are implemented, the last five are research.**
+Status: **the first six routes are implemented, the last four are research.**
 Written 2026-10-06 against the tree plan 34 left, and worked through in the order
 at the end of this page: the TGA two byte map entries, the bare DIB, cursors, the
-gray+alpha TIFF and the flat gray EXR are in the tree with their fixtures and
-their checks, and the five the order puts last are still the routes below.
+gray+alpha TIFF, the flat gray EXR and twelve bit subsampled AVIF/HEIF are in the
+tree with their fixtures and their checks, and the four the order puts last are
+still the routes below.
 
 [34](34-input-routing-and-planar-decode.md)'s phase-4 row and the plan-34
 candidate table are where these items were listed as "each need an individual

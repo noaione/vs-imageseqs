@@ -583,7 +583,9 @@ fn copy_rows(
 /// The layout dav1d reports for a format this module hands out.
 const fn expected_layout(format: PixelFormat) -> PixelLayout {
     match format {
-        PixelFormat::Yuv422P8 | PixelFormat::Yuv422P10 => PixelLayout::I422,
+        PixelFormat::Yuv422P8 | PixelFormat::Yuv422P10 | PixelFormat::Yuv422P12 => {
+            PixelLayout::I422
+        }
         PixelFormat::Yuv444P8 | PixelFormat::Yuv444P10 | PixelFormat::Yuv444P12 => {
             PixelLayout::I444
         }
@@ -598,7 +600,10 @@ const fn nominal_depth(format: PixelFormat) -> usize {
         | PixelFormat::Yuv420P10
         | PixelFormat::Yuv422P10
         | PixelFormat::Yuv444P10 => 10,
-        PixelFormat::Gray12 | PixelFormat::Yuv444P12 => 12,
+        PixelFormat::Gray12
+        | PixelFormat::Yuv444P12
+        | PixelFormat::Yuv420P12
+        | PixelFormat::Yuv422P12 => 12,
         PixelFormat::Gray16 | PixelFormat::Rgb16 => 16,
         _ => 8,
     }
@@ -619,6 +624,8 @@ const fn yuv_format(chroma: u8, depth: u8) -> Option<PixelFormat> {
         (1, 10) => Some(PixelFormat::Yuv422P10),
         (0, 10) => Some(PixelFormat::Yuv444P10),
         (0, 12) => Some(PixelFormat::Yuv444P12),
+        (2, 12) => Some(PixelFormat::Yuv420P12),
+        (1, 12) => Some(PixelFormat::Yuv422P12),
         _ => None,
     }
 }
@@ -1955,10 +1962,11 @@ mod tests {
         assert_eq!(yuv_format(1, 10), Some(PixelFormat::Yuv422P10));
         assert_eq!(yuv_format(0, 10), Some(PixelFormat::Yuv444P10));
         assert_eq!(yuv_format(0, 12), Some(PixelFormat::Yuv444P12));
+        assert_eq!(yuv_format(2, 12), Some(PixelFormat::Yuv420P12));
+        assert_eq!(yuv_format(1, 12), Some(PixelFormat::Yuv422P12));
         // A layout and a depth with no format of their own keep the decoder
         // that has one.
-        assert_eq!(yuv_format(2, 12), None);
-        assert_eq!(yuv_format(1, 12), None);
+        assert_eq!(yuv_format(2, 16), None);
         assert_eq!(yuv_format(0, 16), None);
     }
 
@@ -2482,6 +2490,87 @@ mod tests {
             // is the code for "unknown".
             assert_eq!(info.chroma_location, None, "{name}");
             assert_eq!(info.transform, Transform::IDENTITY, "{name}");
+        }
+    }
+
+    /// A twelve bit subsampled page is the yuv planes it holds, at the depth and
+    /// the sampling the container states.
+    ///
+    /// The two fixtures are encoded from the y4m sources
+    /// `tests/make-alpha-fixtures.py` writes, which is the only `avifenc` input
+    /// that is already yuv: a png would be converted, so the planes would be the
+    /// encoder's arithmetic rather than ones the fixture states. `-q 100` is
+    /// libavif's lossless setting, so the samples come back exactly as written,
+    /// which is what lets this pin them -- and what says a twelve bit sample
+    /// arrives at twelve bits rather than left aligned in a sixteen bit word.
+    #[test]
+    fn a_twelve_bit_subsampled_page_is_handed_out_as_its_own_planes() {
+        // The luma runs 0..47 along the row and the two chroma planes are 100 and
+        // 300 alternating, so a plane that was swapped, shifted or subsampled the
+        // wrong way is a different picture.
+        let luma: Vec<u16> = (0..48).collect();
+        let chroma = |offset: u16, width: usize, count: usize| -> Vec<u16> {
+            (0..count)
+                .map(|at| offset + 100 * (((at % width) + (at / width)) % 2) as u16)
+                .collect()
+        };
+        for (name, format, chroma_size) in [
+            ("avif-yuv420p12.avif", PixelFormat::Yuv420P12, (4, 3)),
+            ("avif-yuv422p12.avif", PixelFormat::Yuv422P12, (4, 6)),
+        ] {
+            let path = Path::new("tests/fixtures").join(name);
+            let info = image_info_at(&path, true).expect("the container describes it");
+            assert_eq!((info.width, info.height), (8, 6), "{name}");
+            assert_eq!(info.format, format, "{name}");
+            assert_eq!(info.color_type, ColorType::Rgb16, "{name}");
+            assert_eq!(
+                info.cicp,
+                Some(Cicp {
+                    primaries: 1,
+                    transfer: 13,
+                    matrix: 6,
+                    full_range: false,
+                }),
+                "{name}"
+            );
+
+            let decoded = decode(&info, Demand::ALL).expect("the item is decoded");
+            let Pixels::Planar { planes, alpha } = decoded.pixels else {
+                panic!("a yuv page is handed out as planes");
+            };
+            assert!(alpha.is_none(), "{name}");
+            assert_eq!(planes.len(), 3, "{name}");
+            // The planes are the sizes the format implies, which for a
+            // subsampled one is half the picture rounded up.
+            let (chroma_width, chroma_height) = chroma_size;
+            assert_eq!(
+                planes.iter().map(Vec::len).collect::<Vec<_>>(),
+                vec![
+                    8 * 6 * 2,
+                    chroma_width * chroma_height * 2,
+                    chroma_width * chroma_height * 2
+                ],
+                "{name}"
+            );
+            let samples = |plane: &[u8]| -> Vec<u16> {
+                plane
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|bytes| u16::from_ne_bytes(*bytes))
+                    .collect()
+            };
+            assert_eq!(samples(&planes[0]), luma, "{name}: the luma plane");
+            assert_eq!(
+                samples(&planes[1]),
+                chroma(100, chroma_width, chroma_width * chroma_height),
+                "{name}: the first chroma plane"
+            );
+            assert_eq!(
+                samples(&planes[2]),
+                chroma(300, chroma_width, chroma_width * chroma_height),
+                "{name}: the second chroma plane"
+            );
         }
     }
 

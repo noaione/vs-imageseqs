@@ -18,9 +18,12 @@ pub enum PixelFormat {
     Yuv420P8,
     /// Planar 4:2:0 at ten bits, which is what a ten bit heif or avif holds.
     Yuv420P10,
+    /// Planar 4:2:0 at twelve bits, which is what a twelve bit heif or avif holds.
+    Yuv420P12,
     /// Planar 4:2:2.
     Yuv422P8,
     Yuv422P10,
+    Yuv422P12,
     /// Planar 4:4:4.
     Yuv444P8,
     Yuv444P10,
@@ -112,7 +115,9 @@ impl PixelFormat {
                 Self::Gray10
             }
             Self::Gray11 | Self::Rgb11 => Self::Gray11,
-            Self::Gray12 | Self::Rgb12 | Self::Yuv444P12 => Self::Gray12,
+            Self::Gray12 | Self::Rgb12 | Self::Yuv444P12 | Self::Yuv420P12 | Self::Yuv422P12 => {
+                Self::Gray12
+            }
             Self::Gray13 | Self::Rgb13 => Self::Gray13,
             Self::Gray14 | Self::Rgb14 => Self::Gray14,
             Self::Gray15 | Self::Rgb15 => Self::Gray15,
@@ -147,6 +152,8 @@ impl PixelFormat {
             | Self::Yuv420P10
             | Self::Yuv422P8
             | Self::Yuv422P10
+            | Self::Yuv420P12
+            | Self::Yuv422P12
             | Self::Yuv444P8
             | Self::Yuv444P10
             | Self::Yuv444P12
@@ -167,7 +174,7 @@ impl PixelFormat {
             Self::Gray9 | Self::Rgb9 => 9,
             Self::Gray10 | Self::Rgb10 | Self::Yuv420P10 | Self::Yuv422P10 | Self::Yuv444P10 => 10,
             Self::Gray11 | Self::Rgb11 => 11,
-            Self::Gray12 | Self::Rgb12 | Self::Yuv444P12 => 12,
+            Self::Gray12 | Self::Rgb12 | Self::Yuv444P12 | Self::Yuv420P12 | Self::Yuv422P12 => 12,
             Self::Gray13 | Self::Rgb13 => 13,
             Self::Gray14 | Self::Rgb14 => 14,
             Self::Gray15 | Self::Rgb15 => 15,
@@ -220,8 +227,8 @@ impl PixelFormat {
     /// Chroma subsampling of this format, as VapourSynth reports it.
     pub const fn sub_sampling(self) -> (i32, i32) {
         match self {
-            Self::Yuv420P8 | Self::Yuv420P10 => (1, 1),
-            Self::Yuv422P8 | Self::Yuv422P10 => (1, 0),
+            Self::Yuv420P8 | Self::Yuv420P10 | Self::Yuv420P12 => (1, 1),
+            Self::Yuv422P8 | Self::Yuv422P10 | Self::Yuv422P12 => (1, 0),
             _ => (0, 0),
         }
     }
@@ -302,8 +309,10 @@ impl PixelFormat {
             Self::Rgb32F => "RGBS",
             Self::Yuv420P8 => "YUV420P8",
             Self::Yuv420P10 => "YUV420P10",
+            Self::Yuv420P12 => "YUV420P12",
             Self::Yuv422P8 => "YUV422P8",
             Self::Yuv422P10 => "YUV422P10",
+            Self::Yuv422P12 => "YUV422P12",
             Self::Yuv444P8 => "YUV444P8",
             Self::Yuv444P10 => "YUV444P10",
             Self::Yuv444P12 => "YUV444P12",

@@ -2423,6 +2423,99 @@ def test_gray_exr() -> None:
     )
 
 
+def test_twelve_bit_pages() -> None:
+    """A twelve bit subsampled page is handed out as the planes it holds.
+
+    The two avif fixtures are encoded from the y4m sources
+    ``tests/make-alpha-fixtures.py`` writes, which is the only ``avifenc`` input
+    that is already yuv, and ``-q 100`` is libavif's lossless setting: their
+    planes are the samples the script wrote, so a twelve bit sample that arrived
+    left aligned in a sixteen bit word, or a chroma plane of the wrong size, is a
+    wrong picture rather than a plausible one. The heic is ``heif-enc --bit-depth
+    12`` from a neutral sixteen bit png, whose r,g,b-to-yuv conversion is the
+    encoder's rather than exact, so only its chroma is stated exactly.
+    """
+    for name, format_name, chroma_size in (
+        ("avif-yuv420p12.avif", "YUV420P12", (4, 3)),
+        ("avif-yuv422p12.avif", "YUV422P12", (4, 6)),
+    ):
+        clip, _ = read_alpha(files=[fixture(name)])
+        check(
+            clip.format.name == format_name,
+            f"{name}: the clip is {format_name} (got {clip.format.name})",
+        )
+        check(
+            (clip.width, clip.height) == (8, 6),
+            f"{name}: the clip is 8x6 (got {clip.width}x{clip.height})",
+        )
+        frame = clip.get_frame(0)
+        chroma_width, chroma_height = chroma_size
+        check(
+            len(samples(frame, 1)) == chroma_width * chroma_height,
+            f"{name}: the chroma plane is its own size",
+        )
+        check(
+            frame.props.get("_Matrix") == 6,
+            f"{name}: the bt.601 matrix the file states (got {frame.props.get('_Matrix')})",
+        )
+        check(
+            frame.props.get("_Range") == 0,
+            f"{name}: the limited range the file states (got {frame.props.get('_Range')})",
+        )
+        check(
+            samples(frame) == list(range(48)),
+            f"{name}: the luma plane is the samples the source wrote"
+            f" (got {samples(frame)[:8]})",
+        )
+
+        def chroma(offset: int) -> list[int]:
+            return [
+                offset + 100 * ((x + y) % 2)
+                for y in range(chroma_height)
+                for x in range(chroma_width)
+            ]
+
+        check(
+            samples(frame, 1) == chroma(100),
+            f"{name}: the first chroma plane is the source's"
+            f" (got {samples(frame, 1)})",
+        )
+        check(
+            samples(frame, 2) == chroma(300),
+            f"{name}: the second chroma plane is the source's"
+            f" (got {samples(frame, 2)})",
+        )
+        check(
+            "_ChromaLocation" not in frame.props,
+            f"{name}: a file that states no chroma position gains no property",
+        )
+
+    # The heic of a neutral twelve bit source: the encoder's conversion puts the
+    # luma a few codes either side of the source's 256..3616 and both chroma
+    # planes at the exact 128 a neutral source has.
+    clip, _ = read_alpha(files=[fixture("heic-yuv420p12.heic")])
+    check(
+        clip.format.name == "YUV420P12",
+        f"heic-yuv420p12: the clip is YUV420P12 (got {clip.format.name})",
+    )
+    frame = clip.get_frame(0)
+    check(
+        (clip.width, clip.height) == (8, 6),
+        f"heic-yuv420p12: the clip is 8x6 (got {clip.width}x{clip.height})",
+    )
+    check(
+        len(samples(frame, 1)) == 4 * 3,
+        "heic-yuv420p12: the chroma plane is its own size",
+    )
+    check(
+        samples(frame) == [256, 740, 1218, 1692, 2179, 2653, 3131, 3615] * 6,
+        f"heic-yuv420p12: the luma plane is the decoder's"
+        f" (got {samples(frame)[:8]})",
+    )
+    check(samples(frame, 1) == [2048] * 12, "heic-yuv420p12: the first chroma plane")
+    check(samples(frame, 2) == [2048] * 12, "heic-yuv420p12: the second chroma plane")
+
+
 def main() -> None:
     for test in (
         test_rgba8,
@@ -2467,6 +2560,7 @@ def main() -> None:
         test_cursor,
         test_gray_alpha_pages,
         test_gray_exr,
+        test_twelve_bit_pages,
     ):
         print(f"--- {test.__name__}")
         test()

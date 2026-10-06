@@ -290,6 +290,8 @@ const fn yuv_format(chroma: Chroma, depth: u8) -> Option<PixelFormat> {
         (Chroma::C422, 10) => Some(PixelFormat::Yuv422P10),
         (Chroma::C444, 10) => Some(PixelFormat::Yuv444P10),
         (Chroma::C444, 12) => Some(PixelFormat::Yuv444P12),
+        (Chroma::C420, 12) => Some(PixelFormat::Yuv420P12),
+        (Chroma::C422, 12) => Some(PixelFormat::Yuv422P12),
         _ => None,
     }
 }
@@ -316,8 +318,12 @@ pub fn color_space_of(format: PixelFormat) -> Option<ColorSpace> {
         | PixelFormat::Gray14
         | PixelFormat::Gray15
         | PixelFormat::Gray16 => Some(ColorSpace::Monochrome),
-        PixelFormat::Yuv420P8 | PixelFormat::Yuv420P10 => Some(ColorSpace::YCbCr(Chroma::C420)),
-        PixelFormat::Yuv422P8 | PixelFormat::Yuv422P10 => Some(ColorSpace::YCbCr(Chroma::C422)),
+        PixelFormat::Yuv420P8 | PixelFormat::Yuv420P10 | PixelFormat::Yuv420P12 => {
+            Some(ColorSpace::YCbCr(Chroma::C420))
+        }
+        PixelFormat::Yuv422P8 | PixelFormat::Yuv422P10 | PixelFormat::Yuv422P12 => {
+            Some(ColorSpace::YCbCr(Chroma::C422))
+        }
         PixelFormat::Yuv444P8 | PixelFormat::Yuv444P10 | PixelFormat::Yuv444P12 => {
             Some(ColorSpace::YCbCr(Chroma::C444))
         }
@@ -726,9 +732,10 @@ mod tests {
         assert_eq!(yuv_format(Chroma::C422, 10), Some(PixelFormat::Yuv422P10));
         assert_eq!(yuv_format(Chroma::C444, 10), Some(PixelFormat::Yuv444P10));
         assert_eq!(yuv_format(Chroma::C444, 12), Some(PixelFormat::Yuv444P12));
+        assert_eq!(yuv_format(Chroma::C420, 12), Some(PixelFormat::Yuv420P12));
+        assert_eq!(yuv_format(Chroma::C422, 12), Some(PixelFormat::Yuv422P12));
         // A depth with no format of its own keeps the decoder that has one.
-        assert_eq!(yuv_format(Chroma::C420, 12), None);
-        assert_eq!(yuv_format(Chroma::C422, 12), None);
+        assert_eq!(yuv_format(Chroma::C420, 16), None);
     }
 
     #[test]
@@ -740,6 +747,8 @@ mod tests {
             (PixelFormat::Yuv420P10, ColorSpace::YCbCr(Chroma::C420)),
             (PixelFormat::Yuv422P8, ColorSpace::YCbCr(Chroma::C422)),
             (PixelFormat::Yuv444P12, ColorSpace::YCbCr(Chroma::C444)),
+            (PixelFormat::Yuv420P12, ColorSpace::YCbCr(Chroma::C420)),
+            (PixelFormat::Yuv422P12, ColorSpace::YCbCr(Chroma::C422)),
         ] {
             assert_eq!(color_space_of(format), Some(colorspace), "{format:?}");
         }
@@ -788,6 +797,64 @@ mod tests {
                 full_range: true
             })
         );
+    }
+
+    /// A twelve bit 4:2:0 heic is the planes it holds, at the depth and the
+    /// sampling the container states.
+    ///
+    /// `heif-enc --bit-depth 12` writes it from the sixteen bit png
+    /// `tests/make-alpha-fixtures.py` writes, and it converts r,g,b to yuv, so
+    /// the planes are the encoder's arithmetic rather than samples the fixture
+    /// states. What this pins is the shape and the depth: the chroma planes are
+    /// half the size, and a twelve bit sample arrives at twelve bits rather than
+    /// left aligned in a sixteen bit word, which the luma plane's range shows --
+    /// a plane shifted up by four would hold values sixteen times these.
+    #[test]
+    fn a_twelve_bit_colour_heic_is_handed_out_as_its_own_planes() {
+        let path = PathBuf::from("tests/fixtures/heic-yuv420p12.heic");
+        let info = image_info_at(&path, true, None).expect("a colour heic");
+        assert_eq!((info.width, info.height), (8, 6));
+        assert_eq!(info.format, PixelFormat::Yuv420P12);
+        assert_eq!(
+            info.cicp,
+            Some(Cicp {
+                primaries: 1,
+                transfer: 13,
+                matrix: 6,
+                full_range: true
+            })
+        );
+
+        let decoded = decode(&info, Demand::ALL).expect("the image is decoded");
+        let Pixels::Planar { planes, alpha } = decoded.pixels else {
+            panic!("a yuv page is handed out as planes");
+        };
+        assert!(alpha.is_none());
+        assert_eq!(
+            planes.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![8 * 6 * 2, 4 * 3 * 2, 4 * 3 * 2]
+        );
+        let samples = |plane: &[u8]| -> Vec<u16> {
+            plane
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|bytes| u16::from_ne_bytes(*bytes))
+                .collect()
+        };
+        // The source is neutral and its luma runs 256..3616, and the encoder's
+        // r,g,b-to-yuv conversion of a neutral pixel is *not* exact: these are the
+        // numbers libheif decodes this file to, a few codes either side of the
+        // source's, and both chroma planes are the exact 128 a neutral source
+        // has. What they pin is the depth: a sample left aligned in a sixteen bit
+        // word would be sixteen times these, which the luma's range rules out.
+        let row = [256u16, 740, 1218, 1692, 2179, 2653, 3131, 3615];
+        assert_eq!(
+            samples(&planes[0]),
+            row.iter().copied().cycle().take(48).collect::<Vec<u16>>()
+        );
+        assert_eq!(samples(&planes[1]), vec![2048u16; 12]);
+        assert_eq!(samples(&planes[2]), vec![2048u16; 12]);
     }
 
     /// A heic whose container rotates it: `libheif` applies the rotation as it
