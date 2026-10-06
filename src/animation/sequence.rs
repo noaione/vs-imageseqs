@@ -807,6 +807,22 @@ mod tests {
         assert!(error.to_string().contains("starts its media"), "{error}");
     }
 
+    /// A movie box that states no samples is not a sequence, which is what a
+    /// fragmented file's `moov` is: its samples are in the fragments that follow
+    /// it.
+    ///
+    /// `libheif` reads its timeline from the same tables and has no fragment
+    /// parsing at all -- the word does not appear anywhere in its sources -- and it
+    /// refuses a file whose movie box states no samples however the empty tables
+    /// are written. So a fragmented sequence is not a file this tree can play, and
+    /// finding no timeline here is the half of that answer this module owns: no
+    /// sequence is promised for a file nothing can decode.
+    #[test]
+    fn a_movie_box_without_samples_is_not_a_sequence() {
+        let sequence = read_file(&fixture("animation-fragmented.avif")).expect("the fixture reads");
+        assert!(sequence.is_none());
+    }
+
     /// The heic fixture states the same sample count at a different rate, and
     /// its coded picture is larger than the aperture it presents.
     #[test]

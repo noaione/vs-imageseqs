@@ -1,13 +1,13 @@
 # unsupported subtypes, and the route to each one
 
-Status: **seven routes are implemented, the eighth is under way, and the last two
-are research.** Written 2026-10-06 against the tree plan 34 left, and worked
-through in the order at the end of this page: the TGA two byte map entries, the
-bare DIB, cursors, the gray+alpha TIFF, the flat gray EXR, twelve bit subsampled
-AVIF/HEIF and a heic storing av1 are in the tree with their fixtures and their
-checks -- the heic storing av1 as a fixture alone, because the path already
-worked -- the ISO composition boxes have their first two slices, and the two the
-puts last are still the routes below.
+Status: **the first eight routes are implemented, and the last two are research.**
+Written 2026-10-06 against the tree plan 34 left, and worked through in the order
+at the end of this page: the TGA two byte map entries, the bare DIB, cursors, the
+gray+alpha TIFF, the flat gray EXR, twelve bit subsampled AVIF/HEIF, a heic
+storing av1 and the ISO composition boxes are in the tree with their fixtures and
+their checks -- the heic storing av1 as a fixture alone, because the path already
+worked, and the fragment box as a recorded non-issue, because no decoder here
+reads one -- and the two the order puts last are still the routes below.
 
 [34](34-input-routing-and-planar-decode.md)'s phase-4 row and the plan-34
 candidate table are where these items were listed as "each need an individual
@@ -363,7 +363,23 @@ the second half of the media. A normal edit shorter than the media is a
 pair is `animation.avif` with its identity edit replaced by one that ends the
 track at 300 of its 600 ticks, and by one that starts 250 ticks in: the first is
 eight frames at 24 fps with its fourth picture never shown, and the second is
-refused by name. Fragments are still open.
+refused by name.
+
+**Fragments: a recorded non-issue.** A fragmented file's samples are not in the
+movie box at all -- they are in the `moof` boxes that follow it -- so its `moov`
+states no samples, and this walker takes its timeline from that box. The question
+the plan asks is whether the walker should grow a fragment loop, and the answer is
+that there is nothing to loop over: **libheif has no fragment parsing at all** --
+`moof`, `traf`, `trun`, `tfdt` and `mvex` appear nowhere in its 1.23.1 sources,
+and the word *fragment* does not either -- so a timeline read from fragments would
+be one no decoder here could replay. It is not merely unimplemented, either: a
+sequence-branded file whose movie box states no samples is refused outright, in
+two different ways, which is what pins the shape. With an empty `stsz` beside its
+`stsc` it reports *Number of samples in 'stsc' box exceeds sample sizes in 'stsz'*
+and with both emptied it reports *'stsc' box with zero entries*. `animation-fragmented.avif`
+is `animation.avif` with its four sample tables emptied, and it is what pins this
+side: the walker finds no timeline (a Rust test) and the plugin refuses the file
+by name rather than describing a sequence nothing can decode (the validator).
 
 ## Flat grayscale Y/Y+A EXR
 

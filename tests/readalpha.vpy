@@ -1658,6 +1658,22 @@ def test_animation() -> None:
         )
     else:
         check(False, "animation elst: a leading skip is refused")
+
+    # A fragmented file's movie box states no samples -- they are in the fragments
+    # that follow it -- and libheif has no fragment parsing at all, so it refuses
+    # such a file: with an empty `stsz` it reports the `stsc` count against it, and
+    # with an empty `stsc` it reports the box itself. This reader takes its timeline
+    # from the same tables, so there is nothing here to promise either, and the file
+    # is refused rather than described as a sequence nothing can decode.
+    try:
+        core.imgseqs.Read(files=[fixture("animation-fragmented.avif")])
+    except Exception as error:
+        check(
+            "no reader here knows its format" in str(error),
+            f"animation fragmented: a movie with no samples is refused ({str(error).strip()})",
+        )
+    else:
+        check(False, "animation fragmented: a movie with no samples is refused")
     # A still of a format that has an animation path stays one frame.
     for name in ["alpha-rgb8.png", "alpha-rgba8.png", "alpha-rgba8.jxl"]:
         clip = core.imgseqs.Read(files=[fixture(name)])
