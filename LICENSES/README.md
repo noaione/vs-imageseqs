@@ -19,8 +19,6 @@ These files are copied verbatim from the dependency sources used by the build:
   and the upstream bundled GPL/MIT license text sections.
 - `libde265-COPYING.txt` — libde265 1.1.1, including its LGPLv3 library text
   and the upstream bundled GPL/MIT license text sections.
-- `libwebp-COPYING.txt` — libwebp 1.6.0, BSD 3-Clause, including its
-  additional IP rights grant for patents.
 - `openjpeg-COPYING.txt` — the OpenJPEG sources vendored by `openjpeg-sys`
   1.0.12, BSD 2-Clause.
 - `wpd-COPYING.txt` — wpd, pinned to the revision in `Cargo.toml`, BSD 2-Clause.

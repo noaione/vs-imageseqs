@@ -60,16 +60,16 @@ fn is_container(data: &[u8]) -> bool {
 
 /// The first picture a webp container holds, for a file read as a still.
 ///
-/// libwebp's simple entry points read one image and refuse a container of them.
+/// `wpd`'s simple entry points read one image and refuse a container of them.
 /// `probe_segment` sends a container that displays several pictures to the
 /// animation adapter, so what reaches the still decoder is one that displays
-/// one -- and libwebp refuses that too, because the refusal is about the
+/// one -- and `wpd` refuses that too, because the refusal is about the
 /// container rather than about how many pictures it shows.
 ///
 /// What it contributes is the picture the timeline starts with, which is what
 /// the reader being replaced handed back. A file that is not a webp container
 /// at all is declined rather than refused, so that the caller's own decoder is
-/// what reports it and names libwebp.
+/// what reports it.
 ///
 /// # Errors
 ///
@@ -265,52 +265,6 @@ const fn div_by_255(value: u32) -> u32 {
     (((value + 0x80) >> 8) + value + 0x80) >> 8
 }
 
-/// The smallest webp container libwebp will decode one frame out of.
-///
-/// An `ANMF` frame's payload is the frame's own `ALPH` and `VP8`/`VP8L`
-/// chunks with no RIFF wrapper, because the wrapper belongs to the whole
-/// animation. libwebp's still decoder wants a file, so a frame that carries
-/// alpha gets one built around it: a `VP8X` header stating the alpha flag and
-/// the rectangle's size, then the payload's chunks as they already are.
-///
-/// A frame with no `ALPH` needs no wrapper at all. A `VP8` or `VP8L` bitstream
-/// is what the decoder's simple entry points accept directly, and a `VP8L`
-/// carries its own alpha in-band, so wrapping it would only add a header that
-/// says nothing.
-fn container(payload: &[u8], width: u32, height: u32) -> Vec<u8> {
-    if !payload.starts_with(b"ALPH") {
-        return payload.to_vec();
-    }
-    // The canvas is stated one less than its size, exactly as the animation's
-    // own header states it.
-    let mut header = vec![0x10u8, 0, 0, 0];
-    header.extend_from_slice(&width.saturating_sub(1).to_le_bytes()[..3]);
-    header.extend_from_slice(&height.saturating_sub(1).to_le_bytes()[..3]);
-
-    let mut body = Vec::with_capacity(payload.len() + 32);
-    push_chunk(&mut body, b"VP8X", &header);
-    // The payload's chunks already carry their own headers and padding.
-    body.extend_from_slice(payload);
-
-    let mut file = Vec::with_capacity(body.len() + 12);
-    file.extend_from_slice(b"RIFF");
-    // The RIFF size counts the four bytes of `WEBP` and the body.
-    file.extend_from_slice(&((body.len() + 4) as u32).to_le_bytes());
-    file.extend_from_slice(b"WEBP");
-    file.extend_from_slice(&body);
-    file
-}
-
-/// Appends one RIFF chunk, padded to an even length.
-fn push_chunk(out: &mut Vec<u8>, code: &[u8; 4], payload: &[u8]) {
-    out.extend_from_slice(code);
-    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-    out.extend_from_slice(payload);
-    if payload.len() % 2 == 1 {
-        out.push(0);
-    }
-}
-
 /// Whether one frame's payload carries an alpha channel of its own.
 ///
 /// A `VP8L` bitstream is treated as carrying one whatever it holds, because
@@ -435,9 +389,9 @@ impl Source {
                     "a frame runs past the end of the file",
                 )
             })?;
-            let container = container(payload, frame.width, frame.height);
-            let (width, height, pixels) = crate::formats::webp::decode_rgba(&container)
-                .map_err(|error| image_error("decode", &self.path, error))?;
+            let (width, height, pixels) =
+                crate::formats::webp::decode_rectangle(payload, frame.width, frame.height)
+                    .map_err(|error| image_error("decode", &self.path, error))?;
             if (width, height) != (frame.width, frame.height) {
                 return Err(ImgSeqError::new(format!(
                     "animated image '{}' states a {}x{} frame that decodes as {width}x{height}",
@@ -940,7 +894,7 @@ mod tests {
     }
 
     /// A webp that is not animated is *declined*, not refused, so that a still
-    /// webp stays on the libwebp path it was already on. This is the case that
+    /// webp stays on the still path it was already on. This is the case that
     /// a reader claiming every `.webp` gets wrong: `lossy.webp` has no `VP8X`
     /// at all, and erroring on it would break every lossy still in the tree.
     #[test]
@@ -1072,8 +1026,8 @@ mod tests {
     }
 
     /// A file that is not a webp container at all is declined rather than
-    /// refused, because the caller's own decoder is what names libwebp in the
-    /// error it reports for such a file.
+    /// refused, because the caller's own decoder is what names the failure in
+    /// the error it reports for such a file.
     #[test]
     fn a_file_that_is_not_a_container_is_declined() {
         let declined = first_picture(

@@ -209,8 +209,10 @@ is the lie the LZW low-bit fixture was deliberately built to avoid.
 uncompressed spelling of the same picture, and a file whose compression is a
 code the reader does not take is still refused by name rather than by file.
 
-**Landed.** The strip is handed to libwebp, which is the decoder the webp files
-already go through, and the layout the probe describes is the one the directory
+**Landed.** The strip is handed to the webp module's own decode, which is the
+decoder the webp files already go through -- libwebp when this landed, and the
+`wpd` decode since [39](39-libwebp-removal.md) -- and the layout the probe
+describes is the one the directory
 states, so a WebP page is r,g,b or gray like any other. The compression check moved
 into the shared layout walk, which is what makes the second half of the acceptance
 hold: a code this reader does not take is refused at the probe with the code in its
@@ -222,6 +224,12 @@ makes the compressed spelling from the uncompressed one this script writes, and 
 file the refusal is pinned against is a real `tiffcp -c zstd` page rather than a
 raster that claims a code it does not hold. `tiffcmp` agrees the two spellings hold
 the same samples, which is the acceptance's first half stated by libtiff itself.
+
+[39](39-libwebp-removal.md) added the four sample page this pair had none of:
+`tiff-webp-alpha.tiff` is a page whose `ExtraSamples` says its fourth sample is
+unassociated alpha, and its strip is where the three sample call this plan left
+behind showed, as the zeroed fourth sample and the shifted rows the removal's
+risks section records.
 
 ## ycbcr TIFF pages whose strip is a JPEG
 

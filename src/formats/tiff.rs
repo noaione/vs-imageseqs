@@ -209,8 +209,8 @@ fn layout_of<R: std::io::Read + std::io::Seek>(
     // A compression code this reader does not take is refused here rather than by
     // the crate at the decode: a probe that described a page the decode would
     // refuse is the one thing this reader must never do. The codes below are the
-    // ones the crate's own features decode, plus the WebP strip this reader hands
-    // to libwebp itself.
+    // ones the crate's own features decode, plus the WebP strip this reader
+    // hands to its own webp decoder.
     let compression = compression_of(decoder);
     if !matches!(
         compression,
@@ -1410,14 +1410,15 @@ const WEBP_COMPRESSION: u16 = 50001;
 /// Decodes the WebP strips of a page into one interleaved buffer.
 ///
 /// A strip holds a whole webp bitstream, and the crate has no reader for one: each
-/// strip is handed to libwebp here, which is the decoder the webp files already go
-/// through. The samples are the ones the uncompressed spelling of the same page
-/// holds, because the strips are read at the depth the page states.
+/// strip is handed to the webp module's own decode here, which is the decoder
+/// the webp files already go through. The samples are the ones the uncompressed
+/// spelling of the same page holds, because the strips are read at the depth the
+/// page states.
 ///
 /// # Errors
 ///
 /// Returns [`ImgSeqError`] for a strip table that does not match the file, a
-/// strip that runs past its end, and a strip libwebp refuses.
+/// strip that runs past its end, and a strip the decoder refuses.
 fn webp_buffer<R: std::io::Read + std::io::Seek>(
     decoder: &mut tiff::decoder::Decoder<R>,
     data: &[u8],
@@ -1443,8 +1444,6 @@ fn webp_buffer<R: std::io::Read + std::io::Seek>(
         .ok()
         .and_then(|width| width.checked_mul(channels))
         .ok_or_else(|| image_error("decode", path, "the image row is too large"))?;
-    let stride = i32::try_from(row)
-        .map_err(|_| image_error("decode", path, "the image is too wide for libwebp"))?;
     let rows = usize::try_from(height).unwrap_or(0);
     let mut buffer = vec![0u8; row.saturating_mul(rows)];
     let mut at = 0usize;
@@ -1472,19 +1471,38 @@ fn webp_buffer<R: std::io::Read + std::io::Seek>(
                 "the strips hold more rows than the image states",
             ));
         };
-        // SAFETY: `target` holds exactly `size` bytes and the stride is its row
-        // length, so libwebp writes inside it or fails.
-        let decoded = unsafe {
-            crate::formats::webp::libwebp::WebPDecodeRGBInto(
-                strip.as_ptr(),
-                strip.len(),
-                target.as_mut_ptr(),
-                size,
-                stride,
-            )
-        };
-        if decoded.is_null() {
-            return Err(image_error("decode", path, "libwebp rejected a webp strip"));
+        // A strip is decoded into a buffer of its own and its rows are copied
+        // from there, because the page's row length is this buffer's: the
+        // decoder's own row is exactly `row` bytes for the channels the page
+        // states, so the two line up sample for sample.
+        let (strip_width, strip_height, pixels) =
+            crate::formats::webp::decode_packed(strip, channels, width.saturating_mul(height))
+                .map_err(|error| image_error("decode", path, error))?;
+        if usize::try_from(strip_width).unwrap_or(usize::MAX)
+            != usize::try_from(width).unwrap_or(usize::MAX)
+        {
+            return Err(image_error(
+                "decode",
+                path,
+                "a webp strip is not the width of the page",
+            ));
+        }
+        if usize::try_from(strip_height).unwrap_or(0) < covered {
+            return Err(image_error(
+                "decode",
+                path,
+                "a webp strip holds fewer rows than the page states",
+            ));
+        }
+        for index in 0..covered {
+            let Some(source) = pixels.get(index * row..index * row + row) else {
+                return Err(image_error(
+                    "decode",
+                    path,
+                    "a webp strip is shorter than the rows it covers",
+                ));
+            };
+            target[index * row..index * row + row].copy_from_slice(source);
         }
         at += covered;
     }

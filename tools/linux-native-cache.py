@@ -13,9 +13,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 STAMP = ".imgseqs-native-cache"
 REQUIRED = (
-    "include/dav1d/dav1d.h", "include/libde265/de265.h", "include/webp/decode.h",
-    "lib/libdav1d.so", "lib/libde265.so", "lib/libwebp.a", "lib/libsharpyuv.a",
-    "lib/pkgconfig/dav1d.pc", "lib/pkgconfig/libde265.pc", "lib/pkgconfig/libwebp.pc",
+    "include/dav1d/dav1d.h", "include/libde265/de265.h",
+    "lib/libdav1d.so", "lib/libde265.so",
+    "lib/pkgconfig/dav1d.pc", "lib/pkgconfig/libde265.pc",
 )
 
 

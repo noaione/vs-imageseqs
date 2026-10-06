@@ -142,6 +142,21 @@ of clip creation, 183 ms per file, to 2 ms, and reading that set from 11.92 s of
 open plus frames to 4.99 s.
 
 ## plans
+### removing libwebp — 2026-10-06
+
+[39 removing libwebp](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/39-libwebp-removal.md)
+is implemented, and nothing links libwebp any more: every webp, an animated
+container's rectangle included, is decoded by wpd. The tests hold wpd against
+reference payloads captured from libwebp before it was unlinked, and `build.rs`,
+`vcpkg.json`, both Linux builders, the legal files and the notice bundle no
+longer name it. Frame parity is byte identical on 809,492 sampled frames over
+the webp fixtures, the 48 file upstream corpus, the 57 tiff fixtures that
+existed then, three synthetic animations and the three sandbox sets, both clips
+each; the validator passes its 954 checks; the animation read is 1.11x to 1.16x
+faster than the build that still linked it; and the Windows library is 134 KB
+smaller. The removal also fixed a four sample WebP-compressed tiff strip, which
+now decodes to libtiff's own decode of the same file and used to come out with
+the fourth sample of every pixel zeroed and every row but the first shifted.
 
 ### PNGWrite: request-driven PNG export
 
@@ -174,15 +189,17 @@ mixed-precision samples.
 
 [35 wpd WebP decoder](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/35-wpd-webp-decoder.md)
 is implemented. wpd decodes an ordinary still, writing the borrowed rows of the
-picture it decoded straight into the frames the call allocated, and libwebp keeps
-the animated container's rectangle decoder, its canvas and its integer blend.
-Both libraries stay linked, and the first-party probe and the one-presentation
-`first_picture` guard are unchanged. The integrated measurement is 1.22x to
+picture it decoded straight into the frames the call allocated. The animated
+container's rectangle, its canvas and its integer blend were libwebp's at the
+time; [39](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/39-libwebp-removal.md)
+has since moved the rectangle onto wpd too and unlinked libwebp. The
+first-party probe and the one-presentation `first_picture` guard are
+unchanged. The integrated measurement is 1.22x to
 1.31x on the 35 page sandbox set and 1.53x on the serial per-frame stage split
 (196.84 → 128.46 ms a frame), with byte identical pixels on 76 of 76 webp parity
-lines and all 941 validator checks; `docs/BENCH.md` has the tables. What is left
-over is deliberately not done: an all-wpd animation path, which the plan page's
-optional experiment covers.
+lines and all 941 validator checks it ran then; `docs/BENCH.md` has the tables.
+The all-wpd animation path was the plan page's optional experiment, and 39 is
+what did it.
 
 ### input routing and planar decoding — 2026-10-04
 

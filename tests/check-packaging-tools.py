@@ -444,7 +444,6 @@ LINUX_LICENSES = (
     "LICENSES/gcc-runtime-COPYING.txt",
     "LICENSES/libde265-COPYING.txt",
     "LICENSES/libheif-COPYING.txt",
-    "LICENSES/libwebp-COPYING.txt",
     "LICENSES/openjpeg-COPYING.txt",
     "LICENSES/wpd-COPYING.txt",
 )
@@ -669,9 +668,9 @@ def check_linux_native_cache() -> None:
     check(result.returncode == 0, "native cache: the exact completed install can be reused")
     result = run("linux-native-cache.py", "check", str(prefix), key + "-changed")
     check(result.returncode != 0, "native cache: a previous build key cannot skip compilation")
-    (prefix / "lib/libwebp.a").unlink()
+    (prefix / "lib/libde265.so").unlink()
     result = run("linux-native-cache.py", "check", str(prefix), key)
-    check(result.returncode != 0, "native cache: a missing static library invalidates a stamped prefix")
+    check(result.returncode != 0, "native cache: a missing library invalidates a stamped prefix")
 
     root = SCRATCH / "native-cache" / "root"
     workflow = root / ".github/workflows/build.yml"

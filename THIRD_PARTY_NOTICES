@@ -7,7 +7,7 @@ distribution and preserve the applicable license texts and notices.
 
 The exact native inputs recorded here are from the x64-windows-static-md
 vcpkg installation used to build the Windows wheel. The two Linux builds pin
-dav1d, libde265 and libwebp in `tools/build-manylinux.sh` and
+dav1d and libde265 in `tools/build-manylinux.sh` and
 `tools/build-musllinux.sh`; Cargo.lock selects the embedded libheif and OpenJPEG
 sources. The macOS arm64 build uses
 the same pinned dav1d and libde265 source versions, builds them as shared
@@ -17,7 +17,6 @@ machine-local codecs are not linked:
   * libheif 1.23.1
   * libde265 1.1.1
   * dav1d 1.5.3
-  * libwebp 1.6.0
   * wpd 0.2.0, at the exact git revision named in `Cargo.toml`
   * OpenJPEG (vendored by openjpeg-sys 1.0.12)
 
@@ -56,19 +55,12 @@ libde265 1.1.1
   Notice and license text: LICENSES/libde265-COPYING.txt
   Upstream: https://github.com/strukturag/libde265
 
-libwebp 1.6.0
-  License: BSD 3-Clause License, with the additional IP rights grant for
-    patents that ships beside it
-  Linkage: statically linked, used by the plugin's own webp decode path
-  Notice and license text: LICENSES/libwebp-COPYING.txt
-  Upstream: https://github.com/webmproject/libwebp
-
 wpd 0.2.0 (git revision 45d5955260f6c44a1b6bea6954a4a34e818f3f8a)
   License: BSD 2-Clause "Simplified" License
   Linkage: statically linked, assembled from the crate's own NASM sources on
     x86 and x86-64 and from its assembler sources on ARM
-  Usage: the plugin's still webp decoder. libwebp above stays linked and is
-    still what decodes the sub-rectangles of an animated webp
+  Usage: the plugin's webp decoder, an ordinary still and an animated
+    container's rectangle alike
   Notice and license text: LICENSES/wpd-COPYING.txt
   Upstream: https://github.com/halidecx/wpd
 
@@ -172,6 +164,5 @@ dependency installation used for this build.
   * dav1d: https://code.videolan.org/videolan/dav1d/-/blob/master/COPYING
   * libheif: https://github.com/strukturag/libheif/blob/master/COPYING
   * libde265: https://github.com/strukturag/libde265/blob/master/COPYING
-  * libwebp: https://github.com/webmproject/libwebp/blob/main/COPYING
   * wpd: https://github.com/halidecx/wpd/blob/main/LICENSE
   * OpenJPEG: https://github.com/uclouvain/openjpeg/blob/master/LICENSE

@@ -9,14 +9,7 @@
         "dav1d"
       ]
     },
-    "dav1d",
-    {
-      "name": "libwebp",
-      "default-features": false,
-      "features": [
-        "simd"
-      ]
-    }
+    "dav1d"
   ],
   "overrides": [
     {

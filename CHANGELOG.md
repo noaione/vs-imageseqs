@@ -4,13 +4,20 @@
 
 ### changed
 
-- A webp still is decoded by `wpd` rather than by libwebp: 1.2x to 1.5x faster
-  on the 35 page sandbox set, and its rows go straight into the frame the call
-  is filling, so the intermediate buffer is gone. An animated webp keeps its
-  libwebp rectangle decoder, its canvas and its blend, and every webp frame
-  these fixtures produce is byte identical to the previous build's. Both
-  decoders are still linked, so the Windows library is about 730 KB bigger.
-  Building from source on x86 or x86-64 now needs `nasm` on `PATH`
+- Every webp is decoded by `wpd`, an animated container's rectangles included,
+  and libwebp is gone from the link. The still path is 1.2x to 1.3x faster on
+  the 35 page sandbox set, the animation path about 1.15x on a 510 frame
+  corpus, and the Windows library is 134 KB smaller than the build that still
+  linked libwebp for the rectangles. A still's rows go straight into the frame
+  the call is filling, so its intermediate buffer is gone, every webp frame
+  these fixtures produce is byte identical to the previous build's, and a
+  corrupt webp is refused with the decoder's own words rather than libwebp's.
+  Building from source on x86 or x86-64 still needs `nasm` on `PATH`
+- A TIFF page of four samples whose strips are WebP-compressed is read
+  correctly. Its strip used to be decoded as three samples a pixel with a four
+  sample stride, which left the fourth sample of every pixel zero and shifted
+  every row but the first; the page now decodes to the samples libtiff's own
+  decode of the same file holds
 - **The `image` crate is gone**. Every format this plugin reads has a reader of its
   own under `src/formats/`. A file whose bytes and extension both name no format
   here is refused with `no reader here knows its format` rather than sent to it.

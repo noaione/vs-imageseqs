@@ -106,9 +106,9 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   timeline with the frame decoding skipped and composes the canvas itself,
   keeping two deliberate departures from the specification: the background
   colour is never used, and `Any` disposal means `Keep`. `webp.rs`
-  walks the RIFF container for the same timeline, builds the smallest container
-  libwebp will decode one frame out of, and composes the canvas with libwebp's
-  own integer alpha blending. `jxl.rs`
+  walks the RIFF container for the same timeline, hands each frame's own chunk
+  sequence to the still decoder, and composes the canvas with this tree's own
+  port of libwebp's integer alpha blending. `jxl.rs`
   scans frame headers without rendering and decodes each presentation from its
   own seek checkpoint. `sequence.rs` reads an avif or heif sequence's sample
   table and clean aperture from the container, because the embedded libheif
@@ -188,8 +188,9 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   and `webp.rs` for the still webp decode, which the `wpd` decoder does
   (`wpd` is a git dependency pinned to an exact revision in `Cargo.toml`, and
   it is created inside the one fill that reads the file because it is not
-  `Send`), and for the lossy yuv format; an animated webp's rectangle stays on
-  libwebp, which is what `animation/webp.rs` draws). An avif this tree's walk
+  `Send`), and for the lossy yuv format; an animated webp's rectangle is the
+  same decode, which is what `animation/webp.rs` calls). An avif this tree's
+  walk
   decodes itself is the yuv
   its container states, and everything else is `heif.rs`'s: an r,g,b container,
   a monochrome one, and one the walk refuses. both readers name the same
@@ -443,10 +444,10 @@ bundle. Both Linux layouts include shared dav1d/libde265 with relative loader
 paths, and a fresh container validates them before publishing. Each Linux build
 includes a relinking source archive; see `docs/LINUX-BUILD.md`.
 
-the current native set is dav1d, libheif, libde265, libwebp, the `wpd` decoder
+the current native set is dav1d, libheif, libde265, the `wpd` decoder
 the crate builds and links into the plugin, and the OpenJPEG
-sources vendored by `openjpeg-sys`. dav1d, OpenJPEG and wpd use the bsd-2-clause
-license and libwebp uses bsd-3-clause. libheif and libde265 are lgplv3 and are
+sources vendored by `openjpeg-sys`. dav1d, OpenJPEG and wpd use the
+bsd-2-clause license. libheif and libde265 are lgplv3 and are
 statically linked. keep the exact upstream texts in `LICENSES/`.
 
 the musllinux wheel also carries the gcc runtime libraries (`libstdc++`,
@@ -456,11 +457,9 @@ exception they are conveyed under.
 
 on windows the vcpkg `x64-windows-static-md` triplet makes every vcpkg native
 library static. `jpeg2k` compiles its vendored OpenJPEG sources on every
-platform. on unix `build.rs` links libwebp from its archive when the
-development package installs one (`libwebp-dev` and homebrew's `webp` both
-do); on apple the archive is named instead of requested, because `ld` ignores
-the `static=` hint and prefers `libwebp.dylib` in the directory homebrew puts
-both forms in. the `embedded-libheif` feature builds libheif into the plugin,
+platform. every webp is decoded by the `wpd` crate, which the plugin links
+and which needs no library found at build time; `build.rs` locates nothing any
+more. the `embedded-libheif` feature builds libheif into the plugin,
 so libheif is static there as well; dav1d and libde265 are the system shared
 libraries. the static lgpl obligation below therefore applies to libheif on
 every platform and to libde265 on windows only.

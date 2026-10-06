@@ -310,13 +310,13 @@ jobs:
 
       - name: install macos dependencies
         if: runner.os == 'macOS'
-        run: brew install cmake meson ninja pkg-config webp
+        run: brew install cmake meson ninja pkg-config
 
       - name: build pinned macOS codec libraries
         if: runner.os == 'macOS'
         run: |
           bash tools/build-macos-native.sh
-          echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/target/macos-native/prefix/lib/pkgconfig:/opt/homebrew/opt/webp/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/target/macos-native/prefix/lib/pkgconfig" >> "$GITHUB_ENV"
           echo "CMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/target/macos-native/prefix" >> "$GITHUB_ENV"
         env:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
@@ -368,7 +368,7 @@ jobs:
         env:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
 
-      - name: check the unix plugin links libwebp statically
+      - name: check the unix plugin links no webp library
         if: runner.os != 'Windows'
         shell: bash
         run: |
@@ -387,10 +387,10 @@ jobs:
               ;;
           esac
           if echo "$dependencies" | grep -E 'libwebp|libsharpyuv'; then
-            echo "the plugin still needs libwebp from the system at run time" >&2
+            echo "the plugin still links a webp library, which nothing decodes with any more" >&2
             exit 1
           fi
-          echo "libwebp is linked into the plugin"
+          echo "no webp library is linked"
 
       - name: stage native plugin from wheel
         run: python tools/stage-native.py dist native

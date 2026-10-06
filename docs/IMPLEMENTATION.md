@@ -74,8 +74,8 @@ Rust
 │     ├── EXR
 │     └── other supported formats, a monochrome AVIF among them
 │
-├── libwebp
-│     └── WebP, lossy files as planar yuv
+├── wpd
+│     └── WebP, lossy files as planar yuv, stills and animated rectangles alike
 │
 ├── dav1d
 │     └── AVIF, the item's own planes, read by `src/formats/avif.rs`
@@ -301,7 +301,7 @@ HEIF / HEIC
         └── libde265 for HEVC/HEIC decoding
 
 WebP
-└── libwebp
+└── wpd
 
 JPEG 2000
 └── jpeg2k
@@ -536,16 +536,21 @@ reports.
 
 `image`'s `webp` feature is `image-webp`: pure rust, single threaded, and it
 decodes into a canvas of its own which it then copies into the caller's buffer.
-libwebp is the format's reference decoder, it is vectorised, and its entry
-points write into a buffer and a stride the caller picks, so the canvas and that
-copy both go. `src/formats/webp.rs` takes every webp file that way, picked by
-extension and by the chunk headers a file starts with, and only the pixel decode
-moved — see above for what `image` still answers. The size libwebp reads from the
-bitstream is checked against the probe the way the `image` path checks its own
-decoder.
+That is what a webp was read with before [04](improvements/04-webp-decoder.md)
+moved the pixel decode onto libwebp, which writes into a buffer and a stride the
+caller picks, so the canvas and that copy both went. It takes a webp file by
+extension and by the chunk headers the file starts with, and only the pixel
+decode ever moved.
 
-Lossy webp stores yuv 4:2:0, and libwebp decodes it either way. A lossy file
-without an alpha channel is decoded into its own planes and handed out as
+[35](improvements/35-wpd-webp-decoder.md) then moved the still decode onto
+`wpd`, whose entry points hand out the borrowed rows of the picture they hold: a
+still is written straight into the frames a call is filling, so no intermediate
+buffer exists at all. [39](improvements/39-libwebp-removal.md) finished the
+removal. An animated container's rectangles are the same decode now, applied to
+each frame's own chunk sequence, and nothing links libwebp.
+
+Lossy webp stores yuv 4:2:0, and the decoder hands it over either way. A lossy
+file without an alpha channel is decoded into its own planes and handed out as
 `YUV420P8`: half the bytes per image, no yuv to rgb conversion that a graph
 would only undo, and twice as many frames in the lookahead budget.
 `formats::webp::output_format` is what tells the probe, and it is one of the two
@@ -554,43 +559,43 @@ layout the `image` path produced, because lossless webp is rgb by definition and
 a file with an alpha channel needs the buffer its alpha plane is read from.
 
 A yuv frame is tagged `_Matrix = 5` (`bt470bg`) and `_Range = 0` (limited): vp8
-defines the bt.601 coefficients for the limited range, libwebp's own yuv to rgb
-conversion uses that pair, and ffmpeg's webp decoder reports the same two values
-for the same bitstreams. `src/color.rs` applies that pair to the yuv family and
-leaves rgb and gray on `_Matrix = RGB` / `_Range = full`.
+defines the bt.601 coefficients for the limited range, the decoder's own yuv to
+rgb conversion uses that pair, and ffmpeg's webp decoder reports the same two
+values for the same bitstreams. `src/color.rs` applies that pair to the yuv
+family and leaves rgb and gray on `_Matrix = RGB` / `_Range = full`.
 
-[BENCH.md](BENCH.md)'s per stage table has what both changes left behind: the
-webp copy is the 5 ms of a frame whose planes arrive in the layout the frame
-already wants, which is why [02](improvements/02-frame-write-path.md) could move
-the rest of the write into the pool without the copy being the floor any more.
+The still decoder is held against libwebp itself by two reference payloads
+captured before it was unlinked, `tests/fixtures/lossy-planes.bin` and
+`lossy-rgb.bin`; `src/formats/webp.rs` says what each one is.
+
+[BENCH.md](BENCH.md)'s per stage table has what the first two changes left
+behind: the webp copy is the 5 ms of a frame whose planes arrive in the layout
+the frame already wants, which is why [02](improvements/02-frame-write-path.md)
+could move the rest of the write into the pool without the copy being the floor
+any more.
 
 ### Native Library Linkage
 
-libwebp is the only native library this crate links on its own; dav1d, libde265,
-libheif and everything below them arrive through `libheif-sys`. `build.rs` links
-libwebp from its archive wherever one exists, so a plugin built on unix does not
-need the platform's `libwebp` at run time:
+No native library is located by this crate's own `build.rs` any more. dav1d,
+libde265, libheif and everything below them arrive through `libheif-sys`, and
+the webp decoder is the `wpd` crate, whose own build script assembles its NASM
+sources and links them into the plugin. What `build.rs` has left is one
+argument on the plugin's own ELF link:
 
-| build | what `build.rs` emits | what the linker is given |
+| build | what `build.rs` emits | why |
 | --- | --- | --- |
-| windows | `vcpkg::find_package("libwebp")` | the archive from the `x64-windows-static-md` tree |
-| gnu link editors | `rustc-link-lib=static=webp` | `-Bstatic -lwebp`, which selects the archive |
-| apple | `rustc-link-lib=static:+whole-archive=webp` | `-force_load <path to libwebp.a>` |
+| gnu link editors | `rustc-link-arg-cdylib=-Wl,-Bsymbolic` | `wpd`'s gamma tables are otherwise preemptible |
+| windows | nothing | a PE image resolves a relative reference in its own module |
+| apple | nothing | Mach-O binds a definition to the image that holds it |
 
-the apple row is not a preference. `static=` is a hint, apple's `ld` reads no
-`-Bstatic` equivalent, and it searches each directory of the search path for
-`libwebp.dylib` before `libwebp.a`: homebrew installs both into one directory, so
-the hint was silently ignored and a macos build came out needing
-`/opt/homebrew/opt/webp/lib/libwebp.7.dylib` and `libsharpyuv.0.dylib`, the
-latter being libwebp's own private requirement, which `pkg-config --static`
-reports as one more library to link. `+whole-archive` is the form rustc resolves
-to a path there, and it is emitted in the local native library position, ahead of
-the libraries other crates name, so the archives supply their symbols first.
-`-Wl,-dead_strip_dylibs` then drops a dylib that a link interface named but no
-symbol came from, which is the shape libheif's generated `libheif.pc` has: its
-`Requires.private` names libsharpyuv, and those flags belong to `libheif-sys`.
+The flag is not a preference: rustc writes a cdylib's version script from every
+`#[no_mangle]` symbol in the crate graph, so the two gamma tables `wpd` exports
+are exported here too and become preemptible, and a preemptible symbol is not
+something an `R_X86_64_PC32` load can name from a shared object. Both link
+editors refuse the link without it, and `-Bsymbolic-functions` does not replace
+it, because the symbols are data.
 `.github/workflows/build.yml` asserts the result by reading `otool -L` on macos
-and `readelf -d` on linux and rejecting either name.
+and `readelf -d` on linux and rejecting either of the webp library names.
 
 ### Decoder Abstraction
 

@@ -1237,6 +1237,31 @@ def test_orientation_yuv() -> None:
         )
 
 
+def test_tiny_lossy_webp() -> None:
+    """A lossy webp narrower than the chroma step is handed out as yuv.
+
+    ``lossy-1x1.webp`` is a one pixel picture, written by
+    ``make-tiny-webp-fixture.py``. A 4:2:0 frame of that size has no chroma
+    plane at all: VapourSynth hands the plane over as no bytes with no stride,
+    and the row writer divided by that stride, which aborted the process on a
+    frame request. The luma is what is checked, because there is no chroma to
+    read.
+    """
+    clip, alpha = read_alpha(files=[fixture("lossy-1x1.webp")])
+    check(
+        clip.format.name == "YUV420P8",
+        f"tiny lossy webp: the colour clip is YUV420P8 (got {clip.format.name})",
+    )
+    check((clip.width, clip.height) == (1, 1), "tiny lossy webp: it is one pixel")
+    # VP8 states black as 16 in its limited range, which is what the sample is.
+    check(samples(clip.get_frame(0)) == [16], "tiny lossy webp: the luma of the one pixel")
+    check(alpha.format.name == "Gray8", "tiny lossy webp: the alpha clip is Gray8")
+    check(
+        samples(alpha.get_frame(0)) == [255],
+        "tiny lossy webp: it states no alpha, so its alpha clip is opaque",
+    )
+
+
 def test_orientation_jxl() -> None:
     """A jpeg xl states its code in the codestream, and it is undone on request.
 
@@ -2726,10 +2751,15 @@ def test_heic_storing_av1() -> None:
 
 
 def test_tiff_webp() -> None:
-    """A TIFF whose compression is WebP holds a webp bitstream in its strip."""
-    # The strip is a lossless `cwebp` bitstream of `tiff-webp-source.png`, so the
-    # page decodes to the samples the uncompressed spelling of the same picture
-    # holds: the two fixtures are one raster in two containers.
+    """A TIFF whose compression is WebP holds a webp bitstream in its strip.
+
+    Two pages: three samples, and four so that the bitstream carries alpha and the
+    strip decode is the four channel case.
+    """
+    # `tiffcp -c webp` is lossy, so the pair is libtiff's own encode of
+    # `tiff-source.tiff` and libtiff's own decode of the same file: one raster in
+    # two containers, with the compressed spelling the one this reader decodes
+    # itself. `make-tiff-webp-fixtures.py` has the commands.
     compressed = core.imgseqs.Read(files=[fixture("tiff-webp.tiff")])
     plain = core.imgseqs.Read(files=[fixture("tiff-webp-uncompressed.tiff")])
     check(
@@ -2743,6 +2773,42 @@ def test_tiff_webp() -> None:
     check(
         samples(compressed.get_frame(0)) == samples(plain.get_frame(0)),
         "tiff webp: every sample is the uncompressed spelling's",
+    )
+
+    # A page of four samples carries alpha inside the bitstream, which is where a
+    # strip decode given the wrong sample count shows: this reader used to ask the
+    # library for three samples a pixel and hand it a four sample stride, which
+    # zeroed the fourth sample of every pixel and shifted every row but the first.
+    compressed_clip, compressed_alpha = read_alpha(files=[fixture("tiff-webp-alpha.tiff")])
+    plain_clip, plain_alpha = read_alpha(files=[fixture("tiff-webp-alpha-uncompressed.tiff")])
+    compressed_frame = compressed_clip.get_frame(0)
+    plain_frame = plain_clip.get_frame(0)
+    check(
+        compressed_clip.format.name == plain_clip.format.name == "RGB24",
+        f"tiff webp alpha: both colour clips are RGB24 (got {compressed_clip.format.name} and {plain_clip.format.name})",
+    )
+    check(
+        compressed_alpha.format.name == plain_alpha.format.name == "Gray8",
+        f"tiff webp alpha: both alpha clips are Gray8 (got {compressed_alpha.format.name} and {plain_alpha.format.name})",
+    )
+    check(
+        (compressed_frame.width, compressed_frame.height) == (plain_frame.width, plain_frame.height) == (3, 2),
+        "tiff webp alpha: both spellings are 3x2",
+    )
+    for plane in range(compressed_frame.format.num_planes):
+        check(
+            samples(compressed_frame, plane) == samples(plain_frame, plane),
+            f"tiff webp alpha: colour plane {plane} is the uncompressed spelling's",
+        )
+    check(
+        samples(compressed_alpha.get_frame(0)) == samples(plain_alpha.get_frame(0)),
+        "tiff webp alpha: every alpha sample is the uncompressed spelling's",
+    )
+    # The fourth sample of the picture the script writes, so the check survives
+    # both spellings moving together.
+    check(
+        samples(compressed_alpha.get_frame(0)) == [40, 80, 120, 160, 200, 240],
+        f"tiff webp alpha: the alpha is the source's (got {samples(compressed_alpha.get_frame(0))})",
     )
     # A compression code this reader does not take is refused by name rather than
     # read as though it were not compressed.
@@ -2779,6 +2845,7 @@ def main() -> None:
         test_icc_profile_properties,
         test_orientation,
         test_orientation_yuv,
+        test_tiny_lossy_webp,
         test_orientation_jxl,
         test_orientation_container,
         test_prefetch_variants,

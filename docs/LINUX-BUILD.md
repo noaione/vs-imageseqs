@@ -11,10 +11,10 @@ the repaired wheels are uploaded to PyPI or GitHub Releases. A glibc host
 cannot load the musl wheel and the other way round, which is why both exist.
 
 `tools/build-manylinux.sh` and `tools/build-musllinux.sh` each build dav1d
-1.5.3 and libde265 1.1.1 as shared libraries and libwebp 1.6.0 as a
-position-independent static library inside their own container. Their archive
-versions and SHA-512 hashes are pinned in both. Cargo.lock selects the embedded
-libheif and OpenJPEG sources, and the same CMake toolchain file disables
+1.5.3 and libde265 1.1.1 as shared libraries inside their own container. Their
+archive versions and SHA-512 hashes are pinned in both. Cargo.lock selects the
+embedded libheif and OpenJPEG sources, the webp decoder is the `wpd` crate's
+own assembler output, and the same CMake toolchain file disables
 discovery of extra libheif codecs, including x265, on either platform. The musl
 build adds what Alpine calls its toolchain: `nasm` and `pkgconf` from `apk`,
 cmake, meson and ninja from PyPI, and the Rust toolchain the script installs

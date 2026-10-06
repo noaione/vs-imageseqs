@@ -174,6 +174,18 @@ pub struct PlaneRows<'a> {
 }
 
 impl PlaneRows<'_> {
+    /// The rows this plane holds.
+    ///
+    /// A plane with no columns is handed over as no bytes at all, and the
+    /// stride VapourSynth reports for it is zero, so the two cannot be
+    /// divided: the chroma plane of a frame narrower than the chroma step is
+    /// exactly that, and it has nothing to write rather than a length to
+    /// derive.
+    #[must_use]
+    pub fn rows(&self) -> usize {
+        self.bytes.len().checked_div(self.stride).unwrap_or(0)
+    }
+
     /// The writable bytes of one active row.
     ///
     /// # Panics
@@ -828,7 +840,7 @@ pub fn probe_segment(
         Some(Format::Jxl) => {
             crate::animation::jxl::segment_info(path, info.clone(), fps, input.reader()?)?
         }
-        // A webp whose bitstream is a still image stays on the libwebp path,
+        // A webp whose bitstream is a still image stays on the still path,
         // which is what hands a lossy file out as its own yuv planes. Only an
         // animated one is claimed here.
         Some(Format::Webp) => {
@@ -1061,6 +1073,30 @@ mod tests {
             .join("tests")
             .join("fixtures")
             .join(name)
+    }
+
+    /// A plane narrower than the chroma step holds no rows and reports no
+    /// stride, so a writer that divided the two would abort the process. A
+    /// lossy webp one pixel wide is the file that reaches this: VapourSynth
+    /// hands its chroma plane over as an empty one.
+    #[test]
+    fn a_plane_with_no_columns_has_no_rows() {
+        let mut empty: [u8; 0] = [];
+        let plane = super::PlaneRows {
+            bytes: &mut empty,
+            stride: 0,
+            row_bytes: 0,
+        };
+        assert_eq!(plane.rows(), 0);
+
+        // And a plane that does hold rows still counts them by its stride.
+        let mut bytes = [0u8; 8];
+        let plane = super::PlaneRows {
+            bytes: &mut bytes,
+            stride: 4,
+            row_bytes: 2,
+        };
+        assert_eq!(plane.rows(), 2);
     }
 
     /// An open of a fixture, for the few tests that hand a reader to a module

@@ -64,8 +64,6 @@ fetch dav1d-1.5.3 https://github.com/videolan/dav1d/archive/1.5.3.tar.gz \
     8d976b93135213d41385c20205475269a6826a68ebfd716c4d9a7a3ff2a79703e8df0573e43207c81b5db44807d2721db18ec84c0fc6bef98efab86a2cccb6cc
 fetch libde265-1.1.1 https://github.com/strukturag/libde265/archive/v1.1.1.tar.gz \
     fb2207f5a3ba901853f61f345c72130f000134918febbc4f3529c3d289fc79ee7457b3e61660110f698bb4ac15d62426e284034bf870bfbd1859ab3feaa52be8
-fetch libwebp-1.6.0 https://github.com/webmproject/libwebp/archive/v1.6.0.tar.gz \
-    298e0ad4c09392213baf5abb69d330c6203b618800073fe2df91d01d35034197c5d3e29a74573b06971473c52c74514f0e6e0f6c8162f923e2dd15cb1a692aef
 
 if [ "$native_cached" != true ]; then
     reconfigure=""
@@ -85,15 +83,6 @@ if [ "$native_cached" != true ]; then
     cmake --build "$work/de265-build" --parallel
     cmake --install "$work/de265-build"
 
-    cmake -S "$work/sources/libwebp-1.6.0" -B "$work/webp-build" -G Ninja \
-        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$prefix" \
-        -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-        -DBUILD_SHARED_LIBS=OFF -DWEBP_BUILD_ANIM_UTILS=OFF -DWEBP_BUILD_CWEBP=OFF \
-        -DWEBP_BUILD_DWEBP=OFF -DWEBP_BUILD_GIF2WEBP=OFF -DWEBP_BUILD_IMG2WEBP=OFF \
-        -DWEBP_BUILD_VWEBP=OFF -DWEBP_BUILD_WEBPINFO=OFF -DWEBP_BUILD_WEBPMUX=OFF \
-        -DWEBP_BUILD_EXTRAS=OFF
-    cmake --build "$work/webp-build" --parallel
-    cmake --install "$work/webp-build"
     python tools/linux-native-cache.py mark "$prefix" "$IMGSEQS_NATIVE_CACHE_KEY"
 fi
 

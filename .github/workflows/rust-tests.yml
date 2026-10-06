@@ -39,7 +39,7 @@ jobs:
           sudo apt-get update
           # nasm assembles wpd's x86-64 decode routines; without it its build
           # script fails before the crate is compiled.
-          sudo apt-get install --yes cmake ninja-build pkg-config nasm libdav1d-dev libde265-dev libwebp-dev
+          sudo apt-get install --yes cmake ninja-build pkg-config nasm libdav1d-dev libde265-dev
 
       - name: run rust tests
         run: cargo test --locked

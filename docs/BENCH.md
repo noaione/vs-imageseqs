@@ -228,9 +228,10 @@ makes an ogsov graph possible on a mixed sequence at all.
 ### wpd as the still decoder
 
 [35](improvements/35-wpd-webp-decoder.md) moved an ordinary still webp off
-libwebp and onto `wpd`, and left the animated container's rectangle on libwebp.
-both decoders are in the same library now, so this compares two builds of the
-plugin and not two programs.
+libwebp and onto `wpd`, and [39](improvements/39-libwebp-removal.md) moved the
+animated container's rectangle onto the same decoder and unlinked libwebp
+altogether. this compares two builds of the plugin, so the decoder is the only
+thing that differs between them.
 
 the headline, 35 files, `--reps 3 --extra --prefetch 16`, best pass of three,
 both builds measured in one session:
@@ -288,11 +289,36 @@ clip and alpha clip, plane by plane. the wider run over all seven sandbox sets
 is 91 of 91 lines identical. `tests/readalpha.vpy` passes 941 checks on both
 builds with no captured warning, and the webp fixture lines are part of that.
 
-the one visible cost is size: the Windows library grows 8,292,864 → 9,039,872
-bytes, because both decoders are linked. peak working set was not separated
-per decoder here; the plan page records the isolated measurement (about 206 →
-207 MiB on the yuv corpus and 118 → 163 MiB on a large generated rgb one),
-which the user accepted before this was implemented.
+the one visible cost of the first move was size: the Windows library grew
+8,292,864 → 9,039,872 bytes, because both decoders were linked at once. peak
+working set was not separated per decoder here; the plan page records the
+isolated measurement (about 206 → 207 MiB on the yuv corpus and 118 → 163 MiB
+on a large generated rgb one), which the user accepted before this was
+implemented. the removal takes that back and then some: the same library is
+8,902,656 bytes with no libwebp in the link at all, 13,824 bytes smaller than
+the build that had already stopped calling it.
+
+### the animated container's rectangle
+
+[39](improvements/39-libwebp-removal.md) hands an `ANMF` frame's own chunk
+sequence to the same decoder the stills use, so what this compares is the
+rectangle decode on its own. the corpus is 39 files and 510 frames: the webp
+fixtures, the 48 files of the upstream `wpd-test-data` tree, and three
+generated 512x512 and 384x384 animations, because the shipped fixture is 16x12
+and would measure the sampler rather than the decoder. medians of three
+alternating fresh processes:
+
+| animation read, 510 frames | before (libwebp) | after (wpd) | change |
+| --- | ---: | ---: | ---: |
+| `prefetch=0` | 0.5392 s | 0.4649 s | 1.16x faster |
+| `prefetch=4` | 0.4611 s | 0.4002 s | 1.15x faster |
+
+both builds share the compositor, the canvas and the frame write, so the gain
+is the decoder and the RIFF container the old path allocated per frame. the
+corpus matters as much as the numbers: of its 204 animated rectangles, 160 are
+`VP8L`, 15 are a bare `VP8`, and 29 are `ALPH` + `VP8`, so the branch
+`tests/fixtures/animation.webp` never reaches is the one most of it covers.
+every frame of both clips is byte identical between the two builds.
 
 ## jpeg
 

@@ -253,13 +253,13 @@ and x86-64, which the webp decoder assembles its own routines with.
 On Debian or Ubuntu:
 
 ```console
-sudo apt-get install --yes cmake ninja-build pkg-config nasm libdav1d-dev libde265-dev libwebp-dev
+sudo apt-get install --yes cmake ninja-build pkg-config nasm libdav1d-dev libde265-dev
 ```
 
 To build from source on macOS with Homebrew:
 
 ```console
-brew install cmake ninja pkg-config nasm dav1d libde265 webp
+brew install cmake ninja pkg-config nasm dav1d libde265
 ```
 
 Then build the wheel:

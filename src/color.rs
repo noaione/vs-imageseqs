@@ -214,8 +214,8 @@ pub fn set_frame_properties(
         }
     }
 
-    // Rgb frames are what an image file means, and libwebp converts yuv to rgb
-    // with the bt.601 matrix the vp8 specification defines for the limited
+    // Rgb frames are what an image file means, and the decoder converts yuv to
+    // rgb with the bt.601 matrix the vp8 specification defines for the limited
     // range, which is also what ffmpeg assumes for the same bitstreams. So the
     // planes this plugin hands out for a lossy webp are the ones that matrix
     // and range describe, whichever of the two paths produced the frame.

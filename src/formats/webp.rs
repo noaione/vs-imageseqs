@@ -1,33 +1,27 @@
-//! webp decoding: wpd for a still, libwebp for an animation.
+//! webp decoding, entirely by `wpd`.
 //!
-//! Two libraries read this format and this module uses both, because they are
-//! good at different things:
+//! One library reads this format here, and it is good at it: `wpd`'s decode
+//! entry points hand out the borrowed rows of the picture they hold, so a still
+//! is written straight into the frames a call is filling and no intermediate
+//! buffer exists at all. The animated container's rectangles are decoded the
+//! same way and composed onto the canvas by [`crate::animation::webp`].
+//! `docs/improvements/35-wpd-webp-decoder.md` has the comparison that selected
+//! `wpd`, `docs/improvements/39-libwebp-removal.md` is the removal of the
+//! second library, and `docs/BENCH.md` has the integrated figures.
 //!
-//! - **wpd** decodes an ordinary still. Its decode entry points hand out the
-//!   borrowed rows of the picture it holds, so a still is written straight
-//!   into the frames a call is filling and no intermediate buffer exists at
-//!   all. `docs/improvements/35-wpd-webp-decoder.md` has the comparison that
-//!   selected it and `docs/BENCH.md` has the integrated figures.
-//! - **libwebp** keeps the animated container's rectangle decode, which is
-//!   [`decode_rgba`]. The timeline, the canvas and this module's port of
-//!   libwebp's integer blend are the pixels a graph already sees, and handing
-//!   them to another compositor would change them; the plan page above records
-//!   where the two differ.
-//!
-//! The split follows the *container* rather than a retry chain, and rather
-//! than a frame count: a file whose container holds a timeline goes to
-//! [`crate::animation::webp`], including one that displays a single picture,
-//! and everything else is a still. A still whose file states an orientation is
-//! the one case decoded into a buffer rather than streamed, because a
-//! transform is the frame writer's walk.
+//! The split follows the *container* rather than a frame count: a file whose
+//! container holds a timeline goes to [`crate::animation::webp`], including one
+//! that displays a single picture, and everything else is a still. A still
+//! whose file states an orientation is the one case decoded into a buffer rather
+//! than streamed, because a transform is the frame writer's walk.
 //!
 //! The probe lives here too: [`image_info`] reads the same container this module
 //! already walks and reports the canvas, the alpha flag, the exif orientation and
 //! the icc profile the reader being replaced reported. The size the bitstream
-//! states is checked against it at decode time, from libwebp's own header reader
-//! and again from the picture the decoder produced.
+//! states is checked against it at decode time, from the picture the decoder
+//! produced.
 //!
-//! Lossy webp is yuv 4:2:0 and both decoders hand it over either way. A file
+//! Lossy webp is yuv 4:2:0 and the decoder hands it over either way. A file
 //! with no alpha channel is decoded into its own planes and comes out as
 //! `YUV420P8`: half the bytes per image, no yuv to rgb conversion that the
 //! graph consuming the frames would only undo, and twice as many frames in the
@@ -405,155 +399,148 @@ fn has_webp_extension(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case(EXTENSION))
 }
 
-/// The libwebp entry points, from `webp/decode.h` and `webp/encode.h`.
+/// Decodes one animation rectangle's payload into interleaved RGBA.
 ///
-/// Declared by hand rather than through a `*-sys` crate: the subset used has
-/// kept its signature since libwebp 0.4, so a binding generator would add a
-/// build dependency and a header search path for nothing.
+/// The payload is an `ANMF` frame's own chunks -- an optional `ALPH` followed
+/// by `VP8` or `VP8L` -- with no RIFF wrapper, because the wrapper belongs to
+/// the whole animation. [`raw_input`] is the slice of it wpd reads, and RGBA
+/// is always asked for, because the canvas the rectangle is drawn onto is
+/// RGBA whatever the frame itself carries.
 ///
-/// Only two of these are production entry points now. `WebPGetInfo` is the
-/// second opinion on the size a still was probed at, and `WebPDecodeRGBAInto`
-/// is the animation rectangle [`decode_rgba`] draws. The rgb and yuv entry
-/// points are what this module's tests hold the two still decoders against, so
-/// that a replaced decoder has an oracle rather than a restatement, and the
-/// lossless encoders write the round trip's fixtures. No frame request reaches
-/// one of those.
-#[allow(non_snake_case, dead_code)]
-pub(crate) mod libwebp {
-    use std::ffi::{c_int, c_uchar};
-
-    /// The signature `WebPEncodeLosslessRGB` and `WebPEncodeLosslessRGBA`
-    /// share.
-    pub(super) type EncodeEntryPoint = unsafe extern "C" fn(
-        pixels: *const c_uchar,
-        width: c_int,
-        height: c_int,
-        stride: c_int,
-        output: *mut *mut c_uchar,
-    ) -> usize;
-
-    unsafe extern "C" {
-        /// Width and height of a bitstream, read from its header.
-        ///
-        /// Returns 0 for data that is not a webp bitstream, in which case the
-        /// outputs are left untouched. Unlike `WebPGetFeatures` this does not
-        /// take a decoder abi version, so it stays callable whichever libwebp
-        /// release the build links.
-        pub(super) fn WebPGetInfo(
-            data: *const c_uchar,
-            data_size: usize,
-            width: *mut c_int,
-            height: *mut c_int,
-        ) -> c_int;
-
-        /// Decodes into `output_buffer` as interleaved rgb, one row every
-        /// `output_stride` bytes.
-        pub(crate) fn WebPDecodeRGBInto(
-            data: *const c_uchar,
-            data_size: usize,
-            output_buffer: *mut c_uchar,
-            output_buffer_size: usize,
-            output_stride: c_int,
-        ) -> *mut c_uchar;
-
-        /// Decodes into `output_buffer` as interleaved rgba, one row every
-        /// `output_stride` bytes.
-        pub(super) fn WebPDecodeRGBAInto(
-            data: *const c_uchar,
-            data_size: usize,
-            output_buffer: *mut c_uchar,
-            output_buffer_size: usize,
-            output_stride: c_int,
-        ) -> *mut c_uchar;
-
-        /// Decodes into one buffer per yuv plane, luma first, one row every
-        /// `luma_stride` and `uv_stride` bytes.
-        ///
-        /// The chroma planes are half the size of the luma plane in each
-        /// direction, which is the 4:2:0 layout `YUV420P8` uses.
-        #[allow(clippy::too_many_arguments)]
-        pub(super) fn WebPDecodeYUVInto(
-            data: *const c_uchar,
-            data_size: usize,
-            luma: *mut c_uchar,
-            luma_size: usize,
-            luma_stride: c_int,
-            u: *mut c_uchar,
-            u_size: usize,
-            u_stride: c_int,
-            v: *mut c_uchar,
-            v_size: usize,
-            v_stride: c_int,
-        ) -> *mut c_uchar;
-
-        /// Encodes interleaved rgb as a lossless bitstream.
-        ///
-        /// The returned buffer is allocated by libwebp and is the caller's to
-        /// release with [`WebPFree`]. A null answer means the picture could
-        /// not be encoded, which for a small test picture does not happen.
-        pub(super) fn WebPEncodeLosslessRGB(
-            rgb: *const c_uchar,
-            width: c_int,
-            height: c_int,
-            stride: c_int,
-            output: *mut *mut c_uchar,
-        ) -> usize;
-
-        /// Encodes interleaved rgba as a lossless bitstream, which keeps the
-        /// alpha channel the rgb entry point would drop.
-        pub(super) fn WebPEncodeLosslessRGBA(
-            rgba: *const c_uchar,
-            width: c_int,
-            height: c_int,
-            stride: c_int,
-            output: *mut *mut c_uchar,
-        ) -> usize;
-
-        /// Releases a buffer libwebp allocated.
-        pub(super) fn WebPFree(pointer: *mut std::ffi::c_void);
-    }
-}
-
-/// Decodes one standalone webp bitstream into interleaved RGBA.
-///
-/// The animation reader hands this the payload of one `ANMF` frame -- an
-/// optional `ALPH` chunk followed by `VP8`/`VP8L`, wrapped by the caller into
-/// the smallest container libwebp will accept -- and gets back the rectangle
-/// that frame draws. RGBA is always asked for, because the canvas it is
-/// composed onto is RGBA whatever the frame itself carries.
+/// The rectangle the `ANMF` header states bounds the decode, so a bitstream
+/// asking for more than the container says is refused before anything that
+/// size is allocated rather than after.
 ///
 /// # Errors
 ///
-/// Returns a message naming what libwebp refused, for the caller to qualify
-/// with the path it was reading.
-pub(crate) fn decode_rgba(data: &[u8]) -> std::result::Result<(u32, u32, Vec<u8>), String> {
-    let mut width: std::ffi::c_int = 0;
-    let mut height: std::ffi::c_int = 0;
-    // SAFETY: the buffer and its length describe the same allocation, and the
-    // two out parameters are writable locals.
-    let known =
-        unsafe { libwebp::WebPGetInfo(data.as_ptr(), data.len(), &raw mut width, &raw mut height) };
-    if known == 0 || width <= 0 || height <= 0 {
+/// Returns a message naming what was refused, for the caller to qualify with
+/// the path it was reading.
+pub(crate) fn decode_rectangle(
+    payload: &[u8],
+    width: u32,
+    height: u32,
+) -> std::result::Result<(u32, u32, Vec<u8>), String> {
+    decode_into_buffer(
+        raw_input(payload)?,
+        WpdFormat::Rgba,
+        4,
+        width.saturating_mul(height),
+    )
+}
+
+/// The slice of an animation rectangle's payload that wpd reads as input.
+///
+/// A frame's payload is a chunk sequence, and wpd takes two of its shapes
+/// directly: a frame that carries alpha is its `ALPH` chunk followed by the
+/// coding chunk, headers and padding included, and a frame without one is the
+/// coding chunk's *body*, because a bare `VP8` or `VP8L` bitstream is what its
+/// simple path expects. Handing the second shape over with its own chunk header
+/// was reproduced as `not a WebP file` while the body decodes, and that is the
+/// adaptation libwebp's own reader did not need: it accepted the sequence
+/// either way.
+fn raw_input(payload: &[u8]) -> std::result::Result<&[u8], String> {
+    if payload.starts_with(b"ALPH") {
+        return Ok(payload);
+    }
+    let coding = payload
+        .get(..4)
+        .ok_or_else(|| "the frame holds no bitstream".to_string())?;
+    if coding != b"VP8 " && coding != b"VP8L" {
         return Err("the frame is not a webp bitstream".to_string());
     }
-    let (width, height) = (width as u32, height as u32);
+    let size = payload
+        .get(4..8)
+        .and_then(|size| <[u8; 4]>::try_from(size).ok())
+        .map(u32::from_le_bytes)
+        .ok_or_else(|| "the frame's chunk header is truncated".to_string())?;
+    payload
+        .get(8..8usize.saturating_add(size as usize))
+        .ok_or_else(|| "the frame's bitstream runs past its chunk".to_string())
+}
+
+/// Decodes one standalone webp bitstream into interleaved rows.
+///
+/// A tiff strip holds a whole bitstream of its own, with no container around
+/// it, so this is a still from wpd's point of view. The channel count is the
+/// page's: three samples ask for rgb and four for rgba, which is what gives a
+/// strip that carries alpha somewhere to put it. `limit` is the pixel count of
+/// the page the strip belongs to, so a bitstream that asks for more than the
+/// page can hold is refused before anything that size is allocated.
+///
+/// # Errors
+///
+/// Returns a message naming what was refused, for the caller to qualify with
+/// the path it was reading.
+pub(crate) fn decode_packed(
+    data: &[u8],
+    channels: usize,
+    limit: u32,
+) -> std::result::Result<(u32, u32, Vec<u8>), String> {
+    let format = match channels {
+        3 => WpdFormat::Rgb,
+        4 => WpdFormat::Rgba,
+        other => {
+            return Err(format!(
+                "a webp strip of {other} channels is not a layout this reader has"
+            ));
+        }
+    };
+    decode_into_buffer(data, format, channels, limit)
+}
+
+/// Decodes one webp bitstream into an interleaved buffer of `channels` samples
+/// a pixel.
+///
+/// Both callers are one picture out of one bitstream -- an animation rectangle
+/// and a tiff strip -- so the walk from the decoder to an owned buffer is the
+/// same one twice: a decoder of one internal thread, the format the caller
+/// asked for, the picture it read, and that picture's rows copied out.
+fn decode_into_buffer(
+    data: &[u8],
+    format: WpdFormat,
+    channels: usize,
+    limit: u32,
+) -> std::result::Result<(u32, u32, Vec<u8>), String> {
+    let mut decoder = WpdDecoder::new();
+    decoder
+        .set_options(WpdOptions {
+            // One internal thread, as the still path sets: the plugin's
+            // parallelism is the lookahead pool, and wpd's automatic setting
+            // would give every worker a pool of its own.
+            n_threads: 1,
+            frame_size_limit: limit,
+            ..WpdOptions::default()
+        })
+        .map_err(|error| error.to_string())?;
+    decoder
+        .set_format(format)
+        .map_err(|error| error.to_string())?;
+    decoder
+        .open_borrowed(data)
+        .map_err(|error| error.to_string())?;
+    let picture = decoder
+        .next_frame()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "the bitstream holds no picture".to_string())?;
+    let width =
+        u32::try_from(picture.width()).map_err(|_| "the picture states no size".to_string())?;
+    let height =
+        u32::try_from(picture.height()).map_err(|_| "the picture states no size".to_string())?;
     let row = usize::try_from(width)
         .ok()
-        .and_then(|width| width.checked_mul(4))
-        .ok_or_else(|| "the frame is too wide to decode".to_string())?;
-    let size = row
-        .checked_mul(height as usize)
-        .ok_or_else(|| "the frame is too large to decode".to_string())?;
-    let stride = std::ffi::c_int::try_from(row)
-        .map_err(|_| "the frame is too wide for libwebp".to_string())?;
+        .and_then(|width| width.checked_mul(channels))
+        .ok_or_else(|| "the picture is too wide to decode".to_string())?;
+    let size = usize::try_from(height)
+        .ok()
+        .and_then(|height| row.checked_mul(height))
+        .ok_or_else(|| "the picture is too large to decode".to_string())?;
     let mut buffer = vec![0u8; size];
-    // SAFETY: `buffer` is `size` bytes and the stride is its row length, so
-    // libwebp writes exactly the allocation it was given.
-    let decoded = unsafe {
-        libwebp::WebPDecodeRGBAInto(data.as_ptr(), data.len(), buffer.as_mut_ptr(), size, stride)
-    };
-    if decoded.is_null() {
-        return Err("libwebp could not decode the frame".to_string());
+    for (index, source) in picture.rows_of(0).enumerate() {
+        let Some(target) = buffer.get_mut(index * row..index * row + row) else {
+            break;
+        };
+        let copied = row.min(source.len());
+        target[..copied].copy_from_slice(&source[..copied]);
     }
     Ok((width, height, buffer))
 }
@@ -562,19 +549,19 @@ pub(crate) fn decode_rgba(data: &[u8]) -> std::result::Result<(u32, u32, Vec<u8>
 ///
 /// The file is read once, and its container decides how it is decoded rather
 /// than a retry: a webp that holds a timeline is answered with the picture its
-/// timeline starts with, through libwebp, and everything else is a still that
-/// wpd reads. The one still not handed out as a row stream is the one whose
-/// file states an orientation, because the transform is the frame writer's.
+/// timeline starts with, and everything else is a still that `wpd` reads. The
+/// one still not handed out as a row stream is the one whose file states an
+/// orientation, because the transform is the frame writer's.
 #[inline(never)]
 pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     let open_started = Instant::now();
-    // Both decoders work from memory, so the file is read once here and neither
-    // of them goes back to the disk. The bytes are handed to the still below
-    // rather than dropped, which is what keeps this one read.
+    // The decoder works from memory, so the file is read once here and nothing
+    // goes back to the disk. The bytes are handed to the still below rather
+    // than dropped, which is what keeps this one read.
     let data = std::fs::read(&info.path).map_err(|error| image_error("open", &info.path, error))?;
     let open = open_started.elapsed();
 
-    // libwebp's simple entry points read one image and refuse a container of
+    // `wpd`'s simple entry points read one image and refuse a container of
     // them, so a webp that holds an animation is answered with the picture its
     // timeline starts with. One reaches this module only when its name hid the
     // animation from `probe_segment`, which picks an animation adapter from the
@@ -586,28 +573,9 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
         return Ok(first);
     }
 
-    let metadata_started = Instant::now();
-    // The size the bitstream states is the second opinion on the one the
-    // container was probed for, and it is the check the `image` path made of its
-    // own decoder: a file that changed between the two reads is reported rather
-    // than written into a frame of a different shape.
-    let (width, height) = header_dimensions(&data).ok_or_else(|| {
-        image_error(
-            "decode",
-            &info.path,
-            "libwebp did not recognise the bitstream",
-        )
-    })?;
-    if (width, height) != (info.width, info.height) {
-        return Err(ImgSeqError::new(format!(
-            "image '{}' changed after probing (was {}x{}, now {width}x{height})",
-            info.path.display(),
-            info.width,
-            info.height,
-        )));
-    }
-    let metadata = metadata_started.elapsed();
-
+    // The size the bitstream states is not read here: the picture the decoder
+    // produces is compared against the probe by `check_picture`, when the frame
+    // the caller asked for is filled.
     let still = Still {
         data: Arc::from(data),
         path: info.path.clone(),
@@ -617,7 +585,6 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
         format: info.format,
         transform: info.transform,
         open,
-        metadata,
     };
     // A file that states an orientation is written by the frame writer, which is
     // where the transform lives: a transpose is read across a plane rather than
@@ -647,7 +614,8 @@ struct Still {
     /// The file's bytes, borrowed by the decoder [`RowStream::fill`] creates.
     data: Arc<[u8]>,
     path: PathBuf,
-    /// The size the probe recorded, which the bitstream is checked against.
+    /// The size the probe recorded, which the decoded picture is checked
+    /// against.
     width: u32,
     height: u32,
     /// The layout the buffer the decoder writes holds.
@@ -657,8 +625,6 @@ struct Still {
     transform: Transform,
     /// What reading the file cost, which happened before this stream existed.
     open: Duration,
-    /// What reading its header and checking its size cost.
-    metadata: Duration,
 }
 
 /// A still prints what it is rather than the bytes it holds.
@@ -790,7 +756,9 @@ impl RowStream for Still {
         )?;
         Ok(DecodeTimings {
             open: self.open,
-            metadata: self.metadata,
+            // The container walk is the probe's, so a webp has no metadata
+            // stage of its own left to time.
+            metadata: Duration::ZERO,
             // A stream owns no buffer of its own: the decoder's picture is the
             // only one, and it exists for this call.
             buffer: Duration::ZERO,
@@ -810,7 +778,6 @@ impl RowStream for Still {
             format: self.format,
             transform: self.transform,
             open: self.open,
-            metadata: self.metadata,
         })
     }
 }
@@ -850,7 +817,7 @@ fn write_planes(picture: &WpdPicture<'_>, sink: &mut RowSink<'_>, path: &Path) -
         )));
     }
     for (plane, target) in sink.colour.iter_mut().enumerate() {
-        let rows = target.bytes.len() / target.stride;
+        let rows = target.rows();
         for (row, source) in picture.rows_of(plane).take(rows).enumerate() {
             let len = target.row_bytes.min(source.len());
             target.row(row)[..len].copy_from_slice(&source[..len]);
@@ -940,7 +907,9 @@ impl Still {
             pixels,
             timings: DecodeTimings {
                 open: self.open,
-                metadata: self.metadata,
+                // The container walk is the probe's, so a webp has no metadata
+                // stage of its own left to time.
+                metadata: Duration::ZERO,
                 buffer,
                 read,
             },
@@ -1044,22 +1013,6 @@ impl Buffers {
     }
 }
 
-/// Size libwebp reads from the header of `data`.
-fn header_dimensions(data: &[u8]) -> Option<(u32, u32)> {
-    let mut width = 0;
-    let mut height = 0;
-    // SAFETY: `data` is a live slice, and both outputs point at initialised
-    // locals that outlive the call. libwebp only writes them when the data is a
-    // webp bitstream, which is what the return value below checks before they
-    // are read.
-    let is_webp =
-        unsafe { libwebp::WebPGetInfo(data.as_ptr(), data.len(), &raw mut width, &raw mut height) };
-    if is_webp == 0 {
-        return None;
-    }
-    Some((u32::try_from(width).ok()?, u32::try_from(height).ok()?))
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -1102,59 +1055,36 @@ mod tests {
         }
     }
 
-    /// Writes a lossless webp stream for `pixels` and probes the file the way
-    /// the plugin does, so `decode` sees the `ImageInfo` a real read produces.
-    fn write_and_probe(
-        name: &str,
-        width: u32,
-        height: u32,
-        color_type: SourceColorType,
-        pixels: &[u8],
-    ) -> (PathBuf, ImageInfo) {
-        let encoded = encode_lossless(pixels, width, height, color_type);
-        let path = write_temp(&format!("{name}.webp"), &encoded);
-        let probed = probe(&path, true, false).expect("the image to probe");
+    /// The path of a committed fixture.
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join(name)
+    }
+
+    /// Probes a committed fixture the way the plugin does, so `decode` sees the
+    /// `ImageInfo` a real read produces.
+    ///
+    /// The lossless streams the round trip reads are committed rather than
+    /// encoded here: libwebp's encoder wrote them and is not linked any more.
+    /// They are encodes of [`RGB`] and [`RGBA`], which is what lets the tests
+    /// below check the samples the fixture was written from.
+    fn fixture_probe(name: &str) -> (PathBuf, ImageInfo) {
+        let path = fixture(name);
+        let probed = probe(&path, true, false).expect("the fixture to probe");
         (path, probed)
     }
 
-    /// Encodes one picture as a lossless webp through libwebp's own encoder.
+    /// The bytes of a committed fixture.
     ///
-    /// The round trip is what these tests are about, so the stream is written
-    /// by the same library that reads it back. The `image` crate used to write
-    /// it here, which was the last thing this crate's production code needed it
-    /// for.
-    fn encode_lossless(
-        pixels: &[u8],
-        width: u32,
-        height: u32,
-        color_type: SourceColorType,
-    ) -> Vec<u8> {
-        let width = i32::try_from(width).expect("a test width");
-        let height = i32::try_from(height).expect("a test height");
-        let (channels, encode) = match color_type {
-            SourceColorType::Rgb8 => (
-                3,
-                libwebp::WebPEncodeLosslessRGB as libwebp::EncodeEntryPoint,
-            ),
-            SourceColorType::Rgba8 => (
-                4,
-                libwebp::WebPEncodeLosslessRGBA as libwebp::EncodeEntryPoint,
-            ),
-            other => panic!("a webp round trip is rgb or rgba, not {other:?}"),
-        };
-        let stride = width * channels;
-        let mut output: *mut u8 = std::ptr::null_mut();
-        // SAFETY: the buffer holds one packed row per row of the picture, the
-        // dimensions are positive, and libwebp writes to the out pointer it
-        // was given. The returned buffer is released below.
-        let size = unsafe { encode(pixels.as_ptr(), width, height, stride, &raw mut output) };
-        assert!(size > 0, "libwebp encoded the picture");
-        // SAFETY: libwebp returned this buffer with this length, and it is
-        // copied out before it is released.
-        let encoded = unsafe { std::slice::from_raw_parts(output, size).to_vec() };
-        // SAFETY: the buffer came from libwebp's encoder and is released once.
-        unsafe { libwebp::WebPFree(output.cast()) };
-        encoded
+    /// `lossy-planes.bin` and `lossy-rgb.bin` are libwebp's own yuv and rgb
+    /// decodes of `lossy.webp`, captured before the library was unlinked, and
+    /// they are what the two oracle tests below compare `wpd` against. A
+    /// payload captured from `wpd` after the fact would restate it rather than
+    /// be evidence about it.
+    fn fixture_bytes(name: &str) -> Vec<u8> {
+        std::fs::read(fixture(name)).unwrap_or_else(|error| panic!("{name}: {error}"))
     }
 
     /// The container walk through an open of its own, which is what a probe does
@@ -1221,12 +1151,7 @@ mod tests {
 
     /// The 16x16 lossy fixture, and the `ImageInfo` the plugin probes for it.
     fn lossy_fixture() -> (PathBuf, ImageInfo) {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("fixtures")
-            .join("lossy.webp");
-        let probed = probe(&path, true, false).expect("the fixture to probe");
-        (path, probed)
+        fixture_probe("lossy.webp")
     }
 
     /// An interleaved decode result, the layout every color type but yuv uses.
@@ -1237,18 +1162,17 @@ mod tests {
         }
     }
 
+    /// The planes a test's row stream filled, and the alpha plane when the call
+    /// hands one out.
+    type Filled = (Vec<Vec<u8>>, Option<Vec<u8>>);
+
     /// Drives a decode's row stream into planes a test can read.
     ///
     /// The production sink is a VapourSynth frame, which a unit test has no
     /// core to allocate. This is the same walk over vectors laid out the way
     /// [`crate::clip`] lays a frame out — the frame's own plane size and no
     /// padding — so what comes back is what lands in the frame.
-    fn planes_of(
-        pixels: Pixels,
-        format: PixelFormat,
-        width: u32,
-        height: u32,
-    ) -> (Vec<Vec<u8>>, Option<Vec<u8>>) {
+    fn fill(pixels: Pixels, format: PixelFormat, width: u32, height: u32) -> Result<Filled> {
         let Pixels::Stream(mut stream) = pixels else {
             panic!("a still decodes into a row stream");
         };
@@ -1280,13 +1204,32 @@ mod tests {
                 row_bytes: width,
             }]
         });
-        stream
-            .fill(RowSink {
-                colour: rows,
-                alpha: alpha_rows,
-            })
-            .expect("the stream to fill the planes");
-        (colour, alpha)
+        stream.fill(RowSink {
+            colour: rows,
+            alpha: alpha_rows,
+        })?;
+        Ok((colour, alpha))
+    }
+
+    /// The planes a decode's row stream fills.
+    fn planes_of(pixels: Pixels, format: PixelFormat, width: u32, height: u32) -> Filled {
+        fill(pixels, format, width, height).expect("the stream to fill the planes")
+    }
+
+    /// What a decode's row stream reports when it refuses the file it was
+    /// given.
+    ///
+    /// A still is handed over as a stream and filled by the caller, so a file
+    /// that is not a bitstream, or is a different shape than the probe
+    /// recorded, is refused here rather than when the still is built.
+    fn fill_error(decoded: DecodedImage) -> ImgSeqError {
+        fill(
+            decoded.pixels,
+            decoded.format,
+            decoded.width,
+            decoded.height,
+        )
+        .expect_err("the stream to refuse the file")
     }
 
     /// One chunk of a container, as the id and payload a case is built from.
@@ -1421,18 +1364,6 @@ mod tests {
         assert_eq!(channels_of(ColorType::Rgb8), Some(3));
         assert_eq!(channels_of(ColorType::Rgba8), Some(4));
         assert_eq!(channels_of(ColorType::Rgb16), None);
-    }
-
-    #[test]
-    fn data_that_is_not_a_bitstream_has_no_dimensions() {
-        assert_eq!(header_dimensions(&[]), None);
-        assert_eq!(header_dimensions(b"not a webp image"), None);
-        // A lossless stream is short enough to build by hand: the signature,
-        // then the VP8L payload the encoder writes.
-        let (path, _) = write_and_probe("header", 3, 2, SourceColorType::Rgb8, &RGB);
-        let encoded = std::fs::read(&path).unwrap();
-        assert_eq!(header_dimensions(&encoded), Some((3, 2)));
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -1594,16 +1525,18 @@ mod tests {
         );
     }
 
-    /// The yuv planes are the ones libwebp's own yuv entry point writes.
+    /// The yuv planes are the ones libwebp's own yuv entry point wrote.
     ///
     /// This is the comparison `docs/improvements/35-wpd-webp-decoder.md`'s
     /// parity table is: both decoders are asked for the same picture and the
     /// three planes have to be byte identical rather than merely close.
-    /// libwebp is the decoder this path replaced, so it is the oracle here
-    /// rather than a second reader with its own rounding.
+    /// `lossy-planes.bin` is that decode, captured before libwebp was unlinked
+    /// -- the luma plane, then u, then v, concatenated -- because a payload
+    /// captured from wpd after the fact would restate it rather than be
+    /// evidence about it.
     #[test]
-    fn the_planes_are_the_ones_libwebp_writes() {
-        let (path, probed) = lossy_fixture();
+    fn the_planes_are_the_ones_libwebp_wrote() {
+        let (_, probed) = lossy_fixture();
         let decoded = decode(&probed).expect("the fixture to decode");
         let (planes, _) = planes_of(
             decoded.pixels,
@@ -1614,40 +1547,26 @@ mod tests {
 
         let (width, height) = (16_usize, 16_usize);
         let (chroma_width, chroma_height) = (width.div_ceil(2), height.div_ceil(2));
-        let data = std::fs::read(&path).unwrap();
-        let mut reference = vec![
-            vec![0u8; width * height],
-            vec![0u8; chroma_width * chroma_height],
-            vec![0u8; chroma_width * chroma_height],
+        let reference = fixture_bytes("lossy-planes.bin");
+        let expected = [
+            &reference[..width * height],
+            &reference[width * height..][..chroma_width * chroma_height],
+            &reference[width * height + chroma_width * chroma_height..],
         ];
-        let [luma, u, v] = reference.as_mut_slice() else {
-            unreachable!("three planes were allocated");
-        };
-        // SAFETY: every plane holds at least `stride * rows` bytes, the strides
-        // are the row lengths of the 4:2:0 layout libwebp writes, and `data`
-        // holds the whole file.
-        let written = unsafe {
-            libwebp::WebPDecodeYUVInto(
-                data.as_ptr(),
-                data.len(),
-                luma.as_mut_ptr(),
-                luma.len(),
-                i32::try_from(width).unwrap(),
-                u.as_mut_ptr(),
-                u.len(),
-                i32::try_from(chroma_width).unwrap(),
-                v.as_mut_ptr(),
-                v.len(),
-                i32::try_from(chroma_width).unwrap(),
-            )
-        };
-        assert!(!written.is_null(), "libwebp has to decode the fixture");
-        assert_eq!(planes, reference);
+        let actual: Vec<&[u8]> = planes.iter().map(Vec::as_slice).collect();
+        assert_eq!(actual, expected);
     }
 
+    /// The planes rebuild the rgb libwebp wrote for the same file.
+    ///
+    /// `lossy-rgb.bin` is libwebp's interleaved rgb decode of the fixture,
+    /// captured with the planes above. The conversion here is libwebp's bt.601
+    /// limited range pair, which is what the plugin tags the planes with, so
+    /// this checks the two against each other rather than restating one of
+    /// them.
     #[test]
-    fn the_planes_rebuild_the_rgb_libwebp_decodes() {
-        let (path, probed) = lossy_fixture();
+    fn the_planes_rebuild_the_rgb_libwebp_wrote() {
+        let (_, probed) = lossy_fixture();
         let decoded = decode(&probed).expect("the fixture to decode");
         let (planes, _) = planes_of(
             decoded.pixels,
@@ -1657,25 +1576,8 @@ mod tests {
         );
         let (width, height) = (16_usize, 16_usize);
 
-        // The conversion here is libwebp's bt.601 limited range pair, which is
-        // what the plugin tags the planes with, and the planes are wpd's, so
-        // this checks the two decoders against each other rather than
-        // restating one of them.
-        let data = std::fs::read(&path).unwrap();
-        let stride = width * 3;
-        let mut rgb = vec![0; stride * height];
-        // SAFETY: `rgb` holds exactly `stride * height` bytes and `data` holds
-        // the whole file, so the decode writes inside `rgb` or fails.
-        let written = unsafe {
-            libwebp::WebPDecodeRGBInto(
-                data.as_ptr(),
-                data.len(),
-                rgb.as_mut_ptr(),
-                rgb.len(),
-                i32::try_from(stride).unwrap(),
-            )
-        };
-        assert!(!written.is_null(), "the fixture has to decode as rgb too");
+        let rgb = fixture_bytes("lossy-rgb.bin");
+        assert_eq!(rgb.len(), width * height * 3, "three samples a pixel");
 
         let mut worst = 0.0_f32;
         let mut total = 0.0_f32;
@@ -1714,11 +1616,8 @@ mod tests {
     /// stream and that its picture is the decoder's own plane layout.
     #[test]
     fn a_still_that_states_an_orientation_is_buffered() {
-        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("fixtures")
-            .join("orientation-6.webp");
-        let probed = probe(&fixture, true, false).expect("the fixture probes");
+        let path = fixture("orientation-6.webp");
+        let probed = probe(&path, true, false).expect("the fixture probes");
         assert_ne!(
             probed.transform,
             Transform::IDENTITY,
@@ -1750,7 +1649,7 @@ mod tests {
 
     #[test]
     fn decodes_rgb_back_to_the_source_pixels() {
-        let (path, probed) = write_and_probe("rgb", 3, 2, SourceColorType::Rgb8, &RGB);
+        let (_, probed) = fixture_probe("lossless-rgb.webp");
         assert_eq!(probed.color_type, ColorType::Rgb8);
 
         let decoded = decode(&probed).expect("the stream to decode");
@@ -1763,20 +1662,17 @@ mod tests {
             decoded.height,
         );
         assert!(alpha.is_none(), "a lossless rgb file states no alpha");
-        assert_eq!(
-            planes,
-            vec![
-                vec![1, 4, 7, 250, 253, 0],
-                vec![2, 5, 8, 251, 254, 128],
-                vec![3, 6, 9, 252, 255, 64],
-            ]
-        );
-        let _ = std::fs::remove_file(&path);
+        // The fixture is an encode of [`RGB`], so a decode that hands those
+        // samples back, deinterleaved, is the round trip closing.
+        let expected: Vec<Vec<u8>> = (0..3)
+            .map(|channel| RGB.iter().skip(channel).step_by(3).copied().collect())
+            .collect();
+        assert_eq!(planes, expected);
     }
 
     #[test]
     fn decodes_alpha_untouched() {
-        let (path, probed) = write_and_probe("rgba", 3, 2, SourceColorType::Rgba8, &RGBA);
+        let (_, probed) = fixture_probe("lossless-rgba.webp");
         assert_eq!(probed.color_type, ColorType::Rgba8);
 
         let decoded = decode(&probed).expect("the stream to decode");
@@ -1788,7 +1684,11 @@ mod tests {
             decoded.height,
         );
         let alpha = alpha.expect("an rgba file hands out an alpha clip");
-        assert_eq!(alpha, vec![0, 128, 255, 1, 127, 192]);
+        // The fixture is an encode of [`RGBA`], so the alpha clip is that
+        // picture's fourth sample of every pixel and the colour planes are the
+        // other three, deinterleaved.
+        let expected: Vec<u8> = RGBA.iter().skip(3).step_by(4).copied().collect();
+        assert_eq!(alpha, expected);
         // libwebp's lossless encoder is free to clear the rgb of a fully
         // transparent pixel, because no reader can see it; the first pixel of
         // the fixture is exactly that case. Every other sample has to come
@@ -1796,42 +1696,50 @@ mod tests {
         // the whole plane.
         let transparent = (0..3).all(|plane| planes[plane][0] == 0);
         assert!(
-            transparent || planes.iter().map(|plane| plane[0]).eq([1u8, 2, 3]),
+            transparent
+                || planes
+                    .iter()
+                    .map(|plane| plane[0])
+                    .eq([RGBA[0], RGBA[1], RGBA[2]]),
             "{planes:?}"
         );
-        let tails: [[u8; 5]; 3] = [
-            [4, 7, 250, 253, 0],
-            [5, 8, 251, 254, 128],
-            [6, 9, 252, 255, 64],
-        ];
-        for (plane, tail) in planes.iter().zip(tails) {
-            assert_eq!(plane[1..], tail);
+        for (channel, plane) in planes.iter().enumerate() {
+            let expected: Vec<u8> = RGBA
+                .iter()
+                .skip(channel)
+                .step_by(4)
+                .skip(1)
+                .copied()
+                .collect();
+            assert_eq!(plane[1..], expected[..], "{channel}");
         }
-        let _ = std::fs::remove_file(&path);
     }
-
     #[test]
     fn a_size_that_changed_after_probing_is_reported() {
-        let (path, probed) = write_and_probe("resized", 3, 2, SourceColorType::Rgb8, &RGB);
+        let (path, probed) = fixture_probe("lossless-rgb.webp");
         assert_eq!((probed.width, probed.height), (3, 2));
         let stale = info(&path, ColorType::Rgb8, 4, 2);
 
-        let error = decode(&stale).expect_err("a stale probe to be caught");
+        // The size the bitstream states is read when the frame is filled, so
+        // the refusal is the decode's and not the probe's.
+        let error = fill_error(decode(&stale).expect("a still to hand over"));
         assert!(
             error.to_string().contains("changed after probing"),
             "{error}"
         );
-        let _ = std::fs::remove_file(&path);
     }
-
+    /// A file that is not a bitstream is refused when its frame is filled.
+    ///
+    /// The header read that used to answer this is gone, so the words are the
+    /// decoder's now rather than libwebp's `did not recognise`; the frame
+    /// request is the same one, because a clip fills the stream it has just
+    /// been handed.
     #[test]
-    fn a_file_that_is_not_a_bitstream_is_reported() {
-        let path =
-            std::env::temp_dir().join(format!("imgseqs-webp-{}-broken.webp", std::process::id()));
-        std::fs::write(&path, b"not a webp image").unwrap();
+    fn the_stream_refuses_a_file_that_is_not_a_bitstream() {
+        let path = write_temp("not-a-bitstream.webp", b"not a webp image");
 
-        let error = decode(&info(&path, ColorType::Rgb8, 3, 2)).expect_err("an error");
-        assert!(error.to_string().contains("did not recognise"), "{error}");
+        let error = fill_error(decode(&info(&path, ColorType::Rgb8, 3, 2)).expect("a still"));
+        assert!(error.to_string().contains("not a WebP file"), "{error}");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1839,15 +1747,11 @@ mod tests {
     /// still, and what it contributes is the picture its timeline starts with.
     /// `image`'s webp reader used to answer this and the `webp` feature is gone
     /// from `Cargo.toml`, so this is the only reader such a file has: if the
-    /// branch that finds the animation went away, this would fail with libwebp
-    /// refusing a container of frames rather than with a wrong picture.
+    /// branch that finds the animation went away, this would fail with `wpd`
+    /// refusing the container rather than with a wrong picture.
     #[test]
     fn a_webp_that_hides_its_animation_is_read_as_the_picture_it_starts_with() {
-        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("fixtures")
-            .join("animation.webp");
-        let bytes = std::fs::read(&fixture).expect("the animation fixture");
+        let bytes = fixture_bytes("animation.webp");
         // The name is what makes it a still: `probe_segment` picks the
         // animation adapter from the route, and the route is the bytes.
         let path = write_temp("hides-its-animation.png", &bytes);
