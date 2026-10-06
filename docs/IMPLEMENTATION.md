@@ -579,21 +579,28 @@ any more.
 No native library is located by this crate's own `build.rs` any more. dav1d,
 libde265, libheif and everything below them arrive through `libheif-sys`, and
 the webp decoder is the `wpd` crate, whose own build script assembles its NASM
-sources and links them into the plugin. What `build.rs` has left is one
-argument on the plugin's own ELF link:
+sources and links them into the plugin. What `build.rs` has left is one link
+argument a platform:
 
 | build | what `build.rs` emits | why |
 | --- | --- | --- |
 | gnu link editors | `rustc-link-arg-cdylib=-Wl,-Bsymbolic` | `wpd`'s gamma tables are otherwise preemptible |
+| apple | `rustc-link-arg=-Wl,-dead_strip_dylibs` | a dependency's link interface names a dylib no symbol comes from |
 | windows | nothing | a PE image resolves a relative reference in its own module |
-| apple | nothing | Mach-O binds a definition to the image that holds it |
 
-The flag is not a preference: rustc writes a cdylib's version script from every
-`#[no_mangle]` symbol in the crate graph, so the two gamma tables `wpd` exports
-are exported here too and become preemptible, and a preemptible symbol is not
-something an `R_X86_64_PC32` load can name from a shared object. Both link
-editors refuse the link without it, and `-Bsymbolic-functions` does not replace
-it, because the symbols are data.
+The first is not a preference: rustc writes a cdylib's version script from
+every `#[no_mangle]` symbol in the crate graph, so the two gamma tables `wpd`
+exports are exported here too and become preemptible, and a preemptible symbol
+is not something an `R_X86_64_PC32` load can name from a shared object. Both
+link editors refuse the link without it, and `-Bsymbolic-functions` does not
+replace it, because the symbols are data.
+
+The second is Mach-O's own rule: it writes a load command for every library the
+link line names, including the ones another crate's flags bring in, so a dylib
+that supplied no symbol is dropped rather than bundled. `libheif-sys` reads
+libheif's `pkg-config` file, whose `Requires.private` lists optional libraries
+this plugin never calls into. ELF needs no equivalent, because `--as-needed`
+already leaves such a library out of `NEEDED`.
 `.github/workflows/build.yml` asserts the result by reading `otool -L` on macos
 and `readelf -d` on linux and rejecting either of the webp library names.
 

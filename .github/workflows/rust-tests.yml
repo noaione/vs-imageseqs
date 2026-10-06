@@ -9,6 +9,12 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # libheif-sys builds libheif with the codec support its own defaults ask for,
+  # which on this runner included libsharpyuv: a library this plugin never
+  # calls into and that apt no longer installs here. The toolchain file is what
+  # narrows the build to what the plugin reads, and it is the same file the
+  # Linux wheels are built with.
+  CMAKE_TOOLCHAIN_FILE: ${{ github.workspace }}/tools/manylinux-toolchain.cmake
 
 concurrency:
   group: rust-tests-${{ github.workflow }}-${{ github.ref }}
@@ -33,6 +39,16 @@ jobs:
 
       - name: cache rust dependencies
         uses: Swatinem/rust-cache@v2
+
+      # libheif-sys records the link flags its CMake configuration produced and
+      # does not treat that configuration as an input, so a cache restored from a
+      # run that used a different toolchain would replay them. Both profiles are
+      # cleared: the tests below are a debug build and the plugin is a release
+      # one.
+      - name: clear the cached libheif configuration
+        run: |
+          cargo clean --package libheif-sys
+          cargo clean --release --package libheif-sys
 
       - name: install native dependencies
         run: |

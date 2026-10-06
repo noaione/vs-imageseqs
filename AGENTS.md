@@ -302,9 +302,16 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   builds ship, and `build-manylinux.sh` and `build-musllinux.sh` build and
   repair a wheel in their own pinned container.
 - `tools/macos-libheif-toolchain.cmake`: the macOS wheel build disables unused
-  embedded libheif codec backends; the plugin decodes HEIC with libde265 and
-  AVIF with dav1d directly. `tools/package-macos-wheel.py` bundles and checks
-  the macOS runtime dylibs before the final wheel is staged.
+  embedded libheif codec backends and its `libsharpyuv` colour transforms; the
+  plugin decodes HEIC with libde265 and AVIF with dav1d directly. Both are
+  switched off through the toolchain file because `libheif-sys` turns them on
+  itself and a toolchain file is read after the command line, so its `FORCE`
+  wins. `tools/manylinux-toolchain.cmake` does the same for the Linux builds,
+  where the same optional dependency would otherwise be whichever one the build
+  image has installed: `libwebp-dev` supplied its sharpyuv to the test job, and
+  homebrew's `webp` does on the macOS runner.
+  `tools/package-macos-wheel.py` bundles and checks the macOS runtime dylibs
+  before the final wheel is staged.
 - `docs/IMPLEMENTATION.md`: design notes and deferred ideas.
 - `docs/improvements/`: one plan per change, with its status; its `README.md` is
   the index of what is open, what the landed work left over and what was decided
@@ -330,6 +337,14 @@ rustc exports every `#[no_mangle]` symbol of the crate graph from a cdylib, so
 without it both link editors refuse the link (`relocation R_X86_64_PC32 cannot
 be used against symbol ...; recompile with -fPIC`). PE and Mach-O do not need
 the flag, and `-Bsymbolic-functions` does not replace it.
+
+an apple build gets `-Wl,-dead_strip_dylibs` from the same file instead. Mach-O
+writes a load command for every library the link line names, including the ones
+another crate's flags bring in -- `libheif-sys` reads libheif's own pkg-config
+file, whose `Requires.private` lists optional libraries the plugin never calls
+into -- so a dylib no symbol came from is dropped rather than bundled. ELF
+needs no equivalent, because `--as-needed` already leaves such a library out of
+`NEEDED`.
 
 from powershell, use the local native paths when running cargo directly:
 
@@ -459,7 +474,9 @@ on windows the vcpkg `x64-windows-static-md` triplet makes every vcpkg native
 library static. `jpeg2k` compiles its vendored OpenJPEG sources on every
 platform. every webp is decoded by the `wpd` crate, which the plugin links
 and which needs no library found at build time; `build.rs` locates nothing any
-more. the `embedded-libheif` feature builds libheif into the plugin,
+more, and nothing else is linked from a pkg-config interface either: the
+embedded libheif is built with its optional backends off, `libsharpyuv` among
+them. the `embedded-libheif` feature builds libheif into the plugin,
 so libheif is static there as well; dav1d and libde265 are the system shared
 libraries. the static lgpl obligation below therefore applies to libheif on
 every platform and to libde265 on windows only.

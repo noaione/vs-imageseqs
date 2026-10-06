@@ -1,10 +1,10 @@
-//! The one link argument this crate's own build has to make.
+//! The link arguments this crate's own build has to make.
 //!
 //! Nothing is located here any more. Every native library the plugin uses
 //! arrives through a crate whose own build script finds it -- dav1d, libde265
 //! and libheif among them -- and the webp decoder is the `wpd` crate, whose
-//! assembly its own build script drives. What is left is a property of this
-//! crate's own link on ELF, which no other build script can be asked for.
+//! assembly its own build script drives. What is left are two properties of
+//! this crate's own link that no other build script can be asked for.
 
 /// Resolves the references the plugin makes to its own definitions to the
 /// definitions it links in, rather than to whatever the dynamic linker finds
@@ -35,10 +35,34 @@ fn bind_definitions_locally() {
     println!("cargo:rustc-link-arg-cdylib=-Wl,-Bsymbolic");
 }
 
+/// Keeps a dependency's link interface from carrying a library no symbol comes
+/// from.
+///
+/// A shared library named on the link line is not kept out of the plugin by the
+/// archive of the same name: Mach-O writes a load command for every library the
+/// line names, including the ones another crate's link flags bring in.
+/// `libheif-sys` reads libheif's own `pkg-config` file, whose `Requires.private`
+/// lists optional libraries this plugin never calls into, and those flags are
+/// not this crate's to change -- so a dylib that supplied no symbol is dropped
+/// instead. The delocated bundle wants only the dylibs
+/// `tools/package-macos-wheel.py` expects, and this is what keeps a stray one
+/// out of it.
+///
+/// ELF needs no equivalent: `--as-needed` already leaves such a library out of
+/// `NEEDED`, which is why the Linux plugin never carried the ones libheif's
+/// file names.
+#[cfg(target_vendor = "apple")]
+fn drop_unused_dylibs() {
+    println!("cargo:rustc-link-arg=-Wl,-dead_strip_dylibs");
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
-    // The cfg is the function's own, so only an ELF link reaches it.
+    // Each cfg is the function's own, so one platform reaches one argument.
     #[cfg(all(unix, not(target_vendor = "apple")))]
     bind_definitions_locally();
+
+    #[cfg(target_vendor = "apple")]
+    drop_unused_dylibs();
 }

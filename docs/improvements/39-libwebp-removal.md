@@ -202,11 +202,14 @@ refusal is the decode's now.
 
 ### the build, packaging and legal surface
 
-- `build.rs` is one link argument now: `bind_definitions_locally`, the ELF
-  `-Wl,-Bsymbolic` wpd's gamma tables need. `MINIMUM_VERSION`,
-  `SYSTEM_LIBRARIES`, `link_unix_libwebp`, `archive_directive`, `is_apple`,
-  `library_names`, `archive_exists` and the two probes are gone, and so are the
-  `vcpkg` and `pkg-config` build dependencies they existed for.
+- `build.rs` is two link arguments now, one per platform, and locates nothing:
+  `bind_definitions_locally`, the ELF `-Wl,-Bsymbolic` wpd's gamma tables need,
+  and `drop_unused_dylibs`, the Apple `-Wl,-dead_strip_dylibs` that keeps a
+  dependency's link interface from carrying a library no symbol comes from.
+  `MINIMUM_VERSION`, `SYSTEM_LIBRARIES`, `link_unix_libwebp`,
+  `archive_directive`, `is_apple`, `library_names`, `archive_exists` and the
+  two probes are gone, and so are the `vcpkg` and `pkg-config` build
+  dependencies they existed for.
 - `vcpkg.json` no longer names libwebp, so a Windows build installs no webp
   package.
 - `tools/build-manylinux.sh` and `tools/build-musllinux.sh` no longer fetch or
@@ -225,6 +228,24 @@ refusal is the decode's now.
   the sense flipped: a webp library among the dependencies is now the failure.
 - `.github/workflows/rust-tests.yml` drops `libwebp-dev` from its apt line, and
   `README.md` and `AGENTS.md` stop naming the webp development package.
+- The embedded libheif had one more dependency than the notices said, and the
+  two CI jobs that build it from source said so. `libheif-sys` asks libheif for
+  its `libsharpyuv` colour transforms, and libheif links whatever it finds: on
+  Linux that was the sharpyuv the test job got from `libwebp-dev`, and on macOS
+  it is homebrew's `webp`, which the runner image already had. Both
+  `tools/manylinux-toolchain.cmake` and
+  `tools/macos-libheif-toolchain.cmake` now set `WITH_LIBSHARPYUV` off, which is
+  what the Windows vcpkg port already did, so the dependency is gone rather than
+  satisfied. Without it the Linux test job could not resolve `-lsharpyuv` once
+  `libwebp-dev` came off its apt line, and the macOS bundle carried
+  `libsharpyuv.0.1.2.dylib` with no symbol of the plugin's referring to it. The
+  ELF `--as-needed` and the Apple `-Wl,-dead_strip_dylibs` are what the two
+  platforms do about a leftover like that; not emitting the dependency at all is
+  what the toolchain files added.
+  `libheif-sys` does not treat that configuration as a build input, so
+  `rust-tests.yml` also clears the cached `libheif-sys` build, the way the macOS
+  wheel job already did, or a cache from a run with the old toolchain would
+  replay the flags that name the library.
 - `docs/LINUX-BUILD.md` and `docs/IMPLEMENTATION.md` describe what is left, the
   link argument included.
 - `LICENSES/libwebp-COPYING.txt` and its line in `LICENSES/README.md` are gone,
