@@ -40,6 +40,9 @@ fn main() {
 
     #[cfg(not(windows))]
     link_unix_libwebp();
+
+    #[cfg(all(unix, not(target_vendor = "apple")))]
+    bind_definitions_locally();
 }
 
 /// Links libwebp through the paths and libraries `pkg-config` reports.
@@ -97,6 +100,35 @@ fn link_unix_libwebp() {
             "cargo:warning=libwebp is linked from the shared library and will be needed at run time; install the development package (libwebp-dev on debian and ubuntu, webp on macos with homebrew) to link the archive instead"
         );
     }
+}
+
+/// Resolves the references the plugin makes to its own definitions to the
+/// definitions it links in, rather than to whatever the dynamic linker finds
+/// first when it loads the plugin.
+///
+/// An ELF shared object needs this because of how `wpd` reaches its gamma
+/// tables. Its x86 and x86-64 decode routines are NASM sources, and a
+/// rip-relative load is what they use (`R_X86_64_PC32`). rustc writes a
+/// cdylib's version script from every `#[no_mangle]` symbol in the crate graph,
+/// so the two tables `wpd` exports are exported here too, which makes them
+/// preemptible; a preemptible symbol is not something that relocation can name
+/// from a shared object, and both link editors refuse the link with
+/// `relocation R_X86_64_PC32 cannot be used against symbol ...; recompile with
+/// -fPIC`. Binding the references locally is what the relocation needs, and it
+/// is what a plugin wants anyway: its own copy of a library is the one its own
+/// code should call. `-Bsymbolic-functions` does not cover this, because the
+/// symbols are data.
+///
+/// Neither other format has the problem. A PE image resolves a relative
+/// reference to a definition in its own module, and Mach-O binds a definition
+/// to the image that holds it unless the link asks for interposition, so the
+/// apple link needs no flag and gets none.
+#[cfg(all(unix, not(target_vendor = "apple")))]
+fn bind_definitions_locally() {
+    // Named for the cdylib, so the flag reaches the shared object and no
+    // other link: an executable defines symbols its own code can already
+    // reach.
+    println!("cargo:rustc-link-arg-cdylib=-Wl,-Bsymbolic");
 }
 
 /// The directive that links `name` from the archive found beside it.

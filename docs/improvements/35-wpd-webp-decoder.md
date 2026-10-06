@@ -32,6 +32,16 @@ depths, 1.53x on the serial per-frame stage split (196.84 → 128.46 ms a frame)
 and byte identical pixels on 76 of 76 webp parity lines and all 941 validator
 checks.
 
+An ELF shared object needed one more thing. `wpd` reaches its two gamma
+tables with a rip-relative load from NASM, and rustc writes a cdylib's version
+script from every `#[no_mangle]` symbol in the crate graph, so those tables are
+preemptible in the plugin: both link editors refuse `R_X86_64_PC32` against a
+preemptible symbol, which is what `cargo test` and both Linux wheel jobs
+reported. `build.rs` now passes `-Wl,-Bsymbolic` to the cdylib link on ELF,
+which resolves those references to the definitions in the object being linked.
+PE and Mach-O need no such flag, and `-Bsymbolic-functions` is not a
+substitute because the symbols are data.
+
 ### what is left over
 
 - **wpd for the animation rectangle.** The optional experiment at the end of

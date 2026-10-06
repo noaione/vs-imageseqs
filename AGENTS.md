@@ -323,6 +323,13 @@ by the C compiler and need nothing extra. On Windows the archiver `nasm-rs`
 calls is MSVC's `lib.exe`, which a normal "x64 Native Tools" prompt already
 puts on `PATH`.
 
+an ELF build also gets `-Wl,-Bsymbolic` on the plugin's own link, from
+`build.rs`. NASM reaches wpd's gamma tables with a rip-relative load, and
+rustc exports every `#[no_mangle]` symbol of the crate graph from a cdylib, so
+without it both link editors refuse the link (`relocation R_X86_64_PC32 cannot
+be used against symbol ...; recompile with -fPIC`). PE and Mach-O do not need
+the flag, and `-Bsymbolic-functions` does not replace it.
+
 from powershell, use the local native paths when running cargo directly:
 
 ```powershell
