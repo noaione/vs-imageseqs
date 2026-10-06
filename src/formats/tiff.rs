@@ -33,6 +33,12 @@
 //!   replaces did. The refusal happens at *identify*, so the probe cannot
 //!   promise a frame the decode would refuse to produce.
 //!
+//! A gray page whose second sample is alpha is read, at eight, sixteen and
+//! thirty-two bits. The pinned decoder names such a page `Multiband` whatever its
+//! depth, because it reports every extra sample that way, so the shape is read
+//! from the directory instead -- two samples and an `ExtraSamples` value that
+//! names alpha -- and the second sample becomes the alpha clip.
+//!
 //! The sample count is checked against the header before anything is handed out.
 //! That is a guard rather than a formality: `read_image_to_buffer` falls back to
 //! one plane when the file's own size exceeds the decoder's buffer limit.
@@ -217,6 +223,11 @@ fn layout_of<R: std::io::Read + std::io::Seek>(
         // because the pinned decoder's error for a predictor it cannot apply is
         // not one this reader should hand out at the decode.
         Some(0) | Some(1) => {
+            // The two sample case comes first: `BitsPerSample` is a two value tag
+            // there, and `layout_gray` reads it as a single one.
+            if let Some(layout) = layout_gray_alpha(decoder, path, action)? {
+                return Ok(layout);
+            }
             if let Some(layout) = layout_gray(decoder, path, action)? {
                 return Ok(layout);
             }
@@ -229,6 +240,93 @@ fn layout_of<R: std::io::Read + std::io::Seek>(
             .map_err(|error| image_error(action, path, error))?,
     )
     .map_err(|error| image_error(action, path, error))
+}
+
+/// The layout of a gray page whose second sample is alpha.
+///
+/// The pinned decoder names such a page `Multiband` whatever its depth or its
+/// sample format, because it reports every extra sample that way, so the shape is
+/// read from the directory instead: two samples, and an `ExtraSamples` value that
+/// says the second one is alpha. `BitsPerSample` is a two value tag here, which is
+/// why this runs before [`layout_gray`], which reads it as a single value.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] for a two sample gray page that does not say its
+/// second sample is alpha, or whose samples are a width this reader does not
+/// take.
+fn layout_gray_alpha<R: std::io::Read + std::io::Seek>(
+    decoder: &mut tiff::decoder::Decoder<R>,
+    path: &Path,
+    action: &str,
+) -> Result<Option<Layout>> {
+    let samples = decoder
+        .get_tag_unsigned::<u16>(tiff::tags::Tag::SamplesPerPixel)
+        .unwrap_or(1);
+    if samples != 2 {
+        return Ok(None);
+    }
+    // One is unassociated alpha and two is associated alpha; anything else is an
+    // extra sample that is not alpha, and this reader does not guess at one.
+    let extra = decoder
+        .get_tag_u16_vec(tiff::tags::Tag::ExtraSamples)
+        .map_err(|error| image_error(action, path, error))?;
+    if !matches!(extra.first(), Some(1 | 2)) {
+        return Err(image_error(
+            action,
+            path,
+            format!(
+                "a gray page of two samples states an extra sample of {extra:?}, which is not alpha"
+            ),
+        ));
+    }
+    let bits = decoder
+        .get_tag_u16_vec(tiff::tags::Tag::BitsPerSample)
+        .map_err(|error| image_error(action, path, error))?;
+    let (color_type, source) = match bits.as_slice() {
+        [8, 8] => (ColorType::La8, SourceColorType::La8),
+        [16, 16] => (ColorType::La16, SourceColorType::La16),
+        [32, 32] => (ColorType::La32F, SourceColorType::La32F),
+        other => {
+            return Err(image_error(
+                action,
+                path,
+                format!("a gray page with alpha of {other:?} bits is not one this reader takes"),
+            ));
+        }
+    };
+    // `SampleFormat` defaults to unsigned when the file states none, and a
+    // thirty-two bit page that is not float is one the raster reader cannot
+    // hand over, so the probe refuses it rather than the decode.
+    let sample_format = decoder
+        .get_tag_u16_vec(tiff::tags::Tag::SampleFormat)
+        .unwrap_or_else(|_| vec![1]);
+    let expected = if bits[0] == 32 { 3 } else { 1 };
+    if sample_format.iter().any(|value| *value != expected) {
+        return Err(image_error(
+            action,
+            path,
+            format!(
+                "a gray page with alpha of {bits:?} bits states a sample format of {sample_format:?}"
+            ),
+        ));
+    }
+    Ok(Some(Layout {
+        channels: 2,
+        sample_bytes: if bits[0] == 32 {
+            4
+        } else {
+            usize::from(bits[0] / 8)
+        },
+        color_type,
+        source,
+        float: bits[0] == 32,
+        separated: false,
+        palette: None,
+        narrow: None,
+        ycbcr: None,
+        cicp: None,
+    }))
 }
 
 /// The layout of a gray page of one, two or four bits a sample.
@@ -712,6 +810,7 @@ fn format(layout: &Layout) -> PixelFormat {
         (ColorType::L8 | ColorType::La8, _) => PixelFormat::Gray8,
         (ColorType::L16 | ColorType::La16, 4) => PixelFormat::Gray32F,
         (ColorType::L16 | ColorType::La16, _) => PixelFormat::Gray16,
+        (ColorType::La32F, _) => PixelFormat::Gray32F,
         (ColorType::Rgb8 | ColorType::Rgba8, _) => PixelFormat::Rgb8,
         (ColorType::Rgb16 | ColorType::Rgba16, _) => PixelFormat::Rgb16,
         _ => PixelFormat::Rgb32F,
@@ -1860,6 +1959,36 @@ mod tests {
                 ColorType::Rgba32F,
                 SourceColorType::Rgba32F,
             ),
+            // A gray page whose second sample is alpha. The buffer holds two
+            // samples a pixel and the frame is one gray plane.
+            (
+                "tiff-graya8.tiff",
+                16,
+                8,
+                ColorType::La8,
+                SourceColorType::La8,
+            ),
+            (
+                "tiff-graya16.tiff",
+                16,
+                8,
+                ColorType::La16,
+                SourceColorType::La16,
+            ),
+            (
+                "tiff-graya32f.tiff",
+                16,
+                8,
+                ColorType::La32F,
+                SourceColorType::La32F,
+            ),
+            (
+                "tiff-graya32f-associated.tiff",
+                16,
+                8,
+                ColorType::La32F,
+                SourceColorType::La32F,
+            ),
             // Every compression the fixtures carry, which must not change the
             // header's meaning. These are the three that `default-features =
             // false` silently drops.
@@ -1955,10 +2084,98 @@ mod tests {
                 ColorType::Rgb8 => (width * height) as usize * 3,
                 ColorType::Rgb16 => (width * height) as usize * 6,
                 ColorType::Rgba8 => (width * height) as usize * 4,
+                ColorType::La8 => (width * height) as usize * 2,
+                ColorType::La16 => (width * height) as usize * 4,
+                ColorType::La32F => (width * height) as usize * 8,
                 _ => (width * height) as usize * 16,
             };
             assert_eq!(buffer.len(), expected, "{name}");
         }
+    }
+
+    /// The two planes of a gray+alpha page, split out of the one buffer the
+    /// decode hands over.
+    fn gray_alpha_planes(name: &str) -> (ImageInfo, Vec<Vec<u8>>) {
+        let info = image_info_at(&fixture(name), true, None)
+            .unwrap_or_else(|error| panic!("{name}: {error}"))
+            .unwrap_or_else(|| panic!("{name} is taken over"));
+        let decoded = decode(&info).unwrap_or_else(|error| panic!("{name}: {error}"));
+        let Pixels::Interleaved { buffer, .. } = decoded.pixels else {
+            panic!("{name} hands out one interleaved buffer");
+        };
+        let sample_bytes = info.format.bytes_per_sample();
+        let mut planes = vec![Vec::new(), Vec::new()];
+        for pixel in buffer.chunks_exact(sample_bytes * 2) {
+            planes[0].extend_from_slice(&pixel[..sample_bytes]);
+            planes[1].extend_from_slice(&pixel[sample_bytes..]);
+        }
+        (info, planes)
+    }
+
+    /// A gray page whose second sample is alpha hands the two samples over as
+    /// they are: the first is the colour plane and the second is the alpha clip.
+    ///
+    /// The pinned decoder names such a page `Multiband` whatever its depth, so
+    /// this is the case that reads the shape from the directory instead. Every
+    /// page has a one sample twin written by the same writer, so the two planes
+    /// are the twins' pictures sample for sample -- and Pillow reads the twins at
+    /// every width, which is what `tests/readalpha.vpy` repeats against Pillow
+    /// itself.
+    #[test]
+    fn a_gray_page_whose_second_sample_is_alpha_hands_over_both_samples() {
+        for (name, format, source, gray, alpha) in [
+            (
+                "tiff-graya8.tiff",
+                PixelFormat::Gray8,
+                SourceColorType::La8,
+                "tiff-graya8-gray.tiff",
+                "tiff-graya8-alpha.tiff",
+            ),
+            (
+                "tiff-graya16.tiff",
+                PixelFormat::Gray16,
+                SourceColorType::La16,
+                "tiff-graya16-gray.tiff",
+                "tiff-graya16-alpha.tiff",
+            ),
+            (
+                "tiff-graya32f.tiff",
+                PixelFormat::Gray32F,
+                SourceColorType::La32F,
+                "tiff-graya32f-gray.tiff",
+                "tiff-graya32f-alpha.tiff",
+            ),
+            (
+                "tiff-graya32f-associated.tiff",
+                PixelFormat::Gray32F,
+                SourceColorType::La32F,
+                "tiff-graya32f-gray.tiff",
+                "tiff-graya32f-alpha.tiff",
+            ),
+        ] {
+            let (info, planes) = gray_alpha_planes(name);
+            assert_eq!((info.width, info.height), (16, 8), "{name}");
+            assert_eq!(info.format, format, "{name}: the colour clip's format");
+            assert_eq!(info.format.plane_count(), 1, "{name}: one colour plane");
+            assert_eq!(info.original_color_type, source, "{name}");
+            assert_eq!(planes.len(), 2, "{name}");
+            assert_eq!(
+                planes[0],
+                read(gray),
+                "{name}: the first sample is the colour"
+            );
+            assert_eq!(
+                planes[1],
+                read(alpha),
+                "{name}: the second sample is the alpha"
+            );
+        }
+
+        // A page of two samples whose extra sample does not say it is alpha is
+        // refused by name rather than guessed at.
+        let error = image_info_at(&fixture("tiff-graya-noalpha.tiff"), true, None)
+            .expect_err("a two sample page with no alpha is refused");
+        assert!(error.to_string().contains("which is not alpha"), "{error}");
     }
 
     /// A compressed file reads to the same picture as an uncompressed one,

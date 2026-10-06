@@ -60,6 +60,7 @@ impl PixelFormat {
             ColorType::Rgb8 | ColorType::Rgba8 => Some(Self::Rgb8),
             ColorType::Rgb16 | ColorType::Rgba16 => Some(Self::Rgb16),
             ColorType::Rgb32F | ColorType::Rgba32F => Some(Self::Rgb32F),
+            ColorType::La32F => Some(Self::Gray32F),
         }
     }
 
@@ -488,7 +489,7 @@ pub const fn inverse_orientation(orientation: Orientation) -> Orientation {
 /// Interleaved channel that carries alpha when the color type has one.
 pub const fn alpha_channel(color_type: ColorType) -> Option<usize> {
     match color_type {
-        ColorType::La8 | ColorType::La16 => Some(1),
+        ColorType::La8 | ColorType::La16 | ColorType::La32F => Some(1),
         ColorType::Rgba8 | ColorType::Rgba16 | ColorType::Rgba32F => Some(3),
         _ => None,
     }
@@ -654,7 +655,7 @@ fn frame_depth(frame: &VideoFrame, source: PixelFormat) -> Result<FrameDepth> {
 pub(crate) const fn channel_count(color_type: ColorType) -> usize {
     match color_type {
         ColorType::L8 | ColorType::L16 => 1,
-        ColorType::La8 | ColorType::La16 => 2,
+        ColorType::La8 | ColorType::La16 | ColorType::La32F => 2,
         ColorType::Rgb8 | ColorType::Rgb16 | ColorType::Rgb32F => 3,
         ColorType::Rgba8 | ColorType::Rgba16 | ColorType::Rgba32F => 4,
     }
@@ -1095,6 +1096,7 @@ pub fn write_planar(
         (2, 4) => write_planes::<u16, 4>(frame, &layout, planes, pixels, transform, shift)?,
         (4, 3) => write_planes::<f32, 3>(frame, &layout, planes, pixels, transform, shift)?,
         (4, 4) => write_planes::<f32, 4>(frame, &layout, planes, pixels, transform, shift)?,
+        (4, 2) => write_planes::<f32, 2>(frame, &layout, planes, pixels, transform, shift)?,
         (bytes_per_sample, channels) => {
             return Err(ImgSeqError::new(format!(
                 "unsupported sample size {bytes_per_sample} with {channels} channels"
@@ -1431,6 +1433,9 @@ pub fn write_alpha(
         }
         (4, Some(3)) => {
             write_alpha_plane::<f32, 4, 3>(frame, &layout, pixels, transform, depth.shift)?;
+        }
+        (4, Some(1)) => {
+            write_alpha_plane::<f32, 2, 1>(frame, &layout, pixels, transform, depth.shift)?;
         }
         (1, None) => fill_alpha_plane::<u8>(frame, &layout, transform, u8::MAX)?,
         (2, None) => fill_alpha_plane::<u16>(frame, &layout, transform, depth.maximum)?,

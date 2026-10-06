@@ -2297,6 +2297,87 @@ def test_cursor() -> None:
     )
 
 
+def test_gray_alpha_pages() -> None:
+    """A gray TIFF whose second sample is alpha is read, at three widths.
+
+    The pinned decoder names such a page `Multiband` whatever its depth, so the
+    reader takes the shape from the directory instead: two samples and an
+    `ExtraSamples` value that names alpha. Every page has a one sample twin
+    written by the same script, and Pillow reads the twins at every width -- a
+    page of two samples it reads only at eight bits -- so the expected values
+    below are Pillow's read of the twins, which the maker's `--check` prints.
+    The gray sample runs along the row and the alpha one down the column, so a
+    page whose samples were swapped, or read as one plane, is a wrong picture
+    rather than a plausible one.
+    """
+    for name, top, format_name in (
+        ("tiff-graya8.tiff", 255, "Gray8"),
+        ("tiff-graya16.tiff", 65535, "Gray16"),
+    ):
+        clip, alpha_clip = read_alpha(files=[fixture(name)])
+        check(
+            clip.format.name == format_name,
+            f"{name}: the colour clip is {format_name} (got {clip.format.name})",
+        )
+        check(
+            clip.format.num_planes == 1,
+            f"{name}: the colour clip is one gray plane (got {clip.format.num_planes})",
+        )
+        check(
+            alpha_clip.format.name == format_name,
+            f"{name}: the alpha clip is the same depth (got {alpha_clip.format.name})",
+        )
+        check(
+            samples(clip.get_frame(0))
+            == [x * top // 15 for _ in range(8) for x in range(16)],
+            f"{name}: the colour plane is the first sample Pillow reads",
+        )
+        check(
+            samples(alpha_clip.get_frame(0))
+            == [y * top // 7 for y in range(8) for _ in range(16)],
+            f"{name}: the alpha clip is the second sample Pillow reads",
+        )
+    # The float spelling and its associated twin: the two differ only in the
+    # `ExtraSamples` tag, and the second sample is handed over as it is rather
+    # than scaled by the first.
+    for name in ("tiff-graya32f.tiff", "tiff-graya32f-associated.tiff"):
+        clip, alpha_clip = read_alpha(files=[fixture(name)])
+        check(
+            clip.format.name == "GrayS",
+            f"{name}: the colour clip is GrayS (got {clip.format.name})",
+        )
+        check(clip.format.num_planes == 1, f"{name}: the colour clip is one gray plane")
+        check(
+            alpha_clip.format.name == "GrayS",
+            f"{name}: the alpha clip is GrayS (got {alpha_clip.format.name})",
+        )
+        check(
+            almost(
+                samples(clip.get_frame(0)),
+                [x / 15 for _ in range(8) for x in range(16)],
+            ),
+            f"{name}: the colour plane is the first sample Pillow reads",
+        )
+        check(
+            almost(
+                samples(alpha_clip.get_frame(0)),
+                [y / 7 for y in range(8) for _ in range(16)],
+            ),
+            f"{name}: the alpha clip is the second sample Pillow reads",
+        )
+    # A page of two samples whose extra sample does not say it is alpha is
+    # refused rather than guessed at.
+    try:
+        core.imgseqs.ReadAlpha(files=[fixture("tiff-graya-noalpha.tiff")])
+    except Exception as error:
+        check(
+            "which is not alpha" in str(error),
+            f"a two sample gray page with no alpha is refused ({str(error).strip()})",
+        )
+    else:
+        check(False, "a two sample gray page with no alpha is refused")
+
+
 def main() -> None:
     for test in (
         test_rgba8,
@@ -2339,6 +2420,7 @@ def main() -> None:
         test_core_header_bitmaps,
         test_bare_dib,
         test_cursor,
+        test_gray_alpha_pages,
     ):
         print(f"--- {test.__name__}")
         test()

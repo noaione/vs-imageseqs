@@ -89,6 +89,11 @@
   the hot spot -- so it is selected on area alone, and the payload and the AND
   mask rule are the icon's: the alpha clip is the payload's own alpha multiplied
   by the mask
+- A gray tiff whose second sample is alpha is read, at eight, sixteen and
+  thirty-two bits. The pinned decoder names such a page `Multiband` whatever its
+  depth, so the shape is read from the directory instead: two samples and an
+  `ExtraSamples` value that names alpha. The second sample becomes the alpha
+  clip, and `ImgSeqOriginalColorType` is `La8`, `La16` or `La32F`
 
 ### fixed
 
