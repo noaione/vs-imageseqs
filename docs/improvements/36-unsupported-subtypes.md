@@ -6,7 +6,7 @@ through in the order at the end of this page: the TGA two byte map entries, the
 bare DIB, cursors, the gray+alpha TIFF, the flat gray EXR, twelve bit subsampled
 AVIF/HEIF and a heic storing av1 are in the tree with their fixtures and their
 checks -- the heic storing av1 as a fixture alone, because the path already
-worked -- the ISO composition boxes have their first slice, and the two the order
+worked -- the ISO composition boxes have their first two slices, and the two the
 puts last are still the routes below.
 
 [34](34-input-routing-and-planar-decode.md)'s phase-4 row and the plan-34
@@ -350,9 +350,20 @@ animation maker -- no encoder here writes one -- and it pins both: the first
 sample is composed forty ticks before zero and the second a hundred after its
 decode time, so the holds become 180, 70, 110 and 240 ticks and the four pictures
 land on output frames 0, 5, 6 and 9 of fifteen, with the same four pictures the
-plain fixture holds. `elst` and fragments are still open, and the `elst` slice has
-a head start: the fixtures every encoder here writes already carry an identity
-one, which is why the walker ignores it today without a visible effect.
+plain fixture holds.
+
+**Landed: `elst`, in part.** An edit list is read, and each of the three shapes
+it can take is decided rather than ignored. An *empty* edit is a delay, which a
+clip whose frames are one per output tick has nowhere to put -- the pictures are
+all there, only later -- so it is read and not acted on. A normal edit that
+starts partway into the media is a **leading skip**, which is refused: the
+pictures are decoded in order, and there is no way to hand out the first ones for
+the second half of the media. A normal edit shorter than the media is a
+**truncation of the end**, which is what the timeline now carries. The fixture
+pair is `animation.avif` with its identity edit replaced by one that ends the
+track at 300 of its 600 ticks, and by one that starts 250 ticks in: the first is
+eight frames at 24 fps with its fourth picture never shown, and the second is
+refused by name. Fragments are still open.
 
 ## Flat grayscale Y/Y+A EXR
 

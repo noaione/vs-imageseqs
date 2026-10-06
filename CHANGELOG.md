@@ -107,6 +107,12 @@
   sample composed before zero is clamped rather than wrapped, and a track whose
   offsets put a sample before the one before it is refused, because the pictures
   are replayed in the order they are decoded
+- An avif or heif sequence whose edit list ends its media early shows only that
+  part of its timeline: the presentations past the edit are not shown, and the
+  one it ends inside is held to the end. An edit list that starts partway into
+  the media is refused by name, because the pictures are decoded in order, and an
+  empty edit -- a delay -- is read and not acted on, since a clip has one frame
+  per output tick and nowhere to put held ticks
 
 ### fixed
 

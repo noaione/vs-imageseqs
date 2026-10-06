@@ -120,12 +120,19 @@ fn presentations(timing: &TrackTiming, path: &Path) -> Result<Vec<Presentation>>
             ImgSeqError::new(format!("the timeline of '{}' overflows", path.display()))
         })?;
     }
-    // The decode time after the last sample is where the track ends, which is
+    // The decode time after the last sample is where the track ends, and that is
     // what holds the last presentation for its own duration.
     let end = decode;
+    // An edit list can end the track before its media does: a presentation that
+    // starts at or after the end is not shown at all, and the one the end falls
+    // inside is held only to it.
+    let shown = timing.shown.map_or(end, |ticks| ticks.min(end));
     let mut presentations = Vec::with_capacity(instants.len());
     for (index, &instant) in instants.iter().enumerate() {
-        let next = instants.get(index + 1).copied().unwrap_or(end);
+        if instant >= shown {
+            break;
+        }
+        let next = instants.get(index + 1).copied().unwrap_or(end).min(shown);
         presentations.push(Presentation {
             timestamp: instant,
             duration: Some(next - instant),

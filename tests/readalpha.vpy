@@ -1623,6 +1623,41 @@ def test_animation() -> None:
         slower.num_frames == 6,
         f"animation ctts: the clip is 6 frames at 10 fps (got {slower.num_frames})",
     )
+
+    # An edit list is where a file says which part of its media it displays. The
+    # short one ends the track at 300 of its 600 ms, so the clip is eight frames
+    # at 24 fps and the last picture is held only to the end; the skip one starts
+    # 250 ms into its media, which this reader refuses rather than playing the
+    # pictures the file says are not shown.
+    clip = core.imgseqs.Read(files=[fixture("animation-elst-short.avif")])
+    check(
+        clip.num_frames == 8,
+        f"animation elst: the truncated clip is 8 frames at 24 fps (got {clip.num_frames})",
+    )
+    hashes = [frame_hash(clip.get_frame(index)) for index in range(clip.num_frames)]
+    for index, (start, end) in enumerate(zip([0, 2, 6], [2, 6, 8])):
+        check(
+            len({hashes[frame] for frame in range(start, end)}) == 1,
+            f"animation elst: holds presentation {index} across frames {start}..{end}",
+        )
+    check(
+        len({hashes[start] for start in [0, 2, 6]}) == 3,
+        "animation elst: the three pictures the edit shows are distinct",
+    )
+    slower = core.imgseqs.Read(files=[fixture("animation-elst-short.avif")], fpsnum=10, fpsden=1)
+    check(
+        slower.num_frames == 3,
+        f"animation elst: the truncated clip is 3 frames at 10 fps (got {slower.num_frames})",
+    )
+    try:
+        core.imgseqs.Read(files=[fixture("animation-elst-skip.avif")])
+    except Exception as error:
+        check(
+            "starts its media" in str(error),
+            f"animation elst: a leading skip is refused by name ({str(error).strip()})",
+        )
+    else:
+        check(False, "animation elst: a leading skip is refused")
     # A still of a format that has an animation path stays one frame.
     for name in ["alpha-rgb8.png", "alpha-rgba8.png", "alpha-rgba8.jxl"]:
         clip = core.imgseqs.Read(files=[fixture(name)])

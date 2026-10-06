@@ -28,7 +28,10 @@ use std::{
     path::Path,
 };
 
-use crate::{decoder::image_error, error::Result};
+use crate::{
+    decoder::image_error,
+    error::{ImgSeqError, Result},
+};
 
 /// A box header: its kind and the range its payload covers.
 #[derive(Clone, Copy, Debug)]
@@ -110,6 +113,11 @@ pub struct TrackTiming {
     /// reading one as the difference it stands for is what a subtraction gets
     /// wrong.
     pub offsets: Vec<i64>,
+    /// The media tick an edit list ends the track at, or `None` for all of it.
+    ///
+    /// An edit list is where a file says which part of its media it displays;
+    /// the shapes this reader follows are described on [`edit_list`].
+    pub shown: Option<i64>,
 }
 
 impl TrackTiming {
@@ -185,10 +193,14 @@ pub fn read(file: &mut BufReader<File>, path: &Path) -> Result<Option<Sequence>>
         let Some(timing) = track_timing(&data, trak) else {
             continue;
         };
+        // The edit list is a box beside the sample tables rather than in them,
+        // and one this reader cannot replay is refused here rather than played
+        // wrongly.
+        let shown = edit_list(&data, trak, path)?;
         let crop = crop_of(&data, Some(trak));
         let coded = coded_size(&data);
         return Ok(Some(Sequence {
-            timing,
+            timing: TrackTiming { shown, ..timing },
             crop,
             coded,
         }));
@@ -300,6 +312,9 @@ fn track_timing(data: &[u8], trak: Box_) -> Option<TrackTiming> {
         timescale,
         durations,
         offsets,
+        // The edit list is a box beside the sample tables, and the caller
+        // reads it: a track that states none shows all of its media.
+        shown: None,
     })
 }
 
@@ -386,6 +401,93 @@ fn read_ctts(data: &[u8], ctts: Box_) -> Option<Vec<i64>> {
         at += 8;
     }
     Some(offsets)
+}
+
+/// The media tick a track's edit list ends it at, or `None` for all of it.
+///
+/// An edit list is a list of edits: an *empty* one, whose media time is -1,
+/// holds nothing for its duration, and a normal one plays the media from its
+/// media time for its segment duration.
+///
+/// Three shapes of that are read, and one of them is refused:
+///
+/// - an empty edit is a **delay**. A clip has one frame per output tick, so
+///   there is nowhere for held ticks to go: the pictures are all there, only
+///   later, and the delay is read and not acted on.
+/// - a normal edit that starts partway into the media is a **leading skip**,
+///   which is refused. The pictures are decoded in order, so there is no way to
+///   hand out the first ones for the second half of the media.
+/// - a normal edit shorter than the media that follows it is a **truncation of
+///   the end**, which is what this returns; a duration of zero runs to the end
+///   of the media, which is the identity every encoder here writes.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] for a leading skip, and for a list that edits the
+/// media more than once: neither is a timeline this reader can replay.
+fn edit_list(data: &[u8], trak: Box_, path: &Path) -> Result<Option<i64>> {
+    let Some(edts) = child(data, trak, b"edts") else {
+        return Ok(None);
+    };
+    let Some(elst) = child(data, edts, b"elst") else {
+        return Ok(None);
+    };
+    let payload = &data[elst.start..elst.end];
+    let version = payload.first().copied().unwrap_or(0);
+    // One entry is a duration, a media time, a rate and a fraction, and version
+    // one widens the first two to 64 bits: a media time of -1 is an empty edit,
+    // which is why the field is signed however wide it is.
+    let wide = version == 1;
+    let width = if wide { 8 } else { 4 };
+    let entry = 2 * width + 4;
+    // The count is always four bytes; a version one entry widens only the two
+    // fields after it.
+    let number = |at: usize, width: usize| -> Option<u64> {
+        let bytes = payload.get(at..at + width)?;
+        let mut value = 0u64;
+        for byte in bytes {
+            value = (value << 8) | u64::from(*byte);
+        }
+        Some(value)
+    };
+    let Some(count) = number(4, 4).and_then(|count| u32::try_from(count).ok()) else {
+        return Ok(None);
+    };
+    let mut shown = None;
+    let mut edits = 0usize;
+    for index in 0..count {
+        let at = 8 + entry * index as usize;
+        let (Some(duration), Some(media_time)) = (number(at, width), number(at + width, width))
+        else {
+            return Ok(None);
+        };
+        let media_time = if wide {
+            media_time as i64
+        } else {
+            i64::from(media_time as u32 as i32)
+        };
+        if media_time < 0 {
+            // An empty edit, which is the delay described above.
+            continue;
+        }
+        edits += 1;
+        if edits > 1 {
+            return Err(ImgSeqError::new(format!(
+                "the edit list of '{}' edits its media more than once, which this reader cannot replay",
+                path.display()
+            )));
+        }
+        if media_time > 0 {
+            return Err(ImgSeqError::new(format!(
+                "the edit list of '{}' starts its media {media_time} ticks in, which this reader cannot replay",
+                path.display()
+            )));
+        }
+        if duration > 0 {
+            shown = Some(duration as i64);
+        }
+    }
+    Ok(shown)
 }
 
 /// The clean aperture that applies to a track's pictures.
@@ -679,6 +781,30 @@ mod tests {
             .expect("the fixture reads")
             .expect("the fixture is a sequence");
         assert!(sequence.timing.offsets.is_empty());
+        // Every encoder here writes an identity edit list: the whole media, from
+        // its start, which is the shape that changes nothing.
+        assert_eq!(sequence.timing.shown, Some(600));
+    }
+
+    /// An edit list shorter than the media ends the track early, which is a
+    /// truncation of the timeline rather than of the pictures.
+    #[test]
+    fn an_edit_list_shorter_than_the_media_ends_the_track() {
+        let sequence = read_file(&fixture("animation-elst-short.avif"))
+            .expect("the fixture reads")
+            .expect("the fixture is a sequence");
+        assert_eq!(sequence.timing.durations, [80, 170, 110, 240]);
+        assert_eq!(sequence.timing.shown, Some(300));
+    }
+
+    /// An edit list that starts partway into the media is a leading skip this
+    /// reader cannot replay: the pictures are decoded in order, so it is refused
+    /// by name rather than played.
+    #[test]
+    fn an_edit_list_that_skips_the_start_is_refused() {
+        let error =
+            read_file(&fixture("animation-elst-skip.avif")).expect_err("a leading skip is refused");
+        assert!(error.to_string().contains("starts its media"), "{error}");
     }
 
     /// The heic fixture states the same sample count at a different rate, and

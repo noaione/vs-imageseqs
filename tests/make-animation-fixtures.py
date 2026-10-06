@@ -191,6 +191,66 @@ def with_composition_offsets(source: Path, path: Path, offsets: list[int]) -> No
     print(f"  + {path.name} ({path.stat().st_size} bytes) ctts {offsets}")
 
 
+def moved_track_chunks(
+    track_boxes: list[tuple[bytes, bytes]], grown: int
+) -> list[tuple[bytes, bytes]]:
+    """One track's boxes with every chunk offset in its sample table moved."""
+    out = []
+    for kind, payload in track_boxes:
+        if kind == b"mdia":
+            mdia = parse_boxes(payload)
+            minf = parse_boxes(next(entry for kind, entry in mdia if kind == b"minf"))
+            stbl = parse_boxes(next(entry for kind, entry in minf if kind == b"stbl"))
+            stbl = moved_chunk_offsets(stbl, grown)
+            minf = replaced(minf, b"stbl", pack_boxes(stbl))
+            mdia = replaced(mdia, b"minf", pack_boxes(minf))
+            payload = pack_boxes(mdia)
+        out.append((kind, payload))
+    return out
+
+
+def with_edit_list(source: Path, path: Path, media_time: int, segment_duration: int) -> None:
+    """Writes `source` with its first track's edit list replaced by one edit.
+
+    An edit list is where a file says which part of its media it displays, and the
+    entry this writes plays the media from `media_time` for `segment_duration`
+    ticks. The box is version one, which is what the encoders here write and the
+    one that can state a media time of -1 for an empty edit.
+
+    The box changes size, so the movie box does too and every chunk offset moves
+    with it: the arithmetic is [`with_composition_offsets`]'s.
+    """
+    payload = (
+        bytes((1, 0, 0, 0))
+        + struct.pack(">I", 1)
+        + struct.pack(">QqHH", segment_duration, media_time, 1, 0)
+    )
+    top = parse_boxes(source.read_bytes())
+    moov = next(entry for kind, entry in top if kind == b"moov")
+    rewritten = []
+    grown = 0
+    first = True
+    for kind, track in parse_boxes(moov):
+        if kind != b"trak":
+            rewritten.append((kind, track))
+            continue
+        track_boxes = parse_boxes(track)
+        if first:
+            before = len(pack_boxes(track_boxes))
+            edts = parse_boxes(next(entry for kind, entry in track_boxes if kind == b"edts"))
+            edts = replaced(edts, b"elst", payload)
+            track_boxes = replaced(track_boxes, b"edts", pack_boxes(edts))
+            grown = len(pack_boxes(track_boxes)) - before
+            first = False
+        rewritten.append((b"trak", pack_boxes(moved_track_chunks(track_boxes, grown))))
+    top = replaced(top, b"moov", pack_boxes(rewritten))
+    path.write_bytes(pack_boxes(top))
+    print(
+        f"  + {path.name} ({path.stat().st_size} bytes)"
+        f" elst media_time={media_time} duration={segment_duration}"
+    )
+
+
 def main() -> None:
     cjxl = require_tool("cjxl")
     avifenc = require_tool("avifenc")
@@ -267,6 +327,23 @@ def main() -> None:
             FIXTURES / "animation.avif",
             FIXTURES / "animation-ctts.avif",
             [-40, 100, 0, 0],
+        )
+
+        # An edit list is where a file says which part of its media it displays.
+        # The first of these is the identity's shorter cousin: it ends the track
+        # at 300 of its 600 ticks. The second starts 250 ticks into the media,
+        # which is a leading skip this reader refuses rather than plays.
+        with_edit_list(
+            FIXTURES / "animation.avif",
+            FIXTURES / "animation-elst-short.avif",
+            0,
+            300,
+        )
+        with_edit_list(
+            FIXTURES / "animation.avif",
+            FIXTURES / "animation-elst-skip.avif",
+            250,
+            600,
         )
 
         # libheif's CLI assigns one duration to every sequence frame. Keep its
