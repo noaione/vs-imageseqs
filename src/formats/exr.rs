@@ -177,6 +177,7 @@ fn states_all(header: &exr::meta::header::Header, names: &[&[u8]]) -> bool {
             .any(|channel| channel.name.bytes() == *name)
     })
 }
+
 /// Whether the layer's channel list holds the alpha channel.
 fn states_alpha(header: &exr::meta::header::Header) -> bool {
     header
@@ -287,6 +288,7 @@ pub fn image_info_at(
     let file = File::open(path).map_err(|error| image_error("open", path, error))?;
     image_info(path, apply_rotation, route, &mut BufReader::new(file))
 }
+
 /// Writes one pixel's channels into the plane-per-channel buffer.
 ///
 /// Channel `slot` of the picture is `slot` planes into the buffer, and a position
@@ -708,6 +710,7 @@ mod tests {
             );
         }
     }
+
     /// A flat grayscale layer: `Y` is the colour plane and `A` is the alpha clip,
     /// which is the same rule the r,g,b set follows with the other name set.
     ///

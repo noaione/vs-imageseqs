@@ -537,38 +537,45 @@ fn layout_ycbcr<R: std::io::Read + std::io::Seek>(
             "a planar ycbcr page is not one this reader takes",
         ));
     }
-    // An uncompressed page is the only kind this reader decodes: the crate's
-    // chunk reader goes through the colour type that refuses this photometric,
-    // so a compressed page would need a decompressor of its own. Refused here
-    // rather than at the decode, because a probe that described a page the
-    // decode would refuse is the one thing this reader must never do.
+    // A ycbcr page is decoded here when it is uncompressed, and by the crate when
+    // its strip is a jpeg: the crate's chunk reader refuses this photometric, but
+    // its whole-picture decode takes it, and what it hands back is ycbcr at full
+    // resolution. Any other compression is refused here rather than at the decode,
+    // because a probe that described a page the decode would refuse is the one
+    // thing this reader must never do.
     let compression = decoder
         .get_tag_unsigned::<u16>(tiff::tags::Tag::Compression)
         .unwrap_or(1);
-    if compression != 1 {
+    if !matches!(compression, 1 | 6 | 7) {
         return Err(image_error(
             action,
             path,
             format!("a ycbcr page compressed with {compression} is not one this reader decodes"),
         ));
     }
-    let subsampling = decoder
-        .find_tag_unsigned_vec::<u16>(tiff::tags::Tag::ChromaSubsampling)
-        .map_err(|error| image_error(action, path, error))?
-        .unwrap_or_default();
-    let subsampling = match subsampling.as_slice() {
-        // The specification's default for a page that states nothing.
-        [] => (2, 2),
-        [horiz, vert] => (
-            u8::try_from(*horiz).unwrap_or(0),
-            u8::try_from(*vert).unwrap_or(0),
-        ),
-        _ => {
-            return Err(image_error(
-                action,
-                path,
-                "the chroma subsampling of a ycbcr page is not two numbers",
-            ));
+    // A jpeg page's chroma is upsampled by the decoder, so the sampling this reader
+    // hands out is one sample a pixel whatever the page states its encoder used.
+    let subsampling = if matches!(compression, 6 | 7) {
+        (1, 1)
+    } else {
+        let stated = decoder
+            .find_tag_unsigned_vec::<u16>(tiff::tags::Tag::ChromaSubsampling)
+            .map_err(|error| image_error(action, path, error))?
+            .unwrap_or_default();
+        match stated.as_slice() {
+            // The specification's default for a page that states nothing.
+            [] => (2, 2),
+            [horiz, vert] => (
+                u8::try_from(*horiz).unwrap_or(0),
+                u8::try_from(*vert).unwrap_or(0),
+            ),
+            _ => {
+                return Err(image_error(
+                    action,
+                    path,
+                    "the chroma subsampling of a ycbcr page is not two numbers",
+                ));
+            }
         }
     };
     // One by one, two by one and two by two are the samplings the format
@@ -1490,6 +1497,7 @@ fn webp_buffer<R: std::io::Read + std::io::Seek>(
     }
     Ok(buffer)
 }
+
 /// One index a pixel, in row order, from the strips of a palette page.
 ///
 /// The raster is read here rather than by the decoder, which refuses this
@@ -1614,6 +1622,53 @@ fn unpack_row(row: &[u8], width: usize, bits: u8, out: &mut Vec<u16>) {
     }
 }
 
+/// The three planes of a jpeg-compressed ycbcr page.
+///
+/// The crate decodes the strip's jpeg and hands back interleaved ycbcr at full
+/// resolution: the sampling the page states is the encoder's, and the samples this
+/// reader gets have already been upsampled, which is why the format the probe
+/// records for such a page is one sample a pixel.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] when the strip does not decode or does not hold three
+/// eight bit samples for every pixel the directory states.
+fn jpeg_ycbcr_planes<R: std::io::Read + std::io::Seek>(
+    decoder: &mut tiff::decoder::Decoder<R>,
+    path: &Path,
+    width: u32,
+    height: u32,
+) -> Result<Vec<Vec<u8>>> {
+    let image = decoder
+        .read_image()
+        .map_err(|error| image_error("decode", path, error))?;
+    let tiff::decoder::DecodingResult::U8(samples) = image else {
+        return Err(image_error(
+            "decode",
+            path,
+            "a jpeg ycbcr page did not decode to eight bit samples",
+        ));
+    };
+    let pixels = usize::try_from(width)
+        .ok()
+        .and_then(|width| width.checked_mul(usize::try_from(height).ok()?))
+        .ok_or_else(|| image_error("decode", path, "the image is too large to decode"))?;
+    if samples.len() < pixels.saturating_mul(3) {
+        return Err(image_error(
+            "decode",
+            path,
+            "a jpeg ycbcr page holds fewer samples than its directory states",
+        ));
+    }
+    let mut planes: Vec<Vec<u8>> = (0..3).map(|_| Vec::with_capacity(pixels)).collect();
+    for pixel in samples.as_chunks::<3>().0.iter().take(pixels) {
+        for (plane, value) in planes.iter_mut().zip(*pixel) {
+            plane.push(value);
+        }
+    }
+    Ok(planes)
+}
+
 /// The three planes of a ycbcr page, at the sampling the file states.
 ///
 /// A coding unit holds every luma sample it covers and then one chroma pair.
@@ -1641,6 +1696,11 @@ fn ycbcr_planes<R: std::io::Read + std::io::Seek>(
     horiz: u8,
     vert: u8,
 ) -> Result<Vec<Vec<u8>>> {
+    // A jpeg strip is not a raster this reader can walk: the crate decodes it and
+    // hands back interleaved ycbcr, so that is where its planes come from.
+    if matches!(compression_of(decoder), 6 | 7) {
+        return jpeg_ycbcr_planes(decoder, path, width, height);
+    }
     let offsets = tag_numbers(decoder, tiff::tags::Tag::StripOffsets, path, "decode")?;
     let counts = tag_numbers(decoder, tiff::tags::Tag::StripByteCounts, path, "decode")?;
     if offsets.is_empty() || offsets.len() != counts.len() {
@@ -1874,6 +1934,22 @@ mod tests {
             .join("tests")
             .join("fixtures")
             .join(name)
+    }
+
+    /// A ycbcr page whose strip is a jpeg is decoded by the crate, which hands back
+    /// ycbcr at full resolution, so the page is handed out as three planes of one
+    /// sample a pixel each -- the sampling the page states is its encoder's.
+    #[test]
+    fn a_jpeg_ycbcr_page_is_handed_out_as_full_resolution_planes() {
+        let (info, planes) = planes("tiff-jpeg-ycbcr.tiff");
+        assert_eq!((info.width, info.height), (3, 2));
+        assert_eq!(info.format, PixelFormat::Yuv444P8);
+        assert!(planes.iter().all(|plane| plane.len() == 6));
+        // The luma rises across the row and the two chroma planes are the flat
+        // pair the encoder wrote, which is what the jpeg decodes to.
+        assert_eq!(planes[0], [16, 49, 77, 108, 141, 169]);
+        assert_eq!(planes[1], [135; 6]);
+        assert_eq!(planes[2], [122; 6]);
     }
 
     /// The planes one fixture decodes to, however the decode handed them over.

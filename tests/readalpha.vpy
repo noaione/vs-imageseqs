@@ -2333,6 +2333,27 @@ def test_ycbcr_pages() -> None:
     check(frame.props["_Matrix"] == 0, "ycbcr: an rgb frame states no matrix")
     check(frame.props["_Range"] == 1, "ycbcr: an rgb frame is full range")
 
+    # A ycbcr page whose strip is a jpeg is decoded by the crate, which hands back
+    # ycbcr at full resolution, so it is handed out at one sample a pixel whatever
+    # the page states its encoder used.
+    clip = core.imgseqs.Read(files=[fixture("tiff-jpeg-ycbcr.tiff")])
+    check(
+        clip.format.name == "YUV444P8",
+        f"ycbcr jpeg: the page is YUV444P8 (got {clip.format.name})",
+    )
+    frame = clip.get_frame(0)
+    check(
+        (frame.width, frame.height) == (3, 2),
+        f"ycbcr jpeg: the page is 3x2 (got {frame.width}x{frame.height})",
+    )
+    check(
+        samples(frame, 0) == [16, 49, 77, 108, 141, 169],
+        f"ycbcr jpeg: the luma is the jpeg's own (got {samples(frame, 0)})",
+    )
+    check(
+        samples(frame, 1) == [135] * 6 and samples(frame, 2) == [122] * 6,
+        "ycbcr jpeg: the chroma planes are the flat pair the encoder wrote",
+    )
     # Every page this reader cannot take is refused by the *probe*, so the
     # probe never promises a frame the decode would not produce.
     for name, said in [

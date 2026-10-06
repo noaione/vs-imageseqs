@@ -152,8 +152,8 @@ and the check that would accept it. All ten routes are implemented -- the TGA tw
 byte map entries, the bare DIB, cursors, the gray+alpha TIFF, the flat gray EXR,
 twelve bit subsampled AVIF/HEIF, a heic storing av1, the ISO composition boxes, the
 JP2 channel definitions and TIFF WebP, whose palette slice is a refusal rather than
-an expansion -- and what stays refused by decision is JP2 signed or mixed-precision
-samples.
+an expansion, and a ycbcr TIFF whose strip is a JPEG is read too -- and what stays
+refused by decision is JP2 signed or mixed-precision samples.
 
 ### wpd WebP decoder — 2026-10-04
 

@@ -1090,6 +1090,7 @@ mod tests {
             );
         }
     }
+
     /// A probe of an animated file opens the file once, and its timeline is read
     /// through that same open.
     ///

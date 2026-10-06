@@ -4,9 +4,10 @@
 The picture is written here as the png a reader can look at and as the uncompressed
 tiff that libtiff's own `tiffcp` reads to make the compressed spellings:
 
-    tiffcp -c webp tests/fixtures/tiff-webp-source.tiff tests/fixtures/tiff-webp.tiff
+    tiffcp -c webp tests/fixtures/tiff-source.tiff tests/fixtures/tiff-webp.tiff
     tiffcp -c none tests/fixtures/tiff-webp.tiff tests/fixtures/tiff-webp-uncompressed.tiff
-    tiffcp -c zstd tests/fixtures/tiff-webp-source.tiff tests/fixtures/tiff-webp-unknown.tiff
+    tiffcp -c zstd tests/fixtures/tiff-source.tiff tests/fixtures/tiff-webp-unknown.tiff
+    tiffcp -c jpeg tests/fixtures/tiff-source.tiff tests/fixtures/tiff-jpeg-ycbcr.tiff
 
 `tiff-webp.tiff` is libtiff's own webp page, and `tiff-webp-uncompressed.tiff` is
 libtiff's own decode of it -- `tiffcp -c webp` is lossy by default, so the pair is
@@ -97,8 +98,9 @@ def write_tiff(path: Path, strip: bytes, compression: int) -> None:
 def main() -> int:
     os.makedirs(FIXTURES, exist_ok=True)
     write_source_png(FIXTURES / "tiff-webp-source.png")
-    write_tiff(FIXTURES / "tiff-webp-source.tiff", raster(), 1)
+    write_tiff(FIXTURES / "tiff-source.tiff", raster(), 1)
     print("wrote the source picture and its uncompressed tiff")
+    print("the compressed spellings come from the tiffcp commands in the header")
     return 0
 
 

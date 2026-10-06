@@ -127,6 +127,10 @@
   the page holds the samples its uncompressed spelling does. A compression code
   this reader does not take is now refused by name at the probe instead of by the
   crate at the decode
+- A TIFF whose photometric is YCbCr and whose strip is a JPEG is decoded by the
+  crate and handed out as its own planes at one sample a pixel, which is the
+  resolution a jpeg decodes to, rather than being refused as a compressed ycbcr
+  page
 
 ### fixed
 

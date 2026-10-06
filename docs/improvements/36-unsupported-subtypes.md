@@ -1,6 +1,8 @@
 # unsupported subtypes, and the route to each one
 
-Status: **all ten routes are implemented.** Written 2026-10-06 against the tree
+Status: **all ten routes are implemented**, and a page this reader refused afterwards
+-- a ycbcr TIFF whose strip is a JPEG -- is implemented too, in its own section below.
+Written 2026-10-06 against the tree
 plan 34 left, and worked through in the order at the end of this page: the TGA two
 byte map entries, the bare DIB, cursors, the gray+alpha TIFF, the flat gray EXR,
 twelve bit subsampled AVIF/HEIF, a heic storing av1, the ISO composition boxes, the
@@ -220,6 +222,24 @@ makes the compressed spelling from the uncompressed one this script writes, and 
 file the refusal is pinned against is a real `tiffcp -c zstd` page rather than a
 raster that claims a code it does not hold. `tiffcmp` agrees the two spellings hold
 the same samples, which is the acceptance's first half stated by libtiff itself.
+
+## ycbcr TIFF pages whose strip is a JPEG
+
+**Today.** The ycbcr path reads the raster itself, because the crate's chunk reader
+refuses this photometric, so a page whose strips are jpegs was refused by name even
+though the crate's *whole-picture* decode takes it.
+
+**Landed.** The probe now takes the jpeg codes (6 and 7) for a ycbcr page and records
+the sampling as one sample a pixel, and the decode hands the page to the crate and
+splits what it returns into three planes. Two measurements made the shape: the
+crate's `colortype()` for such a page is `YCbCr(8)`, and its `read_image()` returns
+interleaved ycbcr at full resolution -- the chroma is already upsampled, which is why
+the format is `YUV444P8` whatever the page says its encoder used. Every other
+compression of a ycbcr page is still refused by name, which is what the existing
+`tiff-ycbcr-lzw.tiff` and `tiff-ycbcr-16bit.tiff` checks pin. The fixture is
+`tiff-jpeg-ycbcr.tiff`, `tiffcp -c jpeg` from the same source raster the webp
+fixtures are cut from, and the validator pins its format, its size and the jpeg's own
+luma and chroma samples.
 
 ## JP2 gray+alpha, palettes and the `cdef` box
 
