@@ -94,6 +94,10 @@
   depth, so the shape is read from the directory instead: two samples and an
   `ExtraSamples` value that names alpha. The second sample becomes the alpha
   clip, and `ImgSeqOriginalColorType` is `La8`, `La16` or `La32F`
+- A flat grayscale OpenEXR is read: `Y` is the colour plane and `A` is the
+  alpha clip, which is the same rule the r,g,b channel set already followed, and
+  `ImgSeqOriginalColorType` is `L32F` or `La32F`. A layer that states neither
+  set is still declined rather than described wrongly
 
 ### fixed
 

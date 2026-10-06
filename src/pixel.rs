@@ -61,6 +61,7 @@ impl PixelFormat {
             ColorType::Rgb16 | ColorType::Rgba16 => Some(Self::Rgb16),
             ColorType::Rgb32F | ColorType::Rgba32F => Some(Self::Rgb32F),
             ColorType::La32F => Some(Self::Gray32F),
+            ColorType::L32F => Some(Self::Gray32F),
         }
     }
 
@@ -654,7 +655,7 @@ fn frame_depth(frame: &VideoFrame, source: PixelFormat) -> Result<FrameDepth> {
 #[must_use]
 pub(crate) const fn channel_count(color_type: ColorType) -> usize {
     match color_type {
-        ColorType::L8 | ColorType::L16 => 1,
+        ColorType::L8 | ColorType::L16 | ColorType::L32F => 1,
         ColorType::La8 | ColorType::La16 | ColorType::La32F => 2,
         ColorType::Rgb8 | ColorType::Rgb16 | ColorType::Rgb32F => 3,
         ColorType::Rgba8 | ColorType::Rgba16 | ColorType::Rgba32F => 4,
@@ -1097,6 +1098,7 @@ pub fn write_planar(
         (4, 3) => write_planes::<f32, 3>(frame, &layout, planes, pixels, transform, shift)?,
         (4, 4) => write_planes::<f32, 4>(frame, &layout, planes, pixels, transform, shift)?,
         (4, 2) => write_planes::<f32, 2>(frame, &layout, planes, pixels, transform, shift)?,
+        (4, 1) => write_planes::<f32, 1>(frame, &layout, planes, pixels, transform, shift)?,
         (bytes_per_sample, channels) => {
             return Err(ImgSeqError::new(format!(
                 "unsupported sample size {bytes_per_sample} with {channels} channels"

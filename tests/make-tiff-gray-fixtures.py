@@ -174,7 +174,7 @@ def gray_alpha_values(bits: int) -> tuple[list[list[float]], list[list[float]]]:
         top = (1 << bits) - 1
         gray = [[(x * top) // (WIDTH - 1) for x in range(WIDTH)] for _ in range(HEIGHT)]
         alpha = [[(y * top) // (HEIGHT - 1) for _ in range(WIDTH)] for y in range(HEIGHT)]
-    return gray, alpha
+    return gray, alpha  # pyright: ignore[reportReturnType]
 
 
 def write_gray_alpha_tiff(
@@ -276,6 +276,7 @@ def write_sample_tiff(
     }
     return write_directory(path, SAMPLE_TAGS, values, raster)
 
+
 def ramp(bits: int) -> list[list[int]]:
     """Every value the width can hold, cycling so one row holds several."""
     values = [v * 255 // ((1 << bits) - 1) for v in range(1 << bits)]
@@ -344,6 +345,7 @@ def build() -> None:
     page = Image.open(FIXTURES / "tiff-gray1.tiff")
     page.save(FIXTURES / "tiff-gray1-lzw.tiff", compression="tiff_lzw")
 
+
 def check() -> None:
     from PIL import Image
 
@@ -366,7 +368,7 @@ def check() -> None:
                 f" {hashlib.sha256(raw).hexdigest()[:16]} bytes={len(raw)}"
             )
             for index, band in enumerate(bands):
-                values = list(image.getdata(index))
+                values = list(image.getdata(index))  # pyright: ignore[reportArgumentType]
                 print(f"  {band}: first/last={values[0]}/{values[WIDTH - 1]} second={values[1]}")
             continue
         gray = image.convert("L")

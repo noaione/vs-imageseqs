@@ -40,6 +40,8 @@ pub enum ColorType {
     Rgb32F,
     /// Three `f32` samples and an `f32` alpha sample.
     Rgba32F,
+    /// One `f32` gray sample per pixel.
+    L32F,
     /// One `f32` gray sample and an `f32` alpha sample.
     La32F,
 }
@@ -60,7 +62,7 @@ impl ColorType {
         match self {
             Self::L8 | Self::La8 | Self::Rgb8 | Self::Rgba8 => 1,
             Self::L16 | Self::La16 | Self::Rgb16 | Self::Rgba16 => 2,
-            Self::Rgb32F | Self::Rgba32F | Self::La32F => 4,
+            Self::Rgb32F | Self::Rgba32F | Self::La32F | Self::L32F => 4,
         }
     }
 
@@ -69,7 +71,7 @@ impl ColorType {
     #[cfg(test)]
     pub const fn channels(self) -> usize {
         match self {
-            Self::L8 | Self::L16 => 1,
+            Self::L8 | Self::L16 | Self::L32F => 1,
             Self::La8 | Self::La16 | Self::La32F => 2,
             Self::Rgb8 | Self::Rgb16 | Self::Rgb32F => 3,
             Self::Rgba8 | Self::Rgba16 | Self::Rgba32F => 4,
@@ -82,7 +84,7 @@ impl ColorType {
         match self {
             Self::La8 | Self::La16 | Self::La32F => Some(1),
             Self::Rgba8 | Self::Rgba16 | Self::Rgba32F => Some(3),
-            Self::L8 | Self::L16 | Self::Rgb8 | Self::Rgb16 | Self::Rgb32F => None,
+            Self::L8 | Self::L16 | Self::Rgb8 | Self::Rgb16 | Self::Rgb32F | Self::L32F => None,
         }
     }
 
@@ -128,6 +130,8 @@ pub enum SourceColorType {
     Rgb32F,
     /// Three `f32` channels and an `f32` alpha channel.
     Rgba32F,
+    /// One `f32` gray channel per pixel.
+    L32F,
     /// One `f32` gray channel and an `f32` alpha channel.
     La32F,
     /// Eight-bit cmyk.
@@ -163,6 +167,7 @@ impl SourceColorType {
             Self::Rgb32F => "Rgb32F",
             Self::Rgba32F => "Rgba32F",
             Self::La32F => "La32F",
+            Self::L32F => "L32F",
             Self::Cmyk8 => "Cmyk8",
             Self::Cmyk16 => "Cmyk16",
         }
@@ -191,6 +196,7 @@ impl SourceColorType {
             ColorType::Rgb32F => Self::Rgb32F,
             ColorType::Rgba32F => Self::Rgba32F,
             ColorType::La32F => Self::La32F,
+            ColorType::L32F => Self::L32F,
         }
     }
 }
@@ -209,6 +215,7 @@ impl From<ColorType> for SourceColorType {
             ColorType::Rgb32F => Self::Rgb32F,
             ColorType::Rgba32F => Self::Rgba32F,
             ColorType::La32F => Self::La32F,
+            ColorType::L32F => Self::L32F,
         }
     }
 }
@@ -296,10 +303,11 @@ mod tests {
             (SourceColorType::Rgb32F, "Rgb32F"),
             (SourceColorType::Rgba32F, "Rgba32F"),
             (SourceColorType::La32F, "La32F"),
+            (SourceColorType::L32F, "L32F"),
             (SourceColorType::Cmyk8, "Cmyk8"),
             (SourceColorType::Cmyk16, "Cmyk16"),
         ];
-        assert_eq!(labels.len(), 17);
+        assert_eq!(labels.len(), 18);
         for (value, label) in labels {
             assert_eq!(value.label(), label);
         }

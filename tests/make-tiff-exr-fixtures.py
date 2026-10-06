@@ -33,36 +33,35 @@ def magick(*args: str) -> None:
     subprocess.run(["magick", *args], check=True)
 
 
-def write_multipart_exr(path: str) -> None:
-    """Writes a two part openexr whose **first** part holds no colour channel.
+# The sample type and compression every fixture here uses: float samples and no
+# compression, so a chunk is one scan line of raw floats.
+FLOAT, UNCOMPRESSED = 2, 0
 
-    Hand written because nothing on this machine writes a multi part file:
-    ImageMagick writes one part, and the OpenEXR command line tools are not
-    installed. The shape is the one the routing plan names -- part 0 is a depth
-    pass holding only ``Z``, part 1 is the colour picture -- because that is the
-    file where a probe and a decode can settle on different parts.
+# The size of every hand written picture here, which is small on purpose: the
+# rows are stated by hand and the point is which channels the file holds.
+EXR_WIDTH, EXR_HEIGHT = 2, 2
 
-    The bytes are the format's own: a magic, a version whose multi part bit is
-    set, one header a part, a zero byte that ends the headers, then an offset
-    table a part and the scan line chunks the tables point at. Every part is
-    uncompressed, so a chunk is one scan line of raw floats.
+
+def write_exr(
+    path: str,
+    parts: list[tuple[str, list[tuple[str, int]], dict[str, list[list[float]]]]],
+) -> None:
+    """Writes an openexr whose parts are the given channels and their rows.
+
+    Hand written because ImageMagick writes one part of three or four channels and
+    nothing else: it writes `B`, `G` and `R` even when asked for a grayscale
+    picture, so a single `Y` channel -- the shape the flat gray fixtures need --
+    cannot come from it. The bytes are the format's own: a magic, a version whose
+    multi part bit is set when there is more than one part, one header a part, a
+    zero byte that ends the headers, then an offset table a part and the scan line
+    chunks the tables point at. Every part is uncompressed, so a chunk is one scan
+    line of raw floats, and a single part chunk states no part number where a
+    multi part one does.
     """
     import struct
 
-    FLOAT, UNCOMPRESSED = 2, 0
-    width, height = 2, 2
-    parts = [
-        ("depth", [("Z", FLOAT)], {"Z": [[100.0, 200.0], [300.0, 400.0]]}),
-        (
-            "colour",
-            [("B", FLOAT), ("G", FLOAT), ("R", FLOAT)],
-            {
-                "B": [[0.25, 0.5], [1.75, 2.0]],
-                "G": [[0.75, 1.0], [2.25, 2.5]],
-                "R": [[1.25, 1.5], [2.75, 3.0]],
-            },
-        ),
-    ]
+    width, height = EXR_WIDTH, EXR_HEIGHT
+    multipart = len(parts) > 1
 
     def attribute(name: str, kind: str, payload: bytes) -> bytes:
         return name.encode() + b"\x00" + kind.encode() + b"\x00" + struct.pack("<i", len(payload)) + payload
@@ -71,7 +70,9 @@ def write_multipart_exr(path: str) -> None:
         # A channel list entry is a name, a sample type, a linearity flag and a
         # sampling rate, and the list ends with a single zero byte.
         listing = bytearray()
-        for channel, sample_type in channels:
+        # The list is sorted by name, which the format requires and the crate
+        # checks.
+        for channel, sample_type in sorted(channels):
             listing += channel.encode() + b"\x00"
             listing += struct.pack("<i", sample_type) + b"\x00" + b"\x00\x00\x00"
             listing += struct.pack("<ii", 1, 1)
@@ -79,9 +80,6 @@ def write_multipart_exr(path: str) -> None:
         window = struct.pack("<iiii", 0, 0, width - 1, height - 1)
         attributes = [
             ("channels", "chlist", bytes(listing)),
-            # A multi part file has to state its chunk count; see the note on
-            # `OffsetTable` in the crate.
-            ("chunkCount", "int", struct.pack("<i", height)),
             ("compression", "compression", struct.pack("<B", UNCOMPRESSED)),
             ("dataWindow", "box2i", window),
             ("displayWindow", "box2i", window),
@@ -95,6 +93,10 @@ def write_multipart_exr(path: str) -> None:
             ("screenWindowWidth", "float", struct.pack("<f", 1.0)),
             ("type", "string", b"scanlineimage"),
         ]
+        if multipart:
+            # A multi part file has to state its chunk count; see the note on
+            # `OffsetTable` in the crate.
+            attributes.append(("chunkCount", "int", struct.pack("<i", height)))
         attributes.sort(key=lambda entry: entry[0])
         out = bytearray()
         for attribute_name, kind, payload in attributes:
@@ -102,10 +104,14 @@ def write_multipart_exr(path: str) -> None:
         return bytes(out) + b"\x00"
 
     # Version 2 with bit 12 set, which is what makes a file multi part.
-    out = bytearray(b"\x76\x2f\x31\x01" + struct.pack("<I", 2 | 0x1000))
+    out = bytearray(b"\x76\x2f\x31\x01" + struct.pack("<I", 2 | (0x1000 if multipart else 0)))
     for name, channels, _ in parts:
         out += part_header(name, channels)
-    out += b"\x00"
+    if multipart:
+        # The zero byte that ends the header list is the multi part one: a single
+        # part file is a 1.x file, where the byte that ends the attributes is also
+        # the one that ends the header.
+        out += b"\x00"
 
     # The offset tables follow the headers and the chunks follow the tables, so
     # an offset is only known once both are laid out.
@@ -116,10 +122,16 @@ def write_multipart_exr(path: str) -> None:
         part_offsets = []
         for y in range(height):
             payload = bytearray()
-            for channel, _sample_type in channels:
+            # The chunk states its channels in the order the header lists them,
+            # which is the sorted one.
+            for channel, _sample_type in sorted(channels):
                 payload += struct.pack(f"<{width}f", *rows[channel][y])
             part_offsets.append(chunks_at + len(chunks))
-            chunks += struct.pack("<iii", number, y, len(payload)) + bytes(payload)
+            if multipart:
+                chunks += struct.pack("<iii", number, y, len(payload))
+            else:
+                chunks += struct.pack("<ii", y, len(payload))
+            chunks += bytes(payload)
         offsets.append(part_offsets)
 
     for part_offsets in offsets:
@@ -129,8 +141,32 @@ def write_multipart_exr(path: str) -> None:
 
     with open(path, "wb") as handle:
         handle.write(out)
-    print(f"  + {os.path.basename(path):28} EXR {width}x{height} 2 parts (Z, then BGR)")
+    held = ", ".join(channel for _, channels, _ in parts for channel, _ in channels)
+    print(f"  + {os.path.basename(path):28} EXR {width}x{height} {len(parts)} part(s) ({held})")
 
+
+def write_multipart_exr(path: str) -> None:
+    """Writes a two part openexr whose **first** part holds no colour channel.
+
+    The shape is the one the routing plan names -- part 0 is a depth pass holding
+    only ``Z``, part 1 is the colour picture -- because that is the file where a
+    probe and a decode can settle on different parts.
+    """
+    write_exr(
+        path,
+        [
+            ("depth", [("Z", FLOAT)], {"Z": [[100.0, 200.0], [300.0, 400.0]]}),
+            (
+                "colour",
+                [("B", FLOAT), ("G", FLOAT), ("R", FLOAT)],
+                {
+                    "B": [[0.25, 0.5], [1.75, 2.0]],
+                    "G": [[0.75, 1.0], [2.25, 2.5]],
+                    "R": [[1.25, 1.5], [2.75, 3.0]],
+                },
+            ),
+        ],
+    )
 
 def source(name: str, depth: int = 8) -> str:
     """Writes the picture every fixture holds, as a png the encoders read."""
@@ -255,6 +291,21 @@ def main() -> int:
     path = os.path.join(FIXTURES, "exr-multipart-z-rgb.exr")
     write_multipart_exr(path)
     report("exr-multipart-z-rgb.exr", path)
+
+    # ---- Flat grayscale: a part holding only `Y`, and one holding `Y` and `A`.
+    # ImageMagick writes three or four channels even when asked for a grayscale
+    # picture, so these are hand written too.
+    gray = {"Y": [[0.25, 0.5], [1.75, 2.0]]}
+    gray_alpha = {
+        "Y": [[0.25, 0.5], [1.75, 2.0]],
+        "A": [[0.125, 0.25], [0.875, 1.0]],
+    }
+    path = os.path.join(FIXTURES, "exr-gray.exr")
+    write_exr(path, [("gray", [("Y", FLOAT)], gray)])
+    report("exr-gray.exr", path)
+    path = os.path.join(FIXTURES, "exr-gray-alpha.exr")
+    write_exr(path, [("gray", [("Y", FLOAT), ("A", FLOAT)], gray_alpha)])
+    report("exr-gray-alpha.exr", path)
 
     for leftover in ["_src-gray.png", "_src-gray16.png", "_src-rgb.png", "_src-rgb16.png", "_src-rgba.png"]:
         target = os.path.join(FIXTURES, leftover)

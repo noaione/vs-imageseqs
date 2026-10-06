@@ -2378,6 +2378,51 @@ def test_gray_alpha_pages() -> None:
         check(False, "a two sample gray page with no alpha is refused")
 
 
+def test_gray_exr() -> None:
+    """A flat grayscale openexr is read: `Y` is the colour plane, `A` the alpha.
+
+    ImageMagick writes three or four channels whatever it is asked for, so the
+    two fixtures are hand written; see ``tests/make-tiff-exr-fixtures.py``. A
+    file without an `A` hands out an opaque alpha clip, which is what every file
+    without one does.
+    """
+    clip, alpha_clip = read_alpha(files=[fixture("exr-gray.exr")])
+    check(
+        (clip.width, clip.height) == (2, 2),
+        f"exr-gray: the size is the layer's own window (got {clip.width}x{clip.height})",
+    )
+    check(
+        clip.format.name == "GrayS",
+        f"exr-gray: the colour clip is GrayS (got {clip.format.name})",
+    )
+    check(clip.format.num_planes == 1, "exr-gray: the colour clip is one gray plane")
+    check(
+        almost(samples(clip.get_frame(0)), [0.25, 0.5, 1.75, 2.0]),
+        f"exr-gray: the colour plane is the `Y` samples"
+        f" (got {samples(clip.get_frame(0))})",
+    )
+    check(
+        almost(samples(alpha_clip.get_frame(0)), [1.0, 1.0, 1.0, 1.0]),
+        "exr-gray: a file without an `A` hands out an opaque alpha clip",
+    )
+
+    clip, alpha_clip = read_alpha(files=[fixture("exr-gray-alpha.exr")])
+    check(
+        clip.format.name == "GrayS",
+        f"exr-gray-alpha: the colour clip is GrayS (got {clip.format.name})",
+    )
+    check(
+        almost(samples(clip.get_frame(0)), [0.25, 0.5, 1.75, 2.0]),
+        f"exr-gray-alpha: the colour plane is the `Y` samples"
+        f" (got {samples(clip.get_frame(0))})",
+    )
+    check(
+        almost(samples(alpha_clip.get_frame(0)), [0.125, 0.25, 0.875, 1.0]),
+        f"exr-gray-alpha: the alpha clip is the `A` samples"
+        f" (got {samples(alpha_clip.get_frame(0))})",
+    )
+
+
 def main() -> None:
     for test in (
         test_rgba8,
@@ -2421,6 +2466,7 @@ def main() -> None:
         test_bare_dib,
         test_cursor,
         test_gray_alpha_pages,
+        test_gray_exr,
     ):
         print(f"--- {test.__name__}")
         test()
