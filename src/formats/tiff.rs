@@ -206,6 +206,22 @@ fn layout_of<R: std::io::Read + std::io::Seek>(
     path: &Path,
     action: &str,
 ) -> Result<Layout> {
+    // A compression code this reader does not take is refused here rather than by
+    // the crate at the decode: a probe that described a page the decode would
+    // refuse is the one thing this reader must never do. The codes below are the
+    // ones the crate's own features decode, plus the WebP strip this reader hands
+    // to libwebp itself.
+    let compression = compression_of(decoder);
+    if !matches!(
+        compression,
+        1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 32773 | 32946 | WEBP_COMPRESSION
+    ) {
+        return Err(image_error(
+            action,
+            path,
+            format!("a page compressed with {compression} is not one this reader decodes"),
+        ));
+    }
     // 3 is `RGBPalette`; see `tiff::tags::PhotometricInterpretation`.
     // 3 is `RGBPalette` and 6 is `YCbCr`; see
     // `tiff::tags::PhotometricInterpretation`. Neither is described by a colour
@@ -1018,10 +1034,20 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
             },
         });
     }
+    // A palette and a WebP strip are both read here rather than by the decoder: the
+    // crate refuses the photometric of the first and has no reader for the
+    // compression of the second.
     let mut buffer = if let Some(bits) = layout.palette {
-        // A palette is read here rather than by the decoder, which refuses the
-        // photometric before it can describe a chunk.
         palette_buffer(&mut decoder, &data, &info.path, width, height, bits)?
+    } else if compression_of(&mut decoder) == WEBP_COMPRESSION {
+        webp_buffer(
+            &mut decoder,
+            &data,
+            &info.path,
+            width,
+            height,
+            layout.channels,
+        )?
     } else {
         // Every plane, not the first one: see the note at the head of the file.
         let mut result = match (layout.sample_bytes, layout.float) {
@@ -1362,6 +1388,108 @@ fn palette_buffer<R: std::io::Read + std::io::Seek>(
     Ok(out)
 }
 
+/// The compression code a page states, or `1` when it states none.
+fn compression_of<R: std::io::Read + std::io::Seek>(
+    decoder: &mut tiff::decoder::Decoder<R>,
+) -> u16 {
+    decoder
+        .get_tag_unsigned::<u16>(tiff::tags::Tag::Compression)
+        .unwrap_or(1)
+}
+
+/// The compression code libtiff gives a strip that holds a webp bitstream.
+const WEBP_COMPRESSION: u16 = 50001;
+
+/// Decodes the WebP strips of a page into one interleaved buffer.
+///
+/// A strip holds a whole webp bitstream, and the crate has no reader for one: each
+/// strip is handed to libwebp here, which is the decoder the webp files already go
+/// through. The samples are the ones the uncompressed spelling of the same page
+/// holds, because the strips are read at the depth the page states.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] for a strip table that does not match the file, a
+/// strip that runs past its end, and a strip libwebp refuses.
+fn webp_buffer<R: std::io::Read + std::io::Seek>(
+    decoder: &mut tiff::decoder::Decoder<R>,
+    data: &[u8],
+    path: &Path,
+    width: u32,
+    height: u32,
+    channels: usize,
+) -> Result<Vec<u8>> {
+    let offsets = tag_numbers(decoder, tiff::tags::Tag::StripOffsets, path, "decode")?;
+    let counts = tag_numbers(decoder, tiff::tags::Tag::StripByteCounts, path, "decode")?;
+    if offsets.is_empty() || offsets.len() != counts.len() {
+        return Err(image_error(
+            "decode",
+            path,
+            "the strip table does not hold one count for every offset",
+        ));
+    }
+    let rows_per_strip = decoder
+        .get_tag_unsigned::<u32>(tiff::tags::Tag::RowsPerStrip)
+        .unwrap_or(height)
+        .max(1);
+    let row = usize::try_from(width)
+        .ok()
+        .and_then(|width| width.checked_mul(channels))
+        .ok_or_else(|| image_error("decode", path, "the image row is too large"))?;
+    let stride = i32::try_from(row)
+        .map_err(|_| image_error("decode", path, "the image is too wide for libwebp"))?;
+    let rows = usize::try_from(height).unwrap_or(0);
+    let mut buffer = vec![0u8; row.saturating_mul(rows)];
+    let mut at = 0usize;
+    for (offset, count) in offsets.iter().zip(&counts) {
+        if at >= rows {
+            break;
+        }
+        let start = usize::try_from(*offset).unwrap_or(usize::MAX);
+        let end = start.saturating_add(usize::try_from(*count).unwrap_or(usize::MAX));
+        let Some(strip) = data.get(start..end) else {
+            return Err(image_error(
+                "decode",
+                path,
+                "a strip runs past the end of the file",
+            ));
+        };
+        let covered = usize::try_from(rows_per_strip)
+            .unwrap_or(rows)
+            .min(rows - at);
+        let size = row.saturating_mul(covered);
+        let Some(target) = buffer.get_mut(at * row..at * row + size) else {
+            return Err(image_error(
+                "decode",
+                path,
+                "the strips hold more rows than the image states",
+            ));
+        };
+        // SAFETY: `target` holds exactly `size` bytes and the stride is its row
+        // length, so libwebp writes inside it or fails.
+        let decoded = unsafe {
+            crate::formats::webp::libwebp::WebPDecodeRGBInto(
+                strip.as_ptr(),
+                strip.len(),
+                target.as_mut_ptr(),
+                size,
+                stride,
+            )
+        };
+        if decoded.is_null() {
+            return Err(image_error("decode", path, "libwebp rejected a webp strip"));
+        }
+        at += covered;
+    }
+    if at != rows {
+        return Err(image_error(
+            "decode",
+            path,
+            "the strips hold fewer rows than the image states",
+        ));
+    }
+    Ok(buffer)
+}
 /// One index a pixel, in row order, from the strips of a palette page.
 ///
 /// The raster is read here rather than by the decoder, which refuses this

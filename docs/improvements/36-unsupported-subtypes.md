@@ -1,13 +1,14 @@
 # unsupported subtypes, and the route to each one
 
-Status: **the first eight routes are implemented, and the last two are research.**
-Written 2026-10-06 against the tree plan 34 left, and worked through in the order
-at the end of this page: the TGA two byte map entries, the bare DIB, cursors, the
-gray+alpha TIFF, the flat gray EXR, twelve bit subsampled AVIF/HEIF, a heic
-storing av1 and the ISO composition boxes are in the tree with their fixtures and
-their checks -- the heic storing av1 as a fixture alone, because the path already
-worked, and the fragment box as a recorded non-issue, because no decoder here
-reads one -- and the two the order puts last are still the routes below.
+Status: **all ten routes are implemented.** Written 2026-10-06 against the tree
+plan 34 left, and worked through in the order at the end of this page: the TGA two
+byte map entries, the bare DIB, cursors, the gray+alpha TIFF, the flat gray EXR,
+twelve bit subsampled AVIF/HEIF, a heic storing av1, the ISO composition boxes, the
+JP2 channel definitions and TIFF WebP are in the tree with their fixtures and their
+checks -- the heic storing av1 as a fixture alone, because the path already worked,
+the fragment box as a recorded non-issue, because no decoder here reads one, and the
+palette as a refusal, because this reader cannot expand one -- and what stays
+refused by decision is the section below.
 
 [34](34-input-routing-and-planar-decode.md)'s phase-4 row and the plan-34
 candidate table are where these items were listed as "each need an individual
@@ -206,6 +207,20 @@ is the lie the LZW low-bit fixture was deliberately built to avoid.
 uncompressed spelling of the same picture, and a file whose compression is a
 code the reader does not take is still refused by name rather than by file.
 
+**Landed.** The strip is handed to libwebp, which is the decoder the webp files
+already go through, and the layout the probe describes is the one the directory
+states, so a WebP page is r,g,b or gray like any other. The compression check moved
+into the shared layout walk, which is what makes the second half of the acceptance
+hold: a code this reader does not take is refused at the probe with the code in its
+message, rather than by the crate at the decode. The fixture pair is one raster in
+two containers -- `tiff-webp-uncompressed.tiff` and `tiff-webp.tiff`, whose strip is
+libtiff's own webp bitstream -- and the validator compares them sample by sample.
+The fixtures are libtiff's own, which is what the plan asked for: `tiffcp -c webp`
+makes the compressed spelling from the uncompressed one this script writes, and the
+file the refusal is pinned against is a real `tiffcp -c zstd` page rather than a
+raster that claims a code it does not hold. `tiffcmp` agrees the two spellings hold
+the same samples, which is the acceptance's first half stated by libtiff itself.
+
 ## JP2 gray+alpha, palettes and the `cdef` box
 
 **Today.** `src/formats/jp2.rs` accepts one or three components and rejects two
@@ -237,6 +252,34 @@ a codestream.
 clip whose bytes match `opj_decompress`'s two components; a `cdef` that names
 three colour channels is rgb and not a refusal; and an unlabelled two-component
 file keeps today's refusal, because nothing in it says which sample is alpha.
+
+**Landed: `cdef`.** The channel definitions are read in the box walk the probe
+already makes, and the two shapes that need them are acted on: one colour
+component beside one opacity is `La8`/`La16`, three colour components beside one
+opacity is `Rgba8`/`Rgba16`. A `cdef` that names fewer channels than the file
+holds is not a statement about that file's components, so the count rule stands
+and an unlabelled two-component file keeps its refusal. The decode needed one
+change of its own: `jpeg2k`'s `get_pixels` hands a two-component image back as
+`La8` only when OpenJPEG has marked a component alpha, which is what the same
+`cdef` makes it do -- so the two readers agree about the file by construction
+rather than by a rule written here. The fixtures are `mono-alpha.png` and
+`alpha-rgba8.png` through `opj_compress` losslessly, so the validator checks the
+colour and alpha clips sample by sample against the pngs they came from, and the
+unlabelled variant is the same codestream with the box dropped.
+
+**Landed: `pclr`, as a refusal.** A palette is read and named rather than acted
+on: the codestream holds indices and the colour is in the `pclr` box beside it, so
+the samples a frame would carry are not the ones the SIZ describes. The route the
+plan sketched -- expand the indices here -- is not open to this reader: the decode
+gets whatever components the codec hands back, and OpenJPEG either applies the
+palette itself or refuses the file, so the index plane is never something this
+module can see. What is open is the honest half: a file that states a palette is
+refused by name with the entries and components it states, rather than promised as
+the gray its one component looks like and then failing at decode with `Null
+pointer from openjpeg-sys`. The fixture is the index codestream this script's
+header compresses by hand, wrapped in four entries of three components and a
+`cmap` mapping three channels onto them; the same codestream without the boxes is
+a plain gray page, which the validator checks beside the refusal.
 
 ## Twelve bit subsampled AVIF and HEIF
 

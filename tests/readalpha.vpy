@@ -320,6 +320,68 @@ def test_jpeg2000() -> None:
             f"{name}: opaque alpha plane",
         )
 
+    # A `cdef` box is where a JP2 says what its components mean, and it is what
+    # tells a two-component file apart: without it the container says nothing about
+    # which sample is alpha, which is why the count rule refuses one. These
+    # fixtures are `mono-alpha.png` and `alpha-rgba8.png` through OpenJPEG
+    # losslessly, so their colour and alpha clips are the pngs' own samples.
+    for name, source in [
+        ("alpha-jp2-grayalpha.jp2", "mono-alpha.png"),
+        ("alpha-jp2-rgba8.jp2", "alpha-rgba8.png"),
+    ]:
+        clip, alpha = read_alpha(files=[fixture(name)])
+        plain, plain_alpha = read_alpha(files=[fixture(source)])
+        check(
+            (clip.width, clip.height, clip.format.name)
+            == (plain.width, plain.height, plain.format.name),
+            f"{name}: the colour clip is the png's ({clip.format.name} {clip.width}x{clip.height})",
+        )
+        planes = 1 if clip.format.name.startswith("Gray") else 3
+        for plane in range(planes):
+            check(
+                samples(clip.get_frame(0), plane) == samples(plain.get_frame(0), plane),
+                f"{name}: colour plane {plane} is the png's",
+            )
+        check(
+            samples(alpha.get_frame(0)) == samples(plain_alpha.get_frame(0)),
+            f"{name}: every alpha sample is the png's",
+        )
+
+    # The same codestream with its `cdef` dropped states nothing about which of
+    # its two components is alpha, so it keeps the refusal rather than being
+    # guessed at.
+    try:
+        core.imgseqs.Read(files=[fixture("alpha-jp2-grayalpha-unlabelled.jp2")])
+    except Exception as error:
+        check(
+            "2 JPEG 2000 components" in str(error),
+            f"alpha-jp2-grayalpha-unlabelled: two components with no cdef is refused ({str(error).strip()})",
+        )
+    else:
+        check(False, "alpha-jp2-grayalpha-unlabelled: two components with no cdef is refused")
+
+    # A palette is a statement this reader does not act on: the codestream holds
+    # indices, so the samples a frame would carry are not the ones the SIZ
+    # describes. The fixture is the index codestream with a `pclr` box of four
+    # entries and a `cmap` box mapping three output channels onto it.
+    try:
+        core.imgseqs.Read(files=[fixture("alpha-jp2-palette.jp2")])
+    except Exception as error:
+        check(
+            "JP2 palette of 4 entries of 3 components" in str(error),
+            f"alpha-jp2-palette: a palette is refused by name ({str(error).strip()})",
+        )
+    else:
+        check(False, "alpha-jp2-palette: a palette is refused by name")
+    # The codestream on its own is a plain one component image, which is what the
+    # palette box is the statement about.
+    index = core.imgseqs.Read(files=[fixture("jp2-palette-indices.j2k")])
+    check(index.format.name == "Gray8", "jp2-palette-indices: the codestream alone is gray")
+    check(
+        samples(index.get_frame(0)) == [0, 1, 2, 3, 3, 2, 1, 0],
+        "jp2-palette-indices: the indices are the samples",
+    )
+
 
 def test_opaque_fill() -> None:
     _, alpha = read_alpha(files=[fixture("alpha-rgb8.png")])
@@ -2633,6 +2695,38 @@ def test_heic_storing_av1() -> None:
     )
 
 
+def test_tiff_webp() -> None:
+    """A TIFF whose compression is WebP holds a webp bitstream in its strip."""
+    # The strip is a lossless `cwebp` bitstream of `tiff-webp-source.png`, so the
+    # page decodes to the samples the uncompressed spelling of the same picture
+    # holds: the two fixtures are one raster in two containers.
+    compressed = core.imgseqs.Read(files=[fixture("tiff-webp.tiff")])
+    plain = core.imgseqs.Read(files=[fixture("tiff-webp-uncompressed.tiff")])
+    check(
+        compressed.format.name == plain.format.name == "RGB24",
+        f"tiff webp: both spellings are RGB24 (got {compressed.format.name} and {plain.format.name})",
+    )
+    check(
+        (compressed.width, compressed.height) == (plain.width, plain.height) == (3, 2),
+        "tiff webp: both spellings are 3x2",
+    )
+    check(
+        samples(compressed.get_frame(0)) == samples(plain.get_frame(0)),
+        "tiff webp: every sample is the uncompressed spelling's",
+    )
+    # A compression code this reader does not take is refused by name rather than
+    # read as though it were not compressed.
+    try:
+        core.imgseqs.Read(files=[fixture("tiff-webp-unknown.tiff")])
+    except Exception as error:
+        check(
+            "50000" in str(error),
+            f"tiff webp: an unknown compression is refused by name ({str(error).strip()})",
+        )
+    else:
+        check(False, "tiff webp: an unknown compression is refused by name")
+
+
 def main() -> None:
     for test in (
         test_rgba8,
@@ -2679,6 +2773,7 @@ def main() -> None:
         test_gray_exr,
         test_twelve_bit_pages,
         test_heic_storing_av1,
+        test_tiff_webp,
     ):
         print(f"--- {test.__name__}")
         test()

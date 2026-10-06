@@ -148,12 +148,11 @@ open plus frames to 4.99 s.
 [36 unsupported subtypes](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/36-unsupported-subtypes.md)
 collects the refused subtypes it takes up: what the container states, where the
 change lands, the fixture it needs
-and the check that would accept it. Eight of the ten routes are implemented -- the
-TGA two byte map entries, the bare DIB, cursors, the gray+alpha TIFF, the flat
-gray EXR, twelve bit subsampled AVIF/HEIF, a heic storing av1 and the ISO
-composition boxes, whose fragment slice is a recorded non-issue rather than code
--- and the two the order puts last are still routes: JP2 `cdef` and `pclr`, and
-TIFF WebP. The one refusal that stays a decision is JP2 signed or mixed-precision
+and the check that would accept it. All ten routes are implemented -- the TGA two
+byte map entries, the bare DIB, cursors, the gray+alpha TIFF, the flat gray EXR,
+twelve bit subsampled AVIF/HEIF, a heic storing av1, the ISO composition boxes, the
+JP2 channel definitions and TIFF WebP, whose palette slice is a refusal rather than
+an expansion -- and what stays refused by decision is JP2 signed or mixed-precision
 samples.
 
 ### wpd WebP decoder — 2026-10-04

@@ -113,6 +113,20 @@
   the media is refused by name, because the pictures are decoded in order, and an
   empty edit -- a delay -- is read and not acted on, since a clip has one frame
   per output tick and nowhere to put held ticks
+- A JP2 that states what its components mean is read as what it states: a colour
+  component beside an opacity component is handed out as gray and alpha, and three
+  colour components beside one opacity as r,g,b and alpha. A two component file
+  whose container names no opacity component is still refused, because nothing in
+  it says which sample is alpha
+- A JP2 that states a palette is refused by name rather than read as the gray its
+  one component looks like: the codestream holds indices, so the samples a frame
+  would carry are not the ones its header describes, and this reader does not
+  expand a palette
+- A TIFF whose compression is WebP is decoded here rather than refused: each strip
+  is a webp bitstream, which libwebp reads the same way it reads a webp file, so
+  the page holds the samples its uncompressed spelling does. A compression code
+  this reader does not take is now refused by name at the probe instead of by the
+  crate at the decode
 
 ### fixed
 

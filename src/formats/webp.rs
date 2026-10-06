@@ -393,7 +393,7 @@ fn has_webp_extension(path: &Path) -> bool {
 /// round trip only, which is why they are allowed to be unused in a build
 /// without them.
 #[allow(non_snake_case, dead_code)]
-mod libwebp {
+pub(crate) mod libwebp {
     use std::ffi::{c_int, c_uchar};
 
     /// The signature `WebPEncodeLosslessRGB` and `WebPEncodeLosslessRGBA`
@@ -422,7 +422,7 @@ mod libwebp {
 
         /// Decodes into `output_buffer` as interleaved rgb, one row every
         /// `output_stride` bytes.
-        pub(super) fn WebPDecodeRGBInto(
+        pub(crate) fn WebPDecodeRGBInto(
             data: *const c_uchar,
             data_size: usize,
             output_buffer: *mut c_uchar,
