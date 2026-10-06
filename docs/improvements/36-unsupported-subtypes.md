@@ -1,7 +1,10 @@
 # unsupported subtypes, and the route to each one
 
-Status: **research intent, nothing implemented.** Written 2026-10-06 against the
-tree plan 34 left.
+Status: **the first five routes are implemented, the last five are research.**
+Written 2026-10-06 against the tree plan 34 left, and worked through in the order
+at the end of this page: the TGA two byte map entries, the bare DIB, cursors, the
+gray+alpha TIFF and the flat gray EXR are in the tree with their fixtures and
+their checks, and the five the order puts last are still the routes below.
 
 [34](34-input-routing-and-planar-decode.md)'s phase-4 row and the plan-34
 candidate table are where these items were listed as "each need an individual
@@ -19,9 +22,10 @@ conversion -- stay deferred, and the last section is the one refusal this page
 keeps as a decision rather than a route.
 
 The rule every item here has to satisfy is the index's rule for correctness work:
-a reproducible case or a clear code-path defect first. Today every item has the
-second (a named refusal in the code) and none has the first (a fixture), so the
-fixture is the first step of each route rather than a detail of it. No item is
+a reproducible case or a clear code-path defect first. Every item starts from the
+second -- a named refusal in the code -- and needs the first, which is why the
+fixture is the first step of a route rather than a detail of it; the five that
+have landed each have one. No item is
 accepted on a picture that "looks right": each names the reference decoder or the
 fixture pair its acceptance compares against, which is what the low-bit gray TIFF
 slice just did with Pillow.

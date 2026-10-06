@@ -64,9 +64,11 @@ SOURCES = []
 # A format content cannot name is not a routing failure when it is renamed,
 # because there is nothing in the bytes to route by. Targa has no leading
 # signature at all, and the icon family shares its first four bytes with a Targa
-# type 1 or 2 header, so neither can be identified without the name; `.icc` is
-# not an image at all and is skipped for that reason.
-SKIP = {".tga", ".targa", ".icb", ".vda", ".vst", ".ico", ".cur", ".icc"}
+# signature at all, the icon family shares its first four bytes with a Targa
+# type 1 or 2 header, and a bare DIB has no `BM` file header to be named by, so
+# none of the three can be identified without the name; `.icc` is not an image
+# at all and is skipped for that reason.
+SKIP = {".tga", ".targa", ".icb", ".vda", ".vst", ".ico", ".cur", ".dib", ".icc"}
 _seen: set[str] = set()
 for _entry in sorted(FIXTURES.iterdir()):
     if not _entry.is_file() or _entry.suffix.lower() in _seen:
