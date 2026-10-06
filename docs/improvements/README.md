@@ -143,6 +143,21 @@ open plus frames to 4.99 s.
 
 ## plans
 
+### PNGWrite: request-driven PNG export
+
+[38 PNGWrite](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/38-png-write.md)
+is research complete and proposed, with no plugin implementation. It records the
+requested arguments and recommends Gray/RGB integer 8–16-bit input, optional
+alpha, lossless widening of intermediate depths, and row-streamed encoding with
+the existing `png` dependency. API defaults remain proposals. FrameProps report
+successful writes rather than serving as the save ledger; repeat requests,
+cache behavior, safe publication and overwrite permission need explicit
+contracts. YUV/float conversion stays upstream in the recommended first scope.
+The note includes encoder metadata caveats, effort estimates and acceptance checks.
+Its [writer benchmark protocol](../BENCH.md#png-writer-comparison-planned) requires
+comparison with default Pillow saving both serially and through an nmanga-style
+bounded pool fixed to six workers, including total completion time and peak memory.
+
 ### unsupported subtypes — 2026-10-06
 
 [36 unsupported subtypes](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/36-unsupported-subtypes.md)
