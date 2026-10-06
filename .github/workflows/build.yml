@@ -2,12 +2,18 @@ name: build
 
 on:
   push:
+    branches:
+      - master
+      - develop
     paths-ignore:
       - 'README.md'
       - 'LICENSE'
       - '.gitignore'
       - '.vscode/**'
   pull_request:
+    branches:
+      - master
+      - develop
     paths-ignore:
       - 'README.md'
       - 'LICENSE'
