@@ -1,12 +1,13 @@
 # unsupported subtypes, and the route to each one
 
-Status: **the first seven routes are implemented, the last three are research.**
-Written 2026-10-06 against the tree plan 34 left, and worked through in the order
-at the end of this page: the TGA two byte map entries, the bare DIB, cursors, the
-gray+alpha TIFF, the flat gray EXR, twelve bit subsampled AVIF/HEIF and a heic
-storing av1 are in the tree with their fixtures and their checks -- the last of
-them as a fixture alone, because the path already worked -- and the three the
-order puts last are still the routes below.
+Status: **seven routes are implemented, the eighth is under way, and the last two
+are research.** Written 2026-10-06 against the tree plan 34 left, and worked
+through in the order at the end of this page: the TGA two byte map entries, the
+bare DIB, cursors, the gray+alpha TIFF, the flat gray EXR, twelve bit subsampled
+AVIF/HEIF and a heic storing av1 are in the tree with their fixtures and their
+checks -- the heic storing av1 as a fixture alone, because the path already
+worked -- the ISO composition boxes have their first slice, and the two the order
+puts last are still the routes below.
 
 [34](34-input-routing-and-planar-decode.md)'s phase-4 row and the plan-34
 candidate table are where these items were listed as "each need an individual
@@ -336,6 +337,22 @@ duration this build is known to report wrongly, which is why the walker exists.
 validator's animation section, beside the existing timeline checks. A file with
 none of the three boxes decodes exactly as it does today, which is the control
 that says the walker did not change the common case.
+
+**Landed: `ctts`.** A composition-to-sample box is read, and a sample is
+presented at its decode time plus its offset. The two details the plan names are
+the two that needed writing down: a time that lands before zero is clamped, which
+is what a version zero box's unsigned offsets make easy to get wrong by
+subtracting, and a track whose offsets put a sample before the one before it is
+refused, because this reader replays the pictures in the order they are decoded
+and has nowhere to put a presentation that has to be shown before the one it
+follows. The fixture is `animation.avif` with a version one box inserted by the
+animation maker -- no encoder here writes one -- and it pins both: the first
+sample is composed forty ticks before zero and the second a hundred after its
+decode time, so the holds become 180, 70, 110 and 240 ticks and the four pictures
+land on output frames 0, 5, 6 and 9 of fifteen, with the same four pictures the
+plain fixture holds. `elst` and fragments are still open, and the `elst` slice has
+a head start: the fixtures every encoder here writes already carry an identity
+one, which is why the walker ignores it today without a visible effect.
 
 ## Flat grayscale Y/Y+A EXR
 

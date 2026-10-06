@@ -102,6 +102,11 @@
   own yuv planes. `YUV420P12` and `YUV422P12` are the two formats the table
   gained, where a twelve bit 4:2:0 or 4:2:2 page used to keep the r,g,b the
   reader builds
+- An avif or heif sequence that states composition offsets presents its samples
+  at the instants the `ctts` box names rather than where they were decoded. A
+  sample composed before zero is clamped rather than wrapped, and a track whose
+  offsets put a sample before the one before it is refused, because the pictures
+  are replayed in the order they are decoded
 
 ### fixed
 

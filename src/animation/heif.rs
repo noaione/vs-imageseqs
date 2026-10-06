@@ -81,18 +81,55 @@ pub fn segment_info(
     }))
 }
 
-/// Turns a track's sample durations into a presentation list.
+/// Turns a track's sample durations and composition offsets into presentations.
+///
+/// A sample's presentation time is its decode time -- the sum of the durations
+/// before it -- plus its composition offset, and a track that states none is
+/// presented where it was decoded. A time that lands before zero is clamped
+/// rather than wrapped: a version zero box states its offsets unsigned, and
+/// reading one as the difference it stands for is exactly what a subtraction
+/// gets wrong.
+///
+/// Each presentation is held until the next one starts, so the offsets decide
+/// the holds as well as the instants; the last is held to the end of the track,
+/// which is the decode time after it. A track whose offsets put a sample before
+/// the one before it is refused: this reader replays the pictures in the order
+/// they are decoded, and it has nowhere to put a presentation that has to be
+/// shown before the one it follows.
 fn presentations(timing: &TrackTiming, path: &Path) -> Result<Vec<Presentation>> {
-    let mut presentations = Vec::with_capacity(timing.durations.len());
-    let mut timestamp = 0i64;
-    for &duration in &timing.durations {
-        presentations.push(Presentation {
-            timestamp,
-            duration: Some(i64::from(duration)),
-        });
-        timestamp = timestamp.checked_add(i64::from(duration)).ok_or_else(|| {
+    let mut instants = Vec::with_capacity(timing.durations.len());
+    let mut decode = 0i64;
+    let mut last = 0i64;
+    for (index, &duration) in timing.durations.iter().enumerate() {
+        let offset = timing.offsets.get(index).copied().unwrap_or(0);
+        let instant = decode
+            .checked_add(offset)
+            .ok_or_else(|| {
+                ImgSeqError::new(format!("the timeline of '{}' overflows", path.display()))
+            })?
+            .max(0);
+        if instant < last {
+            return Err(ImgSeqError::new(format!(
+                "the composition offsets of '{}' put sample {index} before the one before it",
+                path.display()
+            )));
+        }
+        last = instant;
+        instants.push(instant);
+        decode = decode.checked_add(i64::from(duration)).ok_or_else(|| {
             ImgSeqError::new(format!("the timeline of '{}' overflows", path.display()))
         })?;
+    }
+    // The decode time after the last sample is where the track ends, which is
+    // what holds the last presentation for its own duration.
+    let end = decode;
+    let mut presentations = Vec::with_capacity(instants.len());
+    for (index, &instant) in instants.iter().enumerate() {
+        let next = instants.get(index + 1).copied().unwrap_or(end);
+        presentations.push(Presentation {
+            timestamp: instant,
+            duration: Some(next - instant),
+        });
     }
     Ok(presentations)
 }

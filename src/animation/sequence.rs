@@ -101,6 +101,15 @@ pub struct TrackTiming {
     pub timescale: u32,
     /// How long each sample is displayed, in timeline order.
     pub durations: Vec<u32>,
+    /// Composition offsets, one per sample, or empty when the track states
+    /// none.
+    ///
+    /// A sample's presentation time is its decode time plus its offset, and the
+    /// offset may move it before zero: the caller clamps that rather than
+    /// wrapping, because a version zero box states the offsets unsigned and
+    /// reading one as the difference it stands for is what a subtraction gets
+    /// wrong.
+    pub offsets: Vec<i64>,
 }
 
 impl TrackTiming {
@@ -276,6 +285,12 @@ fn track_timing(data: &[u8], trak: Box_) -> Option<TrackTiming> {
     let timescale = read_timescale(data, mdhd)?;
     let minf = child(data, mdia, b"minf")?;
     let stbl = child(data, minf, b"stbl")?;
+    // A track that states no composition offsets is the common case, and every
+    // sample is then presented where it was decoded.
+    let offsets = match child(data, stbl, b"ctts") {
+        Some(ctts) => read_ctts(data, ctts)?,
+        None => Vec::new(),
+    };
     let stts = child(data, stbl, b"stts")?;
     let durations = read_stts(data, stts)?;
     if timescale == 0 || durations.is_empty() {
@@ -284,6 +299,7 @@ fn track_timing(data: &[u8], trak: Box_) -> Option<TrackTiming> {
     Some(TrackTiming {
         timescale,
         durations,
+        offsets,
     })
 }
 
@@ -330,6 +346,46 @@ fn read_stts(data: &[u8], stts: Box_) -> Option<Vec<u32>> {
         at += 8;
     }
     Some(durations)
+}
+
+/// The composition offsets a composition-to-sample box states.
+///
+/// The box is the same table of runs [`read_stts`] reads, with an offset where
+/// the delta goes, and the offsets are signed in version one and unsigned in
+/// version zero: a version zero box cannot state a negative offset at all, so
+/// both are read into the signed type the caller adds to a decode time.
+fn read_ctts(data: &[u8], ctts: Box_) -> Option<Vec<i64>> {
+    let payload = &data[ctts.start..ctts.end];
+    let version = *payload.first()?;
+    let count = u32::from_be_bytes([
+        *payload.get(4)?,
+        *payload.get(5)?,
+        *payload.get(6)?,
+        *payload.get(7)?,
+    ]);
+    let mut offsets = Vec::new();
+    let mut at = 8usize;
+    for _ in 0..count {
+        let entry = payload.get(at..at + 8)?;
+        let samples = u32::from_be_bytes([entry[0], entry[1], entry[2], entry[3]]);
+        if samples == 0 {
+            return None;
+        }
+        let raw = [entry[4], entry[5], entry[6], entry[7]];
+        let offset = if version == 1 {
+            i64::from(i32::from_be_bytes(raw))
+        } else {
+            i64::from(u32::from_be_bytes(raw))
+        };
+        // The same bound `read_stts` keeps, for the same reason.
+        let total = offsets.len().checked_add(samples as usize)?;
+        if total > MAX_SAMPLES {
+            return None;
+        }
+        offsets.extend(std::iter::repeat_n(offset, samples as usize));
+        at += 8;
+    }
+    Some(offsets)
 }
 
 /// The clean aperture that applies to a track's pictures.
@@ -592,6 +648,37 @@ mod tests {
         assert_eq!(sequence.timing.durations, [80, 170, 110, 240]);
         assert_eq!(sequence.timing.durations.iter().sum::<u32>(), 600);
         assert_eq!(sequence.timing.samples(), 4);
+    }
+
+    /// A track that states composition offsets presents its samples where the
+    /// `ctts` box says rather than where they were decoded.
+    ///
+    /// The fixture is `animation.avif` with a version one box inserted by
+    /// `tests/make-animation-fixtures.py`, whose offsets are `-40, 100, 0, 0`:
+    /// the first sample is composed forty ticks before zero, which is clamped,
+    /// and the second a hundred after its decode time. The decode times the
+    /// durations make are 0, 80, 250 and 360, so the presentation times the
+    /// offsets ask for are 0, 180, 250 and 360.
+    #[test]
+    fn a_composition_offset_moves_a_sample() {
+        let sequence = read_file(&fixture("animation-ctts.avif"))
+            .expect("the fixture reads")
+            .expect("the fixture is a sequence");
+        assert_eq!(sequence.timing.timescale, 1000);
+        assert_eq!(sequence.timing.durations, [80, 170, 110, 240]);
+        assert_eq!(sequence.timing.offsets, [-40, 100, 0, 0]);
+        assert_eq!(sequence.timing.samples(), 4);
+    }
+
+    /// A track with no composition offsets states none, which is the control:
+    /// the common case has to read exactly as it did before the box was
+    /// understood.
+    #[test]
+    fn a_track_without_composition_offsets_states_none() {
+        let sequence = read_file(&fixture("animation.avif"))
+            .expect("the fixture reads")
+            .expect("the fixture is a sequence");
+        assert!(sequence.timing.offsets.is_empty());
     }
 
     /// The heic fixture states the same sample count at a different rate, and

@@ -1590,6 +1590,39 @@ def test_animation() -> None:
             f"animation: {name} is 6 frames at 10 fps (got {slower.num_frames})",
         )
 
+    # A track that states composition offsets presents its samples where the
+    # `ctts` box says rather than where they were decoded. The fixture is
+    # `animation.avif` with a version one box inserted by
+    # `tests/make-animation-fixtures.py`: the first sample is composed 40 ms
+    # before zero, which is clamped rather than wrapped, and the second 100 ms
+    # after its decode time, so the four holds become 180, 70, 110 and 240 ms
+    # and the pictures land on output frames 0, 5, 6 and 9.
+    clip = core.imgseqs.Read(files=[fixture("animation-ctts.avif")])
+    check(
+        clip.num_frames == 15,
+        f"animation ctts: the clip is 15 frames at 24 fps (got {clip.num_frames})",
+    )
+    starts = [0, 5, 6, 9]
+    hashes = [frame_hash(clip.get_frame(index)) for index in range(clip.num_frames)]
+    ends = [*starts[1:], clip.num_frames]
+    for index, (start, end) in enumerate(zip(starts, ends)):
+        check(
+            len({hashes[frame] for frame in range(start, end)}) == 1,
+            f"animation ctts: holds presentation {index} across frames {start}..{end}",
+        )
+    # The same four pictures as the avif it was cut from, at the instants the
+    # box states: only the timing moved.
+    plain = core.imgseqs.Read(files=[fixture("animation.avif")])
+    check(
+        {hashes[start] for start in starts}
+        == {frame_hash(plain.get_frame(index)) for index in [0, 2, 6, 9]},
+        "animation ctts: the four pictures are the ones the avif holds",
+    )
+    slower = core.imgseqs.Read(files=[fixture("animation-ctts.avif")], fpsnum=10, fpsden=1)
+    check(
+        slower.num_frames == 6,
+        f"animation ctts: the clip is 6 frames at 10 fps (got {slower.num_frames})",
+    )
     # A still of a format that has an animation path stays one frame.
     for name in ["alpha-rgb8.png", "alpha-rgba8.png", "alpha-rgba8.jxl"]:
         clip = core.imgseqs.Read(files=[fixture(name)])

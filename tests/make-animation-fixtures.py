@@ -94,6 +94,103 @@ def write_rgba16_apng(path: Path) -> None:
     path.write_bytes(output)
 
 
+def parse_boxes(data: bytes) -> list[tuple[bytes, bytes]]:
+    """Every top level box of `data`, as its kind and its payload."""
+    found = []
+    at = 0
+    while at + 8 <= len(data):
+        size = struct.unpack(">I", data[at : at + 4])[0]
+        kind = data[at + 4 : at + 8]
+        if size < 8:
+            raise SystemExit(f"a box of size {size} is not one of these fixtures")
+        found.append((kind, data[at + 8 : at + size]))
+        at += size
+    return found
+
+
+def pack_box(kind: bytes, payload: bytes) -> bytes:
+    return struct.pack(">I", 8 + len(payload)) + kind + payload
+
+
+def pack_boxes(boxes: list[tuple[bytes, bytes]]) -> bytes:
+    return b"".join(pack_box(kind, payload) for kind, payload in boxes)
+
+
+def replaced(
+    boxes: list[tuple[bytes, bytes]], kind: bytes, payload: bytes
+) -> list[tuple[bytes, bytes]]:
+    """`boxes` with the first box of `kind` holding `payload` instead."""
+    out = []
+    done = False
+    for entry_kind, entry_payload in boxes:
+        if entry_kind == kind and not done:
+            out.append((kind, payload))
+            done = True
+        else:
+            out.append((entry_kind, entry_payload))
+    return out
+
+
+def moved_chunk_offsets(
+    boxes: list[tuple[bytes, bytes]], grown: int
+) -> list[tuple[bytes, bytes]]:
+    """Every chunk offset table in `boxes`, moved by `grown` bytes."""
+    out = []
+    for kind, payload in boxes:
+        if kind == b"co64":
+            raise SystemExit("a 64 bit chunk offset table is not one of these fixtures")
+        if kind == b"stco":
+            count = struct.unpack(">I", payload[4:8])[0]
+            entries = struct.unpack(f">{count}I", payload[8 : 8 + 4 * count])
+            payload = payload[:8] + struct.pack(f">{count}I", *[entry + grown for entry in entries])
+        out.append((kind, payload))
+    return out
+
+
+def with_composition_offsets(source: Path, path: Path, offsets: list[int]) -> None:
+    """Writes `source` with a composition-to-sample box in its first track.
+
+    No encoder here writes one -- `avifenc` states composition times equal to
+    decode times and writes no box at all -- so a track that composes its samples
+    somewhere else has to be written rather than encoded. The box is version one,
+    which is the one that can state a negative offset.
+
+    The movie box sits in front of the media data, so growing it moves every
+    chunk the sample tables point at: each track is rebuilt with its own sizes and
+    every `stco` entry grows by exactly the box that was inserted. Nothing else
+    about the file changes, so its pictures are the ones the source holds.
+    """
+    payload = bytes((1, 0, 0, 0)) + struct.pack(">I", len(offsets))
+    payload += b"".join(struct.pack(">Ii", 1, offset) for offset in offsets)
+    inserted = pack_box(b"ctts", payload)
+    grown = len(inserted)
+
+    top = parse_boxes(source.read_bytes())
+    moov = next(entry for kind, entry in top if kind == b"moov")
+    rewritten = []
+    first = True
+    for kind, track in parse_boxes(moov):
+        if kind != b"trak":
+            rewritten.append((kind, track))
+            continue
+        track_boxes = parse_boxes(track)
+        mdia = parse_boxes(next(entry for kind, entry in track_boxes if kind == b"mdia"))
+        minf = parse_boxes(next(entry for kind, entry in mdia if kind == b"minf"))
+        stbl = parse_boxes(next(entry for kind, entry in minf if kind == b"stbl"))
+        stbl = moved_chunk_offsets(stbl, grown)
+        if first:
+            # The spec puts `ctts` after `stts` and before the rest of the table.
+            after = next(index for index, (kind, _) in enumerate(stbl) if kind == b"stts") + 1
+            stbl.insert(after, (b"ctts", payload))
+            first = False
+        minf = replaced(minf, b"stbl", pack_boxes(stbl))
+        mdia = replaced(mdia, b"minf", pack_boxes(minf))
+        rewritten.append((b"trak", pack_boxes(replaced(track_boxes, b"mdia", pack_boxes(mdia)))))
+    top = replaced(top, b"moov", pack_boxes(rewritten))
+    path.write_bytes(pack_boxes(top))
+    print(f"  + {path.name} ({path.stat().st_size} bytes) ctts {offsets}")
+
+
 def main() -> None:
     cjxl = require_tool("cjxl")
     avifenc = require_tool("avifenc")
@@ -160,6 +257,17 @@ def main() -> None:
             str(FIXTURES / "animation.avif"),
         ])
         subprocess.run(avif_command, check=True)
+
+        # A track that states composition offsets presents its samples where the
+        # box says rather than where they were decoded. The first sample is
+        # composed forty ticks before zero, which the reader clamps, and the
+        # second a hundred after its decode time, so the holds become 180, 70, 110
+        # and 240 ms rather than 80, 170, 110 and 240.
+        with_composition_offsets(
+            FIXTURES / "animation.avif",
+            FIXTURES / "animation-ctts.avif",
+            [-40, 100, 0, 0],
+        )
 
         # libheif's CLI assigns one duration to every sequence frame. Keep its
         # total duration at 600 ms; AVIF covers varying per-frame durations.
