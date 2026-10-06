@@ -7,9 +7,15 @@
 //! requested.
 //!
 //! JPEG 2000 has no alpha convention this source can preserve. One or three
-//! components are accepted; a two-component gray-plus-alpha image and images
-//! with more than three components are rejected rather than silently losing a
-//! channel.
+//! JPEG 2000 has no alpha convention of its own: what a component means is the
+//! container's statement, and a JP2 makes it in its `cdef` box. One colour
+//! component with association 1 beside one opacity component is gray and alpha,
+//! three colour components beside one opacity is r,g,b and alpha, and the
+//! component count alone cannot tell those apart from three colour channels or a
+//! colour channel beside something else. A file whose `cdef` names nothing -- a
+//! bare codestream has no box to name anything in -- keeps the count rule: one or
+//! three components, and a two component image with no statement of which sample
+//! is alpha is refused rather than guessed at.
 
 use std::{
     fs::File,
@@ -58,6 +64,17 @@ struct ComponentHeader {
     dy: u8,
 }
 
+/// One channel definition of a JP2 `cdef` box.
+///
+/// The box assigns every component a type and an association: what the component
+/// holds, and which colour channel it is or that it covers the image as a whole.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Channel {
+    component: u16,
+    kind: u16,
+    association: u16,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Header {
     width: u32,
@@ -66,6 +83,12 @@ struct Header {
     color: EnumeratedColor,
     has_icc_profile: bool,
     icc_profile: Option<Arc<[u8]>>,
+    /// The container's channel definitions, when it states them.
+    channels: Option<Vec<Channel>>,
+    /// What the container's `pclr` box states, when it states a palette.
+    palette: Option<Palette>,
+    /// Whether the container states a component mapping beside its palette.
+    palette_mapping: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -212,6 +235,48 @@ fn output_format(header: &Header, path: &Path) -> Result<(ColorType, PixelFormat
         )));
     }
 
+    // The container's own statement comes first. A `cdef` box names which
+    // A palette is a statement this reader does not act on. The codestream holds
+    // indices and the colour is in the `pclr` box beside it, and the decoder this
+    // module hands the file to is the one that either applies the palette itself or
+    // refuses the file. Either way the samples a frame would carry are not the
+    // samples the SIZ describes, so a file that states a palette is refused by name
+    // rather than promised as the gray its one component looks like.
+    if let Some(palette) = header.palette {
+        return Err(ImgSeqError::new(format!(
+            "image '{}' states a JP2 palette of {} entries of {} components, which this reader does not expand{}",
+            path.display(),
+            palette.entries,
+            palette.components,
+            if header.palette_mapping {
+                " (with a component mapping)"
+            } else {
+                ""
+            }
+        )));
+    }
+    // component is colour and which is opacity, and the component count cannot:
+    // two components might be gray and alpha, or a colour channel beside
+    // something else. A file that states no `cdef` -- a bare codestream has no
+    // box to state one in -- keeps the count rule below rather than being
+    // guessed at.
+    if let Some(channels) = &header.channels
+        && channels.len() == header.components.len()
+    {
+        let color = channels
+            .iter()
+            .filter(|channel| channel.kind == CHANNEL_COLOR)
+            .count();
+        let opacity = channels
+            .iter()
+            .filter(|channel| matches!(channel.kind, CHANNEL_OPACITY | CHANNEL_PREMULTIPLIED))
+            .count();
+        match (color, opacity) {
+            (1, 1) => return Ok(gray_alpha(depth)),
+            (3, 1) => return Ok(rgba(depth)),
+            _ => {}
+        }
+    }
     match header.components.len() {
         1 => {
             if header.color == EnumeratedColor::Sycc {
@@ -269,7 +334,7 @@ fn output_format(header: &Header, path: &Path) -> Result<(ColorType, PixelFormat
             Ok((color_type, format))
         }
         count => Err(ImgSeqError::new(format!(
-            "image '{}' has {count} JPEG 2000 components; only gray and RGB are supported",
+            "image '{}' has {count} JPEG 2000 components; only gray, gray+alpha, RGB and RGBA are supported",
             path.display()
         ))),
     }
@@ -290,6 +355,32 @@ fn sycc_format(components: &[ComponentHeader], depth: u32) -> Option<PixelFormat
         ((1, 1), (1, 1), (1, 1), 16) => Some(PixelFormat::Yuv444P16),
         _ => None,
     }
+}
+
+/// The layout and format of a gray page with an opacity channel.
+fn gray_alpha(depth: u32) -> (ColorType, PixelFormat) {
+    let color_type = if depth <= 8 {
+        ColorType::La8
+    } else {
+        ColorType::La16
+    };
+    let format = PixelFormat::from_color_type(color_type)
+        .expect("JPEG 2000 gray+alpha color type is supported")
+        .at_depth(depth);
+    (color_type, format)
+}
+
+/// The layout and format of an r,g,b page with an opacity channel.
+fn rgba(depth: u32) -> (ColorType, PixelFormat) {
+    let color_type = if depth <= 8 {
+        ColorType::Rgba8
+    } else {
+        ColorType::Rgba16
+    };
+    let format = PixelFormat::from_color_type(color_type)
+        .expect("JPEG 2000 rgba color type is supported")
+        .at_depth(depth);
+    (color_type, format)
 }
 
 fn check_decoded_header(image: &Image, header: &Header, path: &Path) -> Result<()> {
@@ -331,9 +422,13 @@ fn decode_interleaved(image: &Image, color_type: ColorType, path: &Path) -> Resu
         .map_err(|error| image_error("decode", path, error))?;
     let buffer = match (color_type, data.data) {
         (ColorType::L8, ImagePixelData::L8(buffer))
-        | (ColorType::Rgb8, ImagePixelData::Rgb8(buffer)) => buffer,
+        | (ColorType::La8, ImagePixelData::La8(buffer))
+        | (ColorType::Rgb8, ImagePixelData::Rgb8(buffer))
+        | (ColorType::Rgba8, ImagePixelData::Rgba8(buffer)) => buffer,
         (ColorType::L16, ImagePixelData::L16(buffer))
-        | (ColorType::Rgb16, ImagePixelData::Rgb16(buffer)) => u16_bytes(buffer),
+        | (ColorType::La16, ImagePixelData::La16(buffer))
+        | (ColorType::Rgb16, ImagePixelData::Rgb16(buffer))
+        | (ColorType::Rgba16, ImagePixelData::Rgba16(buffer)) => u16_bytes(buffer),
         (expected, actual) => {
             return Err(image_error(
                 "decode",
@@ -516,7 +611,7 @@ fn parse_header(data: &[u8], path: &Path) -> Result<Header> {
         parse_jp2(data, path)
     } else if data.starts_with(&J2K_SIGNATURE) {
         let siz = parse_siz(data, path)?;
-        header_from_siz(siz, None, EnumeratedColor::Unspecified, false, None, path)
+        header_from_siz(siz, &Jp2State::default(), path)
     } else {
         Err(image_error(
             "identify",
@@ -568,15 +663,9 @@ fn parse_jp2(data: &[u8], path: &Path) -> Result<Header> {
     walk_boxes(data, 0, data.len(), &mut state, path)?;
     let siz = state
         .siz
+        .clone()
         .ok_or_else(|| image_error("identify", path, "the JP2 file has no SIZ marker"))?;
-    header_from_siz(
-        siz,
-        state.ihdr,
-        state.color,
-        state.has_icc_profile,
-        state.icc_profile,
-        path,
-    )
+    header_from_siz(siz, &state, path)
 }
 
 #[derive(Default)]
@@ -586,6 +675,10 @@ struct Jp2State {
     color: EnumeratedColor,
     has_icc_profile: bool,
     icc_profile: Option<Arc<[u8]>>,
+    channels: Option<Vec<Channel>>,
+    palette: Option<Palette>,
+    /// Whether the container states a component mapping beside its palette.
+    palette_mapping: bool,
 }
 
 fn walk_boxes(
@@ -654,6 +747,9 @@ fn walk_boxes(
             b"jp2h" => walk_boxes(data, payload_start, box_end, state, path)?,
             b"ihdr" => parse_ihdr(payload, state, path)?,
             b"colr" => parse_colr(payload, state, path)?,
+            b"cdef" => parse_cdef(payload, state, path)?,
+            b"pclr" => parse_pclr(payload, state, path)?,
+            b"cmap" => state.palette_mapping = true,
             b"jp2c" if state.siz.is_none() => state.siz = Some(parse_siz(payload, path)?),
             b"jp2c" => {}
             _ => {}
@@ -679,6 +775,95 @@ fn parse_ihdr(payload: &[u8], state: &mut Jp2State, path: &Path) -> Result<()> {
         value => Some(u32::from(value & 0x7f) + 1),
     };
     state.ihdr = Some((width, height, components, depth));
+    Ok(())
+}
+
+/// What a JP2 `cdef` box says about one component.
+const CHANNEL_COLOR: u16 = 0;
+/// An opacity component, which is what the alpha clip is built from.
+const CHANNEL_OPACITY: u16 = 1;
+/// A colour that already has its alpha folded in. This reader hands the samples
+/// out as they are and does not unpremultiply, so it is an opacity component
+/// like any other for the purpose of finding the clip's alpha channel.
+const CHANNEL_PREMULTIPLIED: u16 = 2;
+
+fn parse_cdef(payload: &[u8], state: &mut Jp2State, path: &Path) -> Result<()> {
+    if payload.len() < 2 {
+        return Err(image_error(
+            "identify",
+            path,
+            "the JP2 cdef box is truncated",
+        ));
+    }
+    let count = usize::from(u16::from_be_bytes(payload[..2].try_into().unwrap()));
+    // Every definition is a component index, a type and an association.
+    let Some(definitions) = payload.get(2..2 + count.saturating_mul(6)) else {
+        return Err(image_error(
+            "identify",
+            path,
+            "the JP2 cdef box is truncated",
+        ));
+    };
+    state.channels = Some(
+        definitions
+            .as_chunks::<6>()
+            .0
+            .iter()
+            .map(|definition| Channel {
+                component: u16::from_be_bytes(definition[..2].try_into().unwrap()),
+                kind: u16::from_be_bytes(definition[2..4].try_into().unwrap()),
+                association: u16::from_be_bytes(definition[4..6].try_into().unwrap()),
+            })
+            .collect(),
+    );
+    Ok(())
+}
+
+/// What a JP2 `pclr` box states: how many entries a palette holds, how many
+/// components each entry has, and how many bits each component is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Palette {
+    entries: u16,
+    components: u8,
+    bits: u8,
+}
+
+/// Reads the palette a JP2 states, which is a statement this reader does not act
+/// on; see [`output_format`] for what it does with one.
+fn parse_pclr(payload: &[u8], state: &mut Jp2State, path: &Path) -> Result<()> {
+    if payload.len() < 4 {
+        return Err(image_error(
+            "identify",
+            path,
+            "the JP2 pclr box is truncated",
+        ));
+    }
+    let palette = Palette {
+        entries: u16::from_be_bytes(payload[..2].try_into().unwrap()),
+        components: payload[2],
+        bits: payload[3],
+    };
+    // Every entry is `components` values of `bits` bits, and a palette that does
+    // not hold what its own header says is one nothing can expand.
+    let values = usize::from(palette.entries)
+        .checked_mul(usize::from(palette.components))
+        .and_then(|count| count.checked_mul(usize::from(palette.bits)))
+        .map(|bits| bits.div_ceil(8));
+    if palette.components == 0 || palette.bits < 3 || palette.bits > 16 {
+        return Err(image_error(
+            "identify",
+            path,
+            "the JP2 pclr box states a palette no reader can expand",
+        ));
+    }
+    if values.is_none_or(|values| payload.len() < 4 + values) {
+        return Err(image_error(
+            "identify",
+            path,
+            "the JP2 pclr box is truncated",
+        ));
+    }
+    state.palette = Some(palette);
     Ok(())
 }
 
@@ -745,9 +930,9 @@ fn parse_siz(data: &[u8], path: &Path) -> Result<SizHeader> {
         ));
     }
     let component_count = u16::from_be_bytes(data[marker + 38..marker + 40].try_into().unwrap());
-    if component_count == 0 || component_count > 3 {
+    if component_count == 0 || component_count > 4 {
         return Err(ImgSeqError::new(format!(
-            "image '{}' has {component_count} JPEG 2000 components; only gray and RGB are supported",
+            "image '{}' has {component_count} JPEG 2000 components; only gray, gray+alpha, RGB and RGBA are supported",
             path.display()
         )));
     }
@@ -795,15 +980,13 @@ fn parse_siz(data: &[u8], path: &Path) -> Result<SizHeader> {
     })
 }
 
-fn header_from_siz(
-    siz: SizHeader,
-    ihdr: Option<(u32, u32, u16, Option<u32>)>,
-    color: EnumeratedColor,
-    has_icc_profile: bool,
-    icc_profile: Option<Arc<[u8]>>,
-    path: &Path,
-) -> Result<Header> {
-    if let Some((width, height, components, depth)) = ihdr {
+/// What a JP2's boxes state about it, which the codestream's own SIZ does not.
+///
+/// The walk fills one of these in as it reads the header boxes, and the header
+/// the probe describes is the two of them together. A bare codestream has no
+/// boxes at all, which is what [`Jp2State::default`] stands for.
+fn header_from_siz(siz: SizHeader, state: &Jp2State, path: &Path) -> Result<Header> {
+    if let Some((width, height, components, depth)) = state.ihdr {
         if (width, height, usize::from(components)) != (siz.width, siz.height, siz.components.len())
         {
             return Err(image_error(
@@ -824,22 +1007,25 @@ fn header_from_siz(
             ));
         }
     }
-    let color = if color == EnumeratedColor::Unspecified {
+    let color = if state.color == EnumeratedColor::Unspecified {
         if siz.components.len() == 1 {
             EnumeratedColor::Gray
         } else {
             EnumeratedColor::Other
         }
     } else {
-        color
+        state.color
     };
     Ok(Header {
         width: siz.width,
         height: siz.height,
         components: siz.components,
         color,
-        has_icc_profile,
-        icc_profile,
+        has_icc_profile: state.has_icc_profile,
+        icc_profile: state.icc_profile.clone(),
+        channels: state.channels.clone(),
+        palette: state.palette,
+        palette_mapping: state.palette_mapping,
     })
 }
 
@@ -921,6 +1107,9 @@ mod tests {
             color: EnumeratedColor::Srgb,
             has_icc_profile: false,
             icc_profile: None,
+            channels: None,
+            palette: None,
+            palette_mapping: false,
         };
         assert_eq!(
             output_format(&rgb, Path::new("rgb.jp2")).unwrap().1,
@@ -995,6 +1184,9 @@ mod tests {
             color: EnumeratedColor::Srgb,
             has_icc_profile: false,
             icc_profile: None,
+            channels: None,
+            palette: None,
+            palette_mapping: false,
         };
 
         let signed = Header {
@@ -1034,6 +1226,124 @@ mod tests {
         assert!(said.contains("different precision"), "{said}");
         assert!(said.contains("component 1 is 8 bits"), "{said}");
         assert!(said.contains("component 3 is 12 bits"), "{said}");
+    }
+
+    /// A `cdef` box names which component is alpha, which is what tells a
+    /// two-component file apart from one whose second component means something
+    /// else. The component count cannot, so a file that states no `cdef` keeps the
+    /// count rule and its refusal.
+    #[test]
+    fn channel_definitions_name_the_alpha_component() {
+        let gray = ComponentHeader {
+            precision: 8,
+            signed: false,
+            dx: 1,
+            dy: 1,
+        };
+        let color = |association: u16| Channel {
+            component: association - 1,
+            kind: CHANNEL_COLOR,
+            association,
+        };
+        let opacity = Channel {
+            component: 1,
+            kind: CHANNEL_OPACITY,
+            association: 0,
+        };
+
+        // The fields every header in this test shares: a size, the colour, the
+        // profile, and the channel definitions each case states for itself.
+        let base = Header {
+            width: 2,
+            height: 2,
+            components: vec![gray, gray, gray],
+            color: EnumeratedColor::Srgb,
+            has_icc_profile: false,
+            icc_profile: None,
+            channels: None,
+            palette: None,
+            palette_mapping: false,
+        };
+        let gray_alpha = Header {
+            components: vec![gray, gray],
+            channels: Some(vec![color(1), opacity]),
+            ..base.clone()
+        };
+        assert_eq!(
+            output_format(&gray_alpha, Path::new("grayalpha.jp2")).unwrap(),
+            (ColorType::La8, PixelFormat::Gray8)
+        );
+
+        // Three colour channels beside one opacity is r,g,b and alpha, and the
+        // opacity channel is the fourth component rather than the second.
+        let rgba = Header {
+            components: vec![gray, gray, gray, gray],
+            channels: Some(vec![
+                color(1),
+                color(2),
+                color(3),
+                Channel {
+                    component: 3,
+                    kind: CHANNEL_OPACITY,
+                    association: 0,
+                },
+            ]),
+            ..base.clone()
+        };
+        assert_eq!(
+            output_format(&rgba, Path::new("rgba.jp2")).unwrap(),
+            (ColorType::Rgba8, PixelFormat::Rgb8)
+        );
+
+        // A `cdef` that names fewer channels than the file holds is not a
+        // statement about this file's components, so the count rule stands and the
+        // two-component file is refused.
+        let mismatched = Header {
+            components: vec![gray, gray],
+            channels: Some(vec![color(1)]),
+            ..base.clone()
+        };
+        let said = output_format(&mismatched, Path::new("two.jp2"))
+            .expect_err("an unlabelled two-component file is refused")
+            .to_string();
+        assert!(said.contains("2 JPEG 2000 components"), "{said}");
+    }
+
+    /// A palette is a statement this reader does not act on: the codestream holds
+    /// indices, so the samples a frame would carry are not the ones the SIZ
+    /// describes. The file is refused by name rather than promised as the gray its
+    /// one component looks like.
+    #[test]
+    fn a_palette_is_refused_by_name() {
+        let palette = Header {
+            width: 2,
+            height: 2,
+            components: vec![ComponentHeader {
+                precision: 8,
+                signed: false,
+                dx: 1,
+                dy: 1,
+            }],
+            color: EnumeratedColor::Srgb,
+            has_icc_profile: false,
+            icc_profile: None,
+            channels: None,
+            palette: Some(Palette {
+                entries: 4,
+                components: 3,
+                bits: 8,
+            }),
+            palette_mapping: true,
+        };
+        let said = output_format(&palette, Path::new("palette.jp2"))
+            .expect_err("a palette is not expanded here")
+            .to_string();
+        assert!(
+            said.contains("palette of 4 entries of 3 components"),
+            "{said}"
+        );
+        assert!(said.contains("does not expand"), "{said}");
+        assert!(said.contains("component mapping"), "{said}");
     }
 
     /// A box with `kind` and `payload`, as the container writes one.

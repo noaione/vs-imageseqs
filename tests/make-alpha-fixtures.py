@@ -34,6 +34,9 @@ commands from the repository root whenever a source png changes, with
     opj_compress -i tests/fixtures/alpha-rgb8.png -mct 0 -I -q 35 -n 1 -o tests/fixtures/alpha-jp2-lossy.jp2
     magick tests/fixtures/alpha-rgba16.png -alpha off PNG48:target/j2k-rgb16.png
     opj_compress -i target/j2k-rgb16.png -mct 0 -n 1 -o tests/fixtures/alpha-jp2-rgb16.jp2
+     opj_compress -i tests/fixtures/jp2-palette-indices.pgm -n 1 -o tests/fixtures/jp2-palette-indices.j2k
+     opj_compress -i tests/fixtures/mono-alpha.png -n 1 -o tests/fixtures/alpha-jp2-grayalpha.jp2
+     opj_compress -i tests/fixtures/alpha-rgba8.png -n 1 -o tests/fixtures/alpha-jp2-rgba8.jp2
 
 The ICC fixtures are generated directly by this script. ``icc-srgb.icc`` is
 written beside ``icc-rgb8.png`` and ``icc-rgba8.png``; the latter two carry
@@ -668,6 +671,75 @@ def tiff_rgba32f(path: str, pixels: list[list[float]]) -> None:
         handle.write(bytes(document))
 
 
+def jp2_without_cdef(source: str, path: str) -> None:
+    """Writes `source` with its JP2 channel definitions dropped.
+
+    A `cdef` box is the container's statement of what each component means, and
+    without it a two-component file says nothing about which sample is alpha --
+    which is the refusal the plan keeps rather than guessing. The codestream is
+    the same bytes, so the two fixtures differ in one box.
+    """
+    with open(source, "rb") as handle:
+        data = handle.read()
+    top = list(avif_boxes(data))
+    header = next(payload for kind, payload in top if kind == b"jp2h")
+    kept = [
+        (kind, payload)
+        for kind, payload in avif_boxes(header)
+        if kind != b"cdef"
+    ]
+    rebuilt = [
+        (
+            kind,
+            avif_box(b"jp2h", b"".join(avif_box(k, p) for k, p in kept))
+            if kind == b"jp2h"
+            else payload,
+        )
+        for kind, payload in top
+    ]
+    with open(path, "wb") as handle:
+        handle.write(b"".join(avif_box(kind, payload) for kind, payload in rebuilt))
+    print(f"wrote {path}")
+
+
+def write_palette_indices(path: str) -> None:
+    """Writes the index pgm a palette JP2's codestream is compressed from."""
+    with open(path, "wb") as handle:
+        handle.write(b"P5\n4 2\n255\n" + bytes((0, 1, 2, 3, 3, 2, 1, 0)))
+
+
+def jp2_palette(source: str, path: str) -> None:
+    """Writes a JP2 whose codestream holds palette indices.
+
+    The codestream of `source` -- the index pgm this script writes, compressed by
+    the hand-made command in the header -- states one component of eight bits, and
+    the colour is in the `pclr` box beside it: four entries of three components
+    each, which the `cmap` box maps onto three output channels. No encoder in this
+    tree writes a palette, and this reader does not expand one, so the fixture is
+    what pins the refusal by name rather than a frame built from indices.
+    """
+    with open(source, "rb") as handle:
+        coded = handle.read()
+    ihdr = struct.pack(">IIHBBBB", 2, 4, 1, 7, 7, 0, 0)
+    colr = struct.pack(">BBBI", 1, 0, 0, 16)
+    entries = bytes((0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255))
+    pclr = struct.pack(">HBB", 4, 3, 8) + entries
+    cmap = b"".join(struct.pack(">HBB", 0, 1, column) for column in range(3))
+    with open(path, "wb") as handle:
+        handle.write(
+            avif_box(b"jP  ", bytes((0x0D, 0x0A, 0x87, 0x0A)))
+            + avif_box(b"ftyp", b"jp2 " + bytes(4) + b"jp2 ")
+            + avif_box(
+                b"jp2h",
+                avif_box(b"ihdr", ihdr)
+                + avif_box(b"colr", colr)
+                + avif_box(b"pclr", pclr)
+                + avif_box(b"cmap", cmap),
+            )
+            + avif_box(b"jp2c", coded)
+        )
+    print(f"wrote {path}")
+
 def main() -> None:
     os.makedirs(FIXTURES, exist_ok=True)
     write = lambda name: os.path.join(FIXTURES, name)
@@ -722,6 +794,18 @@ def main() -> None:
         ],
     )
     dds_dxt5(write("alpha-dds.dds"))
+    # The channel definitions of the two JP2 fixtures the hand-made commands
+    # above produce: the second is the same codestream with its `cdef` dropped, so
+    # it says nothing about which of its two components is alpha.
+    jp2_without_cdef(
+        write("alpha-jp2-grayalpha.jp2"),
+        write("alpha-jp2-grayalpha-unlabelled.jp2"),
+    )
+    # The palette JP2: the index pgm is written here, its codestream is compressed
+    # by the hand-made command above, and the boxes that state the palette are
+    # written around it.
+    write_palette_indices(write("jp2-palette-indices.pgm"))
+    jp2_palette(write("jp2-palette-indices.j2k"), write("alpha-jp2-palette.jp2"))
     avif_no_picture(write("avif-no-picture.avif"))
     # The same coded item as the yuv avif fixture, written as two extents. It
     # reads the fixture the hand-made command above produces, so that one has to
