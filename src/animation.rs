@@ -21,10 +21,11 @@
 //! tested against exact boundaries without a fixture per case.
 
 pub mod apng;
-pub mod frames;
+pub mod gif;
 pub mod heif;
 pub mod jxl;
 pub mod sequence;
+pub mod webp;
 
 use std::{
     collections::BTreeMap,
@@ -36,6 +37,13 @@ use crate::{
     decoder::{DecodedImage, ImageInfo},
     error::{ImgSeqError, Result},
 };
+
+// The four adapters that used to open a file for themselves -- `apng`'s chunk
+// walk, `gif`'s scan, `webp`'s RIFF window and the avif/heif sequence walk -- read
+// the open [`crate::decoder::Input`] already holds, so there is no read here left
+// to count. The number a probe of an animated file makes instead is
+// `decoder::input_opens`, which is what
+// `an_animation_probe_opens_the_file_once_for_its_timeline` asserts.
 
 /// A rate as an exact rational: `num` units per `den` seconds.
 ///
@@ -252,23 +260,20 @@ impl Segment {
                 .ok_or_else(|| timeline_overflow(&info))?;
         }
 
-        // A segment is active over `[0, total)`, so it covers the output ticks
-        // that start before its end and not the one that starts exactly at it.
-        // That last tick belongs to whatever comes next, which is what keeps
-        // two segments of the same length from both claiming the tick between
-        // them: the count is `ceil(total * fps) - 1`.
-        //
-        // The ticks that start before the segment ends, which is
-        // `floor(total * fps)`. The floor at one is what shows a segment
-        // shorter than a single output tick: a whole 10 ms animation at 24 fps
-        // is `floor(0.24) = 0` ticks strictly before its end and still has to
-        // appear once.
-        let frames = total
-            .checked_mul(to_frames_num)
-            .ok_or_else(|| timeline_overflow(&info))?
-            .checked_div(to_frames_den)
-            .ok_or_else(|| timeline_overflow(&info))?
-            .max(1);
+        // A segment is active over `[0, total)`, and what it contributes is the
+        // output sample instants that fall in that range: frame `n` is the
+        // instant `n / fps`, so the count is `ceil(total * fps)`. The ceiling is
+        // what shows the last instant before the segment ends, whose own tick the
+        // source only partly fills, rather than dropping it. The max at one is
+        // what shows a segment shorter than a single output tick: a whole 10 ms
+        // animation at 24 fps is one instant, `ceil(0.24) = 1`.
+        let frames = ceil_div(
+            total
+                .checked_mul(to_frames_num)
+                .ok_or_else(|| timeline_overflow(&info))?,
+            to_frames_den,
+        )
+        .max(1);
         let count = usize::try_from(frames).map_err(|_| {
             ImgSeqError::new(format!(
                 "animated image '{}' expands to more frames than this build can count",
@@ -316,6 +321,7 @@ impl Segment {
     pub const fn frame_count(&self) -> usize {
         self.count
     }
+
     /// Width and height every output frame of this segment is written as.
     ///
     /// This is the size the file is handed out as, which a transposing
@@ -438,6 +444,7 @@ impl SegmentTable {
         let segment = &self.segments[index];
         let presentation = segment.presentation(frame - self.starts[index])?;
         Ok(FrameRef {
+            file: index,
             segment,
             presentation,
             local: frame - self.starts[index],
@@ -455,9 +462,13 @@ impl SegmentTable {
     }
 }
 
-/// One resolved output frame: the segment it comes from and its presentation.
+/// One resolved output frame: the file it comes from, the segment that file
+/// contributes, and the presentation this frame samples.
 #[derive(Clone, Copy, Debug)]
 pub struct FrameRef<'a> {
+    /// The segment's position in the table, which is the path's position in the
+    /// `files` list the clip was created from.
+    pub file: usize,
     pub segment: &'a Segment,
     /// Index into [`Segment::presentations`].
     pub presentation: usize,
@@ -645,18 +656,20 @@ fn ceil_div(numerator: i128, denominator: i128) -> i128 {
 mod tests {
     use super::{AnimationSource, Presentation, Rate, Segment, SegmentTable};
     use crate::decoder::ImageInfo;
+    use crate::layout::{ColorType, Orientation, SourceColorType};
     use crate::pixel::{PixelFormat, Transform};
-    use image::{ColorType, ExtendedColorType, metadata::Orientation};
     use std::path::PathBuf;
 
     /// A segment record without a decoder, for the timeline tests.
     fn info(name: &str) -> ImageInfo {
         ImageInfo {
+            route: None,
+            subimage: None,
             path: PathBuf::from(name),
             width: 4,
             height: 4,
             color_type: ColorType::Rgba8,
-            original_color_type: ExtendedColorType::Rgba8,
+            original_color_type: SourceColorType::Rgba8,
             has_icc_profile: false,
             icc_profile: None,
             cicp: None,
@@ -743,23 +756,19 @@ mod tests {
             } else {
                 quotient + 1
             };
-            eprintln!(
-                "  iter total={total} duration={duration} numerator={numerator} quotient={quotient} rem={} tick={tick}",
-                numerator % units_per_tick
-            );
             ticks.push(usize::try_from(tick).expect("the test rates are small"));
             total += i128::from(duration);
         }
-        // The ticks that start before the segment ends, floored at one.
-        let frames = usize::try_from((total * tick_scale) / units_per_tick)
+        // The sample instants that fall before the segment ends: instant `k` is
+        // `k * fps_den / fps_num` seconds, so the count is the number of them in
+        // `[0, total)`, which is `ceil(total * fps)` rather than the floor of it.
+        // Written out here rather than borrowed from the implementation, which is
+        // what this model is for.
+        let numerator = total * tick_scale;
+        let frames = numerator / units_per_tick + i128::from(numerator % units_per_tick != 0);
+        let frames = usize::try_from(frames)
             .expect("the test timelines are small")
             .max(1);
-        eprintln!(
-            "MODEL in durations={durations:?} rate={rate:?} fps={fps:?} | rate_num={rate_num} rate_den={rate_den} fps_num={fps_num} fps_den={fps_den} units_per_tick={units_per_tick} tick_scale={tick_scale} ticks={ticks:?} frames={frames}"
-        );
-        eprintln!(
-            "MODEL rate={rate:?} fps={fps:?} rn={rate_num} rd={rate_den} fn={fps_num} fd={fps_den} upt={units_per_tick} scale={tick_scale} ticks={ticks:?} frames={frames}"
-        );
         Model { ticks, frames }
     }
 
@@ -812,12 +821,11 @@ mod tests {
     fn a_timeline_is_sampled_onto_the_output_rate() {
         let durations = [80, 170, 110, 240];
         let segment = animated(&durations, (24, 1));
-        // 600 ms at 24 fps is 14.4, so the segment covers the 14 ticks that
-        // start before it ends, and the pictures start at ticks 0, 2, 6 and 9.
-        // 600 ms at 24 fps ends 14.4 ticks in, so 14 ticks start before it.
-        assert_eq!(model(&durations, (1000, 1), (24, 1)).frames, 14);
+        // 600 ms at 24 fps ends 14.4 ticks in, so the instants that fall before
+        // it are 0..=14: fifteen frames, and the pictures start at 0, 2, 6 and 9.
+        assert_eq!(model(&durations, (1000, 1), (24, 1)).frames, 15);
         assert_eq!(model(&durations, (1000, 1), (24, 1)).ticks, [0, 2, 6, 9]);
-        assert_eq!(segment.frame_count(), 14);
+        assert_eq!(segment.frame_count(), 15);
         assert_timeline(&segment, &durations, (1000, 1), (24, 1));
     }
 
@@ -875,8 +883,9 @@ mod tests {
         // A file whose decoder states no delay would otherwise contribute one
         // frame; every zero-delay picture is instead held one tick, so all four
         // are shown at 24 fps. One tick is 41 ms at 24 fps, so the four
-        // pictures start at 0, 41, 82 and 123 ms, which the model then maps
-        // onto ticks 0..3.
+        // pictures start at 0, 41, 82 and 123 ms, which is 168 ms of timeline:
+        // the model maps them onto ticks 0, 2, 3 and 4, and 168 ms ends 4.03
+        // ticks in, so five frames.
         let segment = animated(&[0, 0, 0, 0], (24, 1));
         // One output tick at 24 fps is 1000/24 ms, which is not a whole number
         // of milliseconds, so the substitute has to round up to 42 ms;
@@ -885,7 +894,7 @@ mod tests {
         assert_eq!(tick_substitute((1000, 1), (24, 1)), 42);
         let substitute = [42, 42, 42, 42];
         assert_timeline(&segment, &substitute, (1000, 1), (24, 1));
-        assert_eq!(segment.frame_count(), 4);
+        assert_eq!(segment.frame_count(), 5);
     }
 
     #[test]
@@ -893,15 +902,15 @@ mod tests {
         // Four 100 ms pictures at 30000/1001 fps. The pictures start at 0,
         // 100, 250 and 360 ms, which are 0, 2.997, 5.994 and 8.991 ticks, so
         // they are shown at ticks 0, 3, 6 and 9. The 400 ms timeline ends 11.99
-        // ticks in, so 11 ticks start before it.
+        // ticks in, so the instants before it are 0..=11: twelve frames.
         let durations = [100, 100, 100, 100];
         let segment = animated(&durations, (30000, 1001));
-        assert_eq!(model(&durations, (1000, 1), (30000, 1001)).frames, 11);
+        assert_eq!(model(&durations, (1000, 1), (30000, 1001)).frames, 12);
         assert_eq!(
             model(&durations, (1000, 1), (30000, 1001)).ticks,
             [0, 3, 6, 9]
         );
-        assert_eq!(segment.frame_count(), 11);
+        assert_eq!(segment.frame_count(), 12);
         assert_timeline(&segment, &durations, (1000, 1), (30000, 1001));
     }
 
@@ -957,8 +966,15 @@ mod tests {
             PathBuf::from("last.png")
         );
         let resolved = table.resolve(3).unwrap();
+        assert_eq!(resolved.file, 1);
         assert_eq!(resolved.presentation, 2);
         assert_eq!(resolved.local, 2);
+        // The file is the path's position in the list, not the output frame
+        // number: the animation at index 1 owns every one of its own frames.
+        assert_eq!(table.resolve(0).unwrap().file, 0);
+        assert_eq!(table.resolve(4).unwrap().file, 1);
+        assert_eq!(table.resolve(4).unwrap().presentation, 3);
+        assert_eq!(table.resolve(5).unwrap().file, 2);
         assert_eq!(table.animated_segments(), 1);
         assert!(table.resolve(6).is_err());
     }

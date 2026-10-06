@@ -12,13 +12,13 @@ filename = {
 }.get(sys.platform, "libvs_imageseqs.so")
 directory = Path(vs.get_plugin_dir()) / "imageseqs"  # pyright: ignore[reportAttributeAccessIssue]
 assert (directory / "manifest.vs").read_text().splitlines() == [
-    "[VapourSynth Manifest V1]", Path(filename).stem,
+    "[VapourSynth Manifest V1]",
+    Path(filename).stem,
 ]
 loaded = Path(vs.core.imgseqs.plugin_path).resolve()
 library = Path(filename)
 assert loaded in {
-    (directory / f"{library.stem}{variant}{library.suffix}").resolve()
-    for variant in ("", ".avx2", ".avx512")
+    (directory / f"{library.stem}{variant}{library.suffix}").resolve() for variant in ("", ".avx2", ".avx512")
 }
 assert loaded.is_file()
 fixture = Path(__file__).parent / "fixtures" / "alpha-rgb8.png"
@@ -32,14 +32,14 @@ print(f"manifest autoload and frame decode passed: {loaded}")
 animation = Path(__file__).parent / "fixtures" / "animation.avif"
 outputs = vs.core.imgseqs.ReadAlpha(files=[str(animation.resolve())], prefetch=0)
 colour, alpha = outputs["clip"], outputs["alpha"]
-assert colour.num_frames == alpha.num_frames == 14
+assert colour.num_frames == alpha.num_frames == 15, (
+    f"Frame count not the same, color is {colour.num_frames} and alpha is {alpha.num_frames}"
+)
 assert (colour.width, colour.height) == (16, 12)
 hashes = []
 for index in range(colour.num_frames):
     frame = colour.get_frame(index)
-    pixels = b"".join(
-        frame[plane].tobytes() for plane in range(frame.format.num_planes)
-    )
+    pixels = b"".join(frame[plane].tobytes() for plane in range(frame.format.num_planes))
     hashes.append(hashlib.sha256(pixels).digest())
     alpha_frame = alpha.get_frame(index)
     assert (alpha_frame.width, alpha_frame.height) == (16, 12)

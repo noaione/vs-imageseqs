@@ -562,7 +562,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use image::{ColorType, ExtendedColorType, metadata::Orientation};
+    use crate::layout::{ColorType, Orientation, SourceColorType};
 
     use super::{
         DEFAULT_BYTE_BUDGET, Payload, Prefetcher, Prepare, READY_ENTRY_MARGIN, State,
@@ -593,11 +593,13 @@ mod tests {
     /// An image that is never read, to size budgets in tests.
     fn synthetic(width: u32, height: u32, color_type: ColorType) -> ImageInfo {
         ImageInfo {
+            route: None,
+            subimage: None,
             path: PathBuf::from("synthetic"),
             width,
             height,
             color_type,
-            original_color_type: ExtendedColorType::from(color_type),
+            original_color_type: SourceColorType::from(color_type),
             has_icc_profile: false,
             icc_profile: None,
             cicp: None,
@@ -650,6 +652,8 @@ mod tests {
                 Pixels::Planar { planes, alpha } => {
                     planes.iter().map(Vec::len).sum::<usize>() + alpha.as_ref().map_or(0, Vec::len)
                 }
+                // One buffer, so one buffer's worth: the planes are inside it.
+                Pixels::Strided { buffer, .. } => buffer.len(),
                 // A stream holds no pixels of its own, so this synthetic
                 // payload has nothing to report for one.
                 Pixels::Stream(_) => 0,

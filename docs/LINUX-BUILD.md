@@ -11,10 +11,10 @@ the repaired wheels are uploaded to PyPI or GitHub Releases. A glibc host
 cannot load the musl wheel and the other way round, which is why both exist.
 
 `tools/build-manylinux.sh` and `tools/build-musllinux.sh` each build dav1d
-1.5.3 and libde265 1.1.1 as shared libraries and libwebp 1.6.0 as a
-position-independent static library inside their own container. Their archive
-versions and SHA-512 hashes are pinned in both. Cargo.lock selects the embedded
-libheif and OpenJPEG sources, and the same CMake toolchain file disables
+1.5.3 and libde265 1.1.1 as shared libraries inside their own container. Their
+archive versions and SHA-512 hashes are pinned in both. Cargo.lock selects the
+embedded libheif and OpenJPEG sources, the webp decoder is the `wpd` crate's
+own assembler output, and the same CMake toolchain file disables
 discovery of extra libheif codecs, including x265, on either platform. The musl
 build adds what Alpine calls its toolchain: `nasm` and `pkgconf` from `apk`,
 cmake, meson and ninja from PyPI, and the Rust toolchain the script installs
@@ -22,6 +22,19 @@ with rustup because the image carries none. It builds the plugin for
 `x86_64-unknown-linux-musl` with `-C target-feature=-crt-static`, because a
 cdylib that linked musl statically would carry a second libc, its allocator
 and its thread-local storage into the process that loaded it.
+
+CI prepares the build environment before restoring caches. Each platform
+caches its installed native prefix and checked source archives separately from
+Cargo's compiled dependencies. An exact native cache hit skips codec builds
+only when its completion stamp and required installation files are present.
+Compiler, container and native build-option changes invalidate that cache.
+Wheel assembly, repair, source-bundle generation and clean-container validation
+still run every time. The wheel jobs pin Rust to 1.99.0 through the workflow's
+top-level `IMGSEQS_RUST_TOOLCHAIN` environment variable; musllinux also caches
+that toolchain, and both jobs cache Python downloads. Direct invocations of
+either build script still prepare their own environment. See
+[37](improvements/37-linux-build-caching.md) for the cache boundaries and CI
+timing checks.
 
 Auditwheel checks the requested ABI baseline and bundles the non-system shared
 libraries with rewritten names. What counts as a system library is the

@@ -18,7 +18,8 @@
 //! size, which is small next to the frames it decodes to.
 
 use std::{
-    fs,
+    fs::{self, File},
+    io::BufReader,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -35,12 +36,6 @@ use crate::{
 
 use super::{AnimationDecoder, AnimationSource, Presentation, Rate, SegmentInfo};
 
-/// Whether this module reads `path`.
-#[must_use]
-pub fn owns(path: &Path) -> bool {
-    crate::formats::jxl::owns(path)
-}
-
 /// Describes an animated jpeg xl's timeline without rendering its frames.
 ///
 /// Returns `None` for a file that is not an animation, which leaves it on the
@@ -54,7 +49,15 @@ pub fn segment_info(
     path: &Path,
     info: crate::decoder::ImageInfo,
     fps: Rate,
+    file: &mut BufReader<File>,
 ) -> Result<Option<SegmentInfo>> {
+    // A still is the common case and the scan below reads the whole file to find
+    // that out. The codestream states it in the header, so a file with no
+    // animation header never reaches the scan; a header this cannot read is the
+    // scan's to report, with the words it already had.
+    if matches!(crate::formats::jxl::states_animation(file, path), Ok(false)) {
+        return Ok(None);
+    }
     let bytes =
         Arc::<[u8]>::from(fs::read(path).map_err(|error| image_error("open", path, error))?);
     let scanned = match scan(&bytes, path)? {

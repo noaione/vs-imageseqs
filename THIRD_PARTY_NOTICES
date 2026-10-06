@@ -7,7 +7,7 @@ distribution and preserve the applicable license texts and notices.
 
 The exact native inputs recorded here are from the x64-windows-static-md
 vcpkg installation used to build the Windows wheel. The two Linux builds pin
-dav1d, libde265 and libwebp in `tools/build-manylinux.sh` and
+dav1d and libde265 in `tools/build-manylinux.sh` and
 `tools/build-musllinux.sh`; Cargo.lock selects the embedded libheif and OpenJPEG
 sources. The macOS arm64 build uses
 the same pinned dav1d and libde265 source versions, builds them as shared
@@ -17,12 +17,15 @@ machine-local codecs are not linked:
   * libheif 1.23.1
   * libde265 1.1.1
   * dav1d 1.5.3
-  * libwebp 1.6.0
+  * wpd 0.2.0, at the exact git revision named in `Cargo.toml`
   * OpenJPEG (vendored by openjpeg-sys 1.0.12)
 
 The native dependency versions and license expressions used by this build
-are recorded below. Rust crate licenses are intentionally out of scope for
-this first notice bundle.
+are recorded below. `wpd` is a Rust crate rather than a system library, but
+it is listed here because its x86-64 decode routines are hand-written NASM
+sources that the crate assembles and links into the plugin, so it ships the
+same way the C libraries above do. The remaining Rust crate licenses are
+intentionally out of scope for this notice bundle.
 
 Project
 -------
@@ -52,12 +55,14 @@ libde265 1.1.1
   Notice and license text: LICENSES/libde265-COPYING.txt
   Upstream: https://github.com/strukturag/libde265
 
-libwebp 1.6.0
-  License: BSD 3-Clause License, with the additional IP rights grant for
-    patents that ships beside it
-  Linkage: statically linked, used by the plugin's own webp decode path
-  Notice and license text: LICENSES/libwebp-COPYING.txt
-  Upstream: https://github.com/webmproject/libwebp
+wpd 0.2.0 (git revision 45d5955260f6c44a1b6bea6954a4a34e818f3f8a)
+  License: BSD 2-Clause "Simplified" License
+  Linkage: statically linked, assembled from the crate's own NASM sources on
+    x86 and x86-64 and from its assembler sources on ARM
+  Usage: the plugin's webp decoder, an ordinary still and an animated
+    container's rectangle alike
+  Notice and license text: LICENSES/wpd-COPYING.txt
+  Upstream: https://github.com/halidecx/wpd
 
 openjpeg (vendored by openjpeg-sys 1.0.12)
   License: BSD 2-Clause License
@@ -84,6 +89,36 @@ LICENSES/vcpkg-LICENSE.txt. These recipes are source/build inputs, not another
 native runtime dependency. The macOS CMake toolchain also disables the optional
 libheif backends this plugin does not use, including x265. Always verify the
 final native link output after changing either dependency configuration.
+
+Ported source code
+------------------
+
+Some of the still readers this plugin decodes with its own code are ports of
+the corresponding reader in the `image` crate, version 0.25.10, which is
+licensed MIT OR Apache-2.0. `image` puts no per-file header on its sources, so
+the license travels with the files named here rather than inside them. The
+texts are kept verbatim as LICENSES/image-LICENSE-MIT.txt and
+LICENSES/image-LICENSE-APACHE.txt.
+
+The ported files, and the upstream module each was ported from under
+image-0.25.10's src/codecs/:
+
+  src/formats/bmp.rs
+      bmp/decoder.rs, bmp/mod.rs -- the palette, run-length and bitfield
+      paths, and the DIB header parsing that ico.rs also uses
+  src/formats/ico.rs
+      ico/decoder.rs -- the directory, the entry scoring and the AND mask
+  src/formats/tga.rs
+      tga/ -- the header and all eleven image types
+  src/formats/dds.rs
+      dds/ -- the DXT1, DXT3 and DXT5 block decoding and the DX10 mapping
+  src/formats/pnm.rs
+      pnm/decoder.rs and pnm/header.rs -- the parser and the header, and not
+      pnm/autobreak.rs, which writes a pnm rather than reading one
+
+Each of those modules says at its head what it was ported from. The other
+still readers under src/formats/ are not ports: hdr.rs is written for this
+plugin, and the rest call a crate or a library directly.
 
 Static-linking release checklist
 ---------------------------------
@@ -129,5 +164,5 @@ dependency installation used for this build.
   * dav1d: https://code.videolan.org/videolan/dav1d/-/blob/master/COPYING
   * libheif: https://github.com/strukturag/libheif/blob/master/COPYING
   * libde265: https://github.com/strukturag/libde265/blob/master/COPYING
-  * libwebp: https://github.com/webmproject/libwebp/blob/main/COPYING
+  * wpd: https://github.com/halidecx/wpd/blob/main/LICENSE
   * OpenJPEG: https://github.com/uclouvain/openjpeg/blob/master/LICENSE

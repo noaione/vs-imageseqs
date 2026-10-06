@@ -43,15 +43,31 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from natsort import natsorted
-
 import vapoursynth as vs
+from natsort import natsorted
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PLUGIN = ROOT / "target" / "release" / "vs_imageseqs.dll"
 DEFAULT_PATTERN = "i_%04d.webp"
 
 core = vs.core
+
+
+def installed_bestsource() -> Optional[Path]:
+    """The BestSource plugin this environment would have loaded by itself.
+
+    The core is created with auto-loading off, so that an installed imgseqs
+    cannot shadow the binary under test. That means the comparison has to name
+    BestSource itself rather than rely on the core finding it, and this is the
+    file an auto-loading core would pick.
+    """
+    module = Path(vs.__file__).resolve().parent
+    for root in (module, module / "vapoursynth"):
+        for name in ("libbestsource.dll", "libbestsource.so", "libbestsource.dylib"):
+            candidate = root / "plugins" / name
+            if candidate.is_file():
+                return candidate
+    return None
 
 
 def parse_args() -> argparse.Namespace:
@@ -70,7 +86,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--imgseqs-only", action="store_true", help="skip bestsource when it is not installed or not needed"
     )
-    parser.add_argument("--bestsource-plugin", type=Path, help="load this BestSource plugin explicitly")
+    parser.add_argument(
+        "--bestsource-plugin",
+        type=Path,
+        default=installed_bestsource(),
+        help="load this BestSource plugin explicitly, defaults to the installed one",
+    )
     return parser.parse_args()
 
 
@@ -210,8 +231,10 @@ def check_alignment(configs: list[Config]) -> None:
 
 def main() -> None:
     args = parse_args()
-    if (args.imgseqs_only or args.bestsource_plugin) and not vs.has_policy():
-        # Keep the benchmark explicit about which release build it loads.
+    if not vs.has_policy():
+        # Keep the benchmark explicit about which release build it loads: with
+        # auto-loading on, an installed imgseqs is loaded first and measured in
+        # place of the binary named by --plugin.
         class NoAutoLoad(vs.EnvironmentPolicy):
             def on_policy_registered(self, special_api):
                 self.api = special_api
@@ -228,8 +251,9 @@ def main() -> None:
 
         vs.register_policy(NoAutoLoad())
     core.std.LoadPlugin(str(args.plugin.resolve()))
-    if args.bestsource_plugin:
-        core.std.LoadPlugin(str(args.bestsource_plugin.resolve()))
+    bestsource_plugin = args.bestsource_plugin
+    if bestsource_plugin is not None:
+        core.std.LoadPlugin(str(bestsource_plugin.resolve()))
 
     selection = args.select or glob_for(args.pattern)
     images = matching_files(args.dir, selection)
@@ -244,13 +268,15 @@ def main() -> None:
     configs = [Config("imgseqs", lambda: open_imgseqs(files, None, args.icc_profile))]
     if args.imgseqs_only:
         pass
+    elif bestsource_plugin is None:
+        print("no BestSource plugin to load, so bestsource is left out")
     elif first is None:
         print(f"{args.pattern!r} does not describe {files[0].name}, so bestsource is left out")
     else:
         configs.append(Config("bestsource", lambda: open_bestsource(directory, args.pattern, first, None)))
     if args.extra:
         configs.append(Config("imgseqs p=0", lambda: open_imgseqs(files, 0, args.icc_profile)))
-        if first is not None and not args.imgseqs_only:
+        if first is not None and not args.imgseqs_only and bestsource_plugin is not None:
             configs.append(Config("bestsource t=1", lambda: open_bestsource(directory, args.pattern, first, 1)))
     if args.prefetch is not None:
         workers = args.prefetch
@@ -259,9 +285,9 @@ def main() -> None:
     start = "" if first is None else f", first number {first}"
     print(f"sequence: {directory / selection} ({len(files)} files{start})")
     print(f"imgseqs: {args.plugin.resolve()}")
-    if not args.imgseqs_only:
-        bestsource = core.bs.VideoSource.plugin
-        print(f"bestsource: {bestsource.identifier} {bestsource.name} r{bestsource.version.major}")
+    if not args.imgseqs_only and bestsource_plugin is not None:
+        plugin = core.bs.VideoSource.plugin
+        print(f"bestsource: {plugin.identifier} {plugin.name} r{plugin.version.major}")
     print()
 
     for repetition in range(args.reps):

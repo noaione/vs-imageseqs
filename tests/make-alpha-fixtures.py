@@ -34,6 +34,9 @@ commands from the repository root whenever a source png changes, with
     opj_compress -i tests/fixtures/alpha-rgb8.png -mct 0 -I -q 35 -n 1 -o tests/fixtures/alpha-jp2-lossy.jp2
     magick tests/fixtures/alpha-rgba16.png -alpha off PNG48:target/j2k-rgb16.png
     opj_compress -i target/j2k-rgb16.png -mct 0 -n 1 -o tests/fixtures/alpha-jp2-rgb16.jp2
+     opj_compress -i tests/fixtures/jp2-palette-indices.pgm -n 1 -o tests/fixtures/jp2-palette-indices.j2k
+     opj_compress -i tests/fixtures/mono-alpha.png -n 1 -o tests/fixtures/alpha-jp2-grayalpha.jp2
+     opj_compress -i tests/fixtures/alpha-rgba8.png -n 1 -o tests/fixtures/alpha-jp2-rgba8.jp2
 
 The ICC fixtures are generated directly by this script. ``icc-srgb.icc`` is
 written beside ``icc-rgb8.png`` and ``icc-rgba8.png``; the latter two carry
@@ -52,6 +55,21 @@ samples are the decoder's rgb of the crop re-encoded as yuv:
     avifenc -q 100 --cicp 1/13/6 -r full --yuv 422 crop.png tests/fixtures/avif-yuv422p.avif
     magick "sandbox/hitokage-sample/avif-yuv444p10le.avif[32x24+0+0]" crop.png
     avifenc -q 100 -d 10 --cicp 1/13/6 -r full --yuv 444 crop.png tests/fixtures/avif-yuv444p10.avif
+
+The two twelve bit ones are encoded from the y4m sources this script writes,
+because a png input would be converted to yuv by the encoder and the samples
+would be its arithmetic rather than this script's; ``-q 100`` is libavif's
+lossless setting, so the planes come back exactly as written:
+
+    avifenc -q 100 -d 12 --cicp 1/13/6 -r full -o tests/fixtures/avif-yuv420p12.avif tests/fixtures/yuv420p12.y4m
+    avifenc -q 100 -d 12 --cicp 1/13/6 -r full -o tests/fixtures/avif-yuv422p12.avif tests/fixtures/yuv422p12.y4m
+
+The twelve bit heic is encoded from the sixteen bit png below: ``heif-enc``
+takes the top ``--bit-depth`` bits of a sixteen bit input, so the twelve bit
+sample is shifted up by four. The encoder still converts r,g,b to yuv, so its
+planes are the encoder's arithmetic rather than this script's:
+
+    heif-enc -q 100 --bit-depth 12 -o tests/fixtures/heic-yuv420p12.heic tests/fixtures/heic-rgb12.png
 
 The alpha fixture is the four by four source below, encoded as the yuv page it
 is the alpha of, so that the validator can state its planes: the samples are
@@ -74,6 +92,34 @@ and the ``image`` decoder can, which is what the plugin's probe has to describe
 as the format that decoder hands back rather than as the yuv its samples are.
 The metadata is written by this script, so re-running it needs that fixture to
 exist first.
+
+``heic-av1.heic`` is the same trick one container further out: the coded item of
+``avif-yuv420p.avif`` in a container whose major brand is ``heic``. Nothing about
+the item changes -- it is an ``av01`` payload either way -- so the file answers
+the question of whether a heic that stores av1 is a working path or a hole in
+the reader, and the picture has to be the one the avif it was cut from holds.
+It reads ``avif-yuv420p.avif`` too, so that fixture has to exist first.
+
+``avif-grid.avif`` is the one fixture no decoder in this tree can read yet, and
+it is committed as the lock on that: a 2x2 grid of tiles written by ``avifenc
+-g 2x2`` from ``avif-grid-source.png``, which this script writes. The source
+is four 128x128 squares of one sample each, so a reader that joins the grid has
+to place all four cells at the right offsets, and a cell taken from the wrong
+tile or written at the wrong offset is a wrong quadrant rather than a wrong pixel
+somewhere. The grid is encoded by hand, because only the encoder can lay the
+tiles and the ``dimg`` reference out:
+
+    avifenc --lossless -g 2x2 tests/fixtures/avif-grid-source.png tests/fixtures/avif-grid.avif
+
+``avifenc -g 2x2`` needs every cell to be at least 64x64 and the picture to
+divide evenly into the cells, which is why the source is 256x256. ``avifdec``
+reads the fixture back as 256x256, so the file is valid: what refuses it is
+``mp4parse`` and ``dav1d`` in the ``image`` crate, which is the fallback the
+plugin currently reaches for a grid. ``tests/readalpha.vpy`` pins that refusal
+with the error it reports, so the check says out loud when the grid starts
+decoding and has to become a sample check. When that happens, the four
+quadrants are the samples: the top left is 8, the top right 10, the bottom left
+15 and the bottom right 17.
 
 ``heif-enc`` is x265 through libheif and ``avifenc`` is aom through libavif; both
 are asked for lossless output so the validator can state the exact samples, and
@@ -128,6 +174,12 @@ YUV_HEIGHT = 4
 # the eight bits and the sixteen a png can: four numbers wide and three tall, so
 # the twelve samples one to twelve can be stated by position.
 JXL_WIDTH = 4
+
+# Size of the twelve bit y4m sources of the two twelve bit subsampled avif
+# fixtures: eight wide and six tall, so the luma is 0..47 along the row and the
+# chroma planes are four wide by three or six tall.
+YUV12_WIDTH = 8
+YUV12_HEIGHT = 6
 JXL_HEIGHT = 3
 
 # PNG color types.
@@ -135,6 +187,12 @@ GRAY = 0
 RGB = 2
 GRAY_ALPHA = 4
 RGB_ALPHA = 6
+
+# The 2x2 grid avif fixture's source: a 256x256 picture of four 128x128
+# squares, so every cell of the grid is one uniform sample and a misplaced
+# cell is a wrong quadrant rather than a wrong pixel.
+GRID_SIZE = 256
+GRID_SQUARES = [8, 10, 15, 17]
 
 # A small, valid sRGB profile generated by LittleCMS. Keeping it as base64
 # makes the fixture generator independent of a system color-profile directory.
@@ -176,6 +234,32 @@ def png(
     )
     with open(path, "wb") as handle:
         handle.write(document)
+
+
+def avif_grid_source(path: str) -> None:
+    """The eight bit gray source a 2x2 grid avif is encoded from.
+
+    It is a 256x256 picture of four 128x128 squares, each of one sample, so
+    the grid's four cells are four distinct uniform values. That is what makes
+    the fixture useful: a reader that joins the grid has to place all four
+    cells, and a cell placed at the wrong offset or decoded from the wrong
+    tile shows up as a wrong quadrant rather than as a wrong pixel somewhere.
+
+    The size is not free. ``avifenc -g 2x2`` requires every cell to be at
+    least 64x64, and the AVIF grid restrictions require the picture to be
+    evenly divisible into the cells, so 256x256 is the smallest square source
+    for a 2x2 grid with room to spare.
+    """
+    size = GRID_SIZE
+    half = size // 2
+    rows = [
+        [
+            GRID_SQUARES[(row // half) * 2 + (column // half)]
+            for column in range(size)
+        ]
+        for row in range(size)
+    ]
+    png(path, GRAY, 8, rows, width=size, height=size)
 
 
 def farbfeld(path: str, rows: list[list[tuple[int, int, int, int]]]) -> None:
@@ -261,7 +345,13 @@ def avif_metadata(iloc: bytes) -> bytes:
     ipco = (
         avif_box(b"ispe", bytes(4) + struct.pack(">II", 64, 48))
         + avif_box(b"pixi", bytes(4) + bytes((3, 8, 8, 8)))
-        + avif_box(b"av1C", bytes((0x81, 0x10, 0x0C, 0, 0, 0, 0)))
+        # The coding record is the four bytes the format defines and then the
+        # config OBUs, of which there are none: the sequence header is in the
+        # item's own payload, which is what `avifenc` writes too. Bytes after
+        # these four are read as OBUs, so padding them was a container that lied
+        # about its bitstream -- the plugin's own reader never looked, but
+        # `libheif` reads them and refuses the file.
+        + avif_box(b"av1C", bytes((0x81, 0x00, 0x0C, 0x00)))
         + avif_box(b"colr", b"nclx" + struct.pack(">3H", 1, 13, 6) + bytes((0x80,)))
     )
     ipma = (
@@ -328,6 +418,39 @@ def avif_split_extents(source: str, path: str) -> None:
         handle.write(ftyp + meta(offset) + avif_box(b"mdat", coded))
 
 
+def heic_storing_av1(source: str, path: str) -> None:
+    """Writes the coded item of `source` into a container branded ``heic``.
+
+    The item is the same ``av01`` payload and the only thing that changes is the
+    major brand of the file type box: a ``heic`` brand is what routes the file to
+    the heif reader rather than to the avif one, and libheif's own dav1d backend
+    is what decodes an av1 item. So the question the plan asks -- whether a heic
+    that stores av1 is a working path with no file to prove it -- is answered by
+    this file rather than by an encoder, and the picture has to be the one the
+    avif it was cut from holds, plane for plane, because the payload is the same
+    bytes.
+    """
+    with open(source, "rb") as handle:
+        data = handle.read()
+    coded = next(payload for kind, payload in avif_boxes(data) if kind == b"mdat")
+
+    def meta(offset: int) -> bytes:
+        iloc = avif_box(
+            b"iloc",
+            bytes((0, 0, 0, 0, 0x44, 0x00))
+            + struct.pack(">H", 1)
+            + struct.pack(">HHH", 1, 0, 1)
+            + struct.pack(">II", offset, len(coded)),
+        )
+        return avif_box(b"meta", avif_metadata(iloc))
+
+    ftyp = avif_box(b"ftyp", b"heic" + bytes(4) + b"heicmif1miaf")
+    # The extent offset is an offset into the file, so the metadata has to be
+    # built once to know where the media data box starts.
+    offset = len(ftyp) + len(meta(0)) + 8
+    with open(path, "wb") as handle:
+        handle.write(ftyp + meta(offset) + avif_box(b"mdat", coded))
+
 def avif_broken_alpha(source: str, path: str) -> None:
     """Writes the container of `source` with an alpha item that holds no frame.
 
@@ -361,7 +484,9 @@ def avif_broken_alpha(source: str, path: str) -> None:
         ipco = (
             avif_box(b"ispe", bytes(4) + struct.pack(">II", 64, 48))
             + avif_box(b"pixi", bytes(4) + bytes((3, 8, 8, 8)))
-            + avif_box(b"av1C", bytes((0x81, 0x10, 0x0C, 0, 0, 0, 0)))
+            # The same four bytes the other hand-written container's coding
+            # record is; see `avif_metadata` for why they are not padded.
+            + avif_box(b"av1C", bytes((0x81, 0x00, 0x0C, 0x00)))
             + avif_box(b"colr", b"nclx" + struct.pack(">3H", 1, 13, 6) + bytes((0x80,)))
             + avif_box(b"auxC", b"urn:mpeg:mpegB:cicp:systems:auxiliary:alpha\0")
         )
@@ -471,6 +596,34 @@ def netpbm(path: str, maximum: int, rows: list[list[int]], depth: int = 1) -> No
         handle.write(header.encode("ascii") + payload)
 
 
+def yuv12_y4m(path: str, tag: str, half_height: bool) -> None:
+    """Writes one twelve bit y4m, which is the only avifenc input that is yuv.
+
+    The luma runs 0..47 along the row and the two chroma planes differ from each
+    other as well as along the row, so a plane that was swapped, subsampled the
+    wrong way or shifted is a different picture rather than a plausible one.
+    """
+    width, height = YUV12_WIDTH, YUV12_HEIGHT
+    chroma_width = width // 2
+    chroma_height = height // 2 if half_height else height
+
+    def plane(values: list[int]) -> bytes:
+        return b"".join(struct.pack("<H", value) for value in values)
+
+    def chroma(offset: int) -> list[int]:
+        return [
+            offset + 100 * ((x + y) % 2)
+            for y in range(chroma_height)
+            for x in range(chroma_width)
+        ]
+
+    header = f"YUV4MPEG2 W{width} H{height} F25:1 Ip A1:1 {tag}\n".encode()
+    luma = [row * width + column for row in range(height) for column in range(width)]
+    body = b"FRAME\n" + plane(luma) + plane(chroma(100)) + plane(chroma(300))
+    with open(path, "wb") as handle:
+        handle.write(header + body)
+
+
 def tiff_rgba32f(path: str, pixels: list[list[float]]) -> None:
     """Writes an uncompressed 32 bit float RGBA TIFF."""
     payload = b"".join(struct.pack("<4f", *pixel) for pixel in pixels)
@@ -517,6 +670,77 @@ def tiff_rgba32f(path: str, pixels: list[list[float]]) -> None:
     with open(path, "wb") as handle:
         handle.write(bytes(document))
 
+
+def jp2_without_cdef(source: str, path: str) -> None:
+    """Writes `source` with its JP2 channel definitions dropped.
+
+    A `cdef` box is the container's statement of what each component means, and
+    without it a two-component file says nothing about which sample is alpha --
+    which is the refusal the plan keeps rather than guessing. The codestream is
+    the same bytes, so the two fixtures differ in one box.
+    """
+    with open(source, "rb") as handle:
+        data = handle.read()
+    top = list(avif_boxes(data))
+    header = next(payload for kind, payload in top if kind == b"jp2h")
+    kept = [
+        (kind, payload)
+        for kind, payload in avif_boxes(header)
+        if kind != b"cdef"
+    ]
+    rebuilt = [
+        (
+            kind,
+            avif_box(b"jp2h", b"".join(avif_box(k, p) for k, p in kept))
+            if kind == b"jp2h"
+            else payload,
+        )
+        for kind, payload in top
+    ]
+    with open(path, "wb") as handle:
+        handle.write(b"".join(avif_box(kind, payload) for kind, payload in rebuilt))
+    print(f"wrote {path}")
+
+
+def write_palette_indices(path: str) -> None:
+    """Writes the index pgm a palette JP2's codestream is compressed from."""
+    with open(path, "wb") as handle:
+        handle.write(b"P5\n4 2\n255\n" + bytes((0, 1, 2, 3, 3, 2, 1, 0)))
+
+
+def jp2_palette(source: str, path: str) -> None:
+    """Writes a JP2 whose codestream holds palette indices.
+
+    The codestream of `source` -- the index pgm this script writes, compressed by
+    the hand-made command in the header -- states one component of eight bits, and
+    the colour is in the `pclr` box beside it: four entries of three components
+    each, which the `cmap` box maps onto three output channels. No encoder in this
+    tree writes a palette, and this reader does not expand one, so the fixture is
+    what pins the refusal by name rather than a frame built from indices.
+    """
+    with open(source, "rb") as handle:
+        coded = handle.read()
+    ihdr = struct.pack(">IIHBBBB", 2, 4, 1, 7, 7, 0, 0)
+    colr = struct.pack(">BBBI", 1, 0, 0, 16)
+    entries = bytes((0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255))
+    # NE, NPC, then one `Bi` a column -- bits minus one, the way a codestream's
+    # `Ssiz` states a precision -- and then the entries, entry-major.
+    pclr = struct.pack(">HB", 4, 3) + bytes((7, 7, 7)) + entries
+    cmap = b"".join(struct.pack(">HBB", 0, 1, column) for column in range(3))
+    with open(path, "wb") as handle:
+        handle.write(
+            avif_box(b"jP  ", bytes((0x0D, 0x0A, 0x87, 0x0A)))
+            + avif_box(b"ftyp", b"jp2 " + bytes(4) + b"jp2 ")
+            + avif_box(
+                b"jp2h",
+                avif_box(b"ihdr", ihdr)
+                + avif_box(b"colr", colr)
+                + avif_box(b"pclr", pclr)
+                + avif_box(b"cmap", cmap),
+            )
+            + avif_box(b"jp2c", coded)
+        )
+    print(f"wrote {path}")
 
 def main() -> None:
     os.makedirs(FIXTURES, exist_ok=True)
@@ -572,6 +796,18 @@ def main() -> None:
         ],
     )
     dds_dxt5(write("alpha-dds.dds"))
+    # The channel definitions of the two JP2 fixtures the hand-made commands
+    # above produce: the second is the same codestream with its `cdef` dropped, so
+    # it says nothing about which of its two components is alpha.
+    jp2_without_cdef(
+        write("alpha-jp2-grayalpha.jp2"),
+        write("alpha-jp2-grayalpha-unlabelled.jp2"),
+    )
+    # The palette JP2: the index pgm is written here, its codestream is compressed
+    # by the hand-made command above, and the boxes that state the palette are
+    # written around it.
+    write_palette_indices(write("jp2-palette-indices.pgm"))
+    jp2_palette(write("jp2-palette-indices.j2k"), write("alpha-jp2-palette.jp2"))
     avif_no_picture(write("avif-no-picture.avif"))
     # The same coded item as the yuv avif fixture, written as two extents. It
     # reads the fixture the hand-made command above produces, so that one has to
@@ -580,6 +816,13 @@ def main() -> None:
         write("avif-yuv420p.avif"),
         write("avif-split-extents.avif"),
     )
+    # The same coded item once more, in a container branded `heic`: the item is an
+    # av01 payload either way, so this is the file that says whether a heic
+    # storing av1 is a path the heif reader already has.
+    heic_storing_av1(
+        write("avif-yuv420p.avif"),
+        write("heic-av1.heic"),
+    )
     # The same coded item again, with an alpha item beside it that holds no
     # frame: a colour-only read never asks for that item, so this is the file the
     # demand decision is checked against.
@@ -587,6 +830,11 @@ def main() -> None:
         write("avif-yuv420p.avif"),
         write("avif-broken-alpha.avif"),
     )
+    # The source a 2x2 grid avif is encoded from. The grid itself is written by
+    # ``avifenc -g 2x2`` from this png, with the command in the module
+    # docstring, because only the encoder can lay the tiles and the `dimg`
+    # reference out.
+    avif_grid_source(write("avif-grid-source.png"))
     png(
         write("alpha-rgb8.png"),
         RGB,
@@ -741,6 +989,26 @@ def main() -> None:
             width=MONO_WIDTH,
             height=MONO_HEIGHT,
         )
+    yuv12_y4m(write("yuv420p12.y4m"), "C420p12", True)
+    yuv12_y4m(write("yuv422p12.y4m"), "C422p12", False)
+    # The sixteen bit source of the twelve bit heic. heif-enc takes the top bits
+    # of a sixteen bit png, so the twelve bit sample is shifted up by four, and
+    # the source is neutral: the encoder's r,g,b-to-yuv conversion of a neutral
+    # pixel is exact, so the luma plane is the sample itself and both chroma
+    # planes are 128 at twelve bits. The luma runs 256..3616, which is a value
+    # an eight bit word cannot hold, so a plane that arrived left aligned in a
+    # sixteen bit word is not merely a different picture but an impossible one.
+    png(
+        write("heic-rgb12.png"),
+        RGB,
+        16,
+        [
+            [sample for x in range(YUV12_WIDTH) for sample in ((256 + 480 * x) << 4,) * 3]
+            for _ in range(YUV12_HEIGHT)
+        ],
+        width=YUV12_WIDTH,
+        height=YUV12_HEIGHT,
+    )
     print(f"wrote the alpha fixtures to {FIXTURES}")
 
 

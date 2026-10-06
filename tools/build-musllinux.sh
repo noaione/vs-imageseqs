@@ -11,59 +11,26 @@
 #
 # The image carries no Rust, and a glibc rustup-init cannot run on it, so this
 # installs a toolchain with rustup's own installer when cargo is missing. Every
-# other build input is in the image or on PyPI, which is why the workflow has no
-# setup step for this job: this script is the whole build.
+# other build input is in the image or on PyPI. CI runs the same setup separately
+# before restoring compiled dependencies; standalone builds still run it here.
 set -eu
 
 musl_target=x86_64-unknown-linux-musl
 
-export PATH="/opt/python/cp312-cp312/bin:$PATH"
-export CARGO_TARGET_DIR="$PWD/target/musllinux/cargo"
-work="$PWD/target/musllinux"
-prefix="$work/prefix"
-archives="${IMGSEQS_NATIVE_ARCHIVES:-$work/archives}"
-mkdir -p "$archives" "$work/sources" "$prefix" dist
+export IMGSEQS_LINUX_PLATFORM=musllinux
+. "$PWD/tools/setup-linux-build.sh"
 
 # This script owns the wheels in these three directories, and the checkers below
 # require exactly one of them: a second run in the same checkout has to start
 # from what this run built rather than from what the last one left behind.
 python tools/build_output.py clear --pattern '*.whl' "$work/unrepaired" "$work/repaired" dist
 
-# dav1d's x86 assembly is assembled by nasm; pkgconf is what libwebp is found
-# through, and is what the image's own glib development package already pulls in.
-apk add --no-cache nasm pkgconf
-python -m pip install build wheel 'cmake>=3.28,<4' meson ninja
-
-if ! command -v cargo >/dev/null 2>&1; then
-    echo "no rust toolchain in this image; installing one with rustup"
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-    # shellcheck disable=SC1091
-    . "$HOME/.cargo/env"
+native_cached=false
+if [ "${IMGSEQS_NATIVE_CACHE_HIT:-false}" = true ] && \
+    python tools/linux-native-cache.py check "$prefix" "$IMGSEQS_NATIVE_CACHE_KEY"; then
+    native_cached=true
+    echo 'reusing cached native codec libraries'
 fi
-if command -v rustup >/dev/null 2>&1; then
-    # A no-op on a musl host, and the standard library this target needs when the
-    # image already carried a glibc toolchain.
-    rustup target add "$musl_target"
-fi
-
-export PKG_CONFIG=pkgconf
-# libwebp is found through the prefix this script installed, which is the right
-# answer whatever the toolchain's own host is; the crate refuses the query when
-# the host and target triples differ unless this says otherwise.
-export PKG_CONFIG_ALLOW_CROSS=1
-export PKG_CONFIG_PATH="$prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-export CMAKE_PREFIX_PATH="$prefix${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
-export LD_LIBRARY_PATH="$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-export CMAKE_TOOLCHAIN_FILE="$PWD/tools/manylinux-toolchain.cmake"
-export CARGO_BUILD_TARGET="$musl_target"
-
-# The plugin is a cdylib loaded into a process that already runs musl, and rustc
-# links musl statically by default: that would put a second libc, its allocator
-# and its thread-local storage inside the plugin. Every musllinux wheel links
-# the system's musl instead. The C++ runtime the embedded libheif needs is what
-# auditwheel bundles here, because the musl policy allows only libc and libz,
-# and it is what this wheel's own notices cover.
-export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=-crt-static"
 
 fetch() {
     source_name=$1
@@ -85,8 +52,10 @@ actual = hashlib.sha512(path.read_bytes()).hexdigest()
 if actual != expected:
     raise SystemExit(f"{path}: sha512 mismatch\nexpected {expected}\nactual   {actual}")
 PY
-    mkdir -p "$work/sources/$source_name"
-    tar -xzf "$archives/$source_name.tar.gz" --strip-components=1 -C "$work/sources/$source_name"
+    if [ "$native_cached" != true ]; then
+        mkdir -p "$work/sources/$source_name"
+        tar -xzf "$archives/$source_name.tar.gz" --strip-components=1 -C "$work/sources/$source_name"
+    fi
 }
 
 # Same upstream versions and archive hashes as the repository's Windows and
@@ -95,35 +64,27 @@ fetch dav1d-1.5.3 https://github.com/videolan/dav1d/archive/1.5.3.tar.gz \
     8d976b93135213d41385c20205475269a6826a68ebfd716c4d9a7a3ff2a79703e8df0573e43207c81b5db44807d2721db18ec84c0fc6bef98efab86a2cccb6cc
 fetch libde265-1.1.1 https://github.com/strukturag/libde265/archive/v1.1.1.tar.gz \
     fb2207f5a3ba901853f61f345c72130f000134918febbc4f3529c3d289fc79ee7457b3e61660110f698bb4ac15d62426e284034bf870bfbd1859ab3feaa52be8
-fetch libwebp-1.6.0 https://github.com/webmproject/libwebp/archive/v1.6.0.tar.gz \
-    298e0ad4c09392213baf5abb69d330c6203b618800073fe2df91d01d35034197c5d3e29a74573b06971473c52c74514f0e6e0f6c8162f923e2dd15cb1a692aef
 
-reconfigure=""
-if [ -f "$work/dav1d-build/build.ninja" ]; then
-    reconfigure=--reconfigure
+if [ "$native_cached" != true ]; then
+    reconfigure=""
+    if [ -f "$work/dav1d-build/build.ninja" ]; then
+        reconfigure=--reconfigure
+    fi
+    # shellcheck disable=SC2086
+    meson setup $reconfigure "$work/dav1d-build" "$work/sources/dav1d-1.5.3" \
+        --prefix "$prefix" --libdir lib --buildtype release --default-library shared \
+        -Denable_tests=false -Denable_tools=false
+    meson compile -C "$work/dav1d-build"
+    meson install -C "$work/dav1d-build"
+
+    cmake -S "$work/sources/libde265-1.1.1" -B "$work/de265-build" -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$prefix" \
+        -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_SHARED_LIBS=ON -DENABLE_SDL=OFF
+    cmake --build "$work/de265-build" --parallel
+    cmake --install "$work/de265-build"
+
+    python tools/linux-native-cache.py mark "$prefix" "$IMGSEQS_NATIVE_CACHE_KEY"
 fi
-# shellcheck disable=SC2086
-meson setup $reconfigure "$work/dav1d-build" "$work/sources/dav1d-1.5.3" \
-    --prefix "$prefix" --libdir lib --buildtype release --default-library shared \
-    -Denable_tests=false -Denable_tools=false
-meson compile -C "$work/dav1d-build"
-meson install -C "$work/dav1d-build"
-
-cmake -S "$work/sources/libde265-1.1.1" -B "$work/de265-build" -G Ninja \
-    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$prefix" \
-    -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_SHARED_LIBS=ON -DENABLE_SDL=OFF
-cmake --build "$work/de265-build" --parallel
-cmake --install "$work/de265-build"
-
-cmake -S "$work/sources/libwebp-1.6.0" -B "$work/webp-build" -G Ninja \
-    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$prefix" \
-    -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-    -DBUILD_SHARED_LIBS=OFF -DWEBP_BUILD_ANIM_UTILS=OFF -DWEBP_BUILD_CWEBP=OFF \
-    -DWEBP_BUILD_DWEBP=OFF -DWEBP_BUILD_GIF2WEBP=OFF -DWEBP_BUILD_IMG2WEBP=OFF \
-    -DWEBP_BUILD_VWEBP=OFF -DWEBP_BUILD_WEBPINFO=OFF -DWEBP_BUILD_WEBPMUX=OFF \
-    -DWEBP_BUILD_EXTRAS=OFF
-cmake --build "$work/webp-build" --parallel
-cmake --install "$work/webp-build"
 
 python -m build --wheel --outdir "$work/unrepaired"
 # Every variant of the library targets the triple named above, so this is where

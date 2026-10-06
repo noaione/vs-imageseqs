@@ -2,51 +2,55 @@
 
 ## unreleased
 
+### added
+
+- `ImgSeqAnimationIndex` names the displayed picture's position within its own file, and is written on frames from an animated file
+
+### changed
+
+- **The `image` crate is gone.** Every format this plugin reads has a reader of its own under `src/formats/`, and a file whose bytes and extension both name no format here is refused with `no reader here knows its format`. The plugin is about 435 KB smaller, and several of those readers are ports of that crate's, so its licence texts and notices stay
+  - `webp`: a still is decoded by `wpd`, with libwebp gone from the link, and described from its own chunks, so `ImgSeqOrientation` and `ImgSeqHasICC` come from the file. The still path is **1.2x to 1.3x faster**, the Windows library 134 KB smaller, a corrupt file is refused with the decoder's own words, and building on x86 or x86-64 still needs `nasm` on `PATH`
+  - `tiff`: a WebP- or JPEG-compressed strip is decoded here, and a compression code this reader does not take is refused by name at the probe
+  - `tiff`: one, two or four bit gray, gray plus alpha, cmyk (with alpha for the first time), palette and ycbcr pages are all read now, and a ycbcr page comes out as its own yuv planes with `_Matrix` and `_Range` from its tags
+  - `tiff`: a page that states an orientation, carries an ICC profile or is a BigTIFF now reports all three
+  - `bmp`/`ico`: the older `BITMAPCOREHEADER` and a bare `.dib` are read, and a Windows cursor is read instead of having its type word mistaken for a bit depth
+  - `tga`: a colour map whose entries are fifteen or sixteen bits is read rather than refused, widening by the same round-to-nearest table a direct sixteen bit image uses
+  - `hdr`: a radiance picture whose resolution line states an orientation other than the common `-Y ... +X` decodes
+  - `exr`: a first part with no colour channel decodes, and a flat grayscale layer is read with `Y` as colour and `A` as the alpha clip
+  - `jp2`: a file that states what its components mean is read as what it states -- gray or r,g,b beside an opacity component -- and a palette is expanded here rather than refused
+  - `png`: a file is identified by its bytes on the probe side too, so a name that lies about it gets the same description and the same `cICP` properties
+  - `gif`: a one frame gif is read as a still image
+- Whether a file plays a timeline is decided by its bytes now, like its format already was, so a gif, webp, avif or heic under a name that does not say so plays its timeline. `identify::route` decides that and whose file it is in one call, so a file is opened once to identify it rather than about fifteen times, at a cost of 3% more per file at clip creation over the fixture set
+- An avif or heif is read by the library its container states, through one walk the probe and the decode share
+  - An item written as several extents is joined here, a grid of tiles goes to `libheif`, and an r,g,b page is read by `libheif` too; one with no alpha now reports `ImgSeqOriginalColorType=rgb8`
+  - A sequence honours the `ctts` composition offsets and an edit list that ends its media early, clamping a sample composed before zero and refusing by name an edit list that starts partway into the media
+  - A twelve bit subsampled page is handed out as `YUV420P12` or `YUV422P12`
+- A PAM whose `MAXVAL` is above a byte but which names no `TUPLTYPE` is read at the width its `MAXVAL` states
+
 ### fixed
 
-- Windows builds enable libheif's built-in dav1d decoder, so animated AVIF
-  sequences decode instead of failing with `NoMatchingDecoderInstalled`.
-  libheif's default features stay disabled, and no additional codec is selected.
+- `ImgSeqIndex` reports the path's position in `files` rather than the output frame number, which an animation pushed out of step for every file after it
+- A signed JPEG 2000 page, or one whose components state two widths, is refused with a message that names the component, its width and what is wrong with it
+- The musllinux wheel no longer crashes on a TIFF (or an AVIF with no picture) read on a VapourSynth worker thread: each format's `decode` and `stream` is a call of its own, so the dispatcher no longer grows a 100 KiB frame past musl's 128 KiB stack
+- Windows builds enable libheif's built-in dav1d decoder, so animated AVIF sequences decode instead of failing with `NoMatchingDecoderInstalled`; libheif's default features stay disabled
+- An animated png's delays are placed exactly, at the lowest common denominator of the delays the file states, rather than rounded to whole milliseconds. An animation whose length is not a whole number of output frames keeps its last frame, so 600 ms at 24 fps is 15 frames rather than 14
 
 ### performance
 
-- PNG decoding hands each decoded row to the frame it belongs in instead of
-  building the whole picture in a buffer the plugin then copies, which is one
-  pass over the image rather than two: 1.2x on the decoded side of every PNG
-  set measured, and a frame is byte for byte identical either way
-  - this reaches every colour type and bit depth, `tRNS` on grey, rgb and
-    palette, and an odd width; an interlaced or animated file, and one the
-    caller asked to rotate, still goes through the `image` decoder
-  - a grey page is a copy per row and a colour page a single walk over the row
-    that fills all three planes, so `Read` no longer pays a second pass at all
-  - a palette page is expanded by the plugin rather than by the decoder, which
-    is one pass over one byte per pixel where `Transformations::EXPAND` is a
-    pass over three: a further 1.10x on the pages made of them
-  - every png set measured is now ahead of Pillow's own decode column, from
-    0.89x to 0.69x of its time
-- x86-64 wheels carry one plugin library per microarchitecture level, and
-  VapourSynth loads the widest the machine's CPU supports: 6% to 11% faster on
-  the PNG and JPEG sets measured, almost all of it in the write into the frame
-  - the libraries are `vs_imageseqs.dll`, `vs_imageseqs.avx2.dll` for AVX2 and
-    `vs_imageseqs.avx512.dll` for AVX-512, and a unix wheel names the same
-    three with a `lib` prefix and a `.so` extension
-  - all three decode identically, and the plain library still passes no
-    `-C target-cpu`, so a machine that could load the plugin before still can
-  - the Windows wheel is 10.4 MiB instead of 3.8 MiB, which is what the three
-    builds cost
+- Creating a clip over a long list reads the front of each file where the container states what a description needs there: 35 webp files of 146 MiB went from 99 ms to 6 ms, 35 jpeg xl from 157 ms to 5 ms, 35 jpeg 2000 from 159 ms to 4 ms, and 35 avif plus 35 heic of 362 MiB from 84 and 170 ms to 6 and 13 ms
+- Describing an animated png reads the delays its `fcTL` chunks state instead of rendering every frame: five 1024x1024 files of eight frames each went from 49 ms to 3 ms
+- PNG decoding hands each row to the frame it belongs in rather than buffering the whole picture, and a palette page is expanded here rather than by the decoder. Every png set measured is now ahead of Pillow's own decode column, from 0.89x to 0.69x of its time
+- A netpbm, a targa and a bitmap are read a row at a time rather than into a buffer the size of the file, holding 48 MiB rather than 74 MiB for a 3000x3000 image and decoding 7 to 14% faster
+- A planar tiff is handed to the frame as the planes it already is, which is 43 ms rather than 139 ms on a 3000x3000 eight bit page
+- A DirectDraw surface whose width or height is not a multiple of four is read with the pixels that hang over the edge dropped, and a netpbm whose header is longer than the readable window is read to a megabyte
 
 ### build
 
-- the Linux release includes a musllinux wheel beside the manylinux one, for
-  hosts whose C library is musl rather than glibc, where the manylinux wheel
-  cannot load at all
-  - the musl wheel carries the same three plugin libraries, so an AVX2 or
-    AVX-512 host is served there the same way
-  - auditwheel's musl policy promises the host only libc and libz, so the wheel
-    bundles the C++ runtime the embedded libheif needs instead of leaving the
-    plugin needing a package Alpine does not install by default
-  - it is accompanied by `linux-musl-relink-source.tar.gz`, the corresponding
-    source archive the manylinux wheel already has
+- the Linux release includes a musllinux wheel beside the manylinux one, for hosts whose C library is musl rather than glibc, where the manylinux wheel cannot load at all
+  - it carries the same three plugin libraries, so an AVX2 or AVX-512 host is served there the same way
+  - auditwheel's musl policy promises the host only libc and libz, so it bundles the C++ runtime the embedded libheif needs instead of needing a package Alpine does not install by default
+  - it is accompanied by `linux-musl-relink-source.tar.gz`, the corresponding source archive the manylinux wheel already has
+- x86-64 wheels carry one plugin library per microarchitecture level (`avx2` and `avx512`) and VapourSynth loads the widest the CPU supports, which is 6% to 11% faster on the PNG and JPEG sets measured at the cost of a 10.4 MiB Windows wheel instead of 3.8 MiB
 
 ## [0.2.1] - 2026-09-30
 

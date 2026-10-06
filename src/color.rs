@@ -129,15 +129,27 @@ pub const fn chroma_location(position: u8) -> Option<ffi::VSChromaLocation> {
     }
 }
 
+/// Which source picture a frame was built from.
+///
+/// `file` is the path's position in the `files` list the clip was created
+/// from, and `animation` is the picture's position within that file, which is
+/// only meaningful for an animated one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceIndices {
+    pub file: usize,
+    pub animation: Option<usize>,
+}
+
 /// Attaches the source metadata of `image` to a frame of `format`.
 ///
 /// `format` is the pixel format of the clip that owns the frame, so an alpha
-/// clip is never described as RGB, and `alpha_marker` is only set when the
-/// frame belongs to an alpha clip.
+/// clip is never described as RGB, `indices` is what the source-property names
+/// report, and `alpha_marker` is only set when the frame belongs to an alpha
+/// clip.
 pub fn set_frame_properties(
     frame: &mut VideoFrame,
     image: &ImageInfo,
-    index: usize,
+    indices: SourceIndices,
     format: PixelFormat,
     alpha_marker: Option<bool>,
     export_icc_profile: bool,
@@ -146,20 +158,38 @@ pub fn set_frame_properties(
         return Err(ImgSeqError::new("VapourSynth frame has no property map"));
     };
     let path = image.path.to_string_lossy();
-    let index = i64::try_from(index)
-        .map_err(|_| ImgSeqError::new("frame index does not fit in an Int property"))?;
-    let original_color_type = format!("{:?}", image.original_color_type);
-
+    let file = i64::try_from(indices.file)
+        .map_err(|_| ImgSeqError::new("the file index does not fit in an Int property"))?;
+    let animation = indices
+        .animation
+        .map(|animation| {
+            i64::try_from(animation).map_err(|_| {
+                ImgSeqError::new("the animation index does not fit in an Int property")
+            })
+        })
+        .transpose()?;
+    let original_color_type = image.original_color_type.label();
     properties
         .set(key!(c"ImgSeqPath"), Value::Utf8(&path), AppendMode::Replace)
         .map_err(ImgSeqError::from_display)?;
     properties
-        .set(key!(c"ImgSeqIndex"), Value::Int(index), AppendMode::Replace)
+        .set(key!(c"ImgSeqIndex"), Value::Int(file), AppendMode::Replace)
         .map_err(ImgSeqError::from_display)?;
+    // Only an animated file has a picture position within it to report: a still
+    // contributes one frame, which the file's own index already names.
+    if let Some(animation) = animation {
+        properties
+            .set(
+                key!(c"ImgSeqAnimationIndex"),
+                Value::Int(animation),
+                AppendMode::Replace,
+            )
+            .map_err(ImgSeqError::from_display)?;
+    }
     properties
         .set(
             key!(c"ImgSeqOriginalColorType"),
-            Value::Utf8(&original_color_type),
+            Value::Utf8(original_color_type),
             AppendMode::Replace,
         )
         .map_err(ImgSeqError::from_display)?;
@@ -215,8 +245,8 @@ pub fn set_frame_properties(
         }
     }
 
-    // Rgb frames are what an image file means, and libwebp converts yuv to rgb
-    // with the bt.601 matrix the vp8 specification defines for the limited
+    // Rgb frames are what an image file means, and the decoder converts yuv to
+    // rgb with the bt.601 matrix the vp8 specification defines for the limited
     // range, which is also what ffmpeg assumes for the same bitstreams. So the
     // planes this plugin hands out for a lossy webp are the ones that matrix
     // and range describe, whichever of the two paths produced the frame.
@@ -287,6 +317,7 @@ pub fn set_frame_properties(
 
     Ok(())
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

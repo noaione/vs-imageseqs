@@ -25,3 +25,10 @@ foreach(codec IN ITEMS
 )
     set(WITH_${codec} OFF CACHE BOOL "" FORCE)
 endforeach()
+
+# libheif-sys asks libheif for its libsharpyuv colour transforms too, and the
+# runner image has homebrew's webp installed, so libheif found it. Nothing
+# here encodes, and leaving it on put libsharpyuv.0.1.2.dylib in the delocated
+# bundle, where no symbol referred to it and `package-macos-wheel.py` refused
+# it by name.
+set(WITH_LIBSHARPYUV OFF CACHE BOOL "" FORCE)

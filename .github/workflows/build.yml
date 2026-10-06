@@ -2,12 +2,18 @@ name: build
 
 on:
   push:
+    branches:
+      - master
+      - develop
     paths-ignore:
       - 'README.md'
       - 'LICENSE'
       - '.gitignore'
       - '.vscode/**'
   pull_request:
+    branches:
+      - master
+      - develop
     paths-ignore:
       - 'README.md'
       - 'LICENSE'
@@ -16,6 +22,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  IMGSEQS_RUST_TOOLCHAIN: "1.99.0"
 permissions:
   contents: read
 concurrency:
@@ -39,12 +46,42 @@ jobs:
 
       - name: set up rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.IMGSEQS_RUST_TOOLCHAIN }}
 
-      - name: install assembler
-        run: dnf install --assumeyes nasm
+      - name: cache Python build downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pip
+          key: manylinux-pip-v1-${{ hashFiles('tools/setup-linux-build.sh', '.github/workflows/build.yml') }}
+
+      - name: prepare Linux build environment
+        id: setup
+        run: sh tools/setup-linux-build.sh
+        env:
+          IMGSEQS_LINUX_PLATFORM: manylinux
+          IMGSEQS_WRITE_GITHUB_ENV: "1"
+
+      - name: cache native codec libraries
+        id: native-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/manylinux/prefix
+            target/manylinux/archives
+          key: ${{ steps.setup.outputs.native-key }}
+
+      - name: cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target/manylinux/cargo"
+          key: ${{ steps.setup.outputs.native-key }}
+          env-vars: "CARGO CC CXX CFLAGS CXXFLAGS CPPFLAGS LDFLAGS CMAKE RUST PKG_CONFIG LD_LIBRARY_PATH"
 
       - name: build and repair Linux wheel
         run: bash tools/build-manylinux.sh
+        env:
+          IMGSEQS_NATIVE_CACHE_HIT: ${{ steps.native-cache.outputs.cache-hit }}
 
       - name: upload repaired wheel
         uses: actions/upload-artifact@v7
@@ -112,8 +149,8 @@ jobs:
     name: linux-x86_64 (musllinux)
     runs-on: ubuntu-26.04
     # The musl counterpart of the manylinux job above, from the Alpine-based
-    # image of the same policy. It runs the image's own shell, and the build
-    # script installs the toolchain the image does not carry.
+    # image of the same policy. Setup runs before the compiled dependency cache
+    # so its key sees the musl toolchain and the same environment as the build.
     container: quay.io/pypa/musllinux_1_2_x86_64@sha256:ff786af69d772d7ac3e318c00a2b682428a352cc822d6175f6a0d4b431c0d44d
     defaults:
       run:
@@ -122,8 +159,48 @@ jobs:
       - name: check out source
         uses: actions/checkout@v7
 
+      - name: cache musl Rust toolchain
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup
+            ~/.cargo/bin
+            ~/.cargo/env
+          key: musllinux-rustup-v1-${{ env.IMGSEQS_RUST_TOOLCHAIN }}-${{ hashFiles('.github/workflows/build.yml') }}
+
+      - name: cache Python build downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pip
+          key: musllinux-pip-v1-${{ hashFiles('tools/setup-linux-build.sh', '.github/workflows/build.yml') }}
+
+      - name: prepare Linux build environment
+        id: setup
+        run: sh tools/setup-linux-build.sh
+        env:
+          IMGSEQS_LINUX_PLATFORM: musllinux
+          IMGSEQS_WRITE_GITHUB_ENV: "1"
+
+      - name: cache native codec libraries
+        id: native-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/musllinux/prefix
+            target/musllinux/archives
+          key: ${{ steps.setup.outputs.native-key }}
+
+      - name: cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target/musllinux/cargo"
+          key: ${{ steps.setup.outputs.native-key }}
+          env-vars: "CARGO CC CXX CFLAGS CXXFLAGS CPPFLAGS LDFLAGS CMAKE RUST PKG_CONFIG LD_LIBRARY_PATH"
+
       - name: build and repair musllinux wheel
         run: sh tools/build-musllinux.sh
+        env:
+          IMGSEQS_NATIVE_CACHE_HIT: ${{ steps.native-cache.outputs.cache-hit }}
 
       - name: upload repaired wheel
         uses: actions/upload-artifact@v7
@@ -214,6 +291,19 @@ jobs:
 
       - name: set up rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.IMGSEQS_RUST_TOOLCHAIN }}
+
+      - name: install NASM assembler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nasm --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $nasmDirectory = Join-Path $env:ProgramFiles 'NASM'
+          $nasmDirectory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $env:PATH = "$nasmDirectory;$env:PATH"
+          nasm -v
 
       - name: cache rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -226,13 +316,13 @@ jobs:
 
       - name: install macos dependencies
         if: runner.os == 'macOS'
-        run: brew install cmake meson ninja pkg-config webp
+        run: brew install cmake meson ninja pkg-config
 
       - name: build pinned macOS codec libraries
         if: runner.os == 'macOS'
         run: |
           bash tools/build-macos-native.sh
-          echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/target/macos-native/prefix/lib/pkgconfig:/opt/homebrew/opt/webp/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/target/macos-native/prefix/lib/pkgconfig" >> "$GITHUB_ENV"
           echo "CMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/target/macos-native/prefix" >> "$GITHUB_ENV"
         env:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
@@ -251,68 +341,13 @@ jobs:
           restore-keys: |
             vcpkg-${{ runner.os }}-${{ runner.arch }}-x64-windows-static-md-
 
-      - name: install windows dependencies
+      - name: build Windows wheel
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          $workspace = $env:GITHUB_WORKSPACE
-          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
-          if ([string]::IsNullOrWhiteSpace($vcpkgRoot)) {
-            $vcpkgRoot = 'C:\vcpkg'
-          }
-
-          $vcpkg = Join-Path $vcpkgRoot 'vcpkg.exe'
-          if (-not (Test-Path -LiteralPath $vcpkg)) {
-            throw "vcpkg was not found at $vcpkg"
-          }
-
-          $installRoot = Join-Path $workspace 'vcpkg_installed'
-          & $vcpkg install `
-            --triplet x64-windows-static-md `
-            --x-manifest-root=$workspace `
-            --x-install-root=$installRoot
-          if ($LASTEXITCODE -ne 0) {
-            throw "vcpkg install failed with exit code $LASTEXITCODE"
-          }
-
-          # pkgconf is a build-time tool used by dav1d-sys on Windows.
-          & $vcpkg install pkgconf:x64-windows --classic --x-install-root=$installRoot
-          if ($LASTEXITCODE -ne 0) {
-            throw "vcpkg pkgconf install failed with exit code $LASTEXITCODE"
-          }
-
-          # libheif-sys uses vcpkg-rs, while dav1d-sys discovers dav1d with
-          # pkg-config. The adapter keeps both crates on the same local tree.
-          $adapter = Join-Path $workspace 'target\vcpkg-root'
-          $installed = $installRoot
-          New-Item -ItemType Directory -Force -Path $adapter | Out-Null
-          New-Item -ItemType File -Force -Path (Join-Path $adapter '.vcpkg-root') | Out-Null
-          # A restored Rust target cache can contain a stale file or junction
-          # at this path. Remove it before creating the adapter junction.
-          $adapterInstalled = Join-Path $adapter 'installed'
-          $existingAdapterInstalled = Get-Item -LiteralPath $adapterInstalled -Force -ErrorAction SilentlyContinue
-          if ($null -ne $existingAdapterInstalled) {
-            Remove-Item -LiteralPath $adapterInstalled -Force -Recurse
-          }
-          New-Item -ItemType Junction -Force `
-            -Path $adapterInstalled `
-            -Target $installed | Out-Null
-
-          $pkgconf = Join-Path $installed 'x64-windows\tools\pkgconf'
-          $pkgconfExecutable = Join-Path $pkgconf 'pkgconf.exe'
-          if (-not (Test-Path -LiteralPath $pkgconfExecutable)) {
-            throw "pkgconf was not found at $pkgconfExecutable"
-          }
-          $pkgconf | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-          @(
-            "VCPKG_ROOT=$adapter"
-            'VCPKGRS_TRIPLET=x64-windows-static-md'
-            "PKG_CONFIG=$pkgconfExecutable"
-            "PKG_CONFIG_PATH=$(Join-Path $installed 'x64-windows-static-md\lib\pkgconfig')"
-          ) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        run: ./tools/build-windows.ps1 -InstallRoot "$env:GITHUB_WORKSPACE\vcpkg_installed" -OutputDirectory dist
 
       - name: install build tools
+        if: runner.os == 'macOS'
         run: python -m pip install --upgrade pip build
 
       - name: install macOS wheel repair tool
@@ -320,6 +355,7 @@ jobs:
         run: python -m pip install delocate==0.13.0
 
       - name: clear the previous build output
+        if: runner.os == 'macOS'
         run: python tools/build_output.py clear dist
 
       - name: clear cached libheif configuration
@@ -327,6 +363,7 @@ jobs:
         run: cargo clean --release --package libheif-sys
 
       - name: build wheel
+        if: runner.os == 'macOS'
         run: python -m build --wheel --outdir dist
         env:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
@@ -337,7 +374,7 @@ jobs:
         env:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
 
-      - name: check the unix plugin links libwebp statically
+      - name: check the unix plugin links no webp library
         if: runner.os != 'Windows'
         shell: bash
         run: |
@@ -356,10 +393,10 @@ jobs:
               ;;
           esac
           if echo "$dependencies" | grep -E 'libwebp|libsharpyuv'; then
-            echo "the plugin still needs libwebp from the system at run time" >&2
+            echo "the plugin still links a webp library, which nothing decodes with any more" >&2
             exit 1
           fi
-          echo "libwebp is linked into the plugin"
+          echo "no webp library is linked"
 
       - name: stage native plugin from wheel
         run: python tools/stage-native.py dist native
@@ -451,7 +488,9 @@ jobs:
           for file in \
             build.rs Cargo.toml Cargo.lock vcpkg.json hatch_build.py \
             pyproject.toml CHANGELOG.md tools/build-macos-native.sh \
-            tools/build-musllinux.sh tools/make-linux-source-bundle.sh \
+            tools/build-manylinux.sh tools/build-musllinux.sh \
+            tools/setup-linux-build.sh tools/linux-native-cache.py \
+            tools/make-linux-source-bundle.sh \
             tools/macos-libheif-toolchain.cmake tools/package-macos-wheel.py \
             tools/vcpkg-ports/libheif/vcpkg.json \
             tools/vcpkg-ports/libheif/portfile.cmake; do

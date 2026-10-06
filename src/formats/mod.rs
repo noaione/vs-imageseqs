@@ -14,7 +14,10 @@
 //!   as the `image` path
 //!
 //! A module that can describe a file from its own container without decoding it
-//! also exposes `image_info(path)` for the probe, and `output_format` for the
+//! also exposes `image_info` for the probe, which reads the open the router
+//! already made rather than making one of its own, where
+//! `route` is what [`identify::route`] named for the file -- a module the route
+//! already names answers without reading the head -- and `output_format` for the
 //! files it describes but leaves to the `image` path: [`heif`] answers both, and
 //! [`avif`] answers them for a file the `image` decoder would have had to decode
 //! whole before it could report a size.
@@ -25,8 +28,21 @@
 //! time, which is a fifth entry point rather than one of the four above.
 
 pub mod avif;
+pub mod bmp;
+pub mod dds;
+pub mod exr;
+pub mod farbfeld;
+pub mod gif;
+pub mod hdr;
 pub mod heif;
+pub mod ico;
+pub mod identify;
 pub mod jp2;
+pub mod jpeg;
 pub mod jxl;
 pub mod png;
+pub mod pnm;
+pub mod qoi;
+pub mod tga;
+pub mod tiff;
 pub mod webp;

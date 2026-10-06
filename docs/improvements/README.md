@@ -143,6 +143,109 @@ open plus frames to 4.99 s.
 
 ## plans
 
+### frame source indices — 2026-10-07
+
+[40 frame source indices](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/40-frame-source-indices.md)
+is implemented: `ImgSeqIndex` names the path's position in `files` rather than
+the output frame number, which an animation shifted for every file after it,
+and a new `ImgSeqAnimationIndex` names the displayed picture's position within
+its own file, written on animated files only. The two cannot be one property,
+because an animation contributes several output frames. The validator's
+`test_source_indices` holds both, including the ordering an animation's length
+used to get wrong.
+
+### removing libwebp — 2026-10-06
+
+[39 removing libwebp](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/39-libwebp-removal.md)
+is implemented, and nothing links libwebp any more: every webp, an animated
+container's rectangle included, is decoded by wpd. The tests hold wpd against
+reference payloads captured from libwebp before it was unlinked, and `build.rs`,
+`vcpkg.json`, both Linux builders, the legal files and the notice bundle no
+longer name it. Frame parity is byte identical on 809,492 sampled frames over
+the webp fixtures, the 48 file upstream corpus, the 57 tiff fixtures that
+existed then, three synthetic animations and the three sandbox sets, both clips
+each; the validator passes its 954 checks; the animation read is 1.11x to 1.16x
+faster than the build that still linked it; and the Windows library is 134 KB
+smaller. The removal also fixed a four sample WebP-compressed tiff strip, which
+now decodes to libtiff's own decode of the same file and used to come out with
+the fourth sample of every pixel zeroed and every row but the first shifted.
+
+### PNGWrite: request-driven PNG export
+
+[38 PNGWrite](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/38-png-write.md)
+is research complete and proposed, with no plugin implementation. It records the
+requested arguments and recommends Gray/RGB integer 8–16-bit input, optional
+alpha, lossless widening of intermediate depths, and row-streamed encoding with
+the existing `png` dependency. API defaults remain proposals. FrameProps report
+successful writes rather than serving as the save ledger; repeat requests,
+cache behavior, safe publication and overwrite permission need explicit
+contracts. YUV/float conversion stays upstream in the recommended first scope.
+The note includes encoder metadata caveats, effort estimates and acceptance checks.
+Its [writer benchmark protocol](../BENCH.md#png-writer-comparison-planned) requires
+comparison with default Pillow saving both serially and through an nmanga-style
+bounded pool fixed to six workers, including total completion time and peak memory.
+
+### unsupported subtypes — 2026-10-06
+
+[36 unsupported subtypes](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/36-unsupported-subtypes.md)
+collects the refused subtypes it takes up: what the container states, where the
+change lands, the fixture it needs
+and the check that would accept it. All ten routes are implemented -- the TGA two
+byte map entries, the bare DIB, cursors, the gray+alpha TIFF, the flat gray EXR,
+twelve bit subsampled AVIF/HEIF, a heic storing av1, the ISO composition boxes, the
+JP2 channel definitions and TIFF WebP, whose palette is expanded here, and a ycbcr TIFF
+whose strip is a JPEG is read too -- and what stays refused by decision is JP2 signed or
+mixed-precision samples.
+
+### wpd WebP decoder — 2026-10-04
+
+[35 wpd WebP decoder](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/35-wpd-webp-decoder.md)
+is implemented. wpd decodes an ordinary still, writing the borrowed rows of the
+picture it decoded straight into the frames the call allocated. The animated
+container's rectangle, its canvas and its integer blend were libwebp's at the
+time; [39](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/39-libwebp-removal.md)
+has since moved the rectangle onto wpd too and unlinked libwebp. The
+first-party probe and the one-presentation `first_picture` guard are
+unchanged. The integrated measurement is 1.22x to
+1.31x on the 35 page sandbox set and 1.53x on the serial per-frame stage split
+(196.84 → 128.46 ms a frame), with byte identical pixels on 76 of 76 webp parity
+lines and all 941 validator checks it ran then; `docs/BENCH.md` has the tables.
+The all-wpd animation path was the plan page's optional experiment, and 39 is
+what did it.
+
+### input routing and planar decoding — 2026-10-04
+
+[34 input routing and planar decoding](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/34-input-routing-and-planar-decode.md)
+is closed in substance. Content-based still/animation routing, image-rs removal,
+the shared probe input, the planar and row writes and the timing repairs have all
+landed, and its status table separates those results from the historical 59-of-84
+cohort. Current checks pass 0 of 76 renamed copies and 0 of 7 renamed timelines.
+The one named item left is its DXT SIMD proposal at the end, which waits for a
+quiet machine; its `dds` row is settled rather than open. The original inventory
+and benchmarks are labeled historical.
+
+Plan 34's candidate table has since lost its low-bit gray TIFF row: a gray page
+of one, two or four bits a sample is read and expanded to `Gray8` rather than
+refused, with six fixtures, a `tests/readalpha.vpy` section that reads them and a
+Pillow parity check that agrees with every one of them.
+
+### image-rs removal goal — 2026-10-03
+
+These four plans record the research that preceded image-rs removal. The
+dependency is now removed; plan 34's current-status table records that landed
+work separately from the remaining input and planar work. The table below
+retains the original research scopes and statuses. Its earlier GIF/WebP
+discovery findings and benchmark requirements describe those snapshots, not
+the current implementation inventory. Future performance changes still need
+a matched baseline, correctness checks and memory measurements.
+
+| plan | scope | original research status |
+| --- | --- | --- |
+| [26 remove image-rs](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/26-remove-image-rs.md) | staged goal, complete-coverage removal gate, required baseline protocol and current baseline attempts/results | proposed, no implementation |
+| [27 direct still decoders](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/27-direct-still-decoders.md) | every still format's decoder selected, the candidate rejections and their reproductions, the parity rules a first-party reader inherits and the order to implement them in | **selected, not implemented**: 12 formats keep or promote a crate, 5 get a first-party reader, 2 zune candidates and the DDS pair are rejected on reproduced defects |
+| [28 animation and container decoders](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/28-animation-container-decoders.md) | every animated format's decoder and both container fallbacks selected, the candidate runs, the animated parity baseline and the order to implement it in | **selected, not implemented**: GIF and animated WebP keep or add no dependency, APNG/JXL/AVIF-HEIF sequences are landed, and `libheif` replaces `image` as the fallback for every refused container |
+| [29 decoder types without image](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/29-decoder-types-without-image.md) | enums, source labels, orientation, dispatch, frame ownership, tests and transitive dependency removal | proposed, no implementation |
+
 ### proposed for review — 2026-09-27
 
 Plans 17–20 were documentation only when they were written. Each records the
@@ -194,6 +297,7 @@ second Linux wheel, built in the Alpine pypa image.
 
 | plan | touches | expected | risk | status |
 | --- | --- | --- | --- | --- |
+| [37 Linux build caching](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/37-linux-build-caching.md) | Linux wheel CI, build/setup scripts, native cache checker, source packaging | reuse compiled codecs and Cargo dependencies, plus musl Rust and Python downloads | low: exact native keys and complete-install checks, repair and clean-container validation still run | implemented; local checks pass, CI cache reuse and timings pending |
 | [33 musllinux wheel](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/33-musllinux-wheel.md) | `tools/build-musllinux.sh`, `tools/make-linux-source-bundle.sh`, `tools/check-linux-wheel.py`, CI, notices, `tests/check-packaging-tools.py` | a `musllinux_1_2_x86_64` wheel beside the manylinux one, with the same three plugin libraries and the C++ runtime the musl policy does not promise the host | low: it adds a wheel, and no frame, format, property or argument changes | written and locally checked; the container build and its validation run in CI |
 | [32 host-safe CPU variant builds](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/32-host-safe-cpu-variant-builds.md) | `hatch_build.py`, `tests/check-packaging-tools.py` | an explicit Cargo target keeps AVX2/AVX512 flags out of build scripts and procedural macros that run on CI | low: target dependencies keep their CPU flags, wheel layout unchanged | implemented, Windows wheel, all variants and Cargo isolation validated |
 | [31 stage bundled runtime libraries](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/31-stage-bundled-runtime-libraries.md) | `tools/stage-native.py`, `tests/check-packaging-tools.py` | macOS/Linux runtime dependencies under `imageseqs/lib/` stage without being mistaken for plugin variants | low: plugin validation stays at the manifest directory, wheel contents unchanged | implemented, local platform-layout regression checks |
@@ -342,6 +446,54 @@ code-path defect. Each bullet names the page that keeps the full argument. the
 rest of that `defer:` list — gpu output, manual simd, filesystem globbing and
 format-based clip grouping — is in `not planned` below, with its reasons.
 
+**one format is slower than the reader it replaced**
+
+[26](26-remove-image-rs.md) moved ten still formats off the `image` crate and
+verified every one of their pixels, planes and properties byte-identical. Three
+of the four speed differences that measurement found are resolved: `hdr` is
+faster (1.16x to 0.965x, three whole-picture buffers collapsed to one), `tga` is
+1.13x from 1.34x (a redundant copy of the picture removed), and `ppm` needed
+nothing -- its 1.19x was this tree's own harness comparing best-of runs between
+a high-variance baseline and a low-variance build, and the median says it is
+faster.
+
+`dds` is still 1.12x, and the cause is verified rather than inferred:
+`still::Decoder::read(self, buffer)` fills the caller's frame directly, while
+`src/formats/dds.rs` builds a 4.3 MB `Vec` that the plugin then copies into the
+frame -- about 0.86 ms a file of extra traffic against a measured gap of 1.15.
+The fix is a `RowStream`, which `src/formats/png.rs:650` already models: hold the
+path, re-open in `fill`, and hand each decoded row to the `RowSink`. For `dds`
+that means walking block rows and decoding each block into the four pixel rows it
+belongs to, so the intermediate never exists. The part that makes it more than
+mechanical is that the sink is one entry per **plane**, so an interleaved pixel
+is three plane writes and a correct stream decodes a whole block row into a small
+buffer before scattering it.
+
+Four measured attempts went into these two formats and three were wrong, so the
+page records the split that worked: every fix came from removing a whole
+traversal of memory, and every failure from rearranging one. `dds` has such a
+traversal to remove and no arithmetic to tune.
+
+then it was answered. **`dds` is settled rather than open**: four attempts were
+built and measured, all reverted -- three row-stream and loop variants (67.1, 62.5
+and 66.1 ms against a buffered 60.7) and one that copied whole lines instead of
+pixels (57.7 against 55.3) -- and `widen`, `from_565`, `colour_block` and
+`alpha_levels` were compared against `image`'s `dxt.rs` and are already the same
+algorithm. The regression is real (15 interleaved pairs, paired ratio median
+1.124, faster in 3 of 15) and it is not in the code that was looked at.
+
+**The streaming idea did pay, on `ppm`.** One netpbm shape now answers
+`Pixels::Stream`: a packed `P6` at `MAXVAL` 255, whose rows are `width * 3` bytes
+of the file and therefore already the layout the frame wants. Fifteen interleaved
+pairs put it at a paired ratio median of **0.789**, faster in 14 of 15 -- 21% off
+-- and 0.921 against the reader it replaced. The technique is `RowSink::place_rgb8`
+in `src/decoder.rs`, lifted out of `png.rs`, and the split it establishes is that
+streaming pays when a decoder's own output order already matches the frame's and
+loses when it must transpose, because then it trades a bulk copy for per-pixel
+work. `tga`'s uncompressed rows and `bmp`'s bottom-up rows are the next candidates
+by that rule; `hdr` transposes for three of its eight orientations and `qoi`
+decodes to a buffer by construction.
+
 **the decoder could write the frame itself**
 
 - **decode straight into the frame's planes.** `JxlOutputBuffer::new_from_ptr`
@@ -406,12 +558,13 @@ format-based clip grouping — is in `not planned` below, with its reasons.
   ([11](11-jxl-direct.md)).
 - **`pclr`, `cdef`, `res`/`resc` and the `uuid` boxes of a jp2**
   ([06](06-jpeg-2000-backend.md)).
-- **the tiles of a grid avif.** `dimg` names them and the probe already reads
-  that reference; what is missing is each tile's own coding record and the
-  placement of the decoded tiles into a picture of the grid's size. a tiled avif
-  is read by neither this reader nor the `image` decoder it falls back to, which
-  accepts the item type and then hands the grid descriptor to `dav1d`
-  ([17](17-avif-container-robustness.md)).
+- **the tiles of a grid avif, in this reader.** `dimg` names them and the probe
+  already reads that reference; what is missing is each tile's own coding record
+  and the placement of the decoded tiles into a picture of the grid's size. A grid
+  is read today by `libheif`, which the walk hands a container it refuses, and
+  `tests/readalpha.vpy`'s `test_avif_grid` checks the joined picture's four cells;
+  reading it here is what would remove that fallback, not what would make a grid
+  readable ([17](17-avif-container-robustness.md)).
 - **a heic that stores av1**: the `ispe`/`av1C` read would apply to it and
   nothing in the corpus is one ([05](05-monochrome-heif.md)).
 
@@ -444,6 +597,18 @@ format-based clip grouping — is in `not planned` below, with its reasons.
   in 0.7.4 and is read nowhere, and if a later version honours it, it must stay
   `true` ([11](11-jxl-direct.md)).
 
+**a pass over the present-tense `image` references**
+
+118 mentions of the `image` crate remain in `src/`, and most are provenance
+rather than a claim about today -- a module says it is a port of that crate's
+reader, which is what `CHANGELOG.md` says the notices are for. A few asserted
+current behaviour instead: `dds.rs`'s header said a surface must be a multiple of
+four where the code clips an odd one, and `avif.rs`'s `yuv_format` said a depth
+with no format keeps the rgb "the `image` decoder produces". Both are corrected.
+The remaining mentions have not been read one by one, and the distinction to
+apply is whether the sentence is about where the code came from or about what it
+does now.
+
 ## validating a change
 
 `cargo test --locked` plus the bench on two sets. the png set is the control:
@@ -474,8 +639,10 @@ C:/vcpkg/vcpkg.exe install --triplet x64-windows-static-md --x-manifest-root="$P
 
 - **intra-frame threading of the pure rust webp decoder.** ffmpeg spreads one
   vp8 frame over every core and that is most of why bestsource wins on webp.
-  `image-webp` exposes no threading hooks and owns no slice parallelism, so
-  this would need to happen upstream. not a change this repository can make.
+  the decoder is not this repository's — `image-webp` when this was written, and
+  `wpd` ([35](35-wpd-webp-decoder.md)) as its selected replacement — so slice
+  parallelism inside one frame is upstream work either way. not a change this
+  repository can make.
 - **a thread budget for the avif decoder.** [19](19-avif-thread-budget.md) is
   the measurement that closed it: dav1d already defaults to one thread per
   core, the default `prefetch=4` already uses 8.8 of this machine's ten cores,
@@ -489,6 +656,13 @@ C:/vcpkg/vcpkg.exe install --triplet x64-windows-static-md --x-manifest-root="$P
 - **ffmpeg as a dependency.** it would match bestsource's decoder behaviour,
   but it is a large build and licence surface for one format when libwebp is a
   smaller step with the same yuv entry point.
+- **DDS BC6 and BC7, and a cubemap or a volume as more than one frame.** the
+  reader takes DXT1, DXT3 and DXT5 and their DX10 equivalents, and a cubemap's
+  other faces, a volume's other slices and anything past the top mip are ignored
+  rather than refused, because one frame a file is the contract. BC7 would be a
+  second per-block decoder for surfaces nothing here has a corpus for, and BC6H
+  is half-float HDR, which would need a tone-mapping policy this plugin does not
+  have
 - **raising `AUTO_MAX_WORKERS` above four by default.** the memory question no
   longer blocks it, because the budget scales with the window
   ([01](01-lookahead-scheduling.md)), but the measured answer is still no: the

@@ -225,6 +225,101 @@ the odd page and its restored border. `GPUUpload` refuses the `mismatch` clip
 itself (`ogsov.AnalyzeVk: clip must be a video node`), so the conversion is what
 makes an ogsov graph possible on a mixed sequence at all.
 
+### wpd as the still decoder
+
+[35](improvements/35-wpd-webp-decoder.md) moved an ordinary still webp off
+libwebp and onto `wpd`, and [39](improvements/39-libwebp-removal.md) moved the
+animated container's rectangle onto the same decoder and unlinked libwebp
+altogether. this compares two builds of the plugin, so the decoder is the only
+thing that differs between them.
+
+the headline, 35 files, `--reps 3 --extra --prefetch 16`, best pass of three,
+both builds measured in one session:
+
+| reading the set | before (libwebp) | after (wpd) | change |
+| --- | ---: | ---: | ---: |
+| imgseqs `Read` | 3.517 s | 2.689 s | 1.31x faster |
+| imgseqs `Read`, `prefetch=0` | 11.777 s | 9.039 s | 1.30x faster |
+| imgseqs `Read`, `prefetch=16` | 1.882 s | 1.542 s | 1.22x faster |
+| bestsource `VideoSource` | 1.534 s | 1.529 s | unchanged (control) |
+| bestsource `VideoSource`, `threads=1` | 10.111 s | 10.065 s | unchanged (control) |
+| open | 0.004 s | 0.004 s | unchanged |
+
+imgseqs closes most of the gap to bestsource on frames, from 2.29x behind to
+1.76x, and stays ahead including the open, where it was 1.10x behind on this
+run and is now 1.24x ahead. the control row moved by 0.3%, and the probe is
+untouched because the timeline and the metadata still come out of the
+container walk `wpd` does not touch.
+
+the single-thread rows are the cleanest comparison of the two decoders, because
+neither plugin has a pool behind it: bestsource with `threads=1` is a control at
+10.111 → 10.065 s, so libwebp is what the 11.777 s serial row above was paying
+for, and wpd's 9.039 s is 1.30x of it. imgseqs' own serial row therefore goes
+from 1.17x *behind* bestsource's single thread to 1.11x ahead of it, which the
+pooled rows cannot show: at `prefetch=16` bestsource's threads still win, and
+they are the reason its pooled row was and is ahead.
+
+where the time went, per frame at `prefetch=0` and `prefetch=4` over the first
+four files, from `debug=True` (`target/bench/p35-stage-split.py`, a copy of
+`stage-split.py` that disables auto loading so each build is named by path):
+
+| stage | `p=0` libwebp | `p=0` wpd | `p=4` libwebp | `p=4` wpd |
+| --- | ---: | ---: | ---: | ---: |
+| `read` (the decode itself) | 185.50 ms | 125.24 ms | 213.40 ms | 155.69 ms |
+| `convert` (copy into the frame) | 8.32 ms | 0.00 ms | 7.91 ms | 0.00 ms |
+| `decode` (open + read + buffer) | 186.56 ms | 126.18 ms | 214.66 ms | 157.65 ms |
+| `total` | 196.84 ms | 128.46 ms | 100.56 ms | 81.41 ms |
+
+two things are in the table. the decoder itself is 1.48x faster on this stage,
+which is `wpd`'s own work and not the plugin's, and the copy into the frame is
+gone because a still is a row stream: the frame is allocated first and the
+decoder's borrowed rows are written into it, so the picture never exists in a
+buffer of the plugin's. That is why `buffer` reads 0.00 ms and `convert` 0.00 ms
+on the wpd column, and why the `read` figure there is decode *and* transfer
+where libwebp's is decode alone.
+
+the serial row is the honest per decoder comparison of the two: 196.84 → 128.46
+ms per frame, 1.53x. the pooled rows gain less because the pool was already
+hiding some of the decode, and the deepest row gains least of all.
+
+pixels: 76 of 76 lines of `frame-parity.py` over `sandbox/webp`, every webp in
+`tests/fixtures` (lossless, alpha, orientation 2/6/8, the animated one) and the
+`mixed` and `fixed` controls are byte identical between the two builds, colour
+clip and alpha clip, plane by plane. the wider run over all seven sandbox sets
+is 91 of 91 lines identical. `tests/readalpha.vpy` passes 941 checks on both
+builds with no captured warning, and the webp fixture lines are part of that.
+
+the one visible cost of the first move was size: the Windows library grew
+8,292,864 → 9,039,872 bytes, because both decoders were linked at once. peak
+working set was not separated per decoder here; the plan page records the
+isolated measurement (about 206 → 207 MiB on the yuv corpus and 118 → 163 MiB
+on a large generated rgb one), which the user accepted before this was
+implemented. the removal takes that back and then some: the same library is
+8,902,656 bytes with no libwebp in the link at all, 13,824 bytes smaller than
+the build that had already stopped calling it.
+
+### the animated container's rectangle
+
+[39](improvements/39-libwebp-removal.md) hands an `ANMF` frame's own chunk
+sequence to the same decoder the stills use, so what this compares is the
+rectangle decode on its own. the corpus is 39 files and 510 frames: the webp
+fixtures, the 48 files of the upstream `wpd-test-data` tree, and three
+generated 512x512 and 384x384 animations, because the shipped fixture is 16x12
+and would measure the sampler rather than the decoder. medians of three
+alternating fresh processes:
+
+| animation read, 510 frames | before (libwebp) | after (wpd) | change |
+| --- | ---: | ---: | ---: |
+| `prefetch=0` | 0.5392 s | 0.4649 s | 1.16x faster |
+| `prefetch=4` | 0.4611 s | 0.4002 s | 1.15x faster |
+
+both builds share the compositor, the canvas and the frame write, so the gain
+is the decoder and the RIFF container the old path allocated per frame. the
+corpus matters as much as the numbers: of its 204 animated rectangles, 160 are
+`VP8L`, 15 are a bare `VP8`, and 29 are `ALPH` + `VP8`, so the branch
+`tests/fixtures/animation.webp` never reaches is the one most of it covers.
+every frame of both clips is byte identical between the two builds.
+
 ## jpeg
 
 35 files, 213 MB. 31 of the pages are monochrome and come out as `Gray8` of
@@ -1073,3 +1168,114 @@ and used to be handed out as sixteen bit `RGB48` frames whose samples stopped
 0.4% and 0.02% short of the scale the format claimed, which is the section on
 nominal depth above. [10](improvements/10-nominal-bit-depth.md) fixed it, and it
 cost nothing to fix.
+
+## PNG writer comparison (planned)
+
+Status: **protocol only; no writer measurements yet**. This is the acceptance
+comparison for [38 PNGWrite](improvements/38-png-write.md), not the existing PNG
+decode benchmarks above. Compare the following three routes on identical pixels:
+
+| route | write scheduling | PNG settings |
+| --- | --- | --- |
+| plugin `PNGWrite` | initially sequential `writer.get_frame(n)` requests; record the actual completion mode and any additional parallel run separately | proposed default compression 6 and adaptive filtering |
+| Python Pillow, serial | main thread acquires a frame, creates an owned image, saves it and closes it before the next frame | `image.save(path, format="PNG")`, no compression/optimization overrides |
+| Python Pillow, bounded | main thread acquires frames in order and creates owned images; six worker threads save and close them, with oldest-future backpressure and a final drain | exactly the same Pillow save call as the serial route |
+
+### inspected nmanga reference
+
+The reference is the sibling project's
+[`write_page`](../../nao-manga-rls/nmanga/cli/autolevel.py#L639-L703), whose PNG
+saves have no compression overrides, and its
+[bounded loop](../../nao-manga-rls/nmanga/cli/autolevel.py#L885-L916). The inspected
+file has no function named `save_png`; this is the PNG-saving path intended by
+that description. Use the save/scheduling behavior, not autolevel analysis, skip
+or copy branches, JPEG output, logging or progress rendering.
+
+[`BoundedWritePool`](../../nao-manga-rls/nmanga/common.py#L1111-L1153) owns a
+`ThreadPoolExecutor(max_workers=workers)`. Each submit appends a future. Once the
+pending list reaches the worker count, it pops the oldest future and the caller
+immediately waits on its result before producing another image. At the end the
+caller waits on every remaining future. With six workers this caps outstanding
+write tasks at six. The pool alone is not a bound if its caller ignores the
+returned future. A completed image held by the producer and encoder workspace
+still contribute to peak memory.
+
+Frame fetching and conversion stay on the main thread. The reference
+[`vs_frame_to_image`](../../nao-manga-rls/nmanga/vapour.py#L558-L567) uses
+`Image.fromarray(np.asarray(frame[plane]).copy())`, so the worker owns pixels
+after the frame context closes. Do not hand out an alias of released frame data.
+The inspected helper is a one-plane 8-bit path; color cohorts need verified RGB
+or RGBA packing, included in their timings.
+
+**Fix the bounded comparison to six workers**, as requested. The reference
+[default calculation](../../nao-manga-rls/nmanga/cli/options.py#L344-L348) is half
+the logical CPUs, minimum one, and the
+[CLI thread option](../../nao-manga-rls/nmanga/cli/options.py#L568-L577) uses that
+value. It is six on the 12-logical-CPU benchmark machine, not every host. Record
+the inspected nmanga revision and source snapshot when running the benchmark.
+The benchmark may reproduce this small scheduling pattern locally; nmanga is
+not a required project or wheel dependency.
+
+### timing and fairness
+
+- The headline is **end-to-end batch wall time**, from the first frame request
+  to the last completed, closed output file. Include frame acquisition, Python
+  copies/packing, compression, disk writes and the bounded pool's final drain.
+  Do not stop at the last submission or sum overlapping worker times as wall time.
+- Use fresh equivalent upstream graphs in each route, the same ordered inputs,
+  formats, frame count, source prefetch settings and VapourSynth thread/cache
+  configuration. Do not let one route reuse decoded frames from another route.
+  Keep graph construction outside the timed batch and report it separately.
+- The plugin's initial sequential run measures the proposed public usage, while
+  six Pillow workers measure practical pipeline throughput. This is deliberately
+  not a claim of equal encoder concurrency. Record actual plugin concurrency;
+  optionally add bounded asynchronous plugin requests at six in flight as a
+  separate diagnostic, without replacing the required three rows.
+- Start with Gray8 manga pages, the directly comparable nmanga case, then add
+  verified RGB8/RGBA8 cohorts. Test Gray16/RGB16/RGBA16 plugin throughput separately
+  unless the installed Pillow path can preserve each mode exactly. Never silently
+  reduce depth to make a comparison run. Shared output pixels must decode equal.
+- Use default Pillow PNG settings in both Python rows: omit `compress_level`,
+  `optimize` and other tuning. Record Python, Pillow and zlib versions, confirm
+  the installed default (normally compression 6, optimize false), and record the
+  plugin build, `png`/flate2 backend and filter policy. A shared numeric level
+  does not imply identical encoders, filtering or compressed sizes.
+- Give each route a fresh output directory on the same filesystem/device with
+  equivalent names. Every frame must really be encoded and saved: no existing
+  destinations, copy shortcuts, prior success records or cached writer outputs.
+  Disable optional metadata identically for the pixel-focused comparison, or
+  supply equivalent compatible metadata and report its cost separately.
+- Include the plugin's normal safe-publication overhead in the headline. Pillow's
+  reference save writes directly to its destination; disclose that difference.
+  A separate Pillow temp-file/publication diagnostic can isolate it. Finishing
+  buffered saves is required; do not claim power-loss durability or mix fsync
+  policies between routes.
+- Use at least five measured passes after a separately labeled warm-up. Rotate
+  all three route orders, use matched cohorts and report median plus min/max or
+  another dispersion measure. State whether input/filesystem caches are warm,
+  available RAM, storage, CPU model and machine load. Output deletion and any
+  decode verification stay outside the timed region, with safely owned directories.
+- Report batch seconds, milliseconds/frame, frames/s, process CPU seconds, peak
+  process memory, total PNG bytes and output count. Peak memory must include the
+  six images, producer copies, source caches and all encoder workspaces, not just
+  the pending future list. Verify dimensions, mode/depth and decoded samples for
+  every output; compression is lossless, but conversion bugs are still possible.
+
+For encoder-only diagnosis, add separately labeled runs over already prepared
+equivalent input frames/images with preparation excluded. Hold the same corpus
+resident for each route, report that memory separately, and do not substitute
+these isolated timings for the end-to-end headline. Report plugin levels 0/1/6/9
+as additional speed/size rows, not replacements for the default comparison.
+
+### results to collect
+
+| route | workers / in flight | median batch s | min–max s | ms/frame | frames/s | CPU s | peak MiB | PNG bytes | parity |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| plugin `PNGWrite`, default | sequential requests; implementation concurrency to record | pending | pending | pending | pending | pending | pending | pending | pending |
+| Pillow, default, serial | 1 | pending | pending | pending | pending | pending | pending | pending | pending |
+| Pillow, default, bounded | 6 / at most 6 writes outstanding | pending | pending | pending | pending | pending | pending | pending | pending |
+
+Compute plugin speedups against **both** Pillow rows from matched median batch
+times. A win over serial Pillow alone is not evidence of a win over nmanga's
+bounded writer. Throughput, memory and file size all matter; no measured speedup
+or passing parity result is claimed until this table is populated.

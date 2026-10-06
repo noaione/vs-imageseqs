@@ -23,7 +23,7 @@
 
 use std::{
     fs::File,
-    io::{Read, Seek, SeekFrom},
+    io::{BufReader, Read, Seek, SeekFrom},
     ops::Range,
     path::Path,
     sync::Arc,
@@ -31,18 +31,15 @@ use std::{
 };
 
 use dav1d::{PixelLayout, PlanarImageComponent};
-use image::{ColorType, metadata::Orientation};
 use vapoursynth4_rs::ColorFamily;
 
 use crate::{
     color::{Cicp, UNSPECIFIED},
     decoder::{DecodeTimings, DecodedImage, Demand, ImageInfo, Pixels, image_error},
     error::{ImgSeqError, Result},
+    layout::{ColorType, Orientation},
     pixel::{PixelFormat, Transform},
 };
-
-/// File extensions that hold an avif container.
-const AVIF_EXTENSIONS: [&str; 1] = ["avif"];
 
 /// Size limit for the leading boxes of an avif. The metadata of a real file is
 /// orders of magnitude smaller, and a file past it is left to the decoder.
@@ -58,12 +55,12 @@ const ALPHA_AUX_TYPES: [&[u8]; 2] = [
     b"urn:mpeg:hevc:2015:auxid:1",
 ];
 
-/// Whether this module decodes `info`.
-///
-/// Only a file the probe described as yuv is decoded here; a file whose samples
-/// the container does not name keeps the r,g,b the `image` decoder produces.
-pub fn handles(info: &ImageInfo) -> bool {
-    has_avif_extension(&info.path) && info.format.color_family() == ColorFamily::YUV
+/// The same, from an open of its own, which is what a caller that did not come
+/// through a probe has.
+#[cfg(test)]
+pub fn image_info_at(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
+    let file = File::open(path).ok()?;
+    image_info(path, apply_rotation, &mut BufReader::new(file))
 }
 
 /// What the container of an avif states about its image, when this module can
@@ -74,22 +71,41 @@ pub fn handles(info: &ImageInfo) -> bool {
 /// describe. A file this answers with an r,g,b format is described but not
 /// decoded here, and its format correction is read from the same boxes by
 /// [`output_format`].
-pub fn image_info(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
-    let mut file = File::open(path).ok()?;
-    let file_len = file_length(&file).ok()?;
-    let boxes = leading_boxes(&mut file)?;
+pub fn image_info(
+    path: &Path,
+    apply_rotation: bool,
+    file: &mut BufReader<File>,
+) -> Option<ImageInfo> {
+    // The container walk starts at the front of the file, whatever the caller
+    // left the reader at.
+    file.rewind().ok()?;
+    let file_len = file_length(file.get_ref()).ok()?;
+    let boxes = leading_boxes(&mut *file)?;
     if !has_avif_brand(&boxes) {
         return None;
     }
     let meta = Meta::read(&boxes, file_len)?;
+    // A container this reader will not decode is libheif's to describe and to
+    // decode, and that is a decision the *container* makes rather than the
+    // samples: a grid of tiles and a construction method this walker does not
+    // follow are the cases, and libheif reads both. The `image` decoder used to
+    // be asked instead, and could not: it has no monochrome avif, so a grid of
+    // monochrome tiles ended as `Invalid argument`.
+    //
+    // This is asked before the properties are read, because a container this
+    // walk refuses may not have the properties this reader wants at all, and it
+    // is before any format is chosen, so the probe reports the format libheif
+    // hands out. [`handles`] reads the same walk, so the probe and the decode
+    // cannot disagree about which library owns the file.
+    if !meta.native_eligible() {
+        return super::heif::describe(path, apply_rotation, &mut *file);
+    }
     let header = AvifHeader::read(&meta.primary_properties()?)?;
     let (width, height) = (header.width, header.height);
     if width == 0 || height == 0 {
         return None;
     }
     let has_alpha = meta.has_alpha();
-    let native = meta.native_eligible();
-    // `dav1d` hands the item over as it is coded, so the size and the samples
     // here are the stored ones and the container's own transform is the plugin's
     // to apply; see [`container_orientation`].
     let orientation = header.orientation;
@@ -104,64 +120,43 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
     // `avifenc` writes one, and a lot of other writers state the codes in the
     // bitstream alone.
     let cicp = header.cicp.or_else(|| {
-        let payload = read_range(&mut file, meta.primary_data(SEQUENCE_HEADER_LIMIT).ok()?).ok()?;
+        let payload = read_ranges(
+            &mut *file,
+            file_len as u64,
+            &meta.primary_ranges(SEQUENCE_HEADER_LIMIT).ok()?,
+        )
+        .ok()?;
         sequence_header_cicp(&payload)
     });
 
+    // A monochrome item holds one plane, and libheif hands that plane over as
+    // the gray the container states. This reader has no monochrome avif path of
+    // its own, so the container is libheif's to describe and to decode, exactly
+    // as an r,g,b one is. The `image` decoder used to be asked for these, which
+    // is where the path had always been; see
+    // `docs/improvements/05-monochrome-heif.md`.
     if header.monochrome {
-        // A monochrome item holds one plane, and the `image` decoder converts it
-        // into the four channels it reports. The probe records the gray format
-        // the samples map to, at the depth the `av1C` box states, and leaves the
-        // decode to `image`, which is where that path has always been; see
-        // `docs/improvements/05-monochrome-heif.md`.
-        return Some(ImageInfo {
-            path: path.to_path_buf(),
-            width,
-            height,
-            color_type: header.decoded_color_type(),
-            original_color_type: header.file_color_type(has_alpha).into(),
-            has_icc_profile: header.has_icc_profile,
-            icc_profile: header.icc_profile.clone(),
-            cicp,
-            // A single plane has no chroma to place.
-            chroma_location: None,
-            orientation,
-            transform,
-            format: PixelFormat::from_color_type(header.file_color_type(has_alpha))?
-                .at_depth(header.depth.into()),
-        });
+        return super::heif::describe(path, apply_rotation, &mut *file);
     }
 
     // The samples are yuv when the container states a matrix the frame
     // properties can name. A file that states none, states "unspecified", or
     // states the identity - whose samples are already r,g,b and have no planar
-    // yuv format to be handed out as - keeps the r,g,b the `image` decoder
-    // produces, and is still described here, because the colour it states is
-    // written into the frame's properties either way.
-    //
-    // The second half of that is a container this reader will not decode: a grid
-    // of tiles, an item split over several extents and a construction method it
-    // does not follow are all described as the r,g,b that decoder hands back,
-    // because a yuv probe would promise a frame this module would then refuse to
-    // produce; see [`Meta::native_eligible`].
-    let yuv = match native {
-        true => cicp
-            .filter(|cicp| usable_matrix(cicp.matrix))
-            .and_then(|_| yuv_format(header.chroma, header.depth)),
-        false => None,
+    // yuv format to be handed out as - is libheif's, which reads the r,g,b
+    // planes this reader has no decoder for. So is a container this walk
+    // refuses at all. Either way it is described from libheif's own answer
+    // rather than from the `image` decoder's, because the description and the
+    // decode have to name the same library.
+    let Some(format) = cicp
+        .filter(|cicp| usable_matrix(cicp.matrix))
+        .and_then(|_| yuv_format(header.chroma, header.depth))
+    else {
+        return super::heif::describe(path, apply_rotation, &mut *file);
     };
-    let (format, color_type) = match yuv {
-        Some(format) => (format, header.colour_color_type(has_alpha)),
-        // The color type the `image` decoder reports, which is what the frame
-        // request of such a file is checked against, and the depth the `av1C`
-        // box states, which is what its samples are handed out at.
-        None => (
-            PixelFormat::from_color_type(header.decoded_color_type())?
-                .at_depth(header.depth.into()),
-            header.decoded_color_type(),
-        ),
-    };
+    let color_type = header.colour_color_type(has_alpha);
     Some(ImageInfo {
+        route: None,
+        subimage: None,
         path: path.to_path_buf(),
         width,
         height,
@@ -177,36 +172,6 @@ pub fn image_info(path: &Path, apply_rotation: bool) -> Option<ImageInfo> {
     })
 }
 
-/// Format a file this module describes is handed out as, for a file whose
-/// decode is left to the `image` decoder.
-///
-/// This reads the same boxes as [`image_info`] but without asking for the brand,
-/// because the files it matters for are exactly the ones [`image_info`] declines:
-/// a monochrome item in a container whose major brand is not `avif` is described
-/// by whichever decoder `image` picks, which reports the four channels it always
-/// reports, and its single plane is still the format it should be handed out as.
-/// For such a bitstream the conversion `image` performs has no chroma to mix in,
-/// so every channel of the decoded picture holds the same sample.
-pub fn output_format(path: &Path, color_type: ColorType) -> Option<PixelFormat> {
-    // A decoder that already reports one of the monochrome color types maps to
-    // the gray format on its own, and a file that is not one of these is handed
-    // out as the format its probe describes.
-    let decoded = PixelFormat::from_color_type(color_type)?;
-    if decoded.color_family() != ColorFamily::RGB || !has_avif_extension(path) {
-        return None;
-    }
-    let mut file = File::open(path).ok()?;
-    let file_len = file_length(&file).ok()?;
-    let boxes = leading_boxes(&mut file)?;
-    let meta = Meta::read(&boxes, file_len)?;
-    let header = AvifHeader::read(&meta.primary_properties()?)?;
-    header
-        .monochrome
-        .then(|| PixelFormat::from_color_type(header.file_color_type(meta.has_alpha())))
-        .flatten()
-        .map(|format| format.at_depth(header.depth.into()))
-}
-
 /// Decodes one avif item into the planes of the format its probe recorded.
 ///
 /// The alpha item is a coded item of its own, so a call that hands out no alpha
@@ -215,6 +180,7 @@ pub fn output_format(path: &Path, color_type: ColorType) -> Option<PixelFormat> 
 /// refuses a file whose alpha item is broken, which is the point rather than an
 /// accident: the item is not part of what such a call hands out, and
 /// [`crate::formats::avif::decode`]'s own checks are about the picture.
+#[inline(never)]
 pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
     let open_started = Instant::now();
     let mut file =
@@ -228,20 +194,35 @@ pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
     let metadata_started = Instant::now();
     let meta = Meta::read(&boxes, file_len)
         .ok_or_else(|| image_error("read the boxes of", &info.path, "malformed item boxes"))?;
-    // A container the probe declines never reaches here, so this is the guard
-    // for a file that was described by something else: the layouts it names are
-    // the ones [`Meta::native_eligible`] refuses, and the probe hands those to
-    // the `image` decoder rather than to this one.
+    // Three containers are not this reader's decode, and the walk above is what
+    // tells them apart. [`handles`] claims every `.avif`, so this is where a
+    // file is handed to the library that really reads it -- once, from the walk
+    // that was going to happen anyway.
+    //
+    // A container the walk refuses is libheif's, which joins a grid of tiles and
+    // follows a construction method this walk does not. The `image` decoder used
+    // to be asked and could not: it has no monochrome avif, so a grid of
+    // monochrome cells ended as `Invalid argument`.
     if !meta.native_eligible() {
+        return super::heif::decode(info, demand);
+    }
+    // A file that is not an avif at all, whatever its extension says. The route
+    // sent it here from the extension alone, which is the one case where a file
+    // this reader cannot read is not libheif's either: there is no picture here
+    // and no reader in this tree that knows the file.
+    if !has_avif_brand(&boxes) {
         return Err(image_error(
-            "read the boxes of",
+            "decode",
             &info.path,
-            if meta.grid {
-                "its primary item is a grid of tiles, which this reader does not join"
-            } else {
-                "its primary item is not one payload this reader can locate"
-            },
+            "the container is not an avif",
         ));
+    }
+    // An avif whose samples are not yuv is libheif's: an r,g,b one has no
+    // planar format to be handed out as, and a monochrome one is a single
+    // plane this reader has no avif path for. The probe left both to libheif,
+    // so this is the same library the description named.
+    if info.format.color_family() != ColorFamily::YUV {
+        return super::heif::decode(info, demand);
     }
     let header = AvifHeader::read(&meta.primary_properties().ok_or_else(|| {
         image_error(
@@ -264,12 +245,16 @@ pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
             yuv_format(header.chroma, header.depth).map(PixelFormat::name),
         )));
     }
-    let coded = read_range(&mut file, meta.primary_data(usize::MAX)?)
-        .map_err(|error| image_error("read", &info.path, error))?;
+    let coded = read_ranges(
+        &mut file,
+        file_len as u64,
+        &meta.primary_ranges(usize::MAX)?,
+    )
+    .map_err(|error| image_error("read", &info.path, error))?;
     let expects_alpha = crate::pixel::alpha_channel(info.color_type).is_some() && demand.alpha;
     let alpha_coded = if expects_alpha {
         Some(
-            meta.alpha_data(usize::MAX)?
+            meta.alpha_ranges(usize::MAX)?
                 .ok_or_else(|| {
                     image_error(
                         "read the alpha item of",
@@ -277,8 +262,8 @@ pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
                         "the container holds none",
                     )
                 })
-                .and_then(|range| {
-                    read_range(&mut file, range)
+                .and_then(|ranges| {
+                    read_ranges(&mut file, file_len as u64, &ranges)
                         .map_err(|error| image_error("read", &info.path, error))
                 })?,
         )
@@ -598,7 +583,9 @@ fn copy_rows(
 /// The layout dav1d reports for a format this module hands out.
 const fn expected_layout(format: PixelFormat) -> PixelLayout {
     match format {
-        PixelFormat::Yuv422P8 | PixelFormat::Yuv422P10 => PixelLayout::I422,
+        PixelFormat::Yuv422P8 | PixelFormat::Yuv422P10 | PixelFormat::Yuv422P12 => {
+            PixelLayout::I422
+        }
         PixelFormat::Yuv444P8 | PixelFormat::Yuv444P10 | PixelFormat::Yuv444P12 => {
             PixelLayout::I444
         }
@@ -613,7 +600,10 @@ const fn nominal_depth(format: PixelFormat) -> usize {
         | PixelFormat::Yuv420P10
         | PixelFormat::Yuv422P10
         | PixelFormat::Yuv444P10 => 10,
-        PixelFormat::Gray12 | PixelFormat::Yuv444P12 => 12,
+        PixelFormat::Gray12
+        | PixelFormat::Yuv444P12
+        | PixelFormat::Yuv420P12
+        | PixelFormat::Yuv422P12 => 12,
         PixelFormat::Gray16 | PixelFormat::Rgb16 => 16,
         _ => 8,
     }
@@ -622,8 +612,9 @@ const fn nominal_depth(format: PixelFormat) -> usize {
 /// The yuv format a subsampled layout of `depth` bits is handed out as.
 ///
 /// A depth with no format of its own - twelve bit 4:2:0, say - keeps the r,g,b
-/// the `image` decoder produces, which is why this answers `None` rather than
-/// rounding the samples into a format that would misstate them.
+/// this reader builds from the item's own planes, which is why this answers
+/// `None` rather than rounding the samples into a format that would misstate
+/// them.
 const fn yuv_format(chroma: u8, depth: u8) -> Option<PixelFormat> {
     match (chroma, depth) {
         (2, 8) => Some(PixelFormat::Yuv420P8),
@@ -633,6 +624,8 @@ const fn yuv_format(chroma: u8, depth: u8) -> Option<PixelFormat> {
         (1, 10) => Some(PixelFormat::Yuv422P10),
         (0, 10) => Some(PixelFormat::Yuv444P10),
         (0, 12) => Some(PixelFormat::Yuv444P12),
+        (2, 12) => Some(PixelFormat::Yuv420P12),
+        (1, 12) => Some(PixelFormat::Yuv422P12),
         _ => None,
     }
 }
@@ -709,10 +702,12 @@ fn orientation_of(properties: &[Property<'_>]) -> Orientation {
 /// applies a container's `irot` and `imir` as it decodes but the `libheif-rs`
 /// wrapper exposes no getter for them, so the plugin cannot otherwise tell what
 /// it has been handed.
-pub(crate) fn container_orientation(path: &Path) -> Option<Orientation> {
-    let mut file = File::open(path).ok()?;
-    let file_len = file_length(&file).ok()?;
-    let boxes = leading_boxes(&mut file)?;
+pub(crate) fn container_orientation(file: &mut BufReader<File>) -> Option<Orientation> {
+    // The `irot` and `imir` items are among the leading boxes, so this reads the
+    // same prefix the probe above reads, out of the same open.
+    file.rewind().ok()?;
+    let file_len = file_length(file.get_ref()).ok()?;
+    let boxes = leading_boxes(&mut *file)?;
     let meta = Meta::read(&boxes, file_len)?;
     Some(orientation_of(&meta.primary_properties()?))
 }
@@ -801,34 +796,6 @@ impl AvifHeader {
             cicp,
             orientation: orientation_of(properties),
         })
-    }
-
-    /// The color type the `image` avif decoder reports for this file, whose
-    /// decoder hands back four channels whatever the bitstream holds. That is
-    /// what a file this module leaves to it is probed as.
-    const fn decoded_color_type(&self) -> ColorType {
-        if self.depth > 8 {
-            ColorType::Rgba16
-        } else {
-            ColorType::Rgba8
-        }
-    }
-
-    /// The color type of the samples the file holds: three channels for a colour
-    /// image, and a fourth when an alpha item exists. A monochrome image holds
-    /// the one sample the container says it does, beside the alpha item when
-    /// there is one.
-    const fn file_color_type(&self, has_alpha: bool) -> ColorType {
-        match (self.monochrome, self.depth > 8, has_alpha) {
-            (true, false, false) => ColorType::L8,
-            (true, false, true) => ColorType::La8,
-            (true, true, false) => ColorType::L16,
-            (true, true, true) => ColorType::La16,
-            (false, false, false) => ColorType::Rgb8,
-            (false, false, true) => ColorType::Rgba8,
-            (false, true, false) => ColorType::Rgb16,
-            (false, true, true) => ColorType::Rgba16,
-        }
     }
 
     /// Color type a colour image of this depth is probed as, which is what the
@@ -1025,7 +992,9 @@ impl Meta {
     /// The item has to be locatable for the same reason: a range the file does
     /// not hold is one this reader cannot read either.
     fn native_eligible(&self) -> bool {
-        !self.grid && self.primary_data(usize::MAX).is_ok() && self.alpha_data(usize::MAX).is_ok()
+        !self.grid
+            && self.primary_ranges(usize::MAX).is_ok()
+            && self.alpha_ranges(usize::MAX).is_ok()
     }
 
     /// The extents of one item, and what their offsets are relative to.
@@ -1036,52 +1005,47 @@ impl Meta {
             .map(|(_, method, ranges)| (*method, ranges.as_slice()))
     }
 
-    /// The bytes of the primary item's payload, up to `limit` of them.
-    fn primary_data(&self, limit: usize) -> Result<Range<usize>> {
+    /// The byte ranges of the primary item's payload, up to `limit` of them.
+    fn primary_ranges(&self, limit: usize) -> Result<Vec<Range<usize>>> {
         let (method, ranges) = self
             .extents_of(self.primary)
             .ok_or_else(|| ImgSeqError::new("the container does not locate its primary item"))?;
-        self.data_range(method, ranges, limit)
+        self.data_ranges(method, ranges, limit)
     }
 
-    /// The bytes of the alpha item's payload, when the container holds one.
-    fn alpha_data(&self, limit: usize) -> Result<Option<Range<usize>>> {
+    /// The byte ranges of the alpha item's payload, when the container holds one.
+    fn alpha_ranges(&self, limit: usize) -> Result<Option<Vec<Range<usize>>>> {
         let Some(aux) = self.aux.filter(|_| self.has_alpha()) else {
             return Ok(None);
         };
         let (method, ranges) = self
             .extents_of(aux)
             .ok_or_else(|| ImgSeqError::new("the container does not locate its alpha item"))?;
-        self.data_range(method, ranges, limit).map(Some)
+        self.data_ranges(method, ranges, limit).map(Some)
     }
 
-    /// One contiguous range of an item's bytes.
+    /// The byte ranges an item's payload occupies, up to `limit` bytes of it.
     ///
     /// An extent of an item written into `idat` is an offset into that box, and
-    /// every other one is an offset into the file. Only a payload one extent
-    /// holds is read here: a file that splits its item over several extents is
-    /// left to the `image` decoder, which joins them.
+    /// every other one is an offset into the file. An item written as several
+    /// extents is one payload split across the container, so every extent of it
+    /// is handed out in the order `iloc` lists them and the caller joins them.
     ///
     /// Every range is checked against the container it is written in before it
     /// is handed out, because the caller allocates it: an offset the file does
     /// not reach and a length that overflows an address are both errors rather
     /// than a large allocation or a panic. `limit` caps the length for a caller
     /// that wants a prefix of the payload.
-    fn data_range(
+    fn data_ranges(
         &self,
         method: u8,
         ranges: &[(usize, usize)],
         limit: usize,
-    ) -> Result<Range<usize>> {
-        let Some((offset, length)) = ranges.first().copied() else {
+    ) -> Result<Vec<Range<usize>>> {
+        if ranges.is_empty() {
             return Err(ImgSeqError::new("the container lists no data for an item"));
-        };
-        if ranges.len() > 1 {
-            return Err(ImgSeqError::new(
-                "the item is split over several extents, which this reader does not join",
-            ));
         }
-        // What the extent's offset is relative to, and where that ends.
+        // What every extent's offset is relative to, and where that ends.
         let (base, container_end, container) = match method {
             0 => (0, self.file_len, "the file"),
             1 => {
@@ -1097,19 +1061,31 @@ impl Meta {
                 ));
             }
         };
-        let start = base
-            .checked_add(offset)
-            .ok_or_else(|| ImgSeqError::new(format!("the item is past the end of {container}")))?;
-        let end = start
-            .checked_add(length.min(limit))
-            .ok_or_else(|| ImgSeqError::new(format!("the item is past the end of {container}")))?;
-        if end > container_end {
-            return Err(ImgSeqError::new(format!(
-                "the item is {} bytes past the end of {container}",
-                end - container_end,
-            )));
+        // `limit` caps the *joined* payload rather than each extent, so an
+        // item split over several also ends when the budget does.
+        let mut remaining = limit;
+        let mut out = Vec::with_capacity(ranges.len());
+        for (offset, length) in ranges {
+            if remaining == 0 {
+                break;
+            }
+            let start = base.checked_add(*offset).ok_or_else(|| {
+                ImgSeqError::new(format!("the item is past the end of {container}"))
+            })?;
+            let take = (*length).min(remaining);
+            let end = start.checked_add(take).ok_or_else(|| {
+                ImgSeqError::new(format!("the item is past the end of {container}"))
+            })?;
+            if end > container_end {
+                return Err(ImgSeqError::new(format!(
+                    "the item is {} bytes past the end of {container}",
+                    end - container_end,
+                )));
+            }
+            remaining -= take;
+            out.push(start..end);
         }
-        Ok(start..end)
+        Ok(out)
     }
 }
 
@@ -1644,14 +1620,47 @@ fn file_length(file: &File) -> std::io::Result<usize> {
     })
 }
 
+/// Reads several byte ranges of an open file and joins them.
+///
+/// An item written as several extents is one payload split across the
+/// container, so joining it is a concatenation in the order `iloc` lists them.
+/// Every range is checked against the file before it is read, exactly as a
+/// single range is, and the total is checked before anything is allocated.
+fn read_ranges(
+    file: &mut (impl Read + Seek),
+    length: u64,
+    ranges: &[Range<usize>],
+) -> std::io::Result<Vec<u8>> {
+    let total = ranges
+        .iter()
+        .try_fold(0usize, |total, range| {
+            total.checked_add(range.end - range.start)
+        })
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the item is larger than this platform can address",
+            )
+        })?;
+    let mut out = Vec::with_capacity(total);
+    for range in ranges {
+        out.extend_from_slice(&read_range(&mut *file, length, range.clone())?);
+    }
+    Ok(out)
+}
+
 /// Reads one byte range of an open file.
 ///
 /// The range is checked against the file before the buffer is allocated, so a
 /// container that states a length the file does not hold is an error rather than
 /// a large allocation.
-fn read_range(file: &mut File, range: Range<usize>) -> std::io::Result<Vec<u8>> {
+fn read_range(
+    file: &mut (impl Read + Seek),
+    length: u64,
+    range: Range<usize>,
+) -> std::io::Result<Vec<u8>> {
     let end = u64::try_from(range.end).unwrap_or(u64::MAX);
-    if end > file.metadata()?.len() {
+    if end > length {
         return Err(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
             format!(
@@ -1673,21 +1682,6 @@ fn decode_error(path: &Path, error: impl std::fmt::Display) -> ImgSeqError {
     image_error("decode", path, error)
 }
 
-/// Whether `path` names an avif, which is how this module is selected.
-pub fn owns_extension(path: &Path) -> bool {
-    has_avif_extension(path)
-}
-
-fn has_avif_extension(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            AVIF_EXTENSIONS
-                .iter()
-                .any(|known| extension.eq_ignore_ascii_case(known))
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1695,17 +1689,19 @@ mod tests {
     use std::io::Cursor;
     use std::path::PathBuf;
 
-    use image::ExtendedColorType;
+    use crate::layout::SourceColorType;
 
     use crate::pixel::alpha_channel;
 
     fn info(path: &str, format: PixelFormat, color_type: ColorType) -> ImageInfo {
         ImageInfo {
+            route: None,
+            subimage: None,
             path: PathBuf::from(path),
             width: 64,
             height: 48,
             color_type,
-            original_color_type: ExtendedColorType::Rgb8,
+            original_color_type: SourceColorType::Rgb8,
             has_icc_profile: false,
             icc_profile: None,
             cicp: None,
@@ -1740,7 +1736,7 @@ mod tests {
 
     /// The coding record of an item whose `av1C` flags byte is `flags`.
     fn av1c(flags: u8) -> Vec<u8> {
-        vec![0x81, 0x10, flags, 0, 0, 0, 0]
+        vec![0x81, 0x00, flags, 0]
     }
 
     /// An `nclx` colour box payload.
@@ -1935,41 +1931,27 @@ mod tests {
         payload
     }
 
-    #[test]
-    fn only_avif_extensions_are_taken_over() {
-        for path in ["a.avif", "b.AVIF", "c.AvIf"] {
-            assert!(has_avif_extension(Path::new(path)), "{path}");
-        }
-        for path in ["a.heic", "b.png", "c.avifx", "d"] {
-            assert!(!has_avif_extension(Path::new(path)), "{path}");
-        }
+    /// Whether the tree routes a path to this module.
+    ///
+    /// `handles` was a second copy of that answer, one for the probe and one for
+    /// the decode, and [`identify::route`] is what answers both now.
+    fn claimed(path: &Path) -> bool {
+        crate::formats::identify::route(path) == Some(crate::formats::identify::Format::Avif)
     }
 
+    /// Every `.avif` is this module's, whatever the probe made of its samples:
+    /// this module is the one that knows which library reads each container.
     #[test]
-    fn handles_needs_an_avif_extension_and_a_yuv_probe() {
-        assert!(handles(&info(
-            "a.avif",
-            PixelFormat::Yuv420P8,
-            ColorType::Rgb8
-        )));
-        assert!(handles(&info(
-            "a.avif",
-            PixelFormat::Yuv444P12,
-            ColorType::Rgb16
-        )));
-        // A file the probe leaves to the decoder keeps it, and a monochrome
-        // item is one of those.
-        assert!(!handles(&info(
-            "a.avif",
-            PixelFormat::Rgb8,
-            ColorType::Rgb8
-        )));
-        assert!(!handles(&info("a.avif", PixelFormat::Gray8, ColorType::L8)));
-        assert!(!handles(&info(
-            "a.heic",
-            PixelFormat::Yuv420P8,
-            ColorType::Rgb8
-        )));
+    fn an_avif_container_routes_to_this_module() {
+        for path in ["a.avif", "a.AVIF", "a.AvIf"] {
+            assert!(claimed(Path::new(path)), "{path}");
+        }
+        // Another container is not, and neither is a name that only looks like
+        // one.
+        assert!(!claimed(Path::new("a.heic")));
+        assert!(!claimed(Path::new("a.png")));
+        assert!(!claimed(Path::new("a.avifx")));
+        assert!(!claimed(Path::new("d")));
     }
 
     #[test]
@@ -1981,10 +1963,11 @@ mod tests {
         assert_eq!(yuv_format(1, 10), Some(PixelFormat::Yuv422P10));
         assert_eq!(yuv_format(0, 10), Some(PixelFormat::Yuv444P10));
         assert_eq!(yuv_format(0, 12), Some(PixelFormat::Yuv444P12));
+        assert_eq!(yuv_format(2, 12), Some(PixelFormat::Yuv420P12));
+        assert_eq!(yuv_format(1, 12), Some(PixelFormat::Yuv422P12));
         // A layout and a depth with no format of their own keep the decoder
         // that has one.
-        assert_eq!(yuv_format(2, 12), None);
-        assert_eq!(yuv_format(1, 12), None);
+        assert_eq!(yuv_format(2, 16), None);
         assert_eq!(yuv_format(0, 16), None);
     }
 
@@ -2130,7 +2113,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["ispe", "av1C", "colr"]
         );
-        assert_eq!(meta.primary_data(usize::MAX).expect("located"), 0..8);
+        assert_eq!(
+            meta.primary_ranges(usize::MAX).expect("located"),
+            std::iter::once(0..8).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -2138,7 +2124,10 @@ mod tests {
         let boxes = container(&properties(), &[(b"auxl", 2, 1)], Some(ALPHA_AUX_TYPES[0]));
         let meta = walked(&boxes).expect("the container is walked");
         assert!(meta.has_alpha());
-        assert_eq!(meta.alpha_data(usize::MAX).expect("located"), Some(0..8));
+        assert_eq!(
+            meta.alpha_ranges(usize::MAX).expect("located"),
+            Some(std::iter::once(0..8).collect())
+        );
     }
 
     #[test]
@@ -2151,7 +2140,7 @@ mod tests {
         let meta = walked(&boxes).expect("the container is walked");
         assert!(!meta.has_alpha());
         assert_eq!(
-            meta.alpha_data(usize::MAX).expect("nothing to locate"),
+            meta.alpha_ranges(usize::MAX).expect("nothing to locate"),
             None
         );
     }
@@ -2164,13 +2153,21 @@ mod tests {
     }
 
     #[test]
-    fn an_item_split_over_several_extents_is_not_read() {
+    fn an_item_split_over_several_extents_is_read_as_the_join() {
         let boxes = container(&properties(), &[], None);
         let mut meta = walked(&boxes).expect("the container is walked");
         let (item, method, ranges) = meta.extents.pop().expect("one item");
         assert_eq!((item, method), (1, 0));
+        // The same extent twice, which is what the join reads twice.
         meta.extents.push((1, 0, vec![ranges[0], ranges[0]]));
-        assert!(meta.primary_data(usize::MAX).is_err());
+        let both = meta
+            .primary_ranges(usize::MAX)
+            .expect("the extents are located");
+        assert_eq!(both, vec![ranges[0].0..ranges[0].0 + ranges[0].1; 2]);
+        // And the budget bounds the joined payload, not each extent.
+        let capped = meta.primary_ranges(4).expect("the extents are located");
+        let total: usize = capped.iter().map(|range| range.end - range.start).sum();
+        assert_eq!(total, 4, "the limit bounds the join");
     }
 
     #[test]
@@ -2320,7 +2317,7 @@ mod tests {
         let mut meta = walked(&boxes).expect("the container is walked");
         meta.extents = vec![(1, 0, vec![(boxes.len() - 4, 8)])];
         let error = meta
-            .primary_data(usize::MAX)
+            .primary_ranges(usize::MAX)
             .expect_err("the extent is past the end of the file");
         assert!(
             error.to_string().contains("past the end of the file"),
@@ -2329,7 +2326,7 @@ mod tests {
 
         meta.extents = vec![(1, 0, vec![(usize::MAX - 3, 8)])];
         let error = meta
-            .primary_data(usize::MAX)
+            .primary_ranges(usize::MAX)
             .expect_err("the extent leaves the address space");
         assert!(
             error.to_string().contains("past the end of the file"),
@@ -2345,11 +2342,14 @@ mod tests {
         let mut meta = walked(&boxes).expect("the container is walked");
         let idat = meta.idat.clone().expect("the container holds one");
         meta.extents = vec![(1, 1, vec![(0, idat.len())])];
-        assert_eq!(meta.primary_data(usize::MAX).expect("located"), idat);
+        assert_eq!(
+            meta.primary_ranges(usize::MAX).expect("located"),
+            vec![idat.clone()]
+        );
 
         meta.extents = vec![(1, 1, vec![(0, idat.len() + 1)])];
         let error = meta
-            .primary_data(usize::MAX)
+            .primary_ranges(usize::MAX)
             .expect_err("the extent leaves the item data box");
         assert!(
             error
@@ -2362,7 +2362,7 @@ mod tests {
         // is written into is not located at all.
         meta.idat = None;
         let error = meta
-            .primary_data(usize::MAX)
+            .primary_ranges(usize::MAX)
             .expect_err("the container has no item data box");
         assert!(error.to_string().contains("no idat box"), "{error}");
     }
@@ -2375,13 +2375,14 @@ mod tests {
         let path = Path::new("tests/fixtures/avif-yuv420p.avif");
         let mut file = File::open(path).expect("the fixture opens");
         let length = file_length(&file).expect("the fixture has a length");
-        let error = read_range(&mut file, 0..usize::MAX).expect_err("the range is past the end");
+        let error = read_range(&mut file, length as u64, 0..usize::MAX)
+            .expect_err("the range is past the end");
         assert!(
             error.to_string().contains("past the end of the file"),
             "{error}"
         );
         assert_eq!(
-            read_range(&mut file, 0..4).expect("the file holds it"),
+            read_range(&mut file, length as u64, 0..4).expect("the file holds it"),
             b"\0\0\0\x20"
         );
         assert!(length > 4);
@@ -2406,8 +2407,9 @@ mod tests {
         let (item, method, ranges) = meta.extents.pop().expect("one item");
         assert_eq!((item, method), (1, 0));
 
+        // An item in two extents is joined here, so it is this reader's.
         meta.extents.push((1, 0, vec![ranges[0], ranges[0]]));
-        assert!(!meta.native_eligible(), "an item in two extents");
+        assert!(meta.native_eligible(), "an item in two extents");
         meta.extents.pop();
 
         meta.extents.push((1, 2, vec![ranges[0]]));
@@ -2421,24 +2423,29 @@ mod tests {
         );
     }
 
-    /// The committed fixture is the yuv one with its item cut into two extents:
-    /// the probe describes it as the r,g,b the `image` decoder produces rather
-    /// than as the yuv its samples are, and that decoder joins the extents and
-    /// reads the same picture the file it was cut from holds.
+    /// The committed fixture is the yuv one with its item cut into two extents.
+    ///
+    /// The extents are joined here, so the fixture is this reader's and comes out
+    /// as the yuv its samples are: the same picture, through the same decoder, as
+    /// the file it was cut from. Before the join it was described as the r,g,b the
+    /// `image` decoder produces and handed to that decoder.
     #[test]
-    fn a_split_item_fixture_is_left_to_the_decoder() {
+    fn a_split_item_fixture_is_read_as_the_yuv_it_holds() {
         let path = Path::new("tests/fixtures/avif-split-extents.avif");
         let info = crate::decoder::probe(path, true, false).expect("the container describes it");
         assert_eq!((info.width, info.height), (64, 48));
-        assert_eq!(info.format, PixelFormat::Rgb8);
-        assert!(!handles(&info));
+        assert_eq!(info.format, PixelFormat::Yuv420P8);
+        assert!(claimed(path), "the extents are joined here");
         let decoded =
             crate::decoder::decode(&info, Demand::ALL).expect("the decoder joins the extents");
-        let Pixels::Interleaved { buffer, .. } = decoded.pixels else {
-            panic!("the image decoder hands out one interleaved buffer");
+        // The reader hands out its own planes now, so the picture is the yuv the
+        // container states rather than one interleaved buffer.
+        let Pixels::Planar { planes, .. } = decoded.pixels else {
+            panic!("the direct reader hands out its own planes");
         };
-        assert_eq!(buffer.len(), 64 * 48 * 4);
-        assert_eq!(&buffer[..4], &[74, 75, 70, 255]);
+        assert_eq!(planes.len(), 3);
+        assert_eq!(planes[0].len(), 64 * 48, "the luma plane is the page");
+        assert_eq!(planes[1].len(), 32 * 24, "and the chroma is subsampled");
     }
 
     #[test]
@@ -2464,10 +2471,10 @@ mod tests {
             ),
         ] {
             let path = Path::new("tests/fixtures").join(name);
-            let info = image_info(&path, true).expect("the container describes it");
+            let info = image_info_at(&path, true).expect("the container describes it");
             assert_eq!(info.format, format, "{name}");
             assert_eq!(info.color_type, color_type, "{name}");
-            assert!(handles(&info), "{name}");
+            assert!(claimed(&path), "{name}");
             // The codes of the bitstream, which no `colr` box repeats here.
             assert_eq!(
                 info.cicp,
@@ -2487,14 +2494,95 @@ mod tests {
         }
     }
 
+    /// A twelve bit subsampled page is the yuv planes it holds, at the depth and
+    /// the sampling the container states.
+    ///
+    /// The two fixtures are encoded from the y4m sources
+    /// `tests/make-alpha-fixtures.py` writes, which is the only `avifenc` input
+    /// that is already yuv: a png would be converted, so the planes would be the
+    /// encoder's arithmetic rather than ones the fixture states. `-q 100` is
+    /// libavif's lossless setting, so the samples come back exactly as written,
+    /// which is what lets this pin them -- and what says a twelve bit sample
+    /// arrives at twelve bits rather than left aligned in a sixteen bit word.
+    #[test]
+    fn a_twelve_bit_subsampled_page_is_handed_out_as_its_own_planes() {
+        // The luma runs 0..47 along the row and the two chroma planes are 100 and
+        // 300 alternating, so a plane that was swapped, shifted or subsampled the
+        // wrong way is a different picture.
+        let luma: Vec<u16> = (0..48).collect();
+        let chroma = |offset: u16, width: usize, count: usize| -> Vec<u16> {
+            (0..count)
+                .map(|at| offset + 100 * (((at % width) + (at / width)) % 2) as u16)
+                .collect()
+        };
+        for (name, format, chroma_size) in [
+            ("avif-yuv420p12.avif", PixelFormat::Yuv420P12, (4, 3)),
+            ("avif-yuv422p12.avif", PixelFormat::Yuv422P12, (4, 6)),
+        ] {
+            let path = Path::new("tests/fixtures").join(name);
+            let info = image_info_at(&path, true).expect("the container describes it");
+            assert_eq!((info.width, info.height), (8, 6), "{name}");
+            assert_eq!(info.format, format, "{name}");
+            assert_eq!(info.color_type, ColorType::Rgb16, "{name}");
+            assert_eq!(
+                info.cicp,
+                Some(Cicp {
+                    primaries: 1,
+                    transfer: 13,
+                    matrix: 6,
+                    full_range: false,
+                }),
+                "{name}"
+            );
+
+            let decoded = decode(&info, Demand::ALL).expect("the item is decoded");
+            let Pixels::Planar { planes, alpha } = decoded.pixels else {
+                panic!("a yuv page is handed out as planes");
+            };
+            assert!(alpha.is_none(), "{name}");
+            assert_eq!(planes.len(), 3, "{name}");
+            // The planes are the sizes the format implies, which for a
+            // subsampled one is half the picture rounded up.
+            let (chroma_width, chroma_height) = chroma_size;
+            assert_eq!(
+                planes.iter().map(Vec::len).collect::<Vec<_>>(),
+                vec![
+                    8 * 6 * 2,
+                    chroma_width * chroma_height * 2,
+                    chroma_width * chroma_height * 2
+                ],
+                "{name}"
+            );
+            let samples = |plane: &[u8]| -> Vec<u16> {
+                plane
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|bytes| u16::from_ne_bytes(*bytes))
+                    .collect()
+            };
+            assert_eq!(samples(&planes[0]), luma, "{name}: the luma plane");
+            assert_eq!(
+                samples(&planes[1]),
+                chroma(100, chroma_width, chroma_width * chroma_height),
+                "{name}: the first chroma plane"
+            );
+            assert_eq!(
+                samples(&planes[2]),
+                chroma(300, chroma_width, chroma_width * chroma_height),
+                "{name}: the second chroma plane"
+            );
+        }
+    }
+
     #[test]
     fn a_yuv_fixture_with_an_alpha_item_is_probed_as_the_page_and_its_alpha() {
         let path = Path::new("tests/fixtures/alpha-yuv420p.avif");
-        let info = image_info(path, true).expect("the container describes it");
+        let info = image_info_at(path, true).expect("the container describes it");
         assert_eq!((info.width, info.height), (4, 4));
         assert_eq!(info.format, PixelFormat::Yuv420P8);
         assert_eq!(info.color_type, ColorType::Rgba8);
-        assert!(handles(&info));
+        assert!(claimed(path));
         assert_eq!(alpha_channel(info.color_type), Some(3));
         // The alpha item is decoded into the gray format of the same depth.
         assert_eq!(info.format.alpha_format(), PixelFormat::Gray8);
@@ -2506,9 +2594,17 @@ mod tests {
         // samples are r,g,b, so neither is handed out as yuv.
         for name in ["cicp-rgb8.avif", "alpha-rgba8.avif"] {
             let path = Path::new("tests/fixtures").join(name);
-            let info = image_info(&path, true).expect("the container describes it");
+            let info = image_info_at(&path, true).expect("the container describes it");
             assert_eq!(info.format, PixelFormat::Rgb8, "{name}");
-            assert!(!handles(&info), "{name}");
+            // This module claims the file either way and hands it to libheif,
+            // which reads the r,g,b planes; the hand-off has to produce the
+            // picture. That it is the same picture the `image` decoder read is
+            // `heif`'s own test, which compares the planes of every r,g,b
+            // container the two decoders can both read.
+            assert!(claimed(&path), "{name}");
+            let decoded =
+                decode(&info, Demand::ALL).unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(decoded.format, PixelFormat::Rgb8, "{name}");
             // The colour of the container is still stated for a file that keeps
             // the r,g,b path.
             let (primaries, transfer) = if name.starts_with("cicp") {
@@ -2528,35 +2624,39 @@ mod tests {
     #[test]
     fn a_monochrome_fixture_keeps_its_gray_format() {
         let path = Path::new("tests/fixtures/mono-alpha.avif");
-        let info = image_info(path, true).expect("the container describes it");
+        let info = image_info_at(path, true).expect("the container describes it");
         assert_eq!(info.format, PixelFormat::Gray8);
-        // The item holds one sample per pixel, and the decoder this file is
-        // left to reports four channels for it, which is what the frame request
-        // is checked against.
-        assert_eq!(info.color_type, ColorType::Rgba8);
-        assert_eq!(info.original_color_type, ExtendedColorType::La8);
-        assert_eq!(alpha_channel(info.color_type), Some(3));
-        assert!(!handles(&info));
-        assert_eq!(
-            output_format(path, ColorType::Rgba8),
-            Some(PixelFormat::Gray8)
-        );
-        // A decoder that reports the gray color type needs no correction.
-        assert_eq!(output_format(path, ColorType::La8), None);
-        assert_eq!(output_format(Path::new("a.avif"), ColorType::Rgba8), None);
+        // The item holds one sample per pixel plus an alpha plane, which is
+        // what libheif reports for it: `La8`, not the `Rgba8` the `image`
+        // decoder named. That decoder's avif hook always reported four channels
+        // whatever the file held, so a one plane picture with alpha arrived
+        // spelled as r,g,b,a. This is the property change the migration to
+        // libheif brings, and it is written down in CHANGELOG.md.
+        assert_eq!(info.color_type, ColorType::La8);
+        assert_eq!(info.original_color_type, SourceColorType::La8);
+        assert_eq!(alpha_channel(info.color_type), Some(1));
+        // This module claims it and hands it to libheif, which reads the one
+        // plane and its alpha; the hand-off has to be the same picture.
+        assert!(claimed(path));
+        let decoded = decode(&info, Demand::ALL).expect("libheif reads it");
+        assert_eq!(decoded.format, PixelFormat::Gray8);
+        let Pixels::Planar { alpha, .. } = &decoded.pixels else {
+            panic!("libheif hands out planes");
+        };
+        assert!(alpha.is_some(), "the alpha plane came too");
     }
 
     #[test]
     fn another_container_is_not_described_here() {
-        assert!(image_info(Path::new("tests/fixtures/alpha-rgba8.heic"), true).is_none());
-        assert!(image_info(Path::new("tests/fixtures/alpha-rgba8.jxl"), true).is_none());
-        assert!(image_info(Path::new("tests/fixtures/nowhere.avif"), true).is_none());
+        assert!(image_info_at(Path::new("tests/fixtures/alpha-rgba8.heic"), true).is_none());
+        assert!(image_info_at(Path::new("tests/fixtures/alpha-rgba8.jxl"), true).is_none());
+        assert!(image_info_at(Path::new("tests/fixtures/nowhere.avif"), true).is_none());
     }
 
     #[test]
     fn a_probed_fixture_decodes_into_the_planes_its_format_describes() {
         let path = Path::new("tests/fixtures/avif-yuv420p.avif");
-        let info = image_info(path, true).expect("the container describes it");
+        let info = image_info_at(path, true).expect("the container describes it");
         let decoded = decode(&info, Demand::ALL).expect("the item is decoded");
         let Pixels::Planar { planes, alpha } = decoded.pixels else {
             panic!("a yuv page is handed out as planes");
@@ -2575,7 +2675,7 @@ mod tests {
     #[test]
     fn the_planes_of_an_alpha_fixture_are_the_ones_its_source_holds() {
         let path = Path::new("tests/fixtures/alpha-yuv420p.avif");
-        let info = image_info(path, true).expect("the container describes it");
+        let info = image_info_at(path, true).expect("the container describes it");
         let decoded = decode(&info, Demand::ALL).expect("the item is decoded");
         let Pixels::Planar { planes, alpha } = decoded.pixels else {
             panic!("a yuv page is handed out as planes");
@@ -2606,7 +2706,7 @@ mod tests {
     #[test]
     fn a_colour_only_decode_does_not_read_the_alpha_item() {
         let path = Path::new("tests/fixtures/alpha-yuv420p.avif");
-        let info = image_info(path, true).expect("the container describes it");
+        let info = image_info_at(path, true).expect("the container describes it");
         let wanted = decode(&info, Demand::ALL).expect("the item is decoded");
         let Pixels::Planar {
             planes: wanted_planes,
@@ -2632,7 +2732,7 @@ mod tests {
     #[test]
     fn a_colour_only_decode_reads_a_file_whose_alpha_item_is_broken() {
         let path = Path::new("tests/fixtures/avif-broken-alpha.avif");
-        let info = image_info(path, true).expect("the container describes it");
+        let info = image_info_at(path, true).expect("the container describes it");
         assert_eq!((info.width, info.height), (64, 48));
         assert_eq!(info.format, PixelFormat::Yuv420P8);
         // The file states an alpha item, so the colour type says it has one.
@@ -2646,7 +2746,7 @@ mod tests {
         // The same picture the file this one was cut from holds, which is the
         // check that the colour item is the one that was copied in.
         let source = Path::new("tests/fixtures/avif-yuv420p.avif");
-        let source_info = image_info(source, true).expect("the container describes it");
+        let source_info = image_info_at(source, true).expect("the container describes it");
         let Pixels::Planar {
             planes: source_planes,
             ..
@@ -2797,8 +2897,12 @@ mod tests {
         let file_len = file_length(&file).expect("the fixture has a length");
         let boxes = leading_boxes(&mut file).expect("the boxes are read");
         let meta = Meta::read(&boxes, file_len).expect("the item boxes are walked");
-        read_range(&mut file, meta.primary_data(usize::MAX).expect("located"))
-            .expect("the item is read")
+        read_ranges(
+            &mut file,
+            file_len as u64,
+            &meta.primary_ranges(usize::MAX).expect("located"),
+        )
+        .expect("the item is read")
     }
 
     /// A coded payload cut down to its sequence header, which states an image
@@ -2847,7 +2951,7 @@ mod tests {
     #[test]
     fn a_valid_item_hands_its_picture_back_on_the_first_call() {
         let path = Path::new("tests/fixtures/avif-yuv420p.avif");
-        let info = image_info(path, true).expect("the container describes it");
+        let info = image_info_at(path, true).expect("the container describes it");
         let picture = decode_item(&fixture_payload(path), &info).expect("the item is decoded");
         assert_eq!(
             (picture.width(), picture.height()),
@@ -3075,28 +3179,47 @@ mod tests {
             ),
         ] {
             let path = Path::new("tests/fixtures").join(name);
-            let shown_info = image_info(&path, true).expect("the container describes it");
+            let shown_info = image_info_at(&path, true).expect("the container describes it");
             assert_eq!(shown_info.orientation, code, "{name}");
-            assert_eq!((shown_info.width, shown_info.height), stored, "{name}");
+            // Only a yuv container is this reader's, and it hands the stored
+            // picture over with the transform that reaches the shown one beside
+            // it. Everything else -- r,g,b and monochrome alike -- is libheif's,
+            // and libheif applies the container's own transform as it decodes:
+            // the size it reports is the shown one and nothing is left to apply.
+            let decoded_here = matches!(shown_info.format.color_family(), ColorFamily::YUV);
+            if !decoded_here {
+                assert_eq!((shown_info.width, shown_info.height), shown, "{name}");
+                assert_eq!(shown_info.transform, Transform::IDENTITY, "{name}");
+            } else {
+                assert_eq!((shown_info.width, shown_info.height), stored, "{name}");
+                assert_eq!(
+                    shown_info.transform,
+                    Transform::from_orientation(code),
+                    "{name}"
+                );
+            }
             assert_eq!(
                 (shown_info.output_width(), shown_info.output_height()),
                 shown,
                 "{name}"
             );
-            assert_eq!(
-                shown_info.transform,
-                Transform::from_orientation(code),
-                "{name}"
-            );
 
-            let stored_info = image_info(&path, false).expect("the container describes it");
+            let stored_info = image_info_at(&path, false).expect("the container describes it");
             assert_eq!(stored_info.orientation, code, "{name}");
             assert_eq!(
                 (stored_info.output_width(), stored_info.output_height()),
                 stored,
                 "{name}"
             );
-            assert_eq!(stored_info.transform, Transform::IDENTITY, "{name}");
+            // Rotation off is what undoes a transform, so a file decoded with
+            // one applied is turned back by this and a file this reader walked
+            // is already stored and has nothing to undo.
+            let expected = if !decoded_here {
+                Transform::from_orientation(crate::pixel::inverse_orientation(code))
+            } else {
+                Transform::IDENTITY
+            };
+            assert_eq!(stored_info.transform, expected, "{name}");
         }
     }
 
@@ -3115,7 +3238,7 @@ mod tests {
             ),
         ] {
             let path = Path::new("tests/fixtures").join(name);
-            let info = image_info(&path, true).expect("the container describes it");
+            let info = image_info_at(&path, true).expect("the container describes it");
             assert_eq!(info.transform, Transform::from_orientation(code), "{name}");
             let decoded = decode(&info, Demand::ALL).expect("the item is decoded");
             assert_eq!(decoded.transform, info.transform, "{name}");
@@ -3131,8 +3254,8 @@ mod tests {
     #[test]
     fn an_unrotated_container_is_unchanged_by_the_rotation_policy() {
         let path = Path::new("tests/fixtures/orientation-avif-none.avif");
-        let shown = image_info(path, true).expect("the container describes it");
-        let stored = image_info(path, false).expect("the container describes it");
+        let shown = image_info_at(path, true).expect("the container describes it");
+        let stored = image_info_at(path, false).expect("the container describes it");
         assert_eq!(shown.transform, Transform::IDENTITY);
         assert_eq!(stored.transform, Transform::IDENTITY);
         assert_eq!((shown.width, shown.height), (stored.width, stored.height));
@@ -3144,10 +3267,10 @@ mod tests {
     #[test]
     fn the_no_picture_fixture_is_described_and_then_ends_with_an_error() {
         let path = Path::new("tests/fixtures/avif-no-picture.avif");
-        let info = image_info(path, true).expect("the container describes it");
+        let info = image_info_at(path, true).expect("the container describes it");
         assert_eq!((info.width, info.height), (3, 2));
         assert_eq!(info.format, PixelFormat::Yuv444P8);
-        assert!(handles(&info));
+        assert!(claimed(path));
         let error = decode(&info, Demand::ALL).expect_err("an item without a picture is an error");
         assert!(
             error.to_string().contains("the item holds no picture"),

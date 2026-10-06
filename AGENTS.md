@@ -102,9 +102,13 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   lookahead worker that has moved ahead of a consumer from making that
   consumer's next request replay the wrong picture.
 - `src/animation/`: one module per animated format. `apng.rs` composes APNG
-  frames at the file's own depth, because the `image` compositor's 16-bit arm is
-  `unreachable!` and it refuses every 16-bit colour type. `frames.rs` replays the
-  two formats `image` already composites over the full logical canvas. `jxl.rs`
+  frames at the file's own depth rather than at a fixed one. `gif.rs` reads the
+  timeline with the frame decoding skipped and composes the canvas itself,
+  keeping two deliberate departures from the specification: the background
+  colour is never used, and `Any` disposal means `Keep`. `webp.rs`
+  walks the RIFF container for the same timeline, hands each frame's own chunk
+  sequence to the still decoder, and composes the canvas with this tree's own
+  port of libwebp's integer alpha blending. `jxl.rs`
   scans frame headers without rendering and decodes each presentation from its
   own seek checkpoint. `sequence.rs` reads an avif or heif sequence's sample
   table and clean aperture from the container, because the embedded libheif
@@ -125,25 +129,72 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   file has one is the `ImgSeqHasICC` fact — but keeps its bytes only when the
   caller asked to export them, because a sequence whose files each carry a large
   profile would otherwise hold one copy per file for the life of the clip.
+  [`Input`] is the one open a probe makes: it holds the file and the leading
+  bytes read from it, `head` grows that window from where it stops, and `reader`
+  hands the same handle out rewound to the front for the container walk that
+  finds a timeline, so the route, the module that describes the file and the
+  animation adapters all read one open. a module that reads past the window takes
+  the same handle -- which every arm of `describe` now takes, including the ones
+  that read past the window. two opens remain and cannot be shared, because
+  `libheif` and the `exr` crate each open the path themselves.
   [`Pixels`] is what a buffered decode produced, and `RowStream` is the decode
   that has not read its picture yet because it can write each row into the frame;
-  a format answers with one only when it can fill every frame of the call, and
-  anything it refuses goes back to the `image` path.
-- `src/formats/`: per-format paths for what the `image` crate cannot express or
-  reports wrongly, one module per container and picked by extension (`heif.rs`
+  a format answers with one only when it can fill every frame of the call.
+- `src/formats/`: one module per container, chosen by `identify.rs` rather than
+  by the file's name (`heif.rs`
   for monochrome heif/heic and for the colour pages of both containers, which are
   decoded through libheif's own yuv planes and handed out as they are, `avif.rs`
   for every colour avif, which `dav1d` decodes and which also answers
   `decoder::probe` from the container boxes and the av1 sequence header so that
   probing an avif does not decode it, `jxl.rs` for every jpeg xl, which the `jxl`
-  crate decodes directly because `image` has no jxl format of its own, `jp2.rs`
-  for JPEG 2000 header probing and OpenJPEG decoding, `png.rs` for the `cICP`
-  chunk, which `image` has no accessor for, and for the png files whose rows it
+  crate decodes directly, `jp2.rs` for JPEG 2000 header probing and OpenJPEG
+  decoding, `png.rs` for the `cICP` chunk and for the png files whose rows it
   walks straight into the frame instead of buffering the picture whole — which
   includes expanding a palette page's indices itself — and
-  `webp.rs` for the libwebp decode
-  and the lossy yuv format). a monochrome avif still goes through `image` and is
-  corrected to `Gray8` here. an avif alpha item is a coded item of its own and a
+  `bmp.rs` for Windows bitmaps, whose palette, run-length and bitfield paths are a
+  port of the `image` reader and whose alpha rule is the format's rather than the
+  obvious one -- and which reads both of the format's headers, the twelve byte
+  `BITMAPCOREHEADER` with its three byte palette entries as well as the
+  information header, `ico.rs` for Windows icons, which picks a directory entry and hands
+  its payload to `bmp.rs` or to the `png` crate,
+  `tga.rs` for Truevision Targa, whose eleven image types, three run-length forms
+  and two descriptor directions are a port of the `image` reader, and whose
+  thirty-two bit rule is the opposite of the bitmap one's, `dds.rs` for
+  DirectDraw surfaces, whose DXT1, DXT3 and DXT5 blocks and their DX10
+  equivalents are a port, and whose five and six bit channels widen by
+  truncating division where the bitmap and targa readers round to nearest,
+  `hdr.rs` for Radiance pictures, whose three scanline encodings and eight
+  resolution spellings are written here rather than ported, because the reader
+  this replaces accepted only one spelling of the resolution line,
+  `tiff.rs` for the tagged format, whose decompressors are the crate's default
+  features and whose planar files arrive as planes that have to be reordered into
+  a frame,
+  `pnm.rs` for the netpbm family, whose seven subtypes, ASCII and binary rasters
+  and MAXVAL rescale are a port,
+  `exr.rs` for OpenEXR, read through the `exr` crate, whose channels are
+  selected by name rather than position, whose header is read without the
+  picture, and whose named channels go into one plane-major buffer handed to
+  the frame with its strides attached rather than an interleaved picture,
+  `jpeg.rs` for every jpeg, whose headers one `zune-jpeg` pass answers without
+  the pixels and whose picture is decoded from the file read whole, because a
+  probe over a stream stops where the raster begins -- creating a clip over a
+  35 page corpus reads headers rather than 213 MB of pictures, and went from
+  105 ms to 3 ms,
+  `qoi.rs` for the quite
+  ok image, whose fourteen byte header is read without a
+  sample and whose decoder is the `qoi` crate's, `farbfeld.rs` for the format
+  that is a magic and a size and nothing else, whose samples are big-endian on
+  disk and native in the frame, read one row at a time straight into the frame,
+  and `webp.rs` for the still webp decode, which the `wpd` decoder does
+  (`wpd` is a git dependency pinned to an exact revision in `Cargo.toml`, and
+  it is created inside the one fill that reads the file because it is not
+  `Send`), and for the lossy yuv format; an animated webp's rectangle is the
+  same decode, which is what `animation/webp.rs` calls). An avif this tree's
+  walk
+  decodes itself is the yuv
+  its container states, and everything else is `heif.rs`'s: an r,g,b container,
+  a monochrome one, and one the walk refuses. both readers name the same
+  library the probe did. an avif alpha item is a coded item of its own and a
   heif alpha plane is a buffer this module packs, so both readers take the
   `decoder::Demand` of the call and read only what a clip actually hands out: a
   call that hands out no alpha clip must not decode one, and a webp or a jxl is
@@ -162,11 +213,17 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   length and field width is checked against the type it is read into: a malformed
   container is refused rather than read past its own bounds, because a release
   build aborts on a panic. `Meta::native_eligible` is what decides whether this
-  reader decodes the primary item at all, and a container it refuses — a grid of
-  tiles, an item in several extents, a construction method it does not follow —
-  is described as the format the `image` decoder produces rather than as the yuv
-  its samples are; a probe must never promise a frame a decode would refuse to
-  produce.
+  reader decodes the primary item at all, and an item written as several extents
+  is read rather than refused, because those extents are one payload split
+  across the container. A container it still refuses — a grid of tiles, a
+  construction method it does not follow — is described and decoded by `libheif`
+  instead, which reads both.
+  `avif.rs` is the one module that decides which library owns an avif, and it
+  decides it from the same walk the decode needs for the pixels: a container the
+  walk refuses, an r,g,b one and a monochrome one all go to `libheif`, and only
+  the yuv its own walk reads is decoded here. The probe asks the same question
+  the same way, so the two cannot disagree about which library owns a file; a
+  probe must never promise a frame a decode would refuse to produce.
 - `src/pixel.rs`: supported pixel formats, the format a nominal depth names, and
   planar frame writes, which move a wider word down to the frame's own depth.
 - `src/color.rs`: frame properties, the optional raw `ICCProfile`, and the
@@ -194,7 +251,14 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   plus `alpha-yuv420p.avif`, and those four are likewise described by hand in
   that script's header. its split-extent section reads `avif-split-extents.avif`,
   which that script writes by hand from the coded item `avif-yuv420p.avif` holds,
-  so that fixture has to exist before the script runs. its orientation section reads the `tests/fixtures/orientation-*.png` files written by
+  so that fixture has to exist before the script runs. That section joins nothing
+  itself: it checks the plugin's joined planes against the whole file's, plane by
+  plane. its grid section reads `avif-grid.avif`, a 2x2 grid of tiles encoded
+  once by hand from the `avif-grid-source.png` the same script writes
+  (`avifenc --lossless -g 2x2`, with the command in that script's header). A
+  grid is refused by the plugin's own walk and read by `libheif`, so that
+  section checks the joined picture's four cells -- 8, 10, 15 and 17, taken at
+  each cell's middle -- rather than a refusal. its orientation section reads the `tests/fixtures/orientation-*.png` files written by
   `tests/make-orientation-fixtures.py`, plus `orientation-6.jxl`, which that
   script documents and `cjxl` makes, and its yuv orientation section reads the
   `orientation-{2,6,8}.webp` files that script cuts out of
@@ -212,6 +276,13 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   fixtures all state the same four 80/170/110/240 ms pictures over a 16x12
   canvas, and the heic fixture holds four equal 150 ms samples because `heif-enc`
   accepts one duration for a whole sequence.
+- `tests/routing.py`: the phase 1 acceptance check for plan 34. It copies one
+  fixture per format under a wrong extension and under an uppercase one and
+  requires every copy to decode to the same bytes, alpha and properties as its
+  source, so it measures whether a file's *content* decides how it is read rather
+  than its name. It reports no wrong copies, which is the state routing through
+  `src/formats/identify.rs` reaches and must stay in. It
+  needs a release build and the plugin, like `tests/readalpha.vpy`.
 - `tests/check-packaging-tools.py`: the checks for `tools/`, run with any Python
   3.12 or later. it builds its own tree under `target/check-packaging-tools`, so
   it needs no wheel and no network; `IMGSEQS_CHECK_TMP` moves that tree, and a
@@ -231,9 +302,16 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   builds ship, and `build-manylinux.sh` and `build-musllinux.sh` build and
   repair a wheel in their own pinned container.
 - `tools/macos-libheif-toolchain.cmake`: the macOS wheel build disables unused
-  embedded libheif codec backends; the plugin decodes HEIC with libde265 and
-  AVIF with dav1d directly. `tools/package-macos-wheel.py` bundles and checks
-  the macOS runtime dylibs before the final wheel is staged.
+  embedded libheif codec backends and its `libsharpyuv` colour transforms; the
+  plugin decodes HEIC with libde265 and AVIF with dav1d directly. Both are
+  switched off through the toolchain file because `libheif-sys` turns them on
+  itself and a toolchain file is read after the command line, so its `FORCE`
+  wins. `tools/manylinux-toolchain.cmake` does the same for the Linux builds,
+  where the same optional dependency would otherwise be whichever one the build
+  image has installed: `libwebp-dev` supplied its sharpyuv to the test job, and
+  homebrew's `webp` does on the macOS runner.
+  `tools/package-macos-wheel.py` bundles and checks the macOS runtime dylibs
+  before the final wheel is staged.
 - `docs/IMPLEMENTATION.md`: design notes and deferred ideas.
 - `docs/improvements/`: one plan per change, with its status; its `README.md` is
   the index of what is open, what the landed work left over and what was decided
@@ -246,6 +324,27 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
 the development python executable is `C:\Python314\python.exe`.
 `vcpkg_installed/` is the ignored repository-local install. the generated
 `target/vcpkg-root/` adapter exposes it in the layout expected by vcpkg-rs.
+
+`wpd` assembles its x86 and x86-64 decode routines with NASM, so `nasm` has to
+be on `PATH` for a build on those architectures; its ARM sources are assembled
+by the C compiler and need nothing extra. On Windows the archiver `nasm-rs`
+calls is MSVC's `lib.exe`, which a normal "x64 Native Tools" prompt already
+puts on `PATH`.
+
+an ELF build also gets `-Wl,-Bsymbolic` on the plugin's own link, from
+`build.rs`. NASM reaches wpd's gamma tables with a rip-relative load, and
+rustc exports every `#[no_mangle]` symbol of the crate graph from a cdylib, so
+without it both link editors refuse the link (`relocation R_X86_64_PC32 cannot
+be used against symbol ...; recompile with -fPIC`). PE and Mach-O do not need
+the flag, and `-Bsymbolic-functions` does not replace it.
+
+an apple build gets `-Wl,-dead_strip_dylibs` from the same file instead. Mach-O
+writes a load command for every library the link line names, including the ones
+another crate's flags bring in -- `libheif-sys` reads libheif's own pkg-config
+file, whose `Requires.private` lists optional libraries the plugin never calls
+into -- so a dylib no symbol came from is dropped rather than bundled. ELF
+needs no equivalent, because `--as-needed` already leaves such a library out of
+`NEEDED`.
 
 from powershell, use the local native paths when running cargo directly:
 
@@ -360,9 +459,10 @@ bundle. Both Linux layouts include shared dav1d/libde265 with relative loader
 paths, and a fresh container validates them before publishing. Each Linux build
 includes a relinking source archive; see `docs/LINUX-BUILD.md`.
 
-the current native set is dav1d, libheif, libde265, libwebp, and the OpenJPEG
-sources vendored by `openjpeg-sys`. dav1d and OpenJPEG use the bsd-2-clause
-license and libwebp uses bsd-3-clause. libheif and libde265 are lgplv3 and are
+the current native set is dav1d, libheif, libde265, the `wpd` decoder
+the crate builds and links into the plugin, and the OpenJPEG
+sources vendored by `openjpeg-sys`. dav1d, OpenJPEG and wpd use the
+bsd-2-clause license. libheif and libde265 are lgplv3 and are
 statically linked. keep the exact upstream texts in `LICENSES/`.
 
 the musllinux wheel also carries the gcc runtime libraries (`libstdc++`,
@@ -372,11 +472,11 @@ exception they are conveyed under.
 
 on windows the vcpkg `x64-windows-static-md` triplet makes every vcpkg native
 library static. `jpeg2k` compiles its vendored OpenJPEG sources on every
-platform. on unix `build.rs` links libwebp from its archive when the
-development package installs one (`libwebp-dev` and homebrew's `webp` both
-do); on apple the archive is named instead of requested, because `ld` ignores
-the `static=` hint and prefers `libwebp.dylib` in the directory homebrew puts
-both forms in. the `embedded-libheif` feature builds libheif into the plugin,
+platform. every webp is decoded by the `wpd` crate, which the plugin links
+and which needs no library found at build time; `build.rs` locates nothing any
+more, and nothing else is linked from a pkg-config interface either: the
+embedded libheif is built with its optional backends off, `libsharpyuv` among
+them. the `embedded-libheif` feature builds libheif into the plugin,
 so libheif is static there as well; dav1d and libde265 are the system shared
 libraries. the static lgpl obligation below therefore applies to libheif on
 every platform and to libde265 on windows only.

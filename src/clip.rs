@@ -19,12 +19,12 @@ use vapoursynth4_rs::{
 
 use crate::{
     animation::{AnimationSource, SegmentTable},
-    color::set_frame_properties,
+    color::{SourceIndices, set_frame_properties},
     decoder::{self, DecodeTimings, DecodedImage, Demand, ImageInfo, Pixels, PlaneRows, RowSink},
     error::{ImgSeqError, Result},
     pixel::{
-        PixelFormat, WriteTimings, write_alpha, write_decoded_planes, write_opaque_alpha,
-        write_planar,
+        PixelFormat, PlaneSource, WriteTimings, write_alpha, write_decoded_planes,
+        write_opaque_alpha, write_planar,
     },
     prefetch::{Payload, Prepare},
 };
@@ -191,7 +191,7 @@ impl ClipFrames {
         core: &Core,
         clips: &Arc<[Clip]>,
         image: &ImageInfo,
-        index: usize,
+        indices: SourceIndices,
         mut decoded: DecodedImage,
         export_icc_profile: bool,
     ) -> Result<Self> {
@@ -259,7 +259,7 @@ impl ClipFrames {
             set_frame_properties(
                 frame,
                 image,
-                index,
+                indices,
                 format,
                 clip.alpha_marker(),
                 export_icc_profile,
@@ -367,6 +367,13 @@ impl Prepare for FrameBuilder {
     fn produce(&self, index: usize) -> Result<Self::Payload> {
         let frame = self.segments.resolve(index)?;
         let image = &frame.segment.info;
+        // What the source-property names report: the path's position in the
+        // list, and the picture's position within that file. An animated file
+        // keeps its own index however long its timeline is.
+        let indices = SourceIndices {
+            file: frame.file,
+            animation: frame.segment.animated.then_some(frame.presentation),
+        };
         let decoded = decode_frame(
             image,
             frame.segment.decoder(),
@@ -377,7 +384,7 @@ impl Prepare for FrameBuilder {
             self.core.core(),
             &self.clips,
             image,
-            index,
+            indices,
             decoded,
             self.export_icc_profile,
         )
@@ -498,7 +505,33 @@ fn write_frame(
             decoded.format,
             decoded.width,
             decoded.height,
-            planes,
+            PlaneSource::Packed(planes),
+            transform,
+        ),
+        // A decode that kept the decoder's own plane-major buffer is written out
+        // of that buffer rather than out of a copy of it, so this is the same
+        // write with the decoder's own strides attached.
+        (
+            Clip::Color,
+            Pixels::Strided {
+                planes,
+                alpha,
+                buffer,
+                row_stride,
+                plane_stride,
+            },
+        ) => write_decoded_planes(
+            frame,
+            decoded.format,
+            decoded.width,
+            decoded.height,
+            PlaneSource::Strided {
+                buffer,
+                planes: planes - usize::from(*alpha),
+                first: 0,
+                row_stride: *row_stride,
+                plane_stride: *plane_stride,
+            },
             transform,
         ),
         (Clip::Color, Pixels::Interleaved { color_type, buffer }) => write_planar(
@@ -522,10 +555,43 @@ fn write_frame(
             format,
             decoded.width,
             decoded.height,
-            std::slice::from_ref(alpha),
+            PlaneSource::Packed(std::slice::from_ref(alpha)),
             transform,
         ),
         (Clip::Alpha, Pixels::Planar { alpha: None, .. }) => write_opaque_alpha(
+            frame,
+            format,
+            decoded.output_width(),
+            decoded.output_height(),
+        ),
+        // The alpha plane of a strided decode is the last plane of the one buffer,
+        // one stride after the colour planes. It is read where it already is.
+        (
+            Clip::Alpha,
+            Pixels::Strided {
+                planes,
+                alpha: true,
+                buffer,
+                row_stride,
+                plane_stride,
+            },
+        ) => write_decoded_planes(
+            frame,
+            format,
+            decoded.width,
+            decoded.height,
+            PlaneSource::Strided {
+                buffer,
+                planes: 1,
+                first: planes - 1,
+                row_stride: *row_stride,
+                plane_stride: *plane_stride,
+            },
+            transform,
+        ),
+        // A decode whose buffer holds colour planes only states no alpha of its own,
+        // because every channel of that picture is one of them.
+        (Clip::Alpha, Pixels::Strided { alpha: false, .. }) => write_opaque_alpha(
             frame,
             format,
             decoded.output_width(),

@@ -15,57 +15,53 @@ rust-version = "1.94.0"
 crate-type = ["cdylib"]
 
 [dependencies]
+# The decompressors are named rather than inherited, so what this reader can
+# read is visible here: `deflate`, `fax`, `jpeg` and `lzw` are the crate's
+# defaults.
+tiff = { version = "0.11.3", default-features = false, features = [
+    "deflate",
+    "fax",
+    "jpeg",
+    "lzw",
+] }
 vapoursynth4-rs = { version = "0.5.1", default-features = false, features = [
     "vs-42", # >=R74
     "vsscript-43" # >=R79
 ] }
 
-# image stuff
-image = { version = "0.25.10", default-features = false, features = [
-    # formats
-    "avif-native",
-    "bmp",
-    "dds",
-    "exr",
-    "ff",
-    "gif",
-    "ico",
-    "jpeg",
-    "png",
-    "pnm",
-    "qoi",
-    "tga",
-    "tiff",
-    "webp",
-    # other
-    "hdr",
-    "rayon"
-] }
+# openexr is read here, whose adapter decodes into an f32 image of its own and
+# then copies its bytes to the generic buffer; see `src/formats/exr.rs`
+exr = "1.74.2"
 libheif-rs = { version = "3.0.0", default-features = false, features = [
-    "image",
     "v1_23", # target libheif v1.23.x
     "embedded-libheif" # build on linux (v1.23.0)
 ] }
 jxl = { version = "0.7.4", default-features = false, features = [
-    "all-simd" # the same vector paths the image integration enabled
+    "all-simd"
 ] }
-# the av1 decoder `image` already links for avif, used directly so that the
-# planes the bitstream holds are handed out instead of r,g,b; see
-# `docs/improvements/12-heif-avif-yuv-output.md`
 dav1d = { version = "0.11.1", default-features = false }
 jpeg2k = { version = "0.10.1", default-features = false, features = [
     "openjpeg-sys"
 ] }
-# animated png is composed here rather than by `image`, whose APNG compositor
-# refuses every 16-bit colour type; see `src/animation/apng.rs`
 png = { version = "0.18.1", default-features = false }
-
-# native stuff: find libwebp, see build.rs
-[target.'cfg(windows)'.build-dependencies]
-vcpkg = "0.2.15"
-
-[target.'cfg(not(windows))'.build-dependencies]
-pkg-config = "0.3.34"
+# a jpeg is decoder, whose reader parses the file's headers four times
+# for one probe and one decode, and whose EXIF and ICC accessors each rebuild
+# it; see `src/formats/jpeg.rs`. `zune-core` is the colorspace and options
+# type the two crates share, and it is named directly so that a decoder is
+# built by this module's own options rather than a default.
+zune-core = { version = "0.5.3", default-features = false, features = ["std"] }
+zune-jpeg = { version = "0.5.15", default-features = false, features = ["std"] }
+# animated gif is composed here, whose compositor is the one this replaces and whose
+# frame iterator decodes every picture to find the timeline; see `src/animation/gif.rs`
+gif = { version = "0.14.2", default-features = false, features = ["std"] }
+# quite ok image is read here, whose qoi adapter parses the header a second
+# time for every accessor; see `src/formats/qoi.rs`
+qoi = { version = "0.4.1", default-features = false, features = ["std"] }
+# every webp is decoded by wpd, whose assembly is a default feature and whose
+# revision is pinned here because the crate is not published on crates.io. see
+# `src/formats/webp.rs`, `src/animation/webp.rs` and
+# `docs/improvements/35-wpd-webp-decoder.md`.
+wpd = { git = "https://github.com/halidecx/wpd", rev = "45d5955260f6c44a1b6bea6954a4a34e818f3f8a" }
 
 [profile.release]
 opt-level = 3
