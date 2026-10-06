@@ -286,6 +286,7 @@ pub fn set_frame_properties(
 
     Ok(())
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

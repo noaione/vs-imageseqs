@@ -480,6 +480,7 @@ impl PartialEq for Pixels {
 }
 
 impl Eq for Pixels {}
+
 #[derive(Clone, Debug)]
 pub struct DecodedImage {
     pub width: u32,

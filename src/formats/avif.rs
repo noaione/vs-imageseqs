@@ -1681,6 +1681,7 @@ fn read_range(
 fn decode_error(path: &Path, error: impl std::fmt::Display) -> ImgSeqError {
     image_error("decode", path, error)
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

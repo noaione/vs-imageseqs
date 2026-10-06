@@ -360,19 +360,28 @@ def test_jpeg2000() -> None:
     else:
         check(False, "alpha-jp2-grayalpha-unlabelled: two components with no cdef is refused")
 
-    # A palette is a statement this reader does not act on: the codestream holds
-    # indices, so the samples a frame would carry are not the ones the SIZ
-    # describes. The fixture is the index codestream with a `pclr` box of four
-    # entries and a `cmap` box mapping three output channels onto it.
-    try:
-        core.imgseqs.Read(files=[fixture("alpha-jp2-palette.jp2")])
-    except Exception as error:
-        check(
-            "JP2 palette of 4 entries of 3 components" in str(error),
-            f"alpha-jp2-palette: a palette is refused by name ({str(error).strip()})",
-        )
-    else:
-        check(False, "alpha-jp2-palette: a palette is refused by name")
+    # A palette is expanded here rather than by the codec: the codestream holds
+    # indices and the colour is in the `pclr` box. The entries are black, red, green
+    # and blue, and the index raster is 0,1,2,3,3,2,1,0, so the picture is what
+    # `opj_decompress` makes of the same file.
+    palette_clip = core.imgseqs.Read(files=[fixture("alpha-jp2-palette.jp2")])
+    check(
+        palette_clip.format.name == "RGB24",
+        f"alpha-jp2-palette: the palette is expanded to RGB24 (got {palette_clip.format.name})",
+    )
+    palette_frame = palette_clip.get_frame(0)
+    check(
+        samples(palette_frame, 0) == [0, 255, 0, 0, 0, 0, 255, 0],
+        f"alpha-jp2-palette: the red plane is the palette's (got {samples(palette_frame, 0)})",
+    )
+    check(
+        samples(palette_frame, 1) == [0, 0, 255, 0, 0, 255, 0, 0],
+        "alpha-jp2-palette: the green plane is the palette's",
+    )
+    check(
+        samples(palette_frame, 2) == [0, 0, 0, 255, 255, 0, 0, 0],
+        "alpha-jp2-palette: the blue plane is the palette's",
+    )
     # The codestream on its own is a plain one component image, which is what the
     # palette box is the statement about.
     index = core.imgseqs.Read(files=[fixture("jp2-palette-indices.j2k")])

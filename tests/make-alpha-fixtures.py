@@ -723,7 +723,9 @@ def jp2_palette(source: str, path: str) -> None:
     ihdr = struct.pack(">IIHBBBB", 2, 4, 1, 7, 7, 0, 0)
     colr = struct.pack(">BBBI", 1, 0, 0, 16)
     entries = bytes((0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255))
-    pclr = struct.pack(">HBB", 4, 3, 8) + entries
+    # NE, NPC, then one `Bi` a column -- bits minus one, the way a codestream's
+    # `Ssiz` states a precision -- and then the entries, entry-major.
+    pclr = struct.pack(">HB", 4, 3) + bytes((7, 7, 7)) + entries
     cmap = b"".join(struct.pack(">HBB", 0, 1, column) for column in range(3))
     with open(path, "wb") as handle:
         handle.write(

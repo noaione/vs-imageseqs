@@ -496,6 +496,7 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
         },
     })
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

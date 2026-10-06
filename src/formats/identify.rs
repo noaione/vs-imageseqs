@@ -396,6 +396,7 @@ pub fn route_agrees(route: Option<Format>, format: Format, path: &Path) -> bool 
         None => owns(format, path),
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -118,10 +118,9 @@
   colour components beside one opacity as r,g,b and alpha. A two component file
   whose container names no opacity component is still refused, because nothing in
   it says which sample is alpha
-- A JP2 that states a palette is refused by name rather than read as the gray its
-  one component looks like: the codestream holds indices, so the samples a frame
-  would carry are not the ones its header describes, and this reader does not
-  expand a palette
+- A JP2 that states a palette is expanded here rather than refused: the codestream
+  holds indices and the colour is in the `pclr` box beside it, so the page is
+  handed out as the palette's own shape with every sample the entry its index names
 - A TIFF whose compression is WebP is decoded here rather than refused: each strip
   is a webp bitstream, which libwebp reads the same way it reads a webp file, so
   the page holds the samples its uncompressed spelling does. A compression code

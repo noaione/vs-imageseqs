@@ -648,6 +648,7 @@ fn parse(data: &[u8], path: &Path) -> Result<Option<Animation>> {
         dispose_is_inert: true,
     }))
 }
+
 impl Frame {
     /// Reads one `ANMF` chunk's header, keeping the range of its payload.
     ///

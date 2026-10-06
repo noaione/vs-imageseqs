@@ -26,7 +26,7 @@ use std::{
 };
 
 use crate::layout::ColorType;
-use jpeg2k::{ColorSpace, Image, ImagePixelData};
+use jpeg2k::{ColorSpace, DecodeParameters, Image, ImagePixelData};
 
 use crate::{
     color::{Cicp, UNSPECIFIED},
@@ -162,10 +162,19 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     let metadata = metadata_started.elapsed();
 
     let read_started = Instant::now();
-    let image =
-        Image::from_bytes(&data).map_err(|error| image_error("decode", &info.path, error))?;
+    // A palette page is decoded with its palette left alone: the codestream holds
+    // indices and the colour is in the container, so this reader asks for the
+    // codestream's own components and expands them itself.
+    let image = if header.palette.is_some() {
+        Image::from_bytes_with(&data, DecodeParameters::new().ignore_pclr_cmap_cdef())
+    } else {
+        Image::from_bytes(&data)
+    }
+    .map_err(|error| image_error("decode", &info.path, error))?;
     check_decoded_header(&image, &header, &info.path)?;
-    let pixels = if format.color_family() == vapoursynth4_rs::ColorFamily::YUV {
+    let pixels = if let Some(palette) = &header.palette {
+        palette_buffer(&image, palette, &info.path)?
+    } else if format.color_family() == vapoursynth4_rs::ColorFamily::YUV {
         decode_yuv(&image, format, &info.path)?
     } else {
         decode_interleaved(&image, color_type, &info.path)?
@@ -236,24 +245,32 @@ fn output_format(header: &Header, path: &Path) -> Result<(ColorType, PixelFormat
     }
 
     // The container's own statement comes first. A `cdef` box names which
-    // A palette is a statement this reader does not act on. The codestream holds
-    // indices and the colour is in the `pclr` box beside it, and the decoder this
-    // module hands the file to is the one that either applies the palette itself or
-    // refuses the file. Either way the samples a frame would carry are not the
-    // samples the SIZ describes, so a file that states a palette is refused by name
-    // rather than promised as the gray its one component looks like.
-    if let Some(palette) = header.palette {
-        return Err(ImgSeqError::new(format!(
-            "image '{}' states a JP2 palette of {} entries of {} components, which this reader does not expand{}",
-            path.display(),
-            palette.entries,
-            palette.components,
-            if header.palette_mapping {
-                " (with a component mapping)"
-            } else {
-                ""
+    // A palette is expanded here rather than by the codec: the codestream holds
+    // indices and the colour is in the `pclr` box beside them, so the shape the
+    // frame is handed out as is the palette's own. The decode reads the indices with
+    // the palette left alone and expands them itself; see [`palette_buffer`].
+    if let Some(palette) = &header.palette {
+        if !header.palette_mapping {
+            return Err(ImgSeqError::new(format!(
+                "image '{}' states a JP2 palette with no component mapping, which this reader cannot expand",
+                path.display()
+            )));
+        }
+        let color_type = match (palette.components, palette.bits) {
+            (3, 8) => ColorType::Rgb8,
+            (3, 16) => ColorType::Rgb16,
+            (4, 8) => ColorType::Rgba8,
+            (4, 16) => ColorType::Rgba16,
+            (components, bits) => {
+                return Err(ImgSeqError::new(format!(
+                    "image '{}' states a JP2 palette of {components} components of {bits} bits, which this reader does not expand",
+                    path.display()
+                )));
             }
-        )));
+        };
+        let format = PixelFormat::from_color_type(color_type)
+            .expect("a JPEG 2000 palette color type is supported");
+        return Ok((color_type, format));
     }
     // component is colour and which is opacity, and the component count cannot:
     // two components might be gray and alpha, or a colour channel beside
@@ -411,6 +428,74 @@ fn check_decoded_header(image: &Image, header: &Header, path: &Path) -> Result<(
         ));
     }
     Ok(())
+}
+
+/// Expands a palette page's indices into the colour its `pclr` box states.
+///
+/// The codestream holds one index a pixel, which is why the decode asks OpenJPEG
+/// for the codestream's own components rather than for the picture it would build
+/// from the palette itself. What is left is the expansion the TIFF and png palette
+/// paths already make: one entry looked up per index, into a frame of the palette's
+/// own shape.
+///
+/// # Errors
+///
+/// Returns [`ImgSeqError`] for a page whose index component is missing or empty and
+/// for an index past the end of the palette.
+fn palette_buffer(image: &Image, palette: &Palette, path: &Path) -> Result<Pixels> {
+    let components = image.components();
+    let Some(index) = components.first() else {
+        return Err(image_error(
+            "decode",
+            path,
+            "the palette page holds no index component",
+        ));
+    };
+    let width = usize::try_from(index.width()).unwrap_or(0);
+    let height = usize::try_from(index.height()).unwrap_or(0);
+    if width == 0 || height == 0 {
+        return Err(image_error(
+            "decode",
+            path,
+            "the palette page has no pixels",
+        ));
+    }
+    let channels = usize::from(palette.components);
+    let wide = palette.bits == 16;
+    // The crate hands a component over scaled into the word it fits, so the index is
+    // scaled back to the precision the codestream states before it is looked up.
+    let scale = if palette.bits >= 16 {
+        1.0
+    } else {
+        f64::from((1u32 << u32::from(palette.bits)) - 1) / f64::from(u16::MAX)
+    };
+    let mut buffer = Vec::with_capacity(width * height * channels * if wide { 2 } else { 1 });
+    for value in index.data_u16() {
+        let index = ((f64::from(value) * scale).round() as u32) as usize;
+        let at = index * channels;
+        let Some(entry) = palette.values.get(at..at + channels) else {
+            return Err(image_error(
+                "decode",
+                path,
+                "a palette index is past the end of the palette",
+            ));
+        };
+        for channel in entry {
+            if wide {
+                buffer
+                    .extend_from_slice(&u16::try_from(*channel).unwrap_or(u16::MAX).to_ne_bytes());
+            } else {
+                buffer.push(u8::try_from(*channel).unwrap_or(u8::MAX));
+            }
+        }
+    }
+    let color_type = match (channels, wide) {
+        (3, false) => ColorType::Rgb8,
+        (3, true) => ColorType::Rgb16,
+        (4, false) => ColorType::Rgba8,
+        _ => ColorType::Rgba16,
+    };
+    Ok(Pixels::Interleaved { color_type, buffer })
 }
 
 fn decode_interleaved(image: &Image, color_type: ColorType, path: &Path) -> Result<Pixels> {
@@ -820,50 +905,97 @@ fn parse_cdef(payload: &[u8], state: &mut Jp2State, path: &Path) -> Result<()> {
 }
 
 /// What a JP2 `pclr` box states: how many entries a palette holds, how many
-/// components each entry has, and how many bits each component is.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// components each entry has, how many bits each component is, and the entries
+/// themselves, entry-major.
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct Palette {
     entries: u16,
     components: u8,
     bits: u8,
+    values: Vec<u32>,
 }
 
-/// Reads the palette a JP2 states, which is a statement this reader does not act
-/// on; see [`output_format`] for what it does with one.
+/// Reads the palette a JP2 states.
+///
+/// The box is `NE`, `NPC`, one `Bi` for each of the `NPC` palette columns, and
+/// then the entries: every entry is `NPC` values of its column's width. `Bi` counts
+/// the bits *minus one*, the way a codestream's `Ssiz` states a precision, so eight
+/// bits a column is a seven in the box.
 fn parse_pclr(payload: &[u8], state: &mut Jp2State, path: &Path) -> Result<()> {
-    if payload.len() < 4 {
+    if payload.len() < 3 {
         return Err(image_error(
             "identify",
             path,
             "the JP2 pclr box is truncated",
         ));
     }
-    let palette = Palette {
-        entries: u16::from_be_bytes(payload[..2].try_into().unwrap()),
-        components: payload[2],
-        bits: payload[3],
-    };
-    // Every entry is `components` values of `bits` bits, and a palette that does
-    // not hold what its own header says is one nothing can expand.
-    let values = usize::from(palette.entries)
-        .checked_mul(usize::from(palette.components))
-        .and_then(|count| count.checked_mul(usize::from(palette.bits)))
-        .map(|bits| bits.div_ceil(8));
-    if palette.components == 0 || palette.bits < 3 || palette.bits > 16 {
+    let entries = u16::from_be_bytes(payload[..2].try_into().unwrap());
+    let components = payload[2];
+    if entries == 0 || components == 0 {
         return Err(image_error(
             "identify",
             path,
             "the JP2 pclr box states a palette no reader can expand",
         ));
     }
-    if values.is_none_or(|values| payload.len() < 4 + values) {
+    let Some(columns) = payload.get(3..3 + usize::from(components)) else {
         return Err(image_error(
             "identify",
             path,
             "the JP2 pclr box is truncated",
         ));
+    };
+    let bits: Vec<u32> = columns
+        .iter()
+        .map(|column| u32::from(column & 0x7f) + 1)
+        .collect();
+    // Every column's values are read at its own width, and the entries follow the
+    // columns in the box.
+    let mut values = Vec::with_capacity(usize::from(entries) * usize::from(components));
+    let mut at = 3 + usize::from(components);
+    for _ in 0..entries {
+        for width in &bits {
+            let bytes = usize::try_from(width.div_ceil(8)).unwrap_or(0);
+            let Some(raw) = payload.get(at..at + bytes) else {
+                return Err(image_error(
+                    "identify",
+                    path,
+                    "the JP2 pclr box is truncated",
+                ));
+            };
+            let mut value = 0u32;
+            for byte in raw {
+                value = (value << 8) | u32::from(*byte);
+            }
+            values.push(value);
+            at += bytes;
+        }
     }
-    state.palette = Some(palette);
+    // One width for the whole palette is what this reader expands: a palette of two
+    // widths would have to be widened into the one frame format.
+    let Some(first) = bits.first().copied() else {
+        return Err(image_error(
+            "identify",
+            path,
+            "the JP2 pclr box states a palette no reader can expand",
+        ));
+    };
+    if bits.iter().any(|width| *width != first) || !matches!(first, 8 | 16) {
+        return Err(image_error(
+            "identify",
+            path,
+            format!(
+                "the JP2 palette of '{}' is {first} bits a column, which this reader does not expand",
+                path.display()
+            ),
+        ));
+    }
+    state.palette = Some(Palette {
+        entries,
+        components,
+        bits: u8::try_from(first).unwrap_or(8),
+        values,
+    });
     Ok(())
 }
 
@@ -1024,7 +1156,7 @@ fn header_from_siz(siz: SizHeader, state: &Jp2State, path: &Path) -> Result<Head
         has_icc_profile: state.has_icc_profile,
         icc_profile: state.icc_profile.clone(),
         channels: state.channels.clone(),
-        palette: state.palette,
+        palette: state.palette.clone(),
         palette_mapping: state.palette_mapping,
     })
 }
@@ -1309,41 +1441,29 @@ mod tests {
         assert!(said.contains("2 JPEG 2000 components"), "{said}");
     }
 
-    /// A palette is a statement this reader does not act on: the codestream holds
-    /// indices, so the samples a frame would carry are not the ones the SIZ
-    /// describes. The file is refused by name rather than promised as the gray its
-    /// one component looks like.
+    /// A palette page is expanded here rather than by the codec: the codestream holds
+    /// indices and the colour is in the `pclr` box, so the frame is the palette's own
+    /// shape and every sample is the entry its index names.
     #[test]
-    fn a_palette_is_refused_by_name() {
-        let palette = Header {
-            width: 2,
-            height: 2,
-            components: vec![ComponentHeader {
-                precision: 8,
-                signed: false,
-                dx: 1,
-                dy: 1,
-            }],
-            color: EnumeratedColor::Srgb,
-            has_icc_profile: false,
-            icc_profile: None,
-            channels: None,
-            palette: Some(Palette {
-                entries: 4,
-                components: 3,
-                bits: 8,
-            }),
-            palette_mapping: true,
+    fn a_palette_is_expanded_into_its_entries() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("alpha-jp2-palette.jp2");
+        let info = image_info_at(&path, true).expect("the fixture reads");
+        assert_eq!((info.width, info.height), (4, 2));
+        assert_eq!(info.format, PixelFormat::Rgb8);
+        let decoded = decode(&info).expect("the palette page decodes");
+        let Pixels::Interleaved { buffer, .. } = decoded.pixels else {
+            panic!("a palette page is handed out as one interleaved buffer");
         };
-        let said = output_format(&palette, Path::new("palette.jp2"))
-            .expect_err("a palette is not expanded here")
-            .to_string();
-        assert!(
-            said.contains("palette of 4 entries of 3 components"),
-            "{said}"
+        // Black, red, green and blue, in the order the index raster names them.
+        assert_eq!(
+            buffer,
+            [
+                0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 0, 0, 0
+            ]
         );
-        assert!(said.contains("does not expand"), "{said}");
-        assert!(said.contains("component mapping"), "{said}");
     }
 
     /// A box with `kind` and `payload`, as the container writes one.

@@ -8,9 +8,9 @@ byte map entries, the bare DIB, cursors, the gray+alpha TIFF, the flat gray EXR,
 twelve bit subsampled AVIF/HEIF, a heic storing av1, the ISO composition boxes, the
 JP2 channel definitions and TIFF WebP are in the tree with their fixtures and their
 checks -- the heic storing av1 as a fixture alone, because the path already worked,
-the fragment box as a recorded non-issue, because no decoder here reads one, and the
-palette as a refusal, because this reader cannot expand one -- and what stays
-refused by decision is the section below.
+the fragment box as a recorded non-issue, because no decoder here reads one -- and the
+palette of a JP2, which was a refusal until OpenJPEG's own box layout was read, is
+expanded here too. What stays refused by decision is the section below.
 
 [34](34-input-routing-and-planar-decode.md)'s phase-4 row and the plan-34
 candidate table are where these items were listed as "each need an individual
@@ -287,19 +287,22 @@ rather than by a rule written here. The fixtures are `mono-alpha.png` and
 colour and alpha clips sample by sample against the pngs they came from, and the
 unlabelled variant is the same codestream with the box dropped.
 
-**Landed: `pclr`, as a refusal.** A palette is read and named rather than acted
-on: the codestream holds indices and the colour is in the `pclr` box beside it, so
-the samples a frame would carry are not the ones the SIZ describes. The route the
-plan sketched -- expand the indices here -- is not open to this reader: the decode
-gets whatever components the codec hands back, and OpenJPEG either applies the
-palette itself or refuses the file, so the index plane is never something this
-module can see. What is open is the honest half: a file that states a palette is
-refused by name with the entries and components it states, rather than promised as
-the gray its one component looks like and then failing at decode with `Null
-pointer from openjpeg-sys`. The fixture is the index codestream this script's
-header compresses by hand, wrapped in four entries of three components and a
-`cmap` mapping three channels onto them; the same codestream without the boxes is
-a plain gray page, which the validator checks beside the refusal.
+**Landed: `pclr`, and the route is open after all.** A palette page is expanded
+here: the codestream holds indices and the colour is in the `pclr` box beside it, so
+the decode asks OpenJPEG for the codestream's own components rather than for the
+picture it would build, and looks each index up in the entries. That is what
+`jpeg2k`'s `DecodeParameters::ignore_pclr_cmap_cdef()` is for -- an opt-in builder,
+not the default, which is why `Image::from_bytes` hands over a post-palette
+picture. What actually blocked this slice was the fixture: OpenJPEG's `pclr` reader
+wants `NE`, `NPC`, **one `Bi` for each palette column** and then the entries, with
+`Bi` counting bits *minus one* the way a codestream's `Ssiz` states a precision.
+A single `B` byte and an eight for eight bits both made it fail silently, at
+`return OPJ_FALSE` with no message, which is why it took reading `jp2.c` rather
+than guessing. The fixture is the index codestream this script's header compresses
+by hand, wrapped in four entries of three components and a `cmap` mapping three
+channels onto them; the same codestream without the boxes is a plain gray page, and
+the validator checks the expansion plane by plane against what `opj_decompress`
+makes of the same file.
 
 ## Twelve bit subsampled AVIF and HEIF
 

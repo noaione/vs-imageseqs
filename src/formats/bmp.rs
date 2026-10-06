@@ -530,6 +530,7 @@ pub(crate) fn header_ico(data: &[u8], start: usize) -> Result<Header> {
     header.has_alpha = true;
     Ok(header)
 }
+
 fn truncated() -> ImgSeqError {
     ImgSeqError::new("the bitmap is truncated")
 }
