@@ -247,18 +247,19 @@ for results and instructions to compare against BestSource.
 ## build from source
 
 You need Rust 1.94 or newer, Python 3.12 or newer, CMake, Ninja, and `pkg-config`.
-You also need the codec libraries for your operating system.
+You also need the codec libraries for your operating system, and `nasm` on x86
+and x86-64, which the webp decoder assembles its own routines with.
 
 On Debian or Ubuntu:
 
 ```console
-sudo apt-get install --yes cmake ninja-build pkg-config libdav1d-dev libde265-dev libwebp-dev
+sudo apt-get install --yes cmake ninja-build pkg-config nasm libdav1d-dev libde265-dev libwebp-dev
 ```
 
 To build from source on macOS with Homebrew:
 
 ```console
-brew install cmake ninja pkg-config dav1d libde265 webp
+brew install cmake ninja pkg-config nasm dav1d libde265 webp
 ```
 
 Then build the wheel:

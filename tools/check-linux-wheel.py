@@ -56,6 +56,7 @@ def check_wheel(wheel: Path, tag: str, allowed: tuple[str, ...]) -> None:
             "LICENSES/dav1d-COPYING.txt", "LICENSES/libde265-COPYING.txt",
             "LICENSES/gcc-runtime-COPYING.txt", "LICENSES/libheif-COPYING.txt",
             "LICENSES/libwebp-COPYING.txt", "LICENSES/openjpeg-COPYING.txt",
+            "LICENSES/wpd-COPYING.txt",
         }
         if missing := required - names:
             raise ValueError(f"missing wheel contents: {sorted(missing)}")

@@ -37,7 +37,9 @@ jobs:
       - name: install native dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes cmake ninja-build pkg-config libdav1d-dev libde265-dev libwebp-dev
+          # nasm assembles wpd's x86-64 decode routines; without it its build
+          # script fails before the crate is compiled.
+          sudo apt-get install --yes cmake ninja-build pkg-config nasm libdav1d-dev libde265-dev libwebp-dev
 
       - name: run rust tests
         run: cargo test --locked

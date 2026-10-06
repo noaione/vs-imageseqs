@@ -1,8 +1,57 @@
 # wpd as the WebP decoder
 
-Status: research complete, **wpd for stills / libwebp for animation selected;
-no plugin implementation**.
-Investigated on 2026-10-04. This extends [34](34-input-routing-and-planar-decode.md).
+Status: **implemented** — wpd decodes an ordinary still and libwebp keeps the
+animated container's rectangle, canvas and blend. Investigated on 2026-10-04 and
+implemented on 2026-10-06 against wpd revision
+`45d5955260f6c44a1b6bea6954a4a34e818f3f8a`, which is what `Cargo.toml` pins;
+the research below was measured on `9748cedeedbea4bb195cab18273a33b04531c455`.
+This extends [34](34-input-routing-and-planar-decode.md).
+
+## what landed
+
+`src/formats/webp.rs` answers an ordinary still with a `decoder::RowStream`
+that creates a wpd decoder inside its own `fill` and writes the borrowed rows
+of the picture it decoded straight into the frames the call allocated. Nothing
+about the container is read twice: `decode` reads the file once, asks
+`animation::webp::first_picture` whether it holds a timeline, and hands the same
+bytes to the stream. The decoder is created inside that call rather than stored
+because wpd's decoder is not `Send`, which is the same restriction the research
+recorded; a still is one picture, so nothing is lost by it.
+
+A file whose `ImageInfo.transform` is not the identity is the one exception. It
+is decoded into buffers and handed to the frame writer, because a transform is
+`src/pixel.rs`'s walk and a row stream writes row for row. Its pixels are what
+the orientation section of `tests/readalpha.vpy` checks, including the two yuv
+orientation fixtures whose width and height swap.
+
+The first-party probe, the content route, the animation source, the
+one-presentation `first_picture` guard, the ICC policy and the property
+handling are all unchanged. `docs/BENCH.md` carries the integrated figures; the
+short version is 1.22x to 1.31x on the 35 page webp set at the three prefetch
+depths, 1.53x on the serial per-frame stage split (196.84 → 128.46 ms a frame),
+and byte identical pixels on 76 of 76 webp parity lines and all 941 validator
+checks.
+
+### what is left over
+
+- **wpd for the animation rectangle.** The optional experiment at the end of
+  this page was not implemented: `animation/webp.rs` still composes with
+  libwebp's own rectangle decoder and its integer blend. Nothing in the still
+  work blocks it, and the raw-input adaptation it needs was already proven (27
+  of 27 extracted rectangles matched libwebp). It is the one piece of the plan
+  left, and it is deliberately not done, so libwebp stays linked either way.
+- **native ARGB output for lossless files.** Recorded below as an option and
+  not measured, because the user accepted the memory increase before this was
+  implemented; the packed RGB/RGBA path is what shipped.
+- **`Options.frame_size_limit` is set to the pixel count the container
+  states.** That is a bound against a header asking for an allocation before the
+  size check runs, not a policy; a file that legitimately decoded to a
+  different size than its container declared would now be refused twice over.
+- **assembly tooling.** An x86 or x86-64 build needs `nasm` on `PATH`, and the
+  archiver `nasm-rs` calls is MSVC's `lib.exe` on Windows. `rust-tests.yml` and
+  `tools/setup-linux-build.sh` install it, and the Windows wheel job already
+  did; an ARM build assembles with the C compiler and needs neither.
+
 Only this report and its index entry are intended tracked changes. Experiments
 and cloned upstream sources are under ignored `target/`.
 

@@ -231,6 +231,56 @@ impl RowSink<'_> {
         Some(())
     }
 
+    /// As [`Self::place_rgb8`], for a source whose fourth sample is alpha.
+    ///
+    /// The alpha sample goes to the alpha clip when the call hands one out and
+    /// is dropped when it does not, which is what the planar writer does with a
+    /// four channel layout too: a file that carries an alpha channel costs
+    /// nothing extra for a graph that never asks for it.
+    ///
+    /// Answers `None` when the sink does not hold three colour planes, which a
+    /// caller reports its own way.
+    pub fn place_rgba8(&mut self, source: &[u8], row: usize) -> Option<()> {
+        let (red, rest) = self.colour.split_first_mut()?;
+        let (green, rest) = rest.split_first_mut()?;
+        let (blue, _) = rest.split_first_mut()?;
+        let alpha = self.alpha.as_mut().and_then(|planes| planes.first_mut());
+        let red_row = red.row(row);
+        let green_row = green.row(row);
+        let blue_row = blue.row(row);
+        let alpha_row = alpha.map(|plane| plane.row(row));
+        // One row read once: a pixel's four samples are taken apart in the same
+        // walk that writes them, and the alpha plane joins it only when there is
+        // one to write into.
+        let pixels = source.as_chunks::<4>().0.iter();
+        match alpha_row {
+            Some(alpha_row) => {
+                for ((((red_byte, green_byte), blue_byte), alpha_byte), pixel) in red_row
+                    .iter_mut()
+                    .zip(green_row)
+                    .zip(blue_row)
+                    .zip(alpha_row)
+                    .zip(pixels)
+                {
+                    *red_byte = pixel[0];
+                    *green_byte = pixel[1];
+                    *blue_byte = pixel[2];
+                    *alpha_byte = pixel[3];
+                }
+            }
+            None => {
+                for (((red_byte, green_byte), blue_byte), pixel) in
+                    red_row.iter_mut().zip(green_row).zip(blue_row).zip(pixels)
+                {
+                    *red_byte = pixel[0];
+                    *green_byte = pixel[1];
+                    *blue_byte = pixel[2];
+                }
+            }
+        }
+        Some(())
+    }
+
     /// As [`Self::place_rgb8`], for a source that stores blue first.
     ///
     /// Targa does. The swap is the one thing this does that the other does not,

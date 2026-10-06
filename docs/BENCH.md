@@ -225,6 +225,75 @@ the odd page and its restored border. `GPUUpload` refuses the `mismatch` clip
 itself (`ogsov.AnalyzeVk: clip must be a video node`), so the conversion is what
 makes an ogsov graph possible on a mixed sequence at all.
 
+### wpd as the still decoder
+
+[35](improvements/35-wpd-webp-decoder.md) moved an ordinary still webp off
+libwebp and onto `wpd`, and left the animated container's rectangle on libwebp.
+both decoders are in the same library now, so this compares two builds of the
+plugin and not two programs.
+
+the headline, 35 files, `--reps 3 --extra --prefetch 16`, best pass of three,
+both builds measured in one session:
+
+| reading the set | before (libwebp) | after (wpd) | change |
+| --- | ---: | ---: | ---: |
+| imgseqs `Read` | 3.517 s | 2.689 s | 1.31x faster |
+| imgseqs `Read`, `prefetch=0` | 11.777 s | 9.039 s | 1.30x faster |
+| imgseqs `Read`, `prefetch=16` | 1.882 s | 1.542 s | 1.22x faster |
+| bestsource `VideoSource` | 1.534 s | 1.529 s | unchanged (control) |
+| bestsource `VideoSource`, `threads=1` | 10.111 s | 10.065 s | unchanged (control) |
+| open | 0.004 s | 0.004 s | unchanged |
+
+imgseqs closes most of the gap to bestsource on frames, from 2.29x behind to
+1.76x, and stays ahead including the open, where it was 1.10x behind on this
+run and is now 1.24x ahead. the control row moved by 0.3%, and the probe is
+untouched because the timeline and the metadata still come out of the
+container walk `wpd` does not touch.
+
+the single-thread rows are the cleanest comparison of the two decoders, because
+neither plugin has a pool behind it: bestsource with `threads=1` is a control at
+10.111 → 10.065 s, so libwebp is what the 11.777 s serial row above was paying
+for, and wpd's 9.039 s is 1.30x of it. imgseqs' own serial row therefore goes
+from 1.17x *behind* bestsource's single thread to 1.11x ahead of it, which the
+pooled rows cannot show: at `prefetch=16` bestsource's threads still win, and
+they are the reason its pooled row was and is ahead.
+
+where the time went, per frame at `prefetch=0` and `prefetch=4` over the first
+four files, from `debug=True` (`target/bench/p35-stage-split.py`, a copy of
+`stage-split.py` that disables auto loading so each build is named by path):
+
+| stage | `p=0` libwebp | `p=0` wpd | `p=4` libwebp | `p=4` wpd |
+| --- | ---: | ---: | ---: | ---: |
+| `read` (the decode itself) | 185.50 ms | 125.24 ms | 213.40 ms | 155.69 ms |
+| `convert` (copy into the frame) | 8.32 ms | 0.00 ms | 7.91 ms | 0.00 ms |
+| `decode` (open + read + buffer) | 186.56 ms | 126.18 ms | 214.66 ms | 157.65 ms |
+| `total` | 196.84 ms | 128.46 ms | 100.56 ms | 81.41 ms |
+
+two things are in the table. the decoder itself is 1.48x faster on this stage,
+which is `wpd`'s own work and not the plugin's, and the copy into the frame is
+gone because a still is a row stream: the frame is allocated first and the
+decoder's borrowed rows are written into it, so the picture never exists in a
+buffer of the plugin's. That is why `buffer` reads 0.00 ms and `convert` 0.00 ms
+on the wpd column, and why the `read` figure there is decode *and* transfer
+where libwebp's is decode alone.
+
+the serial row is the honest per decoder comparison of the two: 196.84 → 128.46
+ms per frame, 1.53x. the pooled rows gain less because the pool was already
+hiding some of the decode, and the deepest row gains least of all.
+
+pixels: 76 of 76 lines of `frame-parity.py` over `sandbox/webp`, every webp in
+`tests/fixtures` (lossless, alpha, orientation 2/6/8, the animated one) and the
+`mixed` and `fixed` controls are byte identical between the two builds, colour
+clip and alpha clip, plane by plane. the wider run over all seven sandbox sets
+is 91 of 91 lines identical. `tests/readalpha.vpy` passes 941 checks on both
+builds with no captured warning, and the webp fixture lines are part of that.
+
+the one visible cost is size: the Windows library grows 8,292,864 → 9,039,872
+bytes, because both decoders are linked. peak working set was not separated
+per decoder here; the plan page records the isolated measurement (about 206 →
+207 MiB on the yuv corpus and 118 → 163 MiB on a large generated rgb one),
+which the user accepted before this was implemented.
+
 ## jpeg
 
 35 files, 213 MB. 31 of the pages are monochrome and come out as `Gray8` of

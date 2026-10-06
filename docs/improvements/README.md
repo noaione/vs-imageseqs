@@ -173,13 +173,16 @@ mixed-precision samples.
 ### wpd WebP decoder — 2026-10-04
 
 [35 wpd WebP decoder](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/35-wpd-webp-decoder.md)
-is research complete, with no plugin implementation. The selected scope is
-wpd for ordinary stills and the existing libwebp path for animated containers,
-including those with one presentation. Both libraries coexist in the research
-executable. Local still decode plus planar transfer was 1.4–1.6× faster; the
-user accepts the measured RGB/RGBA memory increase. Adoption requires integrated
-speed, correctness and wheel checks. WebP's first-party probe remains, and an
-all-wpd animation path is optional future work.
+is implemented. wpd decodes an ordinary still, writing the borrowed rows of the
+picture it decoded straight into the frames the call allocated, and libwebp keeps
+the animated container's rectangle decoder, its canvas and its integer blend.
+Both libraries stay linked, and the first-party probe and the one-presentation
+`first_picture` guard are unchanged. The integrated measurement is 1.22x to
+1.31x on the 35 page sandbox set and 1.53x on the serial per-frame stage split
+(196.84 → 128.46 ms a frame), with byte identical pixels on 76 of 76 webp parity
+lines and all 941 validator checks; `docs/BENCH.md` has the tables. What is left
+over is deliberately not done: an all-wpd animation path, which the plan page's
+optional experiment covers.
 
 ### input routing and planar decoding — 2026-10-04
 

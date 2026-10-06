@@ -18,11 +18,15 @@ machine-local codecs are not linked:
   * libde265 1.1.1
   * dav1d 1.5.3
   * libwebp 1.6.0
+  * wpd 0.2.0, at the exact git revision named in `Cargo.toml`
   * OpenJPEG (vendored by openjpeg-sys 1.0.12)
 
 The native dependency versions and license expressions used by this build
-are recorded below. Rust crate licenses are intentionally out of scope for
-this first notice bundle.
+are recorded below. `wpd` is a Rust crate rather than a system library, but
+it is listed here because its x86-64 decode routines are hand-written NASM
+sources that the crate assembles and links into the plugin, so it ships the
+same way the C libraries above do. The remaining Rust crate licenses are
+intentionally out of scope for this notice bundle.
 
 Project
 -------
@@ -58,6 +62,15 @@ libwebp 1.6.0
   Linkage: statically linked, used by the plugin's own webp decode path
   Notice and license text: LICENSES/libwebp-COPYING.txt
   Upstream: https://github.com/webmproject/libwebp
+
+wpd 0.2.0 (git revision 45d5955260f6c44a1b6bea6954a4a34e818f3f8a)
+  License: BSD 2-Clause "Simplified" License
+  Linkage: statically linked, assembled from the crate's own NASM sources on
+    x86 and x86-64 and from its assembler sources on ARM
+  Usage: the plugin's still webp decoder. libwebp above stays linked and is
+    still what decodes the sub-rectangles of an animated webp
+  Notice and license text: LICENSES/wpd-COPYING.txt
+  Upstream: https://github.com/halidecx/wpd
 
 openjpeg (vendored by openjpeg-sys 1.0.12)
   License: BSD 2-Clause License
@@ -160,4 +173,5 @@ dependency installation used for this build.
   * libheif: https://github.com/strukturag/libheif/blob/master/COPYING
   * libde265: https://github.com/strukturag/libde265/blob/master/COPYING
   * libwebp: https://github.com/webmproject/libwebp/blob/main/COPYING
+  * wpd: https://github.com/halidecx/wpd/blob/main/LICENSE
   * OpenJPEG: https://github.com/uclouvain/openjpeg/blob/master/LICENSE

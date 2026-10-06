@@ -185,8 +185,12 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   sample and whose decoder is the `qoi` crate's, `farbfeld.rs` for the format
   that is a magic and a size and nothing else, whose samples are big-endian on
   disk and native in the frame, read one row at a time straight into the frame,
-  and `webp.rs` for the libwebp decode
-  and the lossy yuv format). an avif this tree's walk decodes itself is the yuv
+  and `webp.rs` for the still webp decode, which the `wpd` decoder does
+  (`wpd` is a git dependency pinned to an exact revision in `Cargo.toml`, and
+  it is created inside the one fill that reads the file because it is not
+  `Send`), and for the lossy yuv format; an animated webp's rectangle stays on
+  libwebp, which is what `animation/webp.rs` draws). An avif this tree's walk
+  decodes itself is the yuv
   its container states, and everything else is `heif.rs`'s: an r,g,b container,
   a monochrome one, and one the walk refuses. both readers name the same
   library the probe did. an avif alpha item is a coded item of its own and a
@@ -313,6 +317,12 @@ the development python executable is `C:\Python314\python.exe`.
 `vcpkg_installed/` is the ignored repository-local install. the generated
 `target/vcpkg-root/` adapter exposes it in the layout expected by vcpkg-rs.
 
+`wpd` assembles its x86 and x86-64 decode routines with NASM, so `nasm` has to
+be on `PATH` for a build on those architectures; its ARM sources are assembled
+by the C compiler and need nothing extra. On Windows the archiver `nasm-rs`
+calls is MSVC's `lib.exe`, which a normal "x64 Native Tools" prompt already
+puts on `PATH`.
+
 from powershell, use the local native paths when running cargo directly:
 
 ```powershell
@@ -426,8 +436,9 @@ bundle. Both Linux layouts include shared dav1d/libde265 with relative loader
 paths, and a fresh container validates them before publishing. Each Linux build
 includes a relinking source archive; see `docs/LINUX-BUILD.md`.
 
-the current native set is dav1d, libheif, libde265, libwebp, and the OpenJPEG
-sources vendored by `openjpeg-sys`. dav1d and OpenJPEG use the bsd-2-clause
+the current native set is dav1d, libheif, libde265, libwebp, the `wpd` decoder
+the crate builds and links into the plugin, and the OpenJPEG
+sources vendored by `openjpeg-sys`. dav1d, OpenJPEG and wpd use the bsd-2-clause
 license and libwebp uses bsd-3-clause. libheif and libde265 are lgplv3 and are
 statically linked. keep the exact upstream texts in `LICENSES/`.
 

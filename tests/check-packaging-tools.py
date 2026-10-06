@@ -446,6 +446,7 @@ LINUX_LICENSES = (
     "LICENSES/libheif-COPYING.txt",
     "LICENSES/libwebp-COPYING.txt",
     "LICENSES/openjpeg-COPYING.txt",
+    "LICENSES/wpd-COPYING.txt",
 )
 MANYLINUX_TAG = "py3-none-manylinux_2_28_x86_64"
 MUSLLINUX_TAG = "py3-none-musllinux_1_2_x86_64"

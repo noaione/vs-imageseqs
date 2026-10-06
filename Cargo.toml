@@ -57,6 +57,11 @@ gif = { version = "0.14.2", default-features = false, features = ["std"] }
 # quite ok image is read here, whose qoi adapter parses the header a second
 # time for every accessor; see `src/formats/qoi.rs`
 qoi = { version = "0.4.1", default-features = false, features = ["std"] }
+# webp stills are decoded by wpd, whose assembly is a default feature and whose
+# revision is pinned here because the crate is not published on crates.io. the
+# animated container stays on libwebp, which `build.rs` already links; see
+# `src/formats/webp.rs` and `docs/improvements/35-wpd-webp-decoder.md`.
+wpd = { git = "https://github.com/halidecx/wpd", rev = "45d5955260f6c44a1b6bea6954a4a34e818f3f8a" }
 
 # native stuff: find libwebp, see build.rs
 [target.'cfg(windows)'.build-dependencies]
