@@ -1169,11 +1169,12 @@ and used to be handed out as sixteen bit `RGB48` frames whose samples stopped
 nominal depth above. [10](improvements/10-nominal-bit-depth.md) fixed it, and it
 cost nothing to fix.
 
-## PNG writer comparison (planned)
+## PNG writer comparison
 
-Status: **protocol only; no writer measurements yet**. This is the acceptance
-comparison for [38 PNGWrite](improvements/38-png-write.md), not the existing PNG
-decode benchmarks above. Compare the following three routes on identical pixels:
+Status: **measured**. This is the acceptance comparison for
+[38 PNGWrite](improvements/38-png-write.md), not the existing PNG decode
+benchmarks above. `target/bench/png-write.py` runs it; compare the following
+three routes on identical pixels:
 
 | route | write scheduling | PNG settings |
 | --- | --- | --- |
@@ -1267,15 +1268,149 @@ resident for each route, report that memory separately, and do not substitute
 these isolated timings for the end-to-end headline. Report plugin levels 0/1/6/9
 as additional speed/size rows, not replacements for the default comparison.
 
-### results to collect
+### measured results
+`target/bench/png-write.py`, 1404x2000 synthetic pages over a soft gradient with
+ink, one warm-up pass and five measured passes per route, with the route order
+rotated per pass. Machine: 11th Gen Intel Core i5-11400H, 12 logical CPUs,
+31.8 GiB RAM, Windows; Python 3.12.12, Pillow 12.3.0 over zlib-ng 1.3.1.zlib-ng,
+plugin `compression=6` over `zlib-rs`, asked for one frame at a time. Every
+route's own outputs were decoded with Pillow and compared with the frames it was
+given, and all three cohorts agree.
 
-| route | workers / in flight | median batch s | min–max s | ms/frame | frames/s | CPU s | peak MiB | PNG bytes | parity |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| plugin `PNGWrite`, default | sequential requests; implementation concurrency to record | pending | pending | pending | pending | pending | pending | pending | pending |
-| Pillow, default, serial | 1 | pending | pending | pending | pending | pending | pending | pending | pending |
-| Pillow, default, bounded | 6 / at most 6 writes outstanding | pending | pending | pending | pending | pending | pending | pending | pending |
+| cohort | route | in flight | median batch s | min–max s | ms/frame | frames/s | CPU s | peak MiB | PNG MiB | parity |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| gray8, 24 pages | plugin `PNGWrite` | 1 sequential | 0.686 | 0.670–0.711 | 28.57 | 35.00 | 0.72 | 228.7 | 3.61 | ok |
+| gray8, 24 pages | Pillow, serial | 1 | 0.960 | 0.946–0.988 | 39.99 | 25.01 | 1.09 | 228.7 | 3.60 | ok |
+| gray8, 24 pages | Pillow, bounded | 6 | 0.236 | 0.233–0.261 | 9.82 | 101.88 | 1.25 | 228.7 | 3.60 | ok |
+| rgb8, 16 pages | plugin `PNGWrite` | 1 sequential | 0.713 | 0.703–0.749 | 44.54 | 22.45 | 0.84 | 435.7 | 4.66 | ok |
+| rgb8, 16 pages | Pillow, serial | 1 | 1.342 | 1.338–1.395 | 83.85 | 11.93 | 1.48 | 435.6 | 4.65 | ok |
+| rgb8, 16 pages | Pillow, bounded | 6 | 0.365 | 0.354–0.381 | 22.80 | 43.86 | 1.80 | 435.7 | 4.65 | ok |
+| rgba8, 16 pages | plugin `PNGWrite` | 1 sequential | 0.857 | 0.840–0.861 | 53.55 | 18.67 | 1.03 | 569.6 | 5.81 | ok |
+| rgba8, 16 pages | Pillow, serial | 1 | 1.799 | 1.777–1.816 | 112.45 | 8.89 | 1.95 | 569.6 | 5.81 | ok |
+| rgba8, 16 pages | Pillow, bounded | 6 | 0.504 | 0.494–0.515 | 31.50 | 31.75 | 2.31 | 569.6 | 5.81 | ok |
 
-Compute plugin speedups against **both** Pillow rows from matched median batch
-times. A win over serial Pillow alone is not evidence of a win over nmanga's
-bounded writer. Throughput, memory and file size all matter; no measured speedup
-or passing parity result is claimed until this table is populated.
+Plugin batch time as a fraction of each Pillow route's, from the medians above
+(below 1.0 is the plugin finishing first):
+
+| cohort | vs serial Pillow | vs six-worker Pillow | bytes vs Pillow |
+| --- | --- | --- | --- |
+| gray8 | 0.715x | 2.911x | 1.003x |
+| rgb8 | 0.531x | 1.954x | 1.002x |
+| rgba8 | 0.476x | 1.700x | 1.000x |
+
+One encoder on one thread beats serial Pillow by 1.4x on gray, 1.9x on rgb and
+2.1x on rgba, at the same compressed size: the row interleave, the streamed
+encode and the absence of an intermediate Pillow image are worth more than
+Pillow's own encoder is. Six Pillow workers still win by 1.7x to 2.9x, because
+they are six encodes in flight against one, and that is what the last section
+below answers. Peak process memory is the same for every route in a cohort, since
+the corpus and the decoded frames dominate it; the working set right after a
+batch is reported by the harness per pass and is within 3 MiB across the routes.
+
+### the deflate backend
+
+`png`'s `zlib-rs` feature selects the deflate backend for everything flate2
+touches, which in this crate is the png reader, the png writer and the tiff
+reader. Without it flate2 falls back to `miniz_oxide`, so before this feature
+the plugin compressed with a pure-Rust miniz port while Pillow compressed with
+zlib-ng — which is where the earlier 7.8% size gap and the parity-on-time result
+came from, not from the writer's own filtering.
+
+`target/bench/png-write-async.py` at `compression=6`, same gray8 corpus, five
+passes per route, one session per build:
+
+| backend | request style | in flight | median s | ms/frame | PNG MiB | vs Pillow bounded 6 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `miniz_oxide` | `get_frame(n)` | 1 | 1.018 | 42.40 | 3.88 | 4.294x |
+| `miniz_oxide` | `get_frame_async` | 12 | 0.178 | 7.41 | 3.88 | 0.750x |
+| `zlib-rs` | `get_frame(n)` | 1 | 0.697 | 29.04 | 3.61 | 2.903x |
+| `zlib-rs` | `get_frame_async` | 12 | 0.134 | 5.58 | 3.61 | 0.558x |
+| `zlib-rs` | `get_frame_async` | 24 | 0.130 | 5.43 | 3.61 | 0.543x |
+
+That is 1.46x faster serially and 1.33x at twelve deep, with the files 7.5%
+smaller at the same level, which is what closes the size gap to Pillow (1.08x to
+1.003x). The reader is not asked to pay for it: on the 35 `sandbox/png` pages at
+`prefetch=0`, four interleaved rounds put `miniz_oxide` at a 343.5 ms median and
+`zlib-rs` at 349.1 ms, a 1.6% difference inside the spread, and
+`tests/readalpha.vpy`'s output is byte identical to the build before the feature,
+so every png and tiff fixture inflates to the same samples as before.
+
+The level curve changes with the backend, because `zlib-rs` is a closer port of
+zlib's own effort settings. Same corpus, three passes each, one session per level,
+with each level's own Pillow baseline (0.955 s to 0.977 s):
+
+| level | sequential s | `get_frame_async(12)` s | PNG MiB | vs serial Pillow | vs its size |
+| --- | --- | --- | --- | --- | --- |
+| 0 (`NoCompression`, no filter) | 0.139 | 0.046 | 64.52 | 0.145x | 17.90x |
+| 1 | 0.223 | 0.061 | 7.37 | 0.229x | 2.05x |
+| 3 | 0.347 | 0.088 | 5.02 | 0.357x | 1.39x |
+| 6 (default) | 0.700 | 0.124 | 3.61 | 0.733x | 1.00x |
+| 9 | 5.091 | 0.674 | 3.11 | 5.349x | 0.86x |
+
+Level 6 is the point where the plugin matches Pillow's size and still beats it
+on time, so it stays the default. Level 3 halves that time for 39% more bytes, and
+level 1 halves it again for twice Pillow's bytes. Level 9 is now a much deeper
+search than it was under `miniz_oxide` (5.09 s against 3.20 s) and buys 14% of
+level 6's size, so it is for an archive and not for a pipeline. Level 0 stores the
+raw rows at 64.52 MiB and 5.8 ms a frame, which is the setting for a file another
+step is about to read.
+
+### request style and the filter mode
+
+The completion mode decides whether a consumer that pulls ahead gets anything for
+it. `VSFilterMode::ParallelRequests` calls the filter from several threads with
+activation reason `Initial` but completes one frame at a time, so a node in that
+mode encodes serially whatever the consumer asks for. `Parallel` allows several
+completions at once, and then the request style sets the depth:
+`writer.get_frame(n)` one at a time, `writer.get_frame_async(n)` with futures held
+open, or `writer.frames(prefetch=n)`.
+
+The mode that landed, `Parallel`, with `zlib-rs`, 24 pages, five passes per route,
+and the Pillow rows of the same session:
+
+| route | in flight | median s | ms/frame | PNG MiB | vs Pillow serial | vs Pillow bounded 6 |
+| --- | --- | --- | --- | --- | --- | --- |
+| plugin, `get_frame(n)` | 1 | 0.700 | 29.17 | 3.61 | 0.733x | 3.000x |
+| plugin, `frames(prefetch=6)` | 6 | 0.171 | 7.11 | 3.61 | 0.179x | 0.732x |
+| plugin, `get_frame_async(6)` | 6 | 0.162 | 6.73 | 3.61 | 0.169x | 0.693x |
+| plugin, `get_frame_async(12)` | 12 | 0.124 | 5.15 | 3.61 | 0.129x | 0.530x |
+| Pillow, serial | 1 | 0.955 | 39.77 | 3.60 | 1.000x | 4.091x |
+| Pillow, bounded | 6 | 0.233 | 9.72 | 3.60 | 0.244x | 1.000x |
+
+Six frames in flight are worth 4.3x over one, twelve are worth 5.6x, and at
+twelve the plugin is 1.9x faster than the six-worker Pillow route — the depth
+Pillow fixes at six is the thing it cannot ask for more of. The depth sweep on
+the build before the backend change gives the shape of the curve beyond twelve:
+one 1.004 s, six 0.217 s, twelve 0.175 s, twenty four 0.166 s, so the knee is at
+twelve and twenty four buys another 5%.
+
+`ParallelRequests`, the mode the first implementation used, with the backend of
+the day (`miniz_oxide`), so that the mode is the only thing that differs:
+
+| route | in flight | median s | ms/frame | PNG MiB | vs Pillow serial | vs Pillow bounded 6 |
+| --- | --- | --- | --- | --- | --- | --- |
+| plugin, `get_frame(n)` | 1 | 1.006 | 41.90 | 3.88 | 1.035x | 4.344x |
+| plugin, `frames(prefetch=6)` | 6 | 0.996 | 41.49 | 3.88 | 1.025x | 4.301x |
+| plugin, `get_frame_async(6)` | 6 | 0.989 | 41.21 | 3.88 | 1.018x | 4.272x |
+| plugin, `get_frame_async(12)` | 12 | 0.990 | 41.27 | 3.88 | 1.020x | 4.279x |
+| Pillow, serial | 1 | 0.971 | 40.46 | 3.60 | 1.000x | 4.195x |
+| Pillow, bounded | 6 | 0.231 | 9.65 | 3.60 | 0.238x | 1.000x |
+
+Every request style lands within 2% of 1.0 s there. The reason is the two halves
+of a two-stage request: `Initial` asks the framework for the inputs and runs on
+many threads in either mode, and `AllFramesReady` is where a writer does all of
+its work — pack, deflate, publish — and only `Parallel` lets more than one thread
+be there at a time. A writer has no cursor to serialize, so the serialized mode
+was simply a lock around the whole encode, and the consumer's depth could only
+overlap the request half, which for a writer is the upstream decode it already
+gets for free.
+
+`Parallel` is safe here because VapourSynth never calls a filter for the same
+frame number concurrently, the only mutable state is the ledger behind a mutex and
+an atomic counter, the temporary name is unique per write, the publication is a
+rename or a linking create that cannot be raced, and the per-encode workspace is a
+row buffer and the compressor's own rather than a frame. The validator's
+concurrent and two-writers-racing checks run in that mode.
+
+The encoder-only diagnosis, over already prepared input frames with preparation
+excluded, is still to be run.

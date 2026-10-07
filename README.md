@@ -16,6 +16,7 @@ order you provide and turns them into a clip.
 - reads image orientation and color information
 - decodes frames in the background to help playback
 - plays animated files, contributing the pictures they display
+- writes a frame as a PNG when a graph asks for it
 
 ## install
 
@@ -212,6 +213,70 @@ The restored edge is black here; stack the last real row and column instead to
 extend the picture. `CropAbs` accepts variable-size clips, while `Crop` and
 `AddBorders` need a fixed size and format.
 
+## writing pngs
+
+`PNGWrite` is the other end of `Read`: it returns a node whose frames are the
+input's, and asking for one writes that frame as a PNG before the request
+returns. Creating the node writes nothing, so a frame you never ask for is
+never written.
+
+```python
+writer = core.imgseqs.PNGWrite(
+    rgb,
+    output_path=r"exports\page%04d.png",
+)
+
+with writer.get_frame(0):
+    pass  # exports\page0000.png exists now
+
+for frame in range(writer.num_frames):
+    with writer.get_frame(frame):
+        pass
+```
+
+| option | default | what it does |
+| --- | --- | --- |
+| `clip` | required | The clip to write. Gray or RGB at 8 to 16 bits. |
+| `output_path` | required | A filename for a one-frame clip, or a `%d`/`%06d` template. `%%` is a literal percent sign. |
+| `alpha` | `None` | A matching gray clip whose samples become the alpha channel. |
+| `always_save` | `False` | Write a frame again instead of skipping one this writer already saved. |
+| `overwrite` | `False` | Replace a destination that is already there. |
+| `compression` | `6` | `0` to `9`. Every level is lossless; higher is smaller and slower. |
+| `start_number` | `0` | Added to the writer's frame index when the path is numbered. |
+| `icc_profile` | `False` | Embed the raw `ICCProfile` frame property in the file. |
+| `debug` | `False` | Write timing information to the VapourSynth log. |
+
+The number in the path is the writer node's own frame index, not any index the
+source wrote, so trimming, reversing or splicing the input cannot make two
+frames share a destination. A relative `output_path` is resolved when the node
+is created, and its directory has to exist already.
+
+A frame of 9 to 15 bits is stored as a 16-bit PNG whose high bits hold the
+source precision, with an `sBIT` chunk stating how many bits are meaningful.
+A ten-bit white is therefore stored as 65535 rather than 98% of the scale, and
+shifting the stored sample right by 6 gives the ten-bit sample back. Reading
+the file with `Read` gives the 16-bit PNG the file is, not a ten-bit frame,
+because PNG states no depth of its own.
+
+YUV and float clips are refused rather than converted, so the matrix, range,
+dithering and transfer choices stay yours:
+
+```python
+rgb = core.resize.Bicubic(yuv, format=vs.RGB24, matrix_in_s="709")
+writer = core.imgseqs.PNGWrite(rgb, output_path=r"exports\page%04d.png")
+```
+
+A written frame carries `ImgSeqPNGWritePath`, `ImgSeqPNGWriteSaved` and
+`ImgSeqPNGWritePerformed`, so a caller can tell a write from a skip. The write
+goes to a temporary file beside the destination and is only moved into place
+once it is complete, so a failed encode never leaves a partial file where the
+destination should be.
+
+A consumer that keeps several frames in flight gets several encodes at once.
+`writer.frames(prefetch=6)` and six open `get_frame_async` futures both finish
+a sequence about 4.7 times faster than asking for one frame at a time, with
+identical files. `vspipe` already pulls ahead, so a pipe needs nothing extra.
+
 ## frame properties
 
 | property | meaning |
@@ -224,6 +289,9 @@ extend the picture. `CropAbs` accepts variable-size clips, while `Crop` and
 | `ImgSeqHasICC` | Whether the source contains an ICC profile. |
 | `ICCProfile` | Raw profile bytes when `icc_profile=True`. |
 | `ImgSeqAlpha` | Set to `1` on frames from the alpha clip. |
+| `ImgSeqPNGWritePath` | Destination a `PNGWrite` frame was written to. |
+| `ImgSeqPNGWriteSaved` | `1` when this writer has published this frame. |
+| `ImgSeqPNGWritePerformed` | `1` when this evaluation wrote it, `0` when it was skipped. |
 
 The plugin also sets standard VapourSynth color properties when the source
 provides values it can represent.

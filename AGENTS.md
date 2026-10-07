@@ -8,7 +8,7 @@ identity unchanged:
 - project name: `vapoursynth-imageseqs`
 - namespace: `xyz.n4o.imgseqs`
 - namespace name: `imgseqs`
-- filter: `Read`, `ReadAlpha`
+- filter: `Read`, `ReadAlpha`, `PNGWrite`
 - crate: `vs-imageseqs`
 - python distribution: `vapoursynth-imageseqs`
 
@@ -91,6 +91,7 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
 
 - `src/lib.rs`: plugin declaration and registration.
 - `src/source.rs`: `Read` and `ReadAlpha` filter creation, validation, and frame requests.
+- `src/writer.rs`: `PNGWrite`, the request-driven PNG export. one filter instance is one writer node: its output frames are the input clip's, and evaluating one writes that frame as a PNG. the supported scope is the one `docs/improvements/38-png-write.md` recommends -- integer gray and rgb at eight to sixteen bits, optionally beside a matching gray alpha clip -- and a frame of nine to fifteen bits is stored as a sixteen bit PNG whose samples carry the source precision in their high bits, with an `sBIT` chunk stating how many are meaningful, so the widening is exact rather than a scale. the path is a small grammar (`%d`, `%0Nd`, `%%`) resolved while the node is created and numbered by this node's own frame index plus `start_number`, never by an index a trim, a reverse or a splice moved; a literal path is allowed for a one frame clip only. success is a per-instance bit set keyed by frame index, not a frame property, because a property is a receipt a caller reads while the ledger is what decides whether work happens; `always_save` writes again and deliberately does not imply the right to replace a destination, which `overwrite` grants separately. a write goes to a uniquely named temporary file in the destination's own directory and is published by a rename when replacing and a hard link when not, which is the one primitive that refuses to clobber and cannot be raced, with an exclusive create and copy as the fallback for a file system without links; a failure removes only this writer's temporary file and records nothing, so a later request retries. `cICP` is written only where the frame states primaries and transfer, its matrix is zero or unset and its range is full, and `icc_profile` copies an embedded profile verbatim rather than applying it. yuv and float are refused with the upstream resize call named, because the matrix, range, dithering and transfer choices belong to the caller. completion is `Parallel`, not `ParallelRequests`: the mode is what lets a consumer that keeps several frames in flight -- `writer.frames(prefetch=n)`, open `get_frame_async` futures, `vspipe` -- get several encodes at once, which is 4.3x at six frames in flight and 5.6x at twelve, and nothing at all in the serialized mode. nothing needed serializing for it, because VapourSynth never calls a filter for the same frame number concurrently, the ledger is behind a mutex, the temporary name is unique per write, and publication cannot be raced. the deflate backend is `zlib-rs`, named through `png`'s feature of that name in `Cargo.toml`, and it covers the png and tiff readers as well as this writer; the fallback flate2 would otherwise pick, `miniz_oxide`, is 1.46x slower and writes 7.5% larger files at the default level, which is the whole of the size gap this writer had to Pillow. `target/bench/png-write-async.py` is the measurement, and `docs/BENCH.md` has the tables.
 - `src/animation.rs`: the output timeline and the animation decoders. `Segment`
   is one input path's contribution and `SegmentTable` resolves an output frame
   to a path and a presentation, with checked `i128` rational arithmetic and no
@@ -276,6 +277,7 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   fixtures all state the same four 80/170/110/240 ms pictures over a 16x12
   canvas, and the heic fixture holds four equal 150 ms samples because `heif-enc`
   accepts one duration for a whole sequence.
+- `tests/pngwrite.vpy`: the writer validator, and the only check of `PNGWrite` that runs the plugin. it carries a small PNG reader of its own (chunks, CRC, the five row filters, big-endian sixteen bit samples) so an independent decoder agrees with what the writer produced: the stored depth and colour type, the `sBIT` and `cICP` chunks and their placement before IDAT, the embedded ICC profile decompressed and compared byte for byte, every sample of every round trip, and the widening of the ten and twelve bit jxl fixtures. its other sections cover the path grammar and `start_number`, a destination that already exists, a numbering overflow, a unicode directory, a relative path resolved where the node was created rather than where it is used, the skip and `always_save` rules with the node cache cleared between requests, the refusals (a yuv clip, a float clip, an alpha clip of another size, depth, frame count or family) and four simultaneous requests. it needs a release build and the plugin, and writes its scratch tree under `target/pngwrite-validator`.
 - `tests/routing.py`: the phase 1 acceptance check for plan 34. It copies one
   fixture per format under a wrong extension and under an uppercase one and
   requires every copy to decode to the same bytes, alpha and properties as its
@@ -422,6 +424,7 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --all -- --check
 .\.venv\Scripts\python.exe tests\readalpha.vpy
+.\.venv\Scripts\python.exe tests\pngwrite.vpy
 C:\Python314\python.exe tests\check-packaging-tools.py
 C:\Python314\python.exe -c "import pathlib, tomllib; tomllib.loads(pathlib.Path('pyproject.toml').read_text())"
 C:\Python314\python.exe -m build

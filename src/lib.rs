@@ -10,8 +10,10 @@ mod layout;
 mod pixel;
 mod prefetch;
 mod source;
+mod writer;
 
 use source::{Read, ReadAlpha};
+use writer::PNGWrite;
 
 vapoursynth4_rs::declare_plugin!(
     c"xyz.n4o.imgseqs",
@@ -21,5 +23,6 @@ vapoursynth4_rs::declare_plugin!(
     vapoursynth4_rs::VAPOURSYNTH_API_VERSION,
     0,
     (Read, None),
-    (ReadAlpha, None)
+    (ReadAlpha, None),
+    (PNGWrite, None)
 );

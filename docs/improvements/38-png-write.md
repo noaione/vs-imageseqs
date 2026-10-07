@@ -1,11 +1,86 @@
 # PNGWrite: request-driven PNG export
 
-Status: **research complete, proposed, not implemented**. This records the
-requested `PNGWrite` function, the encoder capabilities checked during research,
-and the recommended first scope. Defaults, repeat-save behavior and conversion
-policy below are recommendations, not an approved or existing public API.
-No plugin edits, builds, validator runs or benchmarks were performed for this
-research. Adding this note does not change the plugin or wheel.
+**status**: implemented
+
+`core.imgseqs.PNGWrite` exists, `src/writer.rs` implements it, and
+`tests/pngwrite.vpy` checks it (182 checks). The measurements are in
+[BENCH.md](../BENCH.md#png-writer-comparison). Everything after this section is
+the research that preceded the implementation and is kept as the record of why
+the scope is what it is; where the implementation settled a question the
+research left open, the section below says so.
+
+## what landed
+
+- `src/writer.rs` holds the filter, registered in `src/lib.rs` beside `Read`
+  and `ReadAlpha`. The identifier, namespace, filter names and the plugin-only
+  wheel are unchanged.
+- Arguments: `clip`, `output_path`, `always_save`, `compression`, `alpha`,
+  `overwrite`, `start_number`, `icc_profile` and `debug`. The optional ones
+  default to `False`, `6`, `None`, `False`, `0`, `False` and `False`.
+- Supported pixels are the recommended first scope: integer Gray and RGB at
+  eight to sixteen bits, optionally beside a matching Gray alpha clip of the
+  same depth, size and frame count. Nine to fifteen bits are stored as a
+  sixteen bit PNG whose high bits hold the source precision, with an `sBIT`
+  chunk stating how many bits are meaningful. YUV and float are refused with
+  the upstream `core.resize.Bicubic(..., matrix_in_s="709")` spelled out.
+- `output_path` is parsed as a small grammar: `%d` and `%0Nd` are the frame
+  number, `%%` is a literal percent, and every other use of `%` is refused.
+  A literal path is allowed for a one frame clip only. The path is resolved
+  against the working directory while the node is created, numbered by the
+  writer node's own frame index plus `start_number` rather than any inherited
+  index, and its directory has to exist already.
+- Repeat handling is a per-instance bit set keyed by frame index, set only
+  after a frame was published. `always_save` attempts a write on every
+  evaluation and deliberately does not imply the right to replace a
+  destination, so it can fail on a second request when `overwrite` is off.
+  Frame properties are receipts: `ImgSeqPNGWritePath`, `ImgSeqPNGWriteSaved`
+  and `ImgSeqPNGWritePerformed`.
+- Publication uses a uniquely named temporary file in the destination's own
+  directory, then a rename when `overwrite` is set and a hard link when it is
+  not, which is the one primitive that refuses to clobber and cannot be raced;
+  a file system without links falls back to an exclusive create and a copy.
+  A failure removes only this writer's temporary file and does not record
+  success, so a later request retries, and an existing destination survives.
+- Metadata is the truthful part only: `cICP` is written when the frame states
+  primaries and transfer, its `_Matrix` is zero or unset and its range is full;
+  `ICCProfile` is copied verbatim when `icc_profile` asks for it and never
+  applied; `sBIT` is written for the widened depths. Nothing invents sRGB and
+  nothing copies `ImgSeqOrientation` into an output EXIF tag.
+- Completion is `Parallel`, so a consumer that keeps several frames in flight gets
+  several encodes at once: `writer.frames(prefetch=6)` or six open
+  `get_frame_async` futures finish the same corpus in 0.162 s against 0.700 s for
+  one frame at a time, 4.3x, and twelve deep is 5.6x, where the serialized mode
+  the plan recommended as a first implementation got nothing from the same
+  consumer. Nothing needed serializing for that: VapourSynth never calls a filter
+  for the same frame number concurrently, the ledger is behind a mutex, the
+  temporary name is unique per write, and publication cannot be raced.
+- The deflate backend is `zlib-rs`, selected through `png`'s feature of that name:
+  without it flate2 falls back to `miniz_oxide`, which at `compression=6` was
+  1.46x slower and produced 7.5% larger files on the same corpus, and it was the
+  whole of the earlier size gap to Pillow's zlib-ng. The feature also covers the
+  png and tiff readers, where the change is neutral.
+- Tests: five unit tests in `src/writer.rs` (the template grammar, the widening
+  formula over every sample of every depth from nine to fifteen, the `sBIT`
+  payload, the ledger and the destination checks) and `tests/pngwrite.vpy`,
+  which independently decodes what was written and compares every sample, the
+  chunk order, the stored depth, the metadata, the repeat and publication
+  rules, the refusals and simultaneous requests.
+- `target/bench/png-write.py` is the benchmark, and it carries its own
+  barebone copy of nmanga's save path: `vs_frame_to_image`, `write_page`,
+  `BoundedWritePool` and the ordered frame loop, with no numpy and no import
+  of that project.
+- The reader is untouched, and was checked as such: `tests/readalpha.vpy`'s
+  output is byte identical to the build before this change, and an interleaved
+  four round `target/bench/decode-time.py` A/B over the 35 `sandbox/png` pages
+  at `prefetch=0` gives medians of 328.1 ms before and 322.4 ms after, which
+  is the noise floor rather than a regression.
+
+What it left over: automatic conversion of YUV and float is still refused
+rather than implemented; low-bit grayscale and indexed palette output are not
+written; a clip of varying frames is accepted frame by frame and checked
+there, which is what the plan allows, but variable *dimensions* are not
+covered by the validator beyond that; and the encoder-only diagnosis is the only
+part of the timing protocol still to be run.
 
 ## objective and scope
 
@@ -237,7 +312,9 @@ of bit-identical zlib output, exact output size or stable implementation details
 The crate's `Fast`/`Fastest` presets use fdeflate rather than mapping directly to
 the numeric levels. A separately named fast preset is optional future work, not
 an extra numeric level. Cargo feature unification determines the actual flate2
-backend; `png`'s disabled default features do not determine that alone.
+backend, and this crate now names it: `png` is built with the `zlib-rs` feature
+([what landed](#what-landed)), which is what makes the level curve below the one
+the shipped build has.
 
 Use [`Writer::stream_writer`](https://docs.rs/png/0.18.1/png/struct.Writer.html#method.stream_writer)
 with a file destination. Pack one row at a time and call `write_all`, not a single
@@ -375,10 +452,12 @@ default on the 12-logical-CPU machine described in the benchmark notes, not a
 universal hardcoded default.
 
 The complete timing, fairness and reporting protocol is in
-[the writer benchmark section](../BENCH.md#png-writer-comparison-planned). These
-sibling links record inspected local reference code, not a new dependency or a
-requirement to execute nmanga's full autolevel command. Record the reference
-revision when running the comparison. No writer speedup has been measured yet.
+[the writer benchmark section](../BENCH.md#png-writer-comparison), which also
+holds the measured numbers. These sibling links record inspected local
+reference code, not a new dependency or a requirement to execute nmanga's full
+autolevel command. The first-party copy of that save path lives in
+`target/bench/png-write.py`, so the comparison needs neither nmanga nor its
+numpy.
 
 ## implementation route and acceptance
 

@@ -43,7 +43,14 @@ dav1d = { version = "0.11.1", default-features = false }
 jpeg2k = { version = "0.10.1", default-features = false, features = [
     "openjpeg-sys"
 ] }
-png = { version = "0.18.1", default-features = false }
+# `zlib-rs` is the deflate backend, not just a writer concern: this one crate
+# inflates every png the reader decodes and deflates every png `PNGWrite`
+# produces, so the feature is worth what it is worth on both sides. without it
+# flate2 falls back to its miniz_oxide backend, which is measurably slower and
+# larger at the same level; see `docs/BENCH.md`'s png writer comparison.
+png = { version = "0.18.1", default-features = false, features = [
+    "zlib-rs",
+] }
 # a jpeg is decoder, whose reader parses the file's headers four times
 # for one probe and one decode, and whose EXIF and ICC accessors each rebuild
 # it; see `src/formats/jpeg.rs`. `zune-core` is the colorspace and options

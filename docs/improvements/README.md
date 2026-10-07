@@ -173,17 +173,23 @@ the fourth sample of every pixel zeroed and every row but the first shifted.
 ### PNGWrite: request-driven PNG export
 
 [38 PNGWrite](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/38-png-write.md)
-is research complete and proposed, with no plugin implementation. It records the
-requested arguments and recommends Gray/RGB integer 8–16-bit input, optional
-alpha, lossless widening of intermediate depths, and row-streamed encoding with
-the existing `png` dependency. API defaults remain proposals. FrameProps report
-successful writes rather than serving as the save ledger; repeat requests,
-cache behavior, safe publication and overwrite permission need explicit
-contracts. YUV/float conversion stays upstream in the recommended first scope.
-The note includes encoder metadata caveats, effort estimates and acceptance checks.
-Its [writer benchmark protocol](../BENCH.md#png-writer-comparison-planned) requires
-comparison with default Pillow saving both serially and through an nmanga-style
-bounded pool fixed to six workers, including total completion time and peak memory.
+is implemented in `src/writer.rs`: `core.imgseqs.PNGWrite(clip, output_path=...)`
+returns a node whose frame request writes that frame as a PNG and writes nothing
+for a frame nobody asks for. Integer Gray and RGB at eight to sixteen bits, an
+optional matching Gray alpha clip, and a frame of nine to fifteen bits stored as
+a sixteen bit PNG whose high bits hold the source precision with an `sBIT` chunk
+saying so. The path grammar numbers by the writer node's own frame index plus
+`start_number`, `always_save` and `overwrite` are separate permissions, success
+is a per-instance bit set rather than a frame property, and a write is published
+from a temporary file by a rename or a linking create. `tests/pngwrite.vpy`
+checks it with 182 checks over its own PNG reader. It compresses with `zlib-rs`
+through `png`'s feature of that name, which puts it 1.4x to 2.1x ahead of serial
+Pillow on time and level with it on size;
+[the writer benchmark](../BENCH.md#png-writer-comparison) compares it against
+serial and six-worker Pillow over three cohorts, and
+`target/bench/png-write.py` carries the barebone copy of nmanga's save path that
+comparison needs. YUV and float conversion stays upstream, and low-bit gray and
+palette output are not written.
 
 ### unsupported subtypes — 2026-10-06
 
