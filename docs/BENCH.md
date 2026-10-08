@@ -1425,7 +1425,7 @@ produce the same r,g,b picture: the writer converting the yuv planes itself,
 resized clip pulled one frame at a time into Pillow. One warm-up pass and
 five measured passes, rotated order, both builds in one session:
 
-| build | route | conversion | median s | ms/page | CPU s | PNG MiB |
+| x86-64 | route | conversion | median s | ms/page | CPU s | PNG MiB |
 | --- | --- | --- | --- | --- | --- | --- |
 | scalar | plugin `PNGWrite` | the writer's own | 11.656 | 1942.59 | 11.438 | 41.67 |
 | scalar | plugin `PNGWrite` | `resize.Bilinear` first | 4.648 | 774.59 | 4.578 | 41.67 |
@@ -1433,6 +1433,18 @@ five measured passes, rotated order, both builds in one session:
 | vector | plugin `PNGWrite` | the writer's own | 4.975 | 829.23 | 4.906 | 41.67 |
 | vector | plugin `PNGWrite` | `resize.Bilinear` first | 5.072 | 845.35 | 4.859 | 41.67 |
 | vector | Pillow | `resize.Bilinear` first | 7.036 | 1172.72 | 6.812 | 36.08 |
+
+The same benchmark on aarch64, the scalar library against the NEON one,
+same corpus and same passes:
+
+| aarch64 | route | conversion | median s | ms/page | CPU s | PNG MiB |
+| --- | --- | --- | --- | --- | --- | --- |
+| scalar | plugin `PNGWrite` | the writer's own | 3.557 | 592.91 | 3.514 | 41.67 |
+| scalar | plugin `PNGWrite` | `resize.Bilinear` first | 2.892 | 482.00 | 2.873 | 41.67 |
+| scalar | Pillow | `resize.Bilinear` first | 3.227 | 537.77 | 3.207 | 36.08 |
+| vector | plugin `PNGWrite` | the writer's own | 2.809 | 468.16 | 2.799 | 41.67 |
+| vector | plugin `PNGWrite` | `resize.Bilinear` first | 2.782 | 463.69 | 2.770 | 41.67 |
+| vector | Pillow | `resize.Bilinear` first | 3.091 | 515.14 | 3.083 | 36.08 |
 
 What compares is each build against the control measured in its own run,
 because this host is a laptop and its absolute numbers move by half between
@@ -1442,6 +1454,13 @@ conversion the writer does is now inside the run to run spread rather than
 seconds of it. The plugin row also came in ahead of the `resize` one here,
 which a writer cannot be in general — a `resize` node is a frame pass it does
 not pay — so read those two as level rather than as a win.
+
+The arm host repeats that shape from a much lower starting point, because its
+scalar loop is far faster to begin with — 2.4x to 9x the x86 rows above,
+the writer was **1.23x** the `resize` route on the scalar library and is
+**1.01x** on the NEON one, which is the same "level, not a win" reading. The
+writer's own route went 3.557 s to 2.809 s, or 1.27x, on a host where
+`resize` did not move at all (2.892 against 2.782 s).
 
 Every route's own files were decoded and compared with the r,g,b the plugin
 hands out: the worst sample anywhere is **one level** away, and on the colour
@@ -1455,43 +1474,81 @@ VapourSynth's own chroma plane is truncated to what it holds.
 
 `src/convert.rs`'s own ignored measurement — `cargo test --release --lib --
 --ignored --nocapture the_kernels_measured` — converts one 3672x5274 frame
-of noise twice a path, in nanoseconds a luma sample:
+of noise twice a path, in nanoseconds a luma sample. Every kernel an
+architecture has is forced by name, so one command reports every column:
 
-| shape | scalar | AVX2 | AVX-512 | dispatched |
+| x86-64 | scalar | AVX2 | AVX-512 | dispatched |
 | --- | ---: | ---: | ---: | ---: |
 | 8 bit 4:2:0, centred | 56.73 | 1.372 | 1.343 | 1.304 |
 | 8 bit 4:2:0, left | 22.27 | 1.290 | 1.026 | 1.019 |
 | 8 bit 4:4:4 | 9.79 | 0.937 | 0.766 | 0.759 |
 | 10 bit 4:2:0, left | 23.16 | 1.540 | 1.048 | 1.111 |
 
-So a kernel is 12x the loop it replaces on a 4:4:4 frame and 42x on a centred
-4:2:0 one, and the 512 bit kernel is 5 to 30% ahead of the 256 bit one. The
-scalar 4:2:0 row is the shape that gains most, because the loop it replaces
-reads two rows of two chroma planes a column; 4:4:4 is already the cheapest
-shape and gains least. The dispatched column is the 512 bit kernel here,
-which this host reports.
+| aarch64 | scalar | NEON | dispatched |
+| --- | ---: | ---: | ---: |
+| 8 bit 4:2:0, centred | 6.16 | 1.245 | 1.262 |
+| 8 bit 4:2:0, left | 6.28 | 1.258 | 1.266 |
+| 8 bit 4:4:4 | 4.02 | 0.916 | 0.921 |
+| 10 bit 4:2:0, left | 7.83 | 1.196 | 1.187 |
+
+The arm rows are the median of three runs, which agreed to within 2%; the one
+outlier seen, a first-run 1.738 in the dispatched 4:2:0 left row, is the
+warm-up of a benchmark whose first pass pays for the first touch of a 200 MB
+frame.
+
+On x86-64 a kernel is 12x the loop it replaces on a 4:4:4 frame and 42x on a
+centred 4:2:0 one, and the 512 bit kernel is 5 to 30% ahead of the 256 bit
+one. The scalar 4:2:0 row is the shape that gains most, because the loop it
+replaces reads two rows of two chroma planes a column; 4:4:4 is already the
+cheapest shape and gains least.
+
+NEON is a different shape of win and the table says so. A NEON register holds
+four `f32` lanes where the 256 bit kernel holds eight and the 512 bit one
+sixteen, so a block is half as wide as AVX2's and the same loop runs half as
+many columns to an instruction. It is nevertheless **level with AVX2** on
+three of the four shapes and 1.3x ahead of it on ten bit 4:2:0, because a
+block's horizontal interpolation is one table lookup here where x86 needs an
+eight-way permute of a register the load did not fill.
+
+What does not carry over is the *ratio*, and it is worth being plain about
+why: the arm scalar loop this replaces is itself 2.4x to 9x the x86 one, so
+the same kernel is **4.4x to 6.6x** the loop here rather than 12x to 42x. The
+kernel is not slower; the loop it replaces is much faster. The batch above is
+the check that it still buys what it is for.
 
 The kernels are held to the scalar path rather than to a tolerance:
-`a_kernel_is_the_scalar_path_sample_for_sample` runs both over a frame of
-noise at every chroma position, every matrix, both ranges, four subsamplings,
-four depths, a precision below and one above the frames', and widths from one
-sample to 129, and compares every sample. Both x86 kernels are forced by name,
-so the narrower one is checked on a host whose dispatch picks the wider, and
-the test fails if a kernel takes no block of a row wide enough to have one.
-`target/bench/ab-simd-bytes.py` then writes whole files with the two builds
-and compares those: **19 pages of `sandbox/webp`, `sandbox/hitokage-sample`
-and the avif and webp fixtures — 4:2:0, 4:2:2 and 4:4:4, eight, ten and
-twelve bits, and the oriented webp pages — are byte for byte the same
-file**.
+`a_kernel_is_the_scalar_path_sample_for_sample` runs every kernel the build
+has over a frame of noise at every chroma position, every matrix, both
+ranges, four subsamplings, four depths, a precision below and one above the
+frames', and widths from one sample to 129, and compares every sample. Each
+kernel is forced by name, so the narrower x86 one is checked on a host whose
+dispatch picks the wider, and on aarch64 the single NEON kernel is forced and
+compared; the test fails if a kernel takes no block of a row wide enough to
+have one, so a kernel that quietly declined every block cannot pass by
+comparing nothing.
 
-`resize` is still zimg's hand-written AVX2 and is not the slower conversion
-now: 1.7 ns a pixel against these kernels' 1.0 to 1.5, which the batch above
-cannot resolve, and a graph that converts in the writer no longer pays for
-the choice.
+`target/bench/ab-simd-bytes.py` then writes whole files with the two builds
+and compares those. On aarch64: **53 yuv pages — 4:2:0, 4:2:2 and 4:4:4 at
+eight, ten and twelve bits, over `sandbox/webp`, `sandbox/hitokage-sample`
+and the still fixtures — are byte for byte the same file** between the scalar
+and NEON libraries. The x86-64 run of the same comparison is the 19 pages
+recorded above.
+
+The arm fixtures are collected by `target/bench/make-ab-corpus.py`, because
+`ab-simd-bytes.py` reads its directory into one clip and one fixture the
+reader refuses ends the run: it keeps the pages that load *and* hand out a yuv
+frame, since a page that is not yuv never reaches a kernel and would be
+counted as agreement without testing anything.
+
+`resize` is still zimg's hand-written AVX2 on x86-64 and is not the slower
+conversion now: 1.7 ns a pixel against these kernels' 1.0 to 1.5, which the
+batch above cannot resolve, and a graph that converts in the writer no longer
+pays for the choice. On aarch64 the two are level to within 1%.
 
 The yuv kernels are reached by a yuv frame and nothing else, so the gray and
 rgb routes are the code they were: `tests/pngwrite.vpy` covers them as it did,
 and the byte comparison above is the path that changed.
+
 
 **No regression in the gray and rgb routes.** The same build against the one
 before this change (`target/bench/p38-pngwrite-zlibrs.dll`), alternating,

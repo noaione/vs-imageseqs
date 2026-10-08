@@ -1013,11 +1013,13 @@ mod tests {
                 converter.rgb_row(row, planes, &mut got);
                 assert_eq!(got, want, "the dispatched path of {what}, row {row}");
 
-                #[cfg(target_arch = "x86_64")]
-                for (name, wide) in [("avx2", false), ("avx512", true)] {
+                // A machine whose dispatch picks one kernel still checks
+                // the other, and an arm build checks the one it has.
+                #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+                for (name, kernel) in simd::KERNELS {
                     let mut got = vec![0u16; width * 3];
                     let rows = converter.rows(row, planes);
-                    let done = simd::rgb_row_forced(&converter, &rows, &mut got, wide);
+                    let done = simd::rgb_row_forced(&converter, &rows, &mut got, *kernel);
                     converter.scalar_columns(&rows, done.clone(), &mut got);
                     assert_eq!(got, want, "the {name} kernel of {what}, row {row}");
                     // A row this wide is one a kernel has to have taken a
@@ -1094,19 +1096,36 @@ mod tests {
     /// ```
     #[test]
     #[ignore = "a measurement"]
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn the_kernels_measured() {
         use std::time::Instant;
 
         const WIDTH: usize = 3672;
         const HEIGHT: usize = 5274;
 
-        #[derive(Clone, Copy, PartialEq)]
+        #[derive(Clone, Copy)]
         enum Path {
             Scalar,
-            Avx2,
-            Avx512,
+            /// One vector kernel by name, which is the architecture's own
+            /// set rather than a fixed list.
+            Kernel(simd::Kernel),
             Dispatched,
+        }
+
+        /// Every path this build can measure, in the order it is reported.
+        ///
+        /// A kernel by name is the same list the parent module's test
+        /// forces, so an x86 build measures both of its widths and an arm
+        /// build the one NEON kernel it has.
+        fn paths() -> Vec<(Path, &'static str)> {
+            let mut paths = vec![(Path::Scalar, "scalar")];
+            paths.extend(
+                simd::KERNELS
+                    .iter()
+                    .map(|(name, kernel)| (Path::Kernel(*kernel), *name)),
+            );
+            paths.push((Path::Dispatched, "dispatched"));
+            paths
         }
 
         fn measure(
@@ -1158,12 +1177,8 @@ mod tests {
                     let rows = converter.rows(row, planes);
                     match path {
                         Path::Scalar => converter.scalar_columns(&rows, 0..0, &mut out),
-                        Path::Avx2 => {
-                            let done = simd::rgb_row_forced(&converter, &rows, &mut out, false);
-                            converter.scalar_columns(&rows, done, &mut out);
-                        }
-                        Path::Avx512 => {
-                            let done = simd::rgb_row_forced(&converter, &rows, &mut out, true);
+                        Path::Kernel(kernel) => {
+                            let done = simd::rgb_row_forced(&converter, &rows, &mut out, kernel);
                             converter.scalar_columns(&rows, done, &mut out);
                         }
                         Path::Dispatched => converter.rgb_row(row, planes, &mut out),
@@ -1186,12 +1201,7 @@ mod tests {
             ("8 bit 4:4:4", 8, (0, 0), None),
             ("10 bit 4:2:0 left", 10, (1, 1), None),
         ] {
-            for (path, label) in [
-                (Path::Scalar, "scalar"),
-                (Path::Avx2, "avx2"),
-                (Path::Avx512, "avx512"),
-                (Path::Dispatched, "dispatched"),
-            ] {
+            for (path, label) in paths() {
                 measure(&format!("{name}, {label}"), bits, sub, location, path, 2);
             }
         }

@@ -143,6 +143,25 @@ open plus frames to 4.99 s.
 
 ## plans
 
+### NEON yuv conversion kernel — 2026-10-08
+
+[41 NEON yuv conversion kernel](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/41-neon-convert-kernel.md)
+adds the arm half of the writer's vectorised conversion. It is not a CPU
+variant like [23](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/23-cpu-variant-avx2.md)
+and [24](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/24-cpu-variant-avx512.md):
+NEON is in the aarch64 baseline, so one library carries the kernel and nothing
+is added to the wheel. On a centred 4:2:0 frame it is 1.245 ns a luma sample
+against the scalar path's 6.16, which is 4.9x, and it is level with AVX2 on
+three of four measured shapes and 1.3x it on ten bit 4:2:0. The batch is what
+says it buys something: converting in the writer was **1.23x** the `resize`
+route on the scalar library and is **1.01x** on the NEON one, the reading
+x86-64 reached at 2.51x to 0.98x. 53 yuv pages — 4:2:0, 4:2:2 and 4:4:4 at
+eight, ten and twelve bits — are byte for byte the same file between the two
+libraries, and `tests/pngwrite.vpy` reports worst 0 against `core.resize`.
+The page also records the `target/bench/x86check/` harness, which type checks
+the x86 half of `simd.rs` on an arm host and caught an unresolved import that
+would have broken an x86-64 release build.
+
 ### frame source indices — 2026-10-07
 
 [40 frame source indices](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/40-frame-source-indices.md)
