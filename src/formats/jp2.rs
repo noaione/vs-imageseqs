@@ -1211,6 +1211,7 @@ mod tests {
         assert_eq!(route(Path::new("page.jp2.zip")), None);
         assert_ne!(route(Path::new("page.png")), jp2);
     }
+
     #[test]
     fn maps_srgb_and_s_ycc_to_their_frame_formats() {
         let rgb = Header {

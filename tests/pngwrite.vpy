@@ -202,26 +202,40 @@ class Png:
             at += 12 + length
         self.channels = CHANNELS[self.color_type]
         self.sample_bytes = self.depth // 8
-        stride = self.width * self.channels * self.sample_bytes
-        packed = _unfilter(
+        # A depth below a byte packs several samples into one, and png pads the
+        # last byte of a row rather than the row itself.
+        self.stride = (self.width * self.channels * self.depth + 7) // 8
+        self.packed = _unfilter(
             zlib.decompress(bytes(idat)),
-            stride,
-            self.channels * self.sample_bytes,
+            self.stride,
+            max(1, self.channels * self.sample_bytes),
             self.height,
         )
         for row in range(self.height):
-            base = row * stride
+            base = row * self.stride
             samples: list[int] = []
             for index in range(self.width * self.channels):
-                at = base + index * self.sample_bytes
-                if self.sample_bytes == 1:
-                    samples.append(packed[at])
+                if self.depth == 8:
+                    samples.append(self.packed[base + index])
+                elif self.depth == 16:
+                    samples.append(
+                        struct.unpack_from(">H", self.packed, base + index * 2)[0]
+                    )
                 else:
-                    samples.append(struct.unpack_from(">H", packed, at)[0])
+                    per_byte = 8 // self.depth
+                    byte = self.packed[base + index // per_byte]
+                    samples.append(
+                        (byte >> (8 - self.depth * (index % per_byte + 1)))
+                        & ((1 << self.depth) - 1)
+                    )
             self.rows.append(samples)
 
     def samples(self) -> list[int]:
         return [sample for row in self.rows for sample in row]
+
+    def row_bytes(self, row: int) -> bytes:
+        """One row as the file packs it, before any unpacking."""
+        return self.packed[row * self.stride : (row + 1) * self.stride]
 
     def chunk_order_ok(self) -> bool:
         """sBIT and cICP have to precede IDAT, whatever else is around them."""
@@ -250,7 +264,7 @@ def widen(sample: int, bits: int) -> int:
     # eight bit frame is an eight bit PNG and a sixteen bit one is unchanged.
     if bits <= 8 or bits >= 16:
         return sample
-    return ((sample << (16 - bits)) | (sample >> (2 * bits - 16))) & 0xFFFF
+    return widen_to(sample, bits, 16)
 
 
 def expected_rows(color, alpha, bits: int) -> list[list[int]]:
@@ -273,6 +287,63 @@ def frame_hash(frame) -> str:
     for plane in range(frame.format.num_planes):
         digest.update(frame[plane].tobytes())
     return digest.hexdigest()
+
+
+def interleaved(frame) -> list[list[int]]:
+    """The samples of a fully sampled frame, in the order a PNG row holds them."""
+    planes = [plane_samples(frame, plane) for plane in range(frame.format.num_planes)]
+    rows = []
+    for row in range(frame.height):
+        samples = []
+        for column in range(frame.width):
+            for plane in planes:
+                samples.append(plane[row * frame.width + column])
+        rows.append(samples)
+    return rows
+
+
+def worst_sample(got: list[list[int]], want: list[list[int]], shift: int = 0) -> int:
+    """The largest difference between two row lists, one sample at a time.
+
+    `shift` moves a stored sample back down to the reference's own depth, which
+    is what a widened word needs: ten bits of picture in a sixteen bit sample
+    repeat themselves in the low six bits.
+    """
+    worst = 0
+    for row, samples in enumerate(got):
+        for index, sample in enumerate(samples):
+            worst = max(worst, abs((sample >> shift) - want[row][index]))
+    return worst
+
+
+def packed_row(samples: list[int], bits: int) -> bytes:
+    """One row as png packs it, most significant bits first."""
+    out = bytearray()
+    accumulator = 0
+    for index, sample in enumerate(samples):
+        accumulator = (accumulator << bits) | sample
+        if (index + 1) * bits % 8 == 0:
+            out.append(accumulator & 0xFF)
+            accumulator = 0
+    if len(samples) * bits % 8:
+        out.append((accumulator << (8 - len(samples) * bits % 8)) & 0xFF)
+    return bytes(out)
+
+
+def widen_to(sample: int, bits: int, stored: int) -> int:
+    """The sample a `bits` bit value becomes in a `stored` bit word.
+
+    The high bits are the sample and the low ones repeat it, so the largest
+    value of the narrow word is the largest of the wide one.
+    """
+    shift = stored - bits
+    low = sample >> (2 * bits - stored) if 2 * bits >= stored else 0
+    return ((sample << shift) | low) & ((1 << stored) - 1)
+
+
+def refused(clip, path, **arguments) -> str | None:
+    """Requests one frame, returning the error message or None when it wrote."""
+    return raised(lambda: write(clip, path, **arguments))
 
 
 def write(clip, path, **arguments):
@@ -682,7 +753,7 @@ def test_paths() -> None:
     try:
         writer = core.imgseqs.PNGWrite(
             sequence,
-            output_path=os.path.join("moved", "frame%02d.png"),
+            output_path=os.path.join("moved", "frame%02d.png"),  # ruff: ignore[os-path-join]
             overwrite=True,
         )
     finally:
@@ -759,20 +830,8 @@ def test_repeat() -> None:
 def test_errors() -> None:
     """Unsupported and inconsistent inputs are refused with a reason."""
     out = directory("errors")
-    yuv = core.imgseqs.Read(files=[fixture("avif-yuv420p.avif")])
-    message = raised(lambda: core.imgseqs.PNGWrite(yuv, output_path=str(out / "yuv.png")))
-    check(
-        message is not None and "resize" in message,
-        f"a yuv clip names the upstream conversion ({message})",
-    )
-    floating = core.std.BlankClip(width=8, height=8, format=vs.GRAYS, length=1)
-    message = raised(
-        lambda: core.imgseqs.PNGWrite(floating, output_path=str(out / "float.png"))
-    )
-    check(
-        message is not None and "resize" in message,
-        f"a float clip names the upstream conversion ({message})",
-    )
+    # A yuv or a float clip is converted rather than refused, and `test_yuv`
+    # and `test_float` are where those two conversions are checked.
 
     color = core.imgseqs.Read(files=[fixture("png-plain-gray8.png")])
     small = core.std.BlankClip(width=4, height=4, format=vs.GRAY8, length=1)
@@ -837,19 +896,398 @@ def test_errors() -> None:
         and Png(out / "mixed01.png").color_type == 0,
         "each frame of a variable clip is written as its own format",
     )
-    refused = core.imgseqs.Read(
+    # A frame of another format or size is converted frame by frame, so one
+    # clip writes an rgb frame and then a yuv one as r,g,b of its own size.
+    converted = core.imgseqs.Read(
         files=[fixture("png-plain-rgb8.png"), fixture("avif-yuv420p.avif")],
         mismatch=True,
     )
     writer = core.imgseqs.PNGWrite(
-        refused, output_path=str(out / "refused%02d.png"), overwrite=True
+        converted, output_path=str(out / "converted%02d.png"), overwrite=True
     )
     with writer.get_frame(0):
         pass
-    message = raised(lambda: writer.get_frame(1))
+    with writer.get_frame(1):
+        pass
+    first = Png(out / "converted00.png")
+    second = Png(out / "converted01.png")
     check(
-        message is not None and "resize" in message,
-        f"a yuv frame of a variable clip is refused ({message})",
+        first.color_type == 2 and first.depth == 8,
+        "the rgb frame of a variable clip is written as it is",
+    )
+    check(
+        second.color_type == 2 and second.depth == 8,
+        "and the yuv frame of another size is converted to r,g,b",
+    )
+    check(
+        (first.width, first.height) == (37, 23)
+        and (second.width, second.height) == (64, 48),
+        f"every frame keeps its own size ({(first.width, first.height)} and {(second.width, second.height)})",
+    )
+
+
+def test_yuv() -> None:
+    """A yuv frame becomes the r,g,b a PNG stores."""
+    out = directory("yuv")
+    # The readers hand a lossy webp out as 4:2:0 at bt.470bg and limited range,
+    # and a colour avif as its own sampling at the matrix its container states,
+    # so these four are every sampling at both words and both ranges.
+    for name, matrix, ranges, sampling, shift in [
+        ("avif-yuv420p.avif", "170m", "full", (1, 1), 0),
+        ("avif-yuv422p.avif", "170m", "full", (1, 0), 0),
+        ("avif-yuv444p10.avif", "170m", "full", (0, 0), 6),
+        ("orientation-6.webp", "470bg", "limited", (1, 1), 0),
+    ]:
+        clip = core.imgseqs.Read(files=[fixture(name)], prefetch=0)
+        check(
+            (clip.format.subsampling_w, clip.format.subsampling_h) == sampling,
+            f"{name} is subsampled the way this check assumes",
+        )
+        with clip.get_frame(0) as frame:
+            props = dict(frame.props)
+        bits = clip.format.bits_per_sample
+        reference = core.resize.Bilinear(
+            clip,
+            format=vs.RGB24 if bits <= 8 else vs.RGB30,
+            matrix_in_s=matrix,
+            range_in_s=ranges,
+        )
+        path = out / f"{name}.png"
+        write(clip, path)
+        png = Png(path)
+        with reference.get_frame(0) as frame:
+            want = interleaved(frame)
+        check(
+            png.depth == (8 if bits <= 8 else 16),
+            f"{name}: a {bits} bit yuv frame becomes a {png.depth} bit png",
+        )
+        check(
+            worst_sample(png.rows, want, shift) <= 1,
+            f"{name}: every sample is the one resize produces (worst {worst_sample(png.rows, want, shift)})",
+        )
+        # The chunk describes the r,g,b the file holds rather than the yuv the
+        # frame was coded as, so a frame that states primaries and a transfer
+        # gets those beside full range r,g,b instead of its own matrix.
+        if "_Primaries" in props:
+            stated = bytes([int(props["_Primaries"]), int(props["_Transfer"]), 0, 1])  # pyright: ignore[reportArgumentType]
+            check(
+                png.cicp == stated,
+                f"{name}: cICP is the frame's colour as full range rgb ({list(png.cicp or b'')})",
+            )
+        else:
+            check(png.cicp is None, f"{name}: a frame that states no colour writes no cICP")
+        if bits > 8:
+            check(
+                png.sbit == bytes([bits] * 3),
+                f"{name}: sBIT states the {bits} bits of picture ({list(png.sbit or b'')})",
+            )
+        check(png.chunk_order_ok(), f"{name}: the chunks precede IDAT")
+
+    # A yuv frame that states no matrix has to be told which one it is, and the
+    # argument is also how one whose container states the wrong matrix is read
+    # as the right one, which is what resize's own matrix_in is for.
+    plain = core.std.BlankClip(
+        width=8, height=8, length=1, format=vs.YUV444P8, color=[100, 130, 140]
+    )
+    with plain.get_frame(0) as frame:
+        if "_Matrix" in frame.props:
+            plain = core.std.SetFrameProp(plain, prop="_Matrix", delete=True)  # pyright: ignore[reportCallIssue]
+    with plain.get_frame(0) as frame:
+        check("_Matrix" not in frame.props, "the yuv clip used here states no matrix")
+    message = refused(plain, out / "no-matrix.png")
+    check(
+        message is not None and "matrix=" in message,
+        f"a yuv frame that states no matrix names the argument ({message})",
+    )
+    path = out / "argued-matrix.png"
+    write(plain, path, matrix=1)
+    reference = core.resize.Bilinear(
+        plain, format=vs.RGB24, matrix_in_s="709", range_in_s="limited"
+    )
+    with reference.get_frame(0) as frame:
+        want = interleaved(frame)
+    check(
+        worst_sample(Png(path).rows, want) <= 1,
+        "the matrix argument is the matrix the conversion reads with",
+    )
+    # A code this writer does not convert is refused by name rather than
+    # converted as though it were another one.
+    for code, said in [
+        (2, "states none"),
+        (10, "constant luminance"),
+        (13, "constant luminance"),
+        (14, "constant luminance"),
+        (3, "not one VapourSynth names"),
+    ]:
+        message = refused(
+            core.std.SetFrameProp(plain, prop="_Matrix", intval=code),
+            out / f"matrix-{code}.png",
+        )
+        check(
+            message is not None and said in message,
+            f"the matrix code {code} is refused because it {said} ({message})",
+        )
+    # Where a subsampled frame's chroma samples sit is the other thing a
+    # container states, and every position is a picture of its own.
+    colored = core.imgseqs.Read(files=[fixture("avif-yuv420p.avif")], prefetch=0)
+    positions = []
+    for code, name in [(0, "left"), (1, "center"), (2, "top_left"), (5, "bottom")]:
+        located = core.std.SetFrameProp(colored, prop="_ChromaLocation", intval=code)
+        path = out / f"chromaloc-{name}.png"
+        write(located, path)
+        png = Png(path)
+        positions.append(tuple(tuple(row) for row in png.rows))
+        reference = core.resize.Bilinear(
+            located,
+            format=vs.RGB24,
+            matrix_in_s="170m",
+            range_in_s="full",
+            chromaloc_in_s=name,
+        )
+        with reference.get_frame(0) as frame:
+            want = interleaved(frame)
+        check(
+            worst_sample(png.rows, want) <= 1,
+            f"chroma at the {name} position is where resize reads it",
+        )
+    check(
+        len(set(positions)) > 1,
+        "the chroma position changes the picture",
+    )
+    # A yuv colour clip beside the gray alpha clip its container carries.
+    result = core.imgseqs.ReadAlpha(files=[fixture("alpha-yuv420p.avif")])
+    color, alpha_clip = result["clip"], result["alpha"]
+    path = out / "yuv-alpha.png"
+    write(color, path, alpha=alpha_clip)
+    png = Png(path)
+    check(
+        png.color_type == 6 and png.channels == 4,
+        f"a yuv colour clip beside a gray alpha clip is rgba ({png.color_type})",
+    )
+    reference = core.resize.Bilinear(
+        color, format=vs.RGB24, matrix_in_s="170m", range_in_s="full"
+    )
+    with reference.get_frame(0) as frame:
+        want = interleaved(frame)
+    with alpha_clip.get_frame(0) as frame:
+        alpha_plane = plane_samples(frame, 0)
+    worst = 0
+    for row in range(png.height):
+        for column in range(png.width):
+            for channel in range(3):
+                worst = max(
+                    worst,
+                    abs(
+                        png.rows[row][column * 4 + channel]
+                        - want[row][column * 3 + channel]
+                    ),
+                )
+            worst = max(
+                worst,
+                abs(
+                    png.rows[row][column * 4 + 3]
+                    - alpha_plane[row * png.width + column]
+                ),
+            )
+    check(worst <= 1, f"a converted yuv colour keeps its alpha (worst {worst})")
+
+
+def test_float() -> None:
+    """A float frame is a value in [0, 1] rather than a code."""
+    out = directory("float")
+    # The whole mapping, and the values that are not a picture at all: a NaN is
+    # written as the smallest sample and an infinity clamps like any other value
+    # outside the range.
+    base = core.std.BlankClip(width=2, height=1, length=1, format=vs.GRAYS, color=0.0)
+    for expression, want in [
+        ("0.0", 0),
+        ("0.25", 16384),
+        ("0.5", 32768),
+        ("1.0", 65535),
+        ("2.0", 65535),
+        ("-1.0", 0),
+        ("1 0 /", 65535),
+        ("0 0 /", 0),
+    ]:
+        clip = core.std.Expr([base], expression)
+        path = out / f"expr-{expression.replace(' ', '').replace('/', 'x')}.png"
+        write(clip, path)
+        check(
+            Png(path).rows == [[want] * 2],
+            f"a float frame of '{expression}' is the sample {want} ({Png(path).rows})",
+        )
+    # An eight bit word is asked for rather than assumed.
+    path = out / "gray-at-8.png"
+    write(core.std.Expr([base], "0.5"), path, depth=8)
+    png = Png(path)
+    check(
+        png.depth == 8 and png.rows == [[128] * 2],
+        f"a float half asked for at eight bits ({png.rows})",
+    )
+    # r,g,b is the same mapping a channel.
+    colour = core.std.BlankClip(
+        width=2, height=1, length=1, format=vs.RGBS, color=[1.0, 0.5, 0.0]
+    )
+    path = out / "rgb.png"
+    write(colour, path)
+    check(
+        Png(path).rows == [[65535, 32768, 0, 65535, 32768, 0]],
+        f"a float rgb frame writes every channel ({Png(path).rows})",
+    )
+    # A float colour clip takes the float alpha a container pairs it with, and
+    # a mixed pair is refused because png gives every sample one word.
+    path = out / "rgb-alpha.png"
+    write(
+        colour,
+        path,
+        alpha=core.std.BlankClip(width=2, height=1, length=1, format=vs.GRAYS, color=0.5),
+    )
+    check(
+        Png(path).rows == [[65535, 32768, 0, 32768, 65535, 32768, 0, 32768]],
+        f"a float alpha is interleaved after the colour ({Png(path).rows})",
+    )
+    message = refused(
+        colour,
+        out / "mixed-alpha.png",
+        alpha=core.std.BlankClip(width=2, height=1, length=1, format=vs.GRAY8, color=128),
+    )
+    check(
+        message is not None and "float" in message,
+        f"an integer alpha beside a float colour is refused ({message})",
+    )
+    # A float yuv frame holds no matrix a writer could read, so it is refused
+    # rather than converted under a guess.
+    message = refused(
+        core.std.BlankClip(
+            width=2, height=1, length=1, format=vs.YUV444PS, color=[0.5, 0.5, 0.5]
+        ),
+        out / "yuv-float.png",
+    )
+    check(
+        message is not None and "float" in message,
+        f"a float yuv clip is refused ({message})",
+    )
+
+
+def test_depth() -> None:
+    """The depth argument names the word the PNG stores."""
+    out = directory("depth")
+    # Sixteen bits asked for at eight gives up precision by rounding, and the
+    # samples of a real page are what says the rounding is to nearest.
+    colour = core.imgseqs.Read(files=[fixture("tiff-gray16.tiff")], prefetch=0)
+    with colour.get_frame(0) as frame:
+        source = plane_samples(frame, 0)
+    path = out / "gray16-at-8.png"
+    write(colour, path, depth=8)
+    png = Png(path)
+    want = [
+        [
+            round(sample * 255 / 65535)
+            for sample in source[row * png.width : (row + 1) * png.width]
+        ]
+        for row in range(png.height)
+    ]
+    check(
+        png.depth == 8 and png.rows == want,
+        "a sixteen bit frame asked for at eight bits is scaled down to it",
+    )
+    # Eight, ten and twelve bits asked for at sixteen are the exact widening,
+    # and the chunk still says how many of those bits are the source's.
+    for name, bits in [
+        ("png-plain-gray8.png", 8),
+        ("jxl-gray10.jxl", 10),
+        ("jxl-gray12.jxl", 12),
+    ]:
+        clip = core.imgseqs.Read(files=[fixture(name)], prefetch=0)
+        with clip.get_frame(0) as frame:
+            source = plane_samples(frame, 0)
+        path = out / f"{name}-at-16.png"
+        write(clip, path, depth=16)
+        png = Png(path)
+        want = [
+            [
+                widen_to(sample, bits, 16)
+                for sample in source[row * png.width : (row + 1) * png.width]
+            ]
+            for row in range(png.height)
+        ]
+        check(
+            png.depth == 16 and png.rows == want,
+            f"{name}: depth=16 is the exact widening of {bits} bits",
+        )
+        check(
+            png.sbit == bytes([bits]),
+            f"{name}: sBIT states the {bits} bits of picture ({list(png.sbit or b'')})",
+        )
+    # A depth below a byte is one gray plane, and a file a low bit reader
+    # expanded is packed back into the word it came from, byte for byte.
+    for name in ("png-gray1.png", "png-gray2.png", "png-gray4.png"):
+        original = Png(FIXTURES / name)
+        clip = core.imgseqs.Read(files=[fixture(name)], prefetch=0)
+        path = out / f"{name}-repacked.png"
+        write(clip, path, depth=original.depth)
+        png = Png(path)
+        check(
+            png.depth == original.depth and png.rows == original.rows,
+            f"{name}: the {original.depth} bit picture the reader expanded is packed back",
+        )
+        check(
+            all(
+                png.row_bytes(row) == packed_row(original.rows[row], original.depth)
+                for row in range(png.height)
+            ),
+            f"{name}: every row is packed most significant bit first",
+        )
+        check(png.sbit is None, f"{name}: a packed depth states no sBIT")
+    # The depths no png stores, and the shapes it does not pack that way.
+    gray = core.std.BlankClip(width=4, height=1, length=1, format=vs.GRAY8, color=0)
+    for depth in (0, 3, 5, 6, 7, 9, 15, 17, 32):
+        message = raised(
+            lambda: core.imgseqs.PNGWrite(
+                gray, output_path=str(out / f"bad-{depth}.png"), depth=depth
+            )
+        )
+        check(
+            message is not None and "1, 2, 4, 8 or 16" in message,
+            f"depth={depth} is refused ({message})",
+        )
+    for label, clip, arguments in [
+        (
+            "rgb",
+            core.std.BlankClip(
+                width=4, height=1, length=1, format=vs.RGB24, color=[0, 0, 0]
+            ),
+            {},
+        ),
+        (
+            "rgb with alpha",
+            gray,
+            {
+                "alpha": core.std.BlankClip(
+                    width=4, height=1, length=1, format=vs.GRAY8, color=255
+                )
+            },
+        ),
+        ("yuv", core.imgseqs.Read(files=[fixture("avif-yuv420p.avif")], prefetch=0), {}),
+    ]:
+        message = refused(
+            clip, out / f"packed-{label.split()[0]}.png", depth=1, **arguments
+        )
+        check(
+            message is not None and "gray plane" in message,
+            f"a packed depth on a {label} clip is refused ({message})",
+        )
+    # A float frame is scaled into a packed word by the same rule: the value is
+    # a fraction of the scale, so a half is the largest code a bit can hold.
+    path = out / "float-at-1.png"
+    write(
+        core.std.BlankClip(width=4, height=1, length=1, format=vs.GRAYS, color=0.5),
+        path,
+        depth=1,
+    )
+    check(
+        Png(path).rows == [[1, 1, 1, 1]],
+        f"a float half asked for at one bit is the largest code ({Png(path).rows})",
     )
 
 
@@ -893,6 +1331,9 @@ def main() -> int:
         test_paths,
         test_repeat,
         test_errors,
+        test_yuv,
+        test_float,
+        test_depth,
         test_concurrent,
     ):
         print(f"--- {test.__name__}")

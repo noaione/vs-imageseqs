@@ -236,7 +236,7 @@ for frame in range(writer.num_frames):
 
 | option | default | what it does |
 | --- | --- | --- |
-| `clip` | required | The clip to write. Gray or RGB at 8 to 16 bits. |
+| `clip` | required | The clip to write. Gray, RGB or YUV at 8 to 16 bits, or float gray or RGB. |
 | `output_path` | required | A filename for a one-frame clip, or a `%d`/`%06d` template. `%%` is a literal percent sign. |
 | `alpha` | `None` | A matching gray clip whose samples become the alpha channel. |
 | `always_save` | `False` | Write a frame again instead of skipping one this writer already saved. |
@@ -244,6 +244,8 @@ for frame in range(writer.num_frames):
 | `compression` | `6` | `0` to `9`. Every level is lossless; higher is smaller and slower. |
 | `start_number` | `0` | Added to the writer's frame index when the path is numbered. |
 | `icc_profile` | `False` | Embed the raw `ICCProfile` frame property in the file. |
+| `depth` | the frame's | The PNG's stored bits per sample: `1`, `2`, `4`, `8` or `16`. |
+| `matrix` | the frame's | An H.273 matrix code to read a YUV clip with, when the frame states none. |
 | `debug` | `False` | Write timing information to the VapourSynth log. |
 
 The number in the path is the writer node's own frame index, not any index the
@@ -251,20 +253,45 @@ source wrote, so trimming, reversing or splicing the input cannot make two
 frames share a destination. A relative `output_path` is resolved when the node
 is created, and its directory has to exist already.
 
-A frame of 9 to 15 bits is stored as a 16-bit PNG whose high bits hold the
+Without `depth`, a frame of 9 to 15 bits is stored as a 16-bit PNG whose high
 source precision, with an `sBIT` chunk stating how many bits are meaningful.
 A ten-bit white is therefore stored as 65535 rather than 98% of the scale, and
 shifting the stored sample right by 6 gives the ten-bit sample back. Reading
 the file with `Read` gives the 16-bit PNG the file is, not a ten-bit frame,
 because PNG states no depth of its own.
 
-YUV and float clips are refused rather than converted, so the matrix, range,
-dithering and transfer choices stay yours:
+A YUV clip is converted to RGB for you, because a lossy WebP, a colour AVIF and
+a colour HEIC arrive as the YUV planes their container coded:
 
 ```python
-rgb = core.resize.Bicubic(yuv, format=vs.RGB24, matrix_in_s="709")
-writer = core.imgseqs.PNGWrite(rgb, output_path=r"exports\page%04d.png")
+yuv = core.imgseqs.Read(files=[r"pages\page001.webp"])
+writer = core.imgseqs.PNGWrite(yuv, output_path=r"exports\page%04d.png")
 ```
+
+The matrix is the frame's own `_Matrix`, which every reader here writes, and
+`_Range` says whether its samples are limited or full. `matrix=6` names one for
+a clip you built yourself that states none. Chroma is upsampled with a bilinear
+filter from the sample position `_ChromaLocation` names, or the left-sited
+position `resize` defaults to, and the picture is the one
+`core.resize.Bilinear` gives, sample for sample. Only the
+non-constant-luminance matrices are converted: a constant-luminance frame, the
+SMPTE 2085 one and the chromaticity-derived ones are refused by name.
+
+The conversion is vectorised where the processor has AVX2 or AVX-512 and is the
+same loop otherwise, which is 12 to 42 times the loop it replaces: a 4:2:0 page
+costs about 1.0 to 1.4 ns a pixel, which is `core.resize`'s own order, so a
+graph can convert here rather than putting a `resize` in front. Both paths
+write byte for byte the same files. It is also the route for a frame `resize`
+refuses, such as a 4:2:0 picture with an odd height.
+
+A float clip is a value in [0, 1] rather than a code. It is written at 16 bits,
+or at the width `depth` asks for; a value outside the range is clamped, and a
+NaN is written as the smallest sample.
+
+`depth` names the word the file stores. `16` widens an 8- or 10-bit frame
+exactly, `8` gives up precision by rounding, and `1`, `2` or `4` pack a gray
+frame, which is how a bilevel or a 16-colour page is written and how a page a
+low-bit reader expanded is written back to the word it came from.
 
 A written frame carries `ImgSeqPNGWritePath`, `ImgSeqPNGWriteSaved` and
 `ImgSeqPNGWritePerformed`, so a caller can tell a write from a skip. The write

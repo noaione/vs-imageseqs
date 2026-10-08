@@ -1,6 +1,7 @@
 mod animation;
 mod clip;
 mod color;
+mod convert;
 mod decoder;
 mod error;
 mod exif;

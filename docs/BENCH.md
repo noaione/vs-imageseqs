@@ -1414,3 +1414,93 @@ concurrent and two-writers-racing checks run in that mode.
 
 The encoder-only diagnosis, over already prepared input frames with preparation
 excluded, is still to be run.
+
+### the yuv conversion
+
+`target/bench/png-write-yuv.py` converts and writes over a real corpus: six
+pages of `sandbox/webp`, which the reader hands out as YUV420P8 at bt.470bg and
+limited range, 3672x5274 each, 93.7 million pixels a batch. Three routes
+produce the same r,g,b picture: the writer converting the yuv planes itself,
+`core.resize.Bilinear` doing the conversion in front of the writer, and the
+resized clip pulled one frame at a time into Pillow. One warm-up pass and
+five measured passes, rotated order, both builds in one session:
+
+| build | route | conversion | median s | ms/page | CPU s | PNG MiB |
+| --- | --- | --- | --- | --- | --- | --- |
+| scalar | plugin `PNGWrite` | the writer's own | 11.656 | 1942.59 | 11.438 | 41.67 |
+| scalar | plugin `PNGWrite` | `resize.Bilinear` first | 4.648 | 774.59 | 4.578 | 41.67 |
+| scalar | Pillow | `resize.Bilinear` first | 6.552 | 1091.93 | 6.484 | 36.08 |
+| vector | plugin `PNGWrite` | the writer's own | 4.975 | 829.23 | 4.906 | 41.67 |
+| vector | plugin `PNGWrite` | `resize.Bilinear` first | 5.072 | 845.35 | 4.859 | 41.67 |
+| vector | Pillow | `resize.Bilinear` first | 7.036 | 1172.72 | 6.812 | 36.08 |
+
+What compares is each build against the control measured in its own run,
+because this host is a laptop and its absolute numbers move by half between
+sessions: converting in the writer was **2.51x** the `resize` route with the
+scalar conversion and is **0.98x** with the vector one, a 2.56x batch, and the
+conversion the writer does is now inside the run to run spread rather than
+seconds of it. The plugin row also came in ahead of the `resize` one here,
+which a writer cannot be in general — a `resize` node is a frame pass it does
+not pay — so read those two as level rather than as a win.
+
+Every route's own files were decoded and compared with the r,g,b the plugin
+hands out: the worst sample anywhere is **one level** away, and on the colour
+page 110 samples of 58.1 million differ at all, which is the two conversions
+rounding differently rather than a phase or a matrix difference. The one page
+`resize` refuses — p000 is 3312x4717, and zimg needs a subsampled picture
+that is a whole number of units — is still written by this writer, because
+VapourSynth's own chroma plane is truncated to what it holds.
+
+#### what a kernel costs
+
+`src/convert.rs`'s own ignored measurement — `cargo test --release --lib --
+--ignored --nocapture the_kernels_measured` — converts one 3672x5274 frame
+of noise twice a path, in nanoseconds a luma sample:
+
+| shape | scalar | AVX2 | AVX-512 | dispatched |
+| --- | ---: | ---: | ---: | ---: |
+| 8 bit 4:2:0, centred | 56.73 | 1.372 | 1.343 | 1.304 |
+| 8 bit 4:2:0, left | 22.27 | 1.290 | 1.026 | 1.019 |
+| 8 bit 4:4:4 | 9.79 | 0.937 | 0.766 | 0.759 |
+| 10 bit 4:2:0, left | 23.16 | 1.540 | 1.048 | 1.111 |
+
+So a kernel is 12x the loop it replaces on a 4:4:4 frame and 42x on a centred
+4:2:0 one, and the 512 bit kernel is 5 to 30% ahead of the 256 bit one. The
+scalar 4:2:0 row is the shape that gains most, because the loop it replaces
+reads two rows of two chroma planes a column; 4:4:4 is already the cheapest
+shape and gains least. The dispatched column is the 512 bit kernel here,
+which this host reports.
+
+The kernels are held to the scalar path rather than to a tolerance:
+`a_kernel_is_the_scalar_path_sample_for_sample` runs both over a frame of
+noise at every chroma position, every matrix, both ranges, four subsamplings,
+four depths, a precision below and one above the frames', and widths from one
+sample to 129, and compares every sample. Both x86 kernels are forced by name,
+so the narrower one is checked on a host whose dispatch picks the wider, and
+the test fails if a kernel takes no block of a row wide enough to have one.
+`target/bench/ab-simd-bytes.py` then writes whole files with the two builds
+and compares those: **19 pages of `sandbox/webp`, `sandbox/hitokage-sample`
+and the avif and webp fixtures — 4:2:0, 4:2:2 and 4:4:4, eight, ten and
+twelve bits, and the oriented webp pages — are byte for byte the same
+file**.
+
+`resize` is still zimg's hand-written AVX2 and is not the slower conversion
+now: 1.7 ns a pixel against these kernels' 1.0 to 1.5, which the batch above
+cannot resolve, and a graph that converts in the writer no longer pays for
+the choice.
+
+The yuv kernels are reached by a yuv frame and nothing else, so the gray and
+rgb routes are the code they were: `tests/pngwrite.vpy` covers them as it did,
+and the byte comparison above is the path that changed.
+
+**No regression in the gray and rgb routes.** The same build against the one
+before this change (`target/bench/p38-pngwrite-zlibrs.dll`), alternating,
+plugin-only, 24 gray8 pages, four passes: 0.680 and 0.663 s for the older build
+against 0.682 and 0.673 s for this one, which is the noise floor. The full
+three-route run of the same benchmark gave 0.720, 0.929 and 0.225 s for plugin,
+Pillow serial and Pillow bounded in today's session against 0.686, 0.960 and
+0.236 s in the recorded one, which is the 3 to 5% a session drifts by rather
+than anything this change did: the same comparison in one session is the one
+above. An intermediate version of the row writer was 7% slower — the storage of
+a sample was decided inside the sample loop — and moving that decision to the
+row took it back.

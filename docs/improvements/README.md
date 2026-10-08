@@ -175,21 +175,30 @@ the fourth sample of every pixel zeroed and every row but the first shifted.
 [38 PNGWrite](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/38-png-write.md)
 is implemented in `src/writer.rs`: `core.imgseqs.PNGWrite(clip, output_path=...)`
 returns a node whose frame request writes that frame as a PNG and writes nothing
-for a frame nobody asks for. Integer Gray and RGB at eight to sixteen bits, an
-optional matching Gray alpha clip, and a frame of nine to fifteen bits stored as
-a sixteen bit PNG whose high bits hold the source precision with an `sBIT` chunk
-saying so. The path grammar numbers by the writer node's own frame index plus
-`start_number`, `always_save` and `overwrite` are separate permissions, success
-is a per-instance bit set rather than a frame property, and a write is published
+for a frame nobody asks for. Integer Gray, RGB and YUV at eight to sixteen bits,
+an optional matching Gray alpha clip, and float Gray and RGB: a yuv frame is
+converted to r,g,b by `src/convert.rs` from its own `_Matrix`, `_Range` and
+`_ChromaLocation` (or a `matrix` the caller names), and a frame of nine to
+fifteen bits is stored as a sixteen bit PNG whose high bits hold the source
+precision with an `sBIT` chunk saying so, or at the word `depth` names. The path
+grammar numbers by the writer node's own frame index plus `start_number`,
+`always_save` and `overwrite` are separate permissions, success is a
+per-instance bit set rather than a frame property, and a write is published
 from a temporary file by a rename or a linking create. `tests/pngwrite.vpy`
-checks it with 182 checks over its own PNG reader. It compresses with `zlib-rs`
+checks it with 260 checks over its own PNG reader, against
+`core.resize.Bilinear` sample for sample for the conversion. It compresses with
+`zlib-rs`
 through `png`'s feature of that name, which puts it 1.4x to 2.1x ahead of serial
 Pillow on time and level with it on size;
 [the writer benchmark](../BENCH.md#png-writer-comparison) compares it against
 serial and six-worker Pillow over three cohorts, and
 `target/bench/png-write.py` carries the barebone copy of nmanga's save path that
-comparison needs. YUV and float conversion stays upstream, and low-bit gray and
-palette output are not written.
+comparison needs.
+[the yuv comparison](../BENCH.md#the-yuv-conversion) measures the conversion
+against `resize`, which is 1.8x faster over a batch because zimg is vectorised
+and this is not; indexed palette output is still not written, because a
+VapourSynth frame is never indexed and choosing a palette is a lossy colour
+decision of its own.
 
 ### unsupported subtypes — 2026-10-06
 

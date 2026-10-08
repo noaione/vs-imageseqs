@@ -2,8 +2,8 @@
 
 **status**: implemented
 
-`core.imgseqs.PNGWrite` exists, `src/writer.rs` implements it, and
-`tests/pngwrite.vpy` checks it (182 checks). The measurements are in
+`core.imgseqs.PNGWrite` exists, `src/writer.rs` and `src/convert.rs` implement
+it, and `tests/pngwrite.vpy` checks it (260 checks). The measurements are in
 [BENCH.md](../BENCH.md#png-writer-comparison). Everything after this section is
 the research that preceded the implementation and is kept as the record of why
 the scope is what it is; where the implementation settled a question the
@@ -15,15 +15,17 @@ research left open, the section below says so.
   and `ReadAlpha`. The identifier, namespace, filter names and the plugin-only
   wheel are unchanged.
 - Arguments: `clip`, `output_path`, `always_save`, `compression`, `alpha`,
-  `overwrite`, `start_number`, `icc_profile` and `debug`. The optional ones
-  default to `False`, `6`, `None`, `False`, `0`, `False` and `False`.
-- Supported pixels are the recommended first scope: integer Gray and RGB at
-  eight to sixteen bits, optionally beside a matching Gray alpha clip of the
-  same depth, size and frame count. Nine to fifteen bits are stored as a
-  sixteen bit PNG whose high bits hold the source precision, with an `sBIT`
-  chunk stating how many bits are meaningful. YUV and float are refused with
-  the upstream `core.resize.Bicubic(..., matrix_in_s="709")` spelled out.
-- `output_path` is parsed as a small grammar: `%d` and `%0Nd` are the frame
+  `overwrite`, `start_number`, `icc_profile`, `depth`, `matrix` and `debug`.
+  The optional ones default to `False`, `6`, `None`, `False`, `0`, `False`,
+  `None`, `None` and `False`.
+- Supported pixels are integer Gray, RGB and YUV at eight to sixteen bits,
+  optionally beside a matching Gray alpha clip of the same depth, size, sample
+  type and frame count, and float Gray and RGB. Nine to fifteen bits are
+  stored as a sixteen bit PNG whose high bits hold the source precision, with
+  an `sBIT` chunk stating how many bits are meaningful.
+- YUV is converted by [`src/convert.rs`](../../src/convert.rs) rather than
+  handed to `core.resize`, and every choice that conversion makes is recorded
+  under [what the conversion decides](#what-the-conversion-decides) below.
   number, `%%` is a literal percent, and every other use of `%` is refused.
   A literal path is allowed for a one frame clip only. The path is resolved
   against the working directory while the node is created, numbered by the
@@ -75,12 +77,79 @@ research left open, the section below says so.
   at `prefetch=0` gives medians of 328.1 ms before and 322.4 ms after, which
   is the noise floor rather than a regression.
 
-What it left over: automatic conversion of YUV and float is still refused
-rather than implemented; low-bit grayscale and indexed palette output are not
-written; a clip of varying frames is accepted frame by frame and checked
-there, which is what the plan allows, but variable *dimensions* are not
-covered by the validator beyond that; and the encoder-only diagnosis is the only
-part of the timing protocol still to be run.
+What it left over: **indexed palette output is not written.** A VapourSynth
+frame is never indexed, so writing one means choosing a palette and a dither
+over the picture, which is a lossy colour decision of its own and a plan of its
+own rather than an argument here. Everything else this section listed has
+landed: YUV and float are converted, a depth below eight bits packs a gray
+frame, and the validator covers a clip of varying formats *and* dimensions.
+The encoder-only diagnosis is the only part of the timing protocol still to be
+run, and the yuv comparison in
+[BENCH.md](../BENCH.md#the-yuv-conversion) is the route it would measure.
+**The conversion is vectorised** where the processor has AVX2 or AVX-512, in
+`src/convert/simd.rs`, and is the loop it replaced otherwise. A block of eight
+or sixteen columns goes through the interpolation, the matrix and the
+quantisation together, with each lane's two chroma taps moved into place by one
+permute, so the horizontal interpolation is a permute, two multiplies and an add
+rather than a gather. That is 12x the loop it replaced on a 4:4:4 frame and 42x
+on a centred 4:2:0 one, which takes a 4:2:0 page to 1.0 to 1.4 ns a pixel
+against zimg's 1.7, so the batch penalty this section records is gone: 2.51x the
+`resize` route before, 0.98x after. The kernels are held to the scalar path
+sample for sample rather than to a tolerance, and the two builds write byte
+identical files over a 19 page corpus of every chroma shape and depth;
+[BENCH.md](../BENCH.md#what-a-kernel-costs) has both tables.
+
+**NEON is not written.** The kernels are x86-64's, so an aarch64 build runs the
+scalar path. What a kernel does is not x86's own — a block of a row, one
+permute of the samples that block loaded, and the scalar remainder — so a third
+module beside `avx2` and `avx512`, entered from the same dispatch, is the whole
+of it.
+
+### what the conversion decides
+
+The research below recommended refusing YUV and float and leaving every choice
+to the caller. The implementation converts them instead, because the readers
+hand a lossy webp, a colour avif and a colour heic out as the yuv planes their
+container coded, so writing one of those to a PNG is the ordinary case rather
+than a detour. Each choice such a conversion has to make is stated rather than
+guessed:
+
+- **the matrix** is the frame's own `_Matrix`, which `src/color.rs` writes for
+  every yuv frame a reader hands out, and the `matrix` argument names one for a
+  frame that states none or corrects one it states, which is the role `resize`'s
+  own `matrix_in` has. Nothing is inferred from the picture's size or from the
+  format's name, and a frame with no matrix and no argument is an error that
+  names the argument.
+- **the coefficients** are the h.273 ones for that code, and only the
+  non-constant-luminance matrices are converted: a constant luminance one, the
+  SMPTE 2085 one, and the chromaticity-derived ones that would need a primaries
+  table are refused by name.
+- **the range** is the frame's own `_Range`, and a frame that states none is
+  read as limited, which is what `resize` does with the same clip.
+- **chroma** is upsampled with a triangle (bilinear) filter from the sample
+  position `_ChromaLocation` names and from the left-sited position `resize`
+  defaults to when it names none; an axis that is not subsampled has no cell to
+  sit in and takes no phase. The result is the one `core.resize.Bilinear`
+  produces, sample for sample, on every fixture and at every chroma position,
+  which is what `tests/pngwrite.vpy` checks.
+- **the depth** is the frame's own, so a ten bit frame becomes a sixteen bit
+  PNG whose `sBIT` says ten, exactly as the gray and rgb paths already did. The
+  `depth` argument names another word: 8 gives up precision by rounding, 16
+  widens an eight or ten bit frame exactly, and 1, 2 or 4 pack a gray one, which
+  is what writes back the picture a low bit reader expanded.
+- **float** is a value in `[0, 1]` rather than a code: it becomes sixteen bits
+  or the word `depth` names, a value outside the range is clamped, and a NaN is
+  written as the smallest sample. Float YUV is refused because it holds no
+  matrix to read.
+- **the metadata** is the truthful part only: a converted frame's `cICP` states
+  the primaries and transfer the frame does beside full range r,g,b rather than
+  the matrix its yuv planes were coded with. Neither sRGB nor a transfer
+  function is applied to any of it.
+
+The reader's own ycbcr conversion in `src/formats/tiff.rs` is a different thing
+and stays: it is the TIFF format's arithmetic, verified against libtiff sample
+for sample, at full range and by repeating a chroma sample, which is what that
+format's pages are defined by.
 
 ## objective and scope
 

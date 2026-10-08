@@ -1714,6 +1714,7 @@ mod tests {
             assert_eq!(plane[1..], expected[..], "{channel}");
         }
     }
+
     #[test]
     fn a_size_that_changed_after_probing_is_reported() {
         let (path, probed) = fixture_probe("lossless-rgb.webp");
@@ -1728,6 +1729,7 @@ mod tests {
             "{error}"
         );
     }
+
     /// A file that is not a bitstream is refused when its frame is filled.
     ///
     /// The header read that used to answer this is gone, so the words are the

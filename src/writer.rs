@@ -6,14 +6,20 @@
 //! request returns. Creating the node writes nothing: a frame that is never
 //! requested is never written.
 //!
-//! The first scope is the one `docs/improvements/38-png-write.md` recommends:
-//! integer Gray and RGB at eight to sixteen bits, optionally beside a matching
-//! Gray alpha clip. A frame at nine to fifteen bits is written as a sixteen bit
-//! PNG whose samples carry the source precision in their high bits, which is
-//! exact rather than approximate and needs no conversion stage. YUV and float
-//! are refused with a message that names the upstream conversion, because the
-//! matrix, range, dithering and transfer choices a conversion needs are the
-//! caller's and not this writer's.
+//! A PNG holds integer gray, r,g,b or an index into a palette, so a frame that
+//! is yuv or float has to be converted before it can be written. That
+//! conversion is done here rather than left to the caller, because the readers
+//! hand a lossy webp, a colour avif and a colour heic out as the yuv planes
+//! their container coded: writing one of those to a PNG is the ordinary case.
+//! What the conversion does, and every choice it makes, is `crate::convert`'s
+//! to state.
+//!
+//! An integer gray or rgb frame of nine to fifteen bits is written as a sixteen
+//! bit PNG whose samples carry the source precision in their high bits, which is
+//! exact rather than approximate and needs no conversion stage. The `depth`
+//! argument asks for another word instead: a lower one gives up precision by
+//! rounding, and one below eight bits packs a gray frame whose samples are
+//! already the codes that word holds.
 //!
 //! Success is a per-instance ledger keyed by frame number; the frame properties
 //! are receipts for the caller and never the thing that decides whether a frame
@@ -35,6 +41,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::{
+    convert::{self, Converter, Plane},
+    error::{ImgSeqError, Result},
+};
 use png::{BitDepth, ColorType, DeflateCompression, Encoder, Filter as PngFilter, Info};
 use vapoursynth4_rs::{
     ColorFamily, SampleType, VideoInfo,
@@ -46,10 +56,8 @@ use vapoursynth4_rs::{
     node::{Dependencies, Filter, FilterMode, Node, VideoNode},
 };
 
-use crate::error::{ImgSeqError, Result};
-
 /// Arguments accepted by `PNGWrite`.
-const PNG_WRITE_ARGS: &CStr = c"clip:vnode;output_path:data;alpha:vnode:opt;always_save:int:opt;compression:int:opt;overwrite:int:opt;start_number:int:opt;icc_profile:int:opt;debug:int:opt;";
+const PNG_WRITE_ARGS: &CStr = c"clip:vnode;output_path:data;alpha:vnode:opt;always_save:int:opt;compression:int:opt;overwrite:int:opt;start_number:int:opt;icc_profile:int:opt;depth:int:opt;matrix:int:opt;debug:int:opt;";
 
 /// The compression level a caller gets when it asks for none.
 const DEFAULT_COMPRESSION: i64 = 6;
@@ -67,15 +75,18 @@ const FILE_BUFFER: usize = 64 * 1024;
 /// The code every H.273 family uses for "unspecified".
 const UNSPECIFIED: u8 = 2;
 
-/// The `png` bit depth that names `bits` significant bits.
+/// The `png` bit depth that names `bits` stored bits a sample.
 ///
-/// Nine through fifteen are stored as sixteen bit samples whose high bits hold
-/// the source precision, which is what [`widen`] is for.
-const fn png_depth(bits: i32) -> BitDepth {
-    if bits <= 8 {
-        BitDepth::Eight
-    } else {
-        BitDepth::Sixteen
+/// Only eight and sixteen are depths a PNG row can hold a whole sample in; one,
+/// two and four pack several samples into a byte, and the encoder says which by
+/// the same number.
+const fn bit_depth_of(bits: u32) -> BitDepth {
+    match bits {
+        1 => BitDepth::One,
+        2 => BitDepth::Two,
+        4 => BitDepth::Four,
+        8 => BitDepth::Eight,
+        _ => BitDepth::Sixteen,
     }
 }
 
@@ -86,12 +97,30 @@ const fn png_depth(bits: i32) -> BitDepth {
 /// whose white is 1023 does not come out at 98% of the scale, and a ten bit
 /// alpha of 1023 is fully opaque. `sample >> (16 - bits)` recovers the source
 /// value without loss.
+///
+/// It is the exact scale-up for every depth from eight to sixteen, so an eight
+/// bit frame asked for at `depth=16` becomes a sixteen bit PNG of the same
+/// picture rather than one whose samples sit in the low half of their word.
 #[must_use]
 const fn widen(sample: u16, bits: u32) -> u16 {
     let shift = 16 - bits;
     let high = (sample as u32) << shift;
     let low = (sample as u32) >> (2 * bits - 16);
     (high | low) as u16
+}
+
+/// Moves a sample of `from` bits down to `to` bits by rounding.
+///
+/// The value is scaled across the two ranges rather than shifted out of the top
+/// of its word, so the largest sample stays the largest one: a sixteen bit frame
+/// written as an eight bit PNG keeps its white white, and a ten bit one keeps
+/// its whole range rather than stopping short of the end of the smaller word.
+#[must_use]
+fn reduce(sample: u16, from: u32, to: u32) -> u16 {
+    let source = (1u32 << from) - 1;
+    let target = (1u32 << to) - 1;
+    let scaled = (u32::from(sample) * target * 2 + source) / (2 * source);
+    u16::try_from(scaled).unwrap_or(u16::MAX)
 }
 
 /// One literal or one substitution of an output path template.
@@ -239,63 +268,344 @@ impl Ledger {
 }
 
 /// What one frame's pixels are written as.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 struct FramePlan {
+    /// The layout the PNG states.
     color_type: ColorType,
     bit_depth: BitDepth,
-    /// Significant bits of one source sample, which is what `sBIT` states.
-    bits: i32,
-    /// Whether samples hold fewer bits than the sixteen bit word they go into.
-    spread: bool,
-    /// Planes of the color frame: one for gray, three for rgb.
+    /// Bits of one colour sample before it is stored, which is what `sBIT`
+    /// states when the stored word is wider than it.
+    bits: u32,
+    /// How a colour sample of `bits` bits reaches the stored word.
+    storage: Storage,
+    /// Where the colour samples of a row come from.
+    source: Source,
+    /// Planes of the colour frame: one for gray, three for rgb or yuv.
     color_planes: usize,
-    /// Whether the alpha clip's plane is interleaved after each pixel.
-    alpha: bool,
+    /// The alpha clip's own precision, which the one word PNG gives every
+    /// sample has to share rather than share a value with.
+    alpha: Option<Alpha>,
     width: usize,
     height: usize,
 }
 
-impl FramePlan {
-    /// Validates the two frames of one request against the supported scope.
-    fn of(color: &VideoFrame, alpha: Option<&VideoFrame>) -> Result<Self> {
-        let format = color.get_video_format();
-        let color_planes = match format.color_family {
-            ColorFamily::Gray if format.num_planes == 1 => 1,
-            ColorFamily::RGB if format.num_planes == 3 => 3,
-            ColorFamily::Gray | ColorFamily::RGB => {
-                return Err(ImgSeqError::new(format!(
-                    "PNGWrite needs a one plane gray or three plane rgb frame, got {} planes",
-                    format.num_planes
-                )));
-            }
-            family => return Err(unsupported_family(family, format.sample_type)),
-        };
-        if format.sample_type != SampleType::Integer {
-            return Err(unsupported_family(format.color_family, format.sample_type));
+/// How a sample of one precision reaches the word the PNG stores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Storage {
+    /// The stored word is the sample's own precision.
+    Direct,
+    /// The stored word is wider, so the sample is spread across it.
+    Widen,
+    /// The stored word is narrower, so the sample is scaled down by rounding.
+    Reduce,
+}
+
+/// How a sample of `bits` bits reaches a `stored` bit word.
+const fn storage_of(bits: u32, stored: u32) -> Storage {
+    if bits == stored {
+        Storage::Direct
+    } else if bits < stored {
+        Storage::Widen
+    } else {
+        Storage::Reduce
+    }
+}
+
+/// The alpha clip of a plan.
+#[derive(Debug, Clone, Copy)]
+struct Alpha {
+    bits: u32,
+    storage: Storage,
+}
+
+/// Where the colour samples of a row come from.
+#[derive(Debug)]
+enum Source {
+    /// Integer samples read straight out of the frame's own planes, already at
+    /// the frame's own precision.
+    Planes,
+    /// Float planes whose samples are values in `[0, 1]`.
+    Float,
+    /// Yuv planes a conversion turns into r, g and b.
+    Yuv(Box<Converter>),
+}
+
+impl Source {
+    /// The word for the log: what the samples were before they were stored.
+    const fn name(&self) -> &'static str {
+        match self {
+            Self::Planes => "read",
+            Self::Float => "float",
+            Self::Yuv(_) => "yuv",
         }
-        if !(8..=16).contains(&format.bits_per_sample) {
+    }
+}
+
+/// The kind of samples a format holds, which is what decides whether there is
+/// anything to convert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// An integer gray or rgb format, which is stored as it stands.
+    Integer,
+    /// A float format, whose samples are values rather than codes.
+    Float,
+    /// An integer yuv format, which has to become r, g and b.
+    Yuv,
+}
+
+/// The kind of samples `format` holds and how many colour planes that is.
+///
+/// `None` for a format VapourSynth calls undefined, which is what a clip of
+/// frames of different formats reports: only a frame can settle what such a
+/// clip holds, so the frame check asks again. Everything else is refused here,
+/// before a frame is ever requested, because the format already settles it.
+fn kind_of(format: &ffi::VSVideoFormat) -> Result<Option<(Kind, usize)>> {
+    if format.color_family == ColorFamily::Undefined {
+        return Ok(None);
+    }
+    let planes = match format.color_family {
+        ColorFamily::Gray if format.num_planes == 1 => 1,
+        ColorFamily::RGB if format.num_planes == 3 => 3,
+        ColorFamily::YUV if format.num_planes == 3 => 3,
+        ColorFamily::Gray | ColorFamily::RGB | ColorFamily::YUV => {
             return Err(ImgSeqError::new(format!(
-                "PNGWrite accepts 8 to 16 bit integer frames, got {} bit samples",
+                "PNGWrite needs a one plane gray or three plane rgb or yuv frame, got {} planes",
+                format.num_planes
+            )));
+        }
+        family => return Err(unsupported_family(family, format.sample_type)),
+    };
+    let subsampled = format.sub_sampling_w != 0 || format.sub_sampling_h != 0;
+    if subsampled && format.color_family != ColorFamily::YUV {
+        return Err(ImgSeqError::new(
+            "PNGWrite needs a gray or rgb frame without chroma subsampling",
+        ));
+    }
+    if !(0..=1).contains(&format.sub_sampling_w) || !(0..=1).contains(&format.sub_sampling_h) {
+        return Err(ImgSeqError::new(format!(
+            "PNGWrite converts 4:4:4, 4:2:2 and 4:2:0 yuv frames, and this one subsamples by {} and {} bits an axis",
+            format.sub_sampling_w, format.sub_sampling_h
+        )));
+    }
+    let kind = match (format.color_family, format.sample_type) {
+        (ColorFamily::YUV, SampleType::Integer) => Kind::Yuv,
+        (ColorFamily::YUV, SampleType::Float) => {
+            return Err(ImgSeqError::new(
+                "PNGWrite converts an integer yuv frame, and a float one holds no matrix it could read: convert it upstream with core.resize.Bicubic(clip, format=vs.RGBS, matrix_in_s=...)",
+            ));
+        }
+        (_, SampleType::Float) => Kind::Float,
+        (_, SampleType::Integer) => Kind::Integer,
+    };
+    match kind {
+        Kind::Float if format.bits_per_sample != 32 => {
+            return Err(ImgSeqError::new(format!(
+                "PNGWrite reads a float frame as the 32 bit samples VapourSynth stores, and this one is {} bits",
                 format.bits_per_sample
             )));
         }
-        if format.sub_sampling_w != 0 || format.sub_sampling_h != 0 {
+        Kind::Float => {}
+        _ if !(8..=16).contains(&format.bits_per_sample) => {
+            return Err(ImgSeqError::new(format!(
+                "PNGWrite writes 8 to 16 bit integer frames, got {} bit samples",
+                format.bits_per_sample
+            )));
+        }
+        _ => {}
+    }
+    Ok(Some((kind, planes)))
+}
+
+/// Validates the alpha clip's format against the colour frame's.
+///
+/// PNG gives every sample of a pixel one word, so an alpha at another depth
+/// would need a conversion of its own; requiring the colour clip's own depth
+/// and sample type is what keeps that decision out of this writer.
+fn check_alpha(colour: &ffi::VSVideoFormat, alpha: &ffi::VSVideoFormat) -> Result<()> {
+    if alpha.color_family != ColorFamily::Undefined {
+        if alpha.color_family != ColorFamily::Gray || alpha.num_planes != 1 {
             return Err(ImgSeqError::new(
-                "PNGWrite needs a frame without chroma subsampling",
+                "PNGWrite needs a one plane gray alpha clip",
             ));
+        }
+        if alpha.sample_type != colour.sample_type {
+            return Err(ImgSeqError::new(format!(
+                "PNGWrite needs the alpha clip to hold {} samples like the color clip",
+                if colour.sample_type == SampleType::Float {
+                    "float"
+                } else {
+                    "integer"
+                }
+            )));
+        }
+        if colour.sample_type == SampleType::Integer
+            && alpha.bits_per_sample != colour.bits_per_sample
+        {
+            return Err(ImgSeqError::new(format!(
+                "PNGWrite needs the alpha clip at the color clip's depth, got {} bit alpha beside {} bit color",
+                alpha.bits_per_sample, colour.bits_per_sample
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The matrix a yuv frame is read with.
+///
+/// The caller's `matrix` argument wins when it is given, which is what
+/// `resize`'s own `matrix_in` does and is the only way to correct a frame whose
+/// container states a matrix the picture was not coded with. Otherwise it is
+/// the frame's own `_Matrix`, and a frame that states none, or states
+/// `unspecified`, is refused rather than converted under a default this writer
+/// picked.
+fn yuv_matrix(
+    frame: &VideoFrame,
+    given: Option<ffi::VSMatrixCoefficients>,
+) -> Result<ffi::VSMatrixCoefficients> {
+    if let Some(matrix) = given {
+        return Ok(matrix);
+    }
+    match property_int(frame, key!(c"_Matrix"))
+        .map(convert::matrix_of)
+        .transpose()?
+    {
+        Some(matrix) if matrix != ffi::VSMatrixCoefficients::VSC_MATRIX_UNSPECIFIED => Ok(matrix),
+        _ => Err(ImgSeqError::new(
+            "PNGWrite needs to know the matrix this yuv frame was coded with and it states none; pass matrix= with the h.273 code the file's own colour metadata names, or convert it upstream with core.resize.Bicubic(clip, format=vs.RGB24, matrix_in_s=\"601\")",
+        )),
+    }
+}
+
+/// The chroma sample position a frame states, when it names one.
+///
+/// The property is VapourSynth's own code point, so this is a lookup rather
+/// than a translation, and a code the enum has no name for is no statement.
+fn chroma_location(frame: &VideoFrame) -> Option<ffi::VSChromaLocation> {
+    use ffi::VSChromaLocation as C;
+    match property_int(frame, key!(c"_ChromaLocation"))? {
+        0 => Some(C::VSC_CHROMA_LEFT),
+        1 => Some(C::VSC_CHROMA_CENTER),
+        2 => Some(C::VSC_CHROMA_TOP_LEFT),
+        3 => Some(C::VSC_CHROMA_TOP),
+        4 => Some(C::VSC_CHROMA_BOTTOM_LEFT),
+        5 => Some(C::VSC_CHROMA_BOTTOM),
+        _ => None,
+    }
+}
+
+impl FramePlan {
+    /// Validates the two frames of one request against the supported scope.
+    ///
+    /// `depth` is the caller's `depth` argument: `None` writes at the frame's
+    /// own precision, and a number names the word the PNG stores instead.
+    /// `matrix` is its `matrix` argument, which is what a yuv frame that
+    /// states no usable matrix of its own is read with.
+    fn of(
+        color: &VideoFrame,
+        alpha: Option<&VideoFrame>,
+        depth: Option<u32>,
+        matrix: Option<ffi::VSMatrixCoefficients>,
+    ) -> Result<Self> {
+        let format = color.get_video_format();
+        let (kind, color_planes) = kind_of(format)?.ok_or_else(|| {
+            ImgSeqError::new(
+                "PNGWrite needs a frame whose format its clip states, and this one is undefined",
+            )
+        })?;
+        // The precision the frame's own samples carry. A float sample is a
+        // value rather than a code, so what it carries is the whole of the
+        // word it is about to be stored in.
+        let source_bits = if kind == Kind::Float {
+            16
+        } else {
+            u32::try_from(format.bits_per_sample)
+                .map_err(|_| ImgSeqError::new("PNGWrite got a frame of a negative depth"))?
+        };
+        let stored = depth.unwrap_or(if source_bits > 8 { 16 } else { 8 });
+        // A word below eight bits is one gray plane with no alpha, which is the
+        // only shape png packs that way. The samples are scaled into it like
+        // every other depth rather than having to be its codes already, which is
+        // what makes writing back the picture a one bit reader expanded work.
+        if stored < 8 && (color_planes != 1 || alpha.is_some()) {
+            return Err(ImgSeqError::new(format!(
+                "PNGWrite stores {stored} bits a sample as one gray plane with no alpha, which this frame is not: write it at 8 or 16 bits, or convert it first"
+            )));
         }
 
         let width = plane_size(color.frame_width(0), "width")?;
         let height = plane_size(color.frame_height(0), "height")?;
         for plane in 0..color_planes {
-            if color.frame_width(plane as i32) as usize != width
-                || color.frame_height(plane as i32) as usize != height
-            {
-                return Err(ImgSeqError::new(
-                    "PNGWrite needs planes of one size, which this frame does not have",
-                ));
+            // A yuv frame's chroma planes are the luma one divided down, which
+            // is the shape the conversion reads them at; every other family has
+            // planes of one size.
+            let (across, down) = if format.color_family == ColorFamily::YUV && plane > 0 {
+                (
+                    1usize << format.sub_sampling_w,
+                    1usize << format.sub_sampling_h,
+                )
+            } else {
+                (1, 1)
+            };
+            let (across, down) = (width / across, height / down);
+            let (plane_width, plane_height) = (
+                color.frame_width(plane as i32),
+                color.frame_height(plane as i32),
+            );
+            if plane_width as usize != across || plane_height as usize != down {
+                return Err(ImgSeqError::new(format!(
+                    "PNGWrite needs a frame whose planes are the size its format states, and plane {plane} is {plane_width}x{plane_height} rather than {across}x{down}"
+                )));
             }
         }
+
+        // The precision the samples the PNG stores carry. An integer plane's
+        // samples carry the frame's own, and the storage below is what moves
+        // them to the word the PNG holds. A conversion quantises to the
+        // precision the frame has and never to more, so a ten bit frame written
+        // as a sixteen bit PNG keeps ten bits of picture, which is what lets
+        // `sBIT` say so.
+        let bits = if kind == Kind::Integer {
+            source_bits
+        } else {
+            source_bits.min(stored)
+        };
+        let source = match kind {
+            Kind::Integer => Source::Planes,
+            Kind::Float => Source::Float,
+            Kind::Yuv => Source::Yuv(Box::new(Converter::new(
+                format.bits_per_sample,
+                bits,
+                (format.sub_sampling_w, format.sub_sampling_h),
+                width,
+                height,
+                yuv_matrix(color, matrix)?,
+                property_int(color, key!(c"_Range")) == Some(1),
+                chroma_location(color),
+            )?)),
+        };
+
+        let alpha = match alpha {
+            None => None,
+            Some(alpha) => {
+                let alpha_format = alpha.get_video_format();
+                check_alpha(format, alpha_format)?;
+                let (alpha_width, alpha_height) = (alpha.frame_width(0), alpha.frame_height(0));
+                if alpha_width as usize != width || alpha_height as usize != height {
+                    return Err(ImgSeqError::new(format!(
+                        "PNGWrite needs the alpha clip at the color clip's size, got {alpha_width}x{alpha_height} beside {width}x{height}"
+                    )));
+                }
+                let bits = if alpha_format.sample_type == SampleType::Float {
+                    source_bits.min(stored)
+                } else {
+                    u32::try_from(alpha_format.bits_per_sample).unwrap_or(source_bits)
+                };
+                Some(Alpha {
+                    bits,
+                    storage: storage_of(bits, stored),
+                })
+            }
+        };
 
         let color_type = match (color_planes, alpha.is_some()) {
             (1, false) => ColorType::Grayscale,
@@ -309,40 +619,14 @@ impl FramePlan {
             }
         };
 
-        if let Some(alpha) = alpha {
-            let alpha_format = alpha.get_video_format();
-            if alpha_format.color_family != ColorFamily::Gray || alpha_format.num_planes != 1 {
-                return Err(ImgSeqError::new(
-                    "PNGWrite needs a one plane gray alpha clip",
-                ));
-            }
-            if alpha_format.sample_type != SampleType::Integer {
-                return Err(ImgSeqError::new(
-                    "PNGWrite needs an integer alpha clip, so a float alpha cannot be interleaved losslessly",
-                ));
-            }
-            if alpha_format.bits_per_sample != format.bits_per_sample {
-                return Err(ImgSeqError::new(format!(
-                    "PNGWrite needs the alpha clip at the color clip's depth, got {} bit alpha beside {} bit color",
-                    alpha_format.bits_per_sample, format.bits_per_sample
-                )));
-            }
-            if alpha.frame_width(0) as usize != width || alpha.frame_height(0) as usize != height {
-                return Err(ImgSeqError::new(format!(
-                    "PNGWrite needs the alpha clip at the color clip's size, got {}x{} beside {width}x{height}",
-                    alpha.frame_width(0),
-                    alpha.frame_height(0)
-                )));
-            }
-        }
-
         Ok(Self {
             color_type,
-            bit_depth: png_depth(format.bits_per_sample),
-            bits: format.bits_per_sample,
-            spread: (9..=15).contains(&format.bits_per_sample),
+            bit_depth: bit_depth_of(stored),
+            bits,
+            storage: storage_of(bits, stored),
+            source,
             color_planes,
-            alpha: alpha.is_some(),
+            alpha,
             width,
             height,
         })
@@ -350,27 +634,34 @@ impl FramePlan {
 
     /// Samples one output pixel holds, which is what the PNG row is made of.
     const fn channels(&self) -> usize {
-        self.color_planes + self.alpha as usize
+        self.color_planes + self.alpha.is_some() as usize
     }
 
-    /// Bytes one output pixel holds.
-    const fn pixel_bytes(&self) -> usize {
-        self.channels() * self.sample_bytes()
+    /// Bits one stored sample holds in the PNG.
+    const fn stored_bits(&self) -> u32 {
+        self.bit_depth as u32
     }
 
-    /// Bytes one stored sample holds in the PNG.
+    /// Bytes one stored sample holds, which is zero when a row packs several of
+    /// them into a byte.
     const fn sample_bytes(&self) -> usize {
-        if matches!(self.bit_depth, BitDepth::Eight) {
-            1
-        } else {
-            2
+        match self.bit_depth {
+            BitDepth::Eight => 1,
+            BitDepth::Sixteen => 2,
+            _ => 0,
         }
     }
 
     /// Bytes one PNG row holds.
+    ///
+    /// A depth of eight or sixteen is a whole number of bytes a sample; one, two
+    /// and four pack the row's samples into bytes most significant first, and
+    /// PNG pads the last byte of a row rather than the row itself.
     fn row_bytes(&self) -> Result<usize> {
         self.width
-            .checked_mul(self.pixel_bytes())
+            .checked_mul(self.channels())
+            .and_then(|samples| samples.checked_mul(self.stored_bits() as usize))
+            .map(|bits| bits.div_ceil(8))
             .ok_or_else(|| ImgSeqError::new("one PNG row does not fit in memory"))
     }
 }
@@ -494,6 +785,10 @@ struct WriteArgs {
     overwrite: bool,
     compression: u8,
     export_icc_profile: bool,
+    /// The word the PNG stores, when the caller named one.
+    depth: Option<u32>,
+    /// The matrix a yuv frame that states none is read with.
+    matrix: Option<ffi::VSMatrixCoefficients>,
     debug: bool,
 }
 
@@ -532,9 +827,24 @@ impl WriteArgs {
                 "start_number must not be negative, got {start_number}"
             )));
         }
+        let depth = read_optional_int(input, key!(c"depth"), "depth")?
+            .map(|depth| {
+                u32::try_from(depth)
+                    .ok()
+                    .filter(|depth| matches!(depth, 1 | 2 | 4 | 8 | 16))
+                    .ok_or_else(|| {
+                        ImgSeqError::new(format!(
+                            "the PNGWrite depth must be 1, 2, 4, 8 or 16, got {depth}"
+                        ))
+                    })
+            })
+            .transpose()?;
+        let matrix = read_optional_int(input, key!(c"matrix"), "matrix")?
+            .map(convert::matrix_of)
+            .transpose()?;
 
         let info = color.info().clone();
-        check_output_format(&info, alpha.as_ref().map(|alpha| alpha.info()))?;
+        check_output_format(&info, alpha.as_ref().map(|alpha| alpha.info()), depth)?;
         let destinations = Destinations::read(path, start_number, i64::from(info.num_frames))?;
 
         Ok(Self {
@@ -546,6 +856,8 @@ impl WriteArgs {
             compression: u8::try_from(compression).expect("a level of 0 to 9 fits a byte"),
             export_icc_profile,
             debug,
+            depth,
+            matrix,
         })
     }
 
@@ -560,6 +872,8 @@ impl WriteArgs {
             compression: self.compression,
             export_icc_profile: self.export_icc_profile,
             debug: self.debug,
+            depth: self.depth,
+            matrix: self.matrix,
             ledger: Mutex::new(Ledger::default()),
             counter: AtomicU64::new(0),
         }
@@ -571,66 +885,43 @@ impl WriteArgs {
 /// An undefined format is what a clip of varying frames reports, so it is left
 /// for the frame check rather than refused here; everything else is a decision
 /// that can be made before a frame is ever requested.
-fn check_output_format(info: &VideoInfo, alpha: Option<&VideoInfo>) -> Result<()> {
-    let format = &info.format;
-    if format.color_family != ColorFamily::Undefined {
-        if format.sample_type != SampleType::Integer {
-            return Err(unsupported_family(format.color_family, format.sample_type));
-        }
-        match format.color_family {
-            ColorFamily::Gray if format.num_planes == 1 => {}
-            ColorFamily::RGB if format.num_planes == 3 => {}
-            ColorFamily::YUV => {
-                return Err(unsupported_family(format.color_family, format.sample_type));
-            }
-            family => {
-                return Err(ImgSeqError::new(format!(
-                    "PNGWrite writes a one plane gray or three plane rgb clip, got a {family:?} clip"
-                )));
-            }
-        }
-        if !(8..=16).contains(&format.bits_per_sample) {
-            return Err(ImgSeqError::new(format!(
-                "PNGWrite writes 8 to 16 bit integer frames, got a {} bit clip",
-                format.bits_per_sample
-            )));
-        }
-        if format.sub_sampling_w != 0 || format.sub_sampling_h != 0 {
-            return Err(ImgSeqError::new(
-                "PNGWrite writes a clip without chroma subsampling",
-            ));
-        }
+fn check_output_format(
+    info: &VideoInfo,
+    alpha: Option<&VideoInfo>,
+    depth: Option<u32>,
+) -> Result<()> {
+    // A depth below eight bits is one gray plane with no alpha, and nothing
+    // here chooses the threshold or the palette that would reach one, so a clip
+    // that is not already that shape is refused before a frame is requested.
+    if let Some(depth) = depth
+        && depth < 8
+        && info.format.color_family != ColorFamily::Undefined
+        && (info.format.color_family != ColorFamily::Gray
+            || info.format.num_planes != 1
+            || alpha.is_some())
+    {
+        return Err(ImgSeqError::new(format!(
+            "PNGWrite stores {depth} bits a sample as one gray plane with no alpha, which this clip is not: write it at 8 or 16 bits, or convert it first"
+        )));
     }
-    if let Some(alpha) = alpha {
-        let format = &alpha.format;
-        if format.color_family != ColorFamily::Undefined {
-            if format.color_family != ColorFamily::Gray || format.num_planes != 1 {
-                return Err(ImgSeqError::new(
-                    "PNGWrite needs a one plane gray alpha clip",
-                ));
-            }
-            if format.sample_type != SampleType::Integer {
-                return Err(ImgSeqError::new("PNGWrite needs an integer alpha clip"));
-            }
-            if info.format.color_family != ColorFamily::Undefined
-                && format.bits_per_sample != info.format.bits_per_sample
-            {
-                return Err(ImgSeqError::new(format!(
-                    "PNGWrite needs the alpha clip at the color clip's depth, got {} bit alpha beside {} bit color",
-                    format.bits_per_sample, info.format.bits_per_sample
-                )));
-            }
-        }
-        if alpha.num_frames != info.num_frames {
-            return Err(ImgSeqError::new(format!(
-                "PNGWrite needs the alpha clip to have the same frame count, got {} frames beside {}",
-                alpha.num_frames, info.num_frames
-            )));
-        }
-        if info.format.color_family != ColorFamily::Undefined
-            && alpha.format.color_family != ColorFamily::Undefined
-            && (alpha.width != info.width || alpha.height != info.height)
-        {
+    // The rest of the format is what a frame check would ask again, so a clip
+    // that can never be stored is refused here where the message can name the
+    // clip rather than a frame.
+    kind_of(&info.format)?;
+    let Some(alpha) = alpha else {
+        return Ok(());
+    };
+    if alpha.num_frames != info.num_frames {
+        return Err(ImgSeqError::new(format!(
+            "PNGWrite needs the alpha clip to have the same frame count, got {} frames beside {}",
+            alpha.num_frames, info.num_frames
+        )));
+    }
+    if info.format.color_family != ColorFamily::Undefined
+        && alpha.format.color_family != ColorFamily::Undefined
+    {
+        check_alpha(&info.format, &alpha.format)?;
+        if alpha.width != info.width || alpha.height != info.height {
             return Err(ImgSeqError::new(format!(
                 "PNGWrite needs the alpha clip at the color clip's size, got {}x{} beside {}x{}",
                 alpha.width, alpha.height, info.width, info.height
@@ -650,6 +941,10 @@ pub struct PNGWrite {
     compression: u8,
     export_icc_profile: bool,
     debug: bool,
+    /// The word the PNG stores, when the caller named one.
+    depth: Option<u32>,
+    /// The matrix a yuv frame that states none is read with.
+    matrix: Option<ffi::VSMatrixCoefficients>,
     /// Which frames this instance has published. Shared by the threads
     /// VapourSynth may complete frames on, and separate from the pixel cache
     /// because a frame going out of cache must not forget a finished write.
@@ -685,7 +980,7 @@ impl PNGWrite {
             .alpha
             .as_ref()
             .map(|alpha| alpha.get_frame_filter(n, ctx));
-        let plan = FramePlan::of(&color, alpha.as_ref())?;
+        let plan = FramePlan::of(&color, alpha.as_ref(), self.depth, self.matrix)?;
         let index =
             usize::try_from(n).map_err(|_| ImgSeqError::new(format!("invalid frame {n}")))?;
         let destination = self.destinations.of(index)?;
@@ -713,7 +1008,7 @@ impl PNGWrite {
             .export_icc_profile
             .then(|| frame_icc_profile(&color))
             .flatten();
-        let cicp = frame_cicp(&color);
+        let cicp = frame_cicp(&color, matches!(plan.source, Source::Yuv(_)));
         let encode_started = Instant::now();
         self.write_destination(
             &destination,
@@ -737,12 +1032,13 @@ impl PNGWrite {
             log_debug(
                 &mut core,
                 format_args!(
-                    "PNGWrite frame {n} '{}': {}x{} {} at {} bit, compression={}, encode={} total={}",
+                    "PNGWrite frame {n} '{}': {}x{} {} at {} bit from {}, compression={}, encode={} total={}",
                     destination.display(),
                     plan.width,
                     plan.height,
                     color_type_name(plan.color_type),
                     plan.bits,
+                    plan.source.name(),
                     self.compression,
                     format_duration(encode),
                     format_duration(started.elapsed())
@@ -949,8 +1245,18 @@ fn encode_png<W: Write>(
 
     let mut stream = writer.stream_writer().map_err(ImgSeqError::from_display)?;
     let mut row = vec![0u8; plan.row_bytes()?];
+    // A conversion writes the samples it makes here and the row storage moves
+    // them into the PNG. The buffer belongs to the caller because a row is not
+    // the place to allocate one, and it serves every row of the frame.
+    let mut staging = vec![0u16; plan.width * plan.color_planes];
     for y in 0..plan.height {
-        pack_row(plan, color, alpha, y, &mut row);
+        // A row that packs several samples into a byte shares those bytes
+        // between them, so it starts from nothing; a row of whole samples
+        // writes every byte it has.
+        if plan.sample_bytes() == 0 {
+            row.fill(0);
+        }
+        pack_row(plan, color, alpha, y, &mut row, &mut staging);
         stream.write_all(&row).map_err(ImgSeqError::from_display)?;
     }
     // Finishing the stream writes the last compressed block; finishing the
@@ -963,82 +1269,232 @@ fn encode_png<W: Write>(
 
 /// The `sBIT` payload of one frame, or `None` when nothing was lost.
 ///
-/// The chunk states how many of the stored bits are meaningful. A sixteen bit
-/// frame needs none, because the PNG depth is the frame's own; a frame of nine
-/// to fifteen bits does, because the sixteen bit PNG it becomes holds repeated
-/// low bits that are not source information.
+/// The chunk states how many of the stored bits are meaningful, so it is
+/// written when the stored word is wider than the precision a channel carries:
+/// a sixteen bit frame needs none, because the PNG depth is the frame's own,
+/// while a ten bit frame written as a sixteen bit PNG does, because the low bits
+/// of that word are not source information. A channel whose samples were
+/// narrowed instead states the whole of its word, which is the same as stating
+/// nothing about it.
 fn significant_bits(plan: &FramePlan) -> Option<Vec<u8>> {
-    if !plan.spread {
-        return None;
-    }
-    let bits = u8::try_from(plan.bits).ok()?;
+    let stored = u8::try_from(plan.stored_bits()).ok()?;
     let mut sbit = Vec::with_capacity(plan.channels());
     for _ in 0..plan.color_planes {
-        sbit.push(bits);
+        sbit.push(u8::try_from(plan.bits.min(plan.stored_bits())).ok()?);
     }
-    if plan.alpha {
-        sbit.push(bits);
+    if let Some(alpha) = plan.alpha {
+        sbit.push(u8::try_from(alpha.bits.min(plan.stored_bits())).ok()?);
+    }
+    if sbit.iter().all(|bits| *bits == stored) {
+        return None;
     }
     Some(sbit)
 }
 
+/// Runs one channel of a row through [`put_row`] with the storage the plan asks
+/// for.
+///
+/// The three ways a produced value reaches the stored word become three
+/// monomorphisations rather than three branches inside the loop, which is what
+/// keeps this writer's hottest loop tight: every sample of a row reaches the
+/// word the same way, so the decision belongs to the row and not to the
+/// sample.
+macro_rules! put_channel {
+    ($row:expr, $plan:expr, $channel:expr, $count:expr, $bits:expr, $storage:expr, $sample:expr) => {
+        match $storage {
+            Storage::Direct => put_row($row, $plan, $channel, $count, $sample, |value| value),
+            Storage::Widen => put_row($row, $plan, $channel, $count, $sample, |value| {
+                widen(value, $bits)
+            }),
+            Storage::Reduce => put_row($row, $plan, $channel, $count, $sample, |value| {
+                reduce(value, $bits, $plan.stored_bits())
+            }),
+        }
+    };
+}
+
 /// Packs one frame row of every plane into one PNG row.
+///
+/// `staging` is where a conversion puts the samples it makes before they reach
+/// the row: the plane it reads first, then the next, each as wide as the row,
+/// which is the layout `convert::Converter::rgb_row` fills. It belongs to the
+/// caller so that a row is never the place to allocate one.
 fn pack_row(
     plan: &FramePlan,
     color: &VideoFrame,
     alpha: Option<&VideoFrame>,
     y: usize,
     row: &mut [u8],
+    staging: &mut [u16],
 ) {
-    let channels = plan.channels();
-    let bytes = plan.sample_bytes();
-    for plane in 0..plan.color_planes {
-        let source = color.plane(plane as i32);
-        let stride = color.stride(plane as i32) as usize;
-        // SAFETY: the row index is inside the frame the plan was built from,
-        // and the plane's own stride is what addresses it.
-        let source = unsafe { source.add(y * stride) };
-        pack_plane(row, plane, channels, plan, source, bytes);
-    }
-    if let (Some(alpha), true) = (alpha, plan.alpha) {
-        let source = alpha.plane(0);
-        let stride = alpha.stride(0) as usize;
-        // SAFETY: as above, for the alpha frame the plan validated.
-        let source = unsafe { source.add(y * stride) };
-        pack_plane(row, plan.color_planes, channels, plan, source, bytes);
-    }
-}
-
-/// Interleaves one plane's row into the PNG row at `channel`.
-fn pack_plane(
-    row: &mut [u8],
-    channel: usize,
-    channels: usize,
-    plan: &FramePlan,
-    source: *const u8,
-    bytes: usize,
-) {
-    let width = plan.width;
-    if bytes == 1 {
-        for x in 0..width {
-            // SAFETY: the plan's width is the plane's own width, so every
-            // sample read is inside the row the caller addressed.
-            row[x * channels + channel] = unsafe { *source.add(x) };
+    match &plan.source {
+        Source::Yuv(converter) => {
+            // SAFETY: the plan was built from this frame, so its three planes
+            // are the ones the conversion's geometry was resolved against.
+            let planes = [
+                unsafe { conversion_plane(color, 0) },
+                unsafe { conversion_plane(color, 1) },
+                unsafe { conversion_plane(color, 2) },
+            ];
+            converter.rgb_row(y, planes, staging);
+            for channel in 0..plan.color_planes {
+                let read = |x: usize| staging[channel * plan.width + x];
+                put_channel!(
+                    row,
+                    plan,
+                    channel,
+                    plan.width,
+                    plan.bits,
+                    plan.storage,
+                    read
+                );
+            }
         }
-        return;
+        Source::Float => {
+            for plane in 0..plan.color_planes {
+                // SAFETY: one row of the plane the plan was built from, which
+                // holds whole float samples across its width.
+                let source = unsafe { row_samples(color, plane, y, plan.width * 4) };
+                let read =
+                    |x: usize| convert::quantise(convert::float_sample(source, x * 4), plan.bits);
+                put_channel!(row, plan, plane, plan.width, plan.bits, plan.storage, read);
+            }
+        }
+        Source::Planes => {
+            let bytes = if plan.bits <= 8 { 1 } else { 2 };
+            for plane in 0..plan.color_planes {
+                // SAFETY: as above, one row of the plane's own samples.
+                let source = unsafe { row_samples(color, plane, y, plan.width * bytes) };
+                let read = |x: usize| -> u16 {
+                    if bytes == 1 {
+                        u16::from(source[x])
+                    } else {
+                        u16::from_ne_bytes([source[x * 2], source[x * 2 + 1]])
+                    }
+                };
+                put_channel!(row, plan, plane, plan.width, plan.bits, plan.storage, read);
+            }
+        }
     }
-    let spread = plan.spread;
-    let bits = u32::try_from(plan.bits).unwrap_or(16);
-    for x in 0..width {
-        // SAFETY: as above, two bytes a sample.
-        let sample = unsafe { u16::from_ne_bytes([*source.add(2 * x), *source.add(2 * x + 1)]) };
-        let stored = if spread { widen(sample, bits) } else { sample };
-        let at = (x * channels + channel) * 2;
-        row[at..at + 2].copy_from_slice(&stored.to_be_bytes());
+    if let (Some(alpha), Some(channel)) = (alpha, plan.alpha) {
+        let float = alpha.get_video_format().sample_type == SampleType::Float;
+        let bytes = if float {
+            // A float sample is four bytes whatever depth it is stored at.
+            4
+        } else if channel.bits <= 8 {
+            1
+        } else {
+            2
+        };
+        // SAFETY: the alpha frame was checked against the colour frame, so its
+        // plane is as wide as the row being built.
+        let source = unsafe { row_samples(alpha, 0, y, plan.width * bytes) };
+        let read = |x: usize| -> u16 {
+            if float {
+                convert::quantise(convert::float_sample(source, x * 4), channel.bits)
+            } else if bytes == 1 {
+                u16::from(source[x])
+            } else {
+                u16::from_ne_bytes([source[x * 2], source[x * 2 + 1]])
+            }
+        };
+        put_channel!(
+            row,
+            plan,
+            plan.color_planes,
+            plan.width,
+            channel.bits,
+            channel.storage,
+            read
+        );
     }
 }
 
-/// The `cICP` payload a frame's colour properties describe, if any.
+/// Writes one channel of one row into the interleaved PNG row.
+///
+/// The stored word's width is decided once here, and `move_sample` is what the
+/// channel's storage asks for: the alpha clip carries a precision of its own,
+/// and this is where the two meet.
+fn put_row<S, T>(
+    row: &mut [u8],
+    plan: &FramePlan,
+    channel: usize,
+    count: usize,
+    sample: S,
+    move_sample: T,
+) where
+    S: Fn(usize) -> u16,
+    T: Fn(u16) -> u16,
+{
+    let channels = plan.channels();
+    match plan.sample_bytes() {
+        2 => {
+            for index in 0..count {
+                let at = (index * channels + channel) * 2;
+                let value = move_sample(sample(index));
+                row[at..at + 2].copy_from_slice(&value.to_be_bytes());
+            }
+        }
+        1 => {
+            for index in 0..count {
+                let value = move_sample(sample(index));
+                debug_assert!(
+                    value <= u16::from(u8::MAX),
+                    "an eight bit sample was scaled into its word"
+                );
+                row[index * channels + channel] = value as u8;
+            }
+        }
+        _ => {
+            // A row of fewer than eight bits a sample packs them most
+            // significant first, and the storage above has already scaled the
+            // value into that word. Such a row is one gray plane, so the flat
+            // sample index is the one the loop counts.
+            let bits = plan.stored_bits() as usize;
+            for index in 0..count {
+                let value = move_sample(sample(index));
+                debug_assert!(
+                    u32::from(value) < (1 << bits),
+                    "a packed sample was scaled into its word"
+                );
+                let at = index * bits;
+                row[at / 8] |= (value as u8) << (8 - bits - at % 8);
+            }
+        }
+    }
+}
+
+/// One row of one of a frame's planes.
+///
+/// # Safety
+///
+/// The frame has to be the one the plan was built from, so the row is inside
+/// the plane and `bytes` is no wider than its own row.
+unsafe fn row_samples(frame: &VideoFrame, plane: usize, y: usize, bytes: usize) -> &[u8] {
+    let stride = frame.stride(plane as i32) as usize;
+    // SAFETY: the caller promises the row is the frame's own, so the plane's
+    // stride addresses it and it holds at least `bytes`.
+    unsafe { std::slice::from_raw_parts(frame.plane(plane as i32).add(y * stride), bytes) }
+}
+
+/// One of a frame's planes as a conversion reads it.
+///
+/// # Safety
+///
+/// The frame has to be the one the plan was built from, so its plane `plane` is
+/// the shape the conversion's geometry was resolved against and holds
+/// `stride * height` bytes.
+unsafe fn conversion_plane(frame: &VideoFrame, plane: i32) -> Plane<'_> {
+    let stride = frame.stride(plane) as usize;
+    let height = frame.frame_height(plane) as usize;
+    Plane {
+        // SAFETY: the caller promises the plane is the one the plan validated.
+        data: unsafe { std::slice::from_raw_parts(frame.plane(plane), stride * height) },
+        stride,
+    }
+}
+
+/// The `cICP` payload the pixels of this write describe, if any.
 ///
 /// PNG states matrices with the field fixed at zero, so a frame whose `_Matrix`
 /// names a conversion is one this chunk cannot describe and is left alone; the
@@ -1046,17 +1502,24 @@ fn pack_plane(
 /// flag would then describe pixels the file does not hold. A frame that leaves
 /// both unset gets the chunk whenever it states primaries and transfer, since
 /// those two are exactly what the file's samples mean.
-fn frame_cicp(frame: &VideoFrame) -> Option<[u8; 4]> {
+///
+/// `converted` is what writing a yuv frame changes: the file holds r,g,b of the
+/// frame's own primaries and transfer, so those two are what it states, whatever
+/// the frame's `_Matrix` and `_Range` describe -- those describe the yuv planes
+/// the file does not hold.
+fn frame_cicp(frame: &VideoFrame, converted: bool) -> Option<[u8; 4]> {
     let primaries = u8::try_from(property_int(frame, key!(c"_Primaries"))?).ok()?;
     let transfer = u8::try_from(property_int(frame, key!(c"_Transfer"))?).ok()?;
     if primaries == UNSPECIFIED || transfer == UNSPECIFIED {
         return None;
     }
-    if property_int(frame, key!(c"_Matrix")).is_some_and(|matrix| matrix != 0) {
-        return None;
-    }
-    if property_int(frame, key!(c"_Range")).is_some_and(|range| range != 1) {
-        return None;
+    if !converted {
+        if property_int(frame, key!(c"_Matrix")).is_some_and(|matrix| matrix != 0) {
+            return None;
+        }
+        if property_int(frame, key!(c"_Range")).is_some_and(|range| range != 1) {
+            return None;
+        }
     }
     Some([primaries, transfer, 0, 1])
 }
@@ -1236,27 +1699,106 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_sixteen_bit_frame_needs_no_spread() {
-        assert_eq!(png_depth(8), BitDepth::Eight);
-        assert_eq!(png_depth(16), BitDepth::Sixteen);
-        let plan = FramePlan {
-            color_type: ColorType::Rgb,
-            bit_depth: BitDepth::Sixteen,
-            bits: 16,
-            spread: false,
-            color_planes: 3,
-            alpha: false,
+    /// A plan of one colour shape, which is what the storage and `sBIT` rules
+    /// are decided from without a frame to read them off.
+    fn plan_of(color_type: ColorType, planes: usize, bits: u32, stored: u32) -> FramePlan {
+        FramePlan {
+            color_type,
+            bit_depth: bit_depth_of(stored),
+            bits,
+            storage: storage_of(bits, stored),
+            source: Source::Planes,
+            color_planes: planes,
+            alpha: None,
             width: 4,
             height: 2,
-        };
-        assert!(significant_bits(&plan).is_none());
-        let spread = FramePlan {
+        }
+    }
+
+    #[test]
+    fn a_sixteen_bit_word_is_not_a_meaningful_one() {
+        // The chunk is written exactly when the stored word is wider than the
+        // samples are: an eight bit frame is an eight bit PNG and a ten bit one
+        // is a sixteen bit PNG whose low bits are not source information.
+        for bits in 8..=16u32 {
+            let stored = if bits > 8 { 16 } else { 8 };
+            let plan = plan_of(ColorType::Rgb, 3, bits, stored);
+            if bits == stored {
+                assert!(significant_bits(&plan).is_none(), "{bits} bit needs none");
+            } else {
+                assert_eq!(
+                    significant_bits(&plan),
+                    Some(vec![bits as u8; 3]),
+                    "{bits} bit states itself"
+                );
+            }
+        }
+        assert_eq!(
+            bit_depth_of(1),
+            BitDepth::One,
+            "a depth below a byte is one png has"
+        );
+        // A depth the caller asked for is a decision rather than a storage
+        // detail: sixteen bits from ten is still a widening, and eight bits
+        // from sixteen is a narrowing that leaves nothing to state.
+        let widened = plan_of(ColorType::Rgb, 3, 10, 16);
+        assert_eq!(widened.storage, Storage::Widen);
+        assert_eq!(significant_bits(&widened), Some(vec![10, 10, 10]));
+        let narrowed = plan_of(ColorType::Rgb, 3, 16, 8);
+        assert_eq!(narrowed.storage, Storage::Reduce);
+        assert!(significant_bits(&narrowed).is_none());
+        // The alpha channel states its own precision, which is the colour's
+        // whenever a clip gave the two the same depth.
+        let mut with_alpha = plan_of(ColorType::Rgba, 3, 10, 16);
+        with_alpha.alpha = Some(Alpha {
             bits: 10,
-            spread: true,
-            ..plan
-        };
-        assert_eq!(significant_bits(&spread), Some(vec![10, 10, 10]));
+            storage: Storage::Widen,
+        });
+        assert_eq!(significant_bits(&with_alpha), Some(vec![10, 10, 10, 10]));
+    }
+
+    #[test]
+    fn a_sample_moves_between_the_depths_it_is_stored_at() {
+        // Both ends of every pair are exact: zero is zero and the largest
+        // sample of the source is the largest of the target, which is what
+        // keeps a white white whether the word grew or shrank.
+        // The packed words are the same rule one level down: a gray frame asked
+        // for at one bit a sample is scaled into it rather than having to be its
+        // codes already, which is what writes back a picture the reader
+        // expanded.
+        for (from, to) in [
+            (16, 8),
+            (12, 8),
+            (10, 8),
+            (9, 8),
+            (8, 16),
+            (10, 16),
+            (8, 4),
+            (8, 2),
+            (8, 1),
+        ] {
+            let source_max = (1u32 << from) - 1;
+            let target_max = (1u32 << to) - 1;
+            let moved = |sample: u16| {
+                if to > from {
+                    widen(sample, from)
+                } else {
+                    reduce(sample, from, to)
+                }
+            };
+            assert_eq!(moved(0), 0, "{from} to {to}");
+            assert_eq!(
+                u32::from(moved(source_max as u16)),
+                target_max,
+                "{from} to {to}"
+            );
+        }
+        // Rounding is to nearest rather than a truncation, which is what makes
+        // the middle of a sixteen bit word the middle of an eight bit one.
+        assert_eq!(reduce(0, 16, 8), 0);
+        assert_eq!(reduce(32768, 16, 8), 128);
+        assert_eq!(reduce(65535, 16, 8), 255);
+        assert_eq!(reduce(4095, 12, 8), 255);
     }
 
     #[test]
