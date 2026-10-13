@@ -99,11 +99,11 @@ sample for sample rather than to a tolerance, and the two builds write byte
 identical files over a 19 page corpus of every chroma shape and depth;
 [BENCH.md](../BENCH.md#what-a-kernel-costs) has both tables.
 
-**NEON is not written.** The kernels are x86-64's, so an aarch64 build runs the
-scalar path. What a kernel does is not x86's own — a block of a row, one
-permute of the samples that block loaded, and the scalar remainder — so a third
-module beside `avx2` and `avx512`, entered from the same dispatch, is the whole
-of it.
+**NEON landed** as [41](41-neon-convert-kernel.md): a third module beside the
+two x86 ones, entered from the same dispatch, four columns a block and a byte
+table lookup for the taps rather than a register permute, with no runtime probe
+because NEON is in the aarch64 baseline. That leaves the encoder-only diagnosis
+above as the only part of this plan still open.
 
 ### what the conversion decides
 

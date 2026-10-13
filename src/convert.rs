@@ -1025,7 +1025,17 @@ mod tests {
                     // A row this wide is one a kernel has to have taken a
                     // block of, so a kernel that quietly declined every block
                     // fails here rather than passing by comparing nothing.
-                    if width >= 64 {
+                    // A machine without the kernel's feature answers with an
+                    // empty range (see `rgb_row_forced`), so only a kernel it
+                    // can run is held to having taken a block.
+                    #[cfg(target_arch = "x86_64")]
+                    let runnable = match *kernel {
+                        simd::Kernel::Avx2 => is_x86_feature_detected!("avx2"),
+                        simd::Kernel::Avx512 => is_x86_feature_detected!("avx512f"),
+                    };
+                    #[cfg(not(target_arch = "x86_64"))]
+                    let runnable = true;
+                    if width >= 64 && runnable {
                         assert!(done.end > 0, "the {name} kernel took no block of {what}");
                     }
                 }

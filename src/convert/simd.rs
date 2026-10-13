@@ -157,10 +157,9 @@ mod x86 {
         // features it was built for, and each one reads a plane inside the
         // bounds its own geometry was resolved against.
         unsafe {
-            // The byte and word extension of the 512 bit set is the one the
-            // kernel needs, and it cannot be reported without the foundation
-            // it is built on.
-            if is_x86_feature_detected!("avx512bw") {
+            // The kernel uses the foundation set of the 512 bit extensions
+            // alone, so that is the one it asks for.
+            if is_x86_feature_detected!("avx512f") {
                 avx512::rgb_row(c, rows, out, pattern)
             } else if is_x86_feature_detected!("avx2") {
                 avx2::rgb_row(c, rows, out, pattern)
@@ -185,7 +184,7 @@ mod x86 {
         // this is only reached from a test on the machine it is built for.
         unsafe {
             match kernel {
-                Kernel::Avx512 if is_x86_feature_detected!("avx512bw") => {
+                Kernel::Avx512 if is_x86_feature_detected!("avx512f") => {
                     avx512::rgb_row(c, rows, out, pattern)
                 }
                 Kernel::Avx2 if is_x86_feature_detected!("avx2") => {
@@ -495,7 +494,7 @@ mod x86 {
         ///
         /// The permute takes its index first here, which is the other way round
         /// from the 256 bit one.
-        #[target_feature(enable = "avx512f,avx512bw")]
+        #[target_feature(enable = "avx512f")]
         #[inline]
         unsafe fn interpolate(
             samples: __m512,
@@ -511,7 +510,7 @@ mod x86 {
         }
 
         /// One channel of a block as the levels a PNG stores.
-        #[target_feature(enable = "avx512f,avx512bw")]
+        #[target_feature(enable = "avx512f")]
         #[inline]
         unsafe fn levels(value: __m512, one: __m512, maximum: __m512, half: __m512) -> __m256i {
             let clamped = _mm512_max_ps(_mm512_min_ps(value, one), _mm512_setzero_ps());
@@ -525,7 +524,7 @@ mod x86 {
         }
 
         /// Stores one channel of a block into the row's own plane.
-        #[target_feature(enable = "avx512f,avx512bw")]
+        #[target_feature(enable = "avx512f")]
         #[inline]
         unsafe fn store(levels: __m256i, at: *mut u16) {
             // SAFETY: the caller keeps the sixteen samples inside the row.
@@ -533,7 +532,7 @@ mod x86 {
         }
 
         /// Loads sixteen samples of a plane as the values a matrix multiplies.
-        #[target_feature(enable = "avx512f,avx512bw")]
+        #[target_feature(enable = "avx512f")]
         #[inline]
         unsafe fn sixteen_u8(ptr: *const u8) -> __m512 {
             // SAFETY: the caller keeps the sixteen samples inside the plane.
@@ -542,7 +541,7 @@ mod x86 {
         }
 
         /// The same for a plane of sixteen bit samples.
-        #[target_feature(enable = "avx512f,avx512bw")]
+        #[target_feature(enable = "avx512f")]
         #[inline]
         unsafe fn sixteen_u16(ptr: *const u16) -> __m512 {
             // SAFETY: as above.
@@ -569,7 +568,7 @@ mod x86 {
         /// The row kernel, once for each width of source sample.
         macro_rules! kernel {
             ($name:ident, $sample:ty, $load:ident) => {
-                #[target_feature(enable = "avx512f,avx512bw")]
+                #[target_feature(enable = "avx512f")]
                 unsafe fn $name(
                     c: &Converter,
                     rows: &Rows<'_>,
