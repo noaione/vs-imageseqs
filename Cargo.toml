@@ -68,7 +68,7 @@ qoi = { version = "0.4.1", default-features = false, features = ["std"] }
 # revision is pinned here because the crate is not published on crates.io. see
 # `src/formats/webp.rs`, `src/animation/webp.rs` and
 # `docs/improvements/35-wpd-webp-decoder.md`.
-wpd = { git = "https://github.com/halidecx/wpd", rev = "45d5955260f6c44a1b6bea6954a4a34e818f3f8a" }
+wpd = { git = "https://github.com/halidecx/wpd", rev = "97da18b74888aea251d2b71db2f116aff66b23e9" }
 
 [profile.release]
 opt-level = 3

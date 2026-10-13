@@ -55,7 +55,7 @@ libde265 1.1.1
   Notice and license text: LICENSES/libde265-COPYING.txt
   Upstream: https://github.com/strukturag/libde265
 
-wpd 0.2.0 (git revision 45d5955260f6c44a1b6bea6954a4a34e818f3f8a)
+wpd 0.2.0 (git revision 97da18b74888aea251d2b71db2f116aff66b23e9)
   License: BSD 2-Clause "Simplified" License
   Linkage: statically linked, assembled from the crate's own NASM sources on
     x86 and x86-64 and from its assembler sources on ARM

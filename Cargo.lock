@@ -1021,7 +1021,7 @@ checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 [[package]]
 name = "wpd"
 version = "0.2.0"
-source = "git+https://github.com/halidecx/wpd?rev=45d5955260f6c44a1b6bea6954a4a34e818f3f8a#45d5955260f6c44a1b6bea6954a4a34e818f3f8a"
+source = "git+https://github.com/halidecx/wpd?rev=97da18b74888aea251d2b71db2f116aff66b23e9#97da18b74888aea251d2b71db2f116aff66b23e9"
 dependencies = [
  "cc",
  "nasm-rs",

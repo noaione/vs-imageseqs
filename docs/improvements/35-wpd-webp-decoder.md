@@ -3,7 +3,7 @@
 Status: **implemented** — wpd decodes an ordinary still and libwebp keeps the
 animated container's rectangle, canvas and blend. Investigated on 2026-10-04 and
 implemented on 2026-10-06 against wpd revision
-`45d5955260f6c44a1b6bea6954a4a34e818f3f8a`, which is what `Cargo.toml` pins;
+`97da18b74888aea251d2b71db2f116aff66b23e9`, which is what `Cargo.toml` pins;
 the research below was measured on `9748cedeedbea4bb195cab18273a33b04531c455`.
 This extends [34](34-input-routing-and-planar-decode.md).
 
