@@ -2,6 +2,10 @@
 
 ## unreleased
 
+nothing yet!
+
+## [0.3.0] - 2026-10-13
+
 ### added
 
 - `ImgSeqAnimationIndex` names the displayed picture's position within its own file, and is written on frames from an animated file
@@ -16,7 +20,7 @@
 ### changed
 
 - **The `image` crate is gone.** Every format this plugin reads has a reader of its own under `src/formats/`, and a file whose bytes and extension both name no format here is refused with `no reader here knows its format`. The plugin is about 435 KB smaller, and several of those readers are ports of that crate's, so its licence texts and notices stay
-  - `webp`: a still is decoded by `wpd`, with libwebp gone from the link, and described from its own chunks, so `ImgSeqOrientation` and `ImgSeqHasICC` come from the file. The still path is **1.2x to 1.3x faster**, the Windows library 134 KB smaller, a corrupt file is refused with the decoder's own words, and building on x86 or x86-64 still needs `nasm` on `PATH`
+  - `webp`: Now decoded with `wpd`, a much faster decoder. The still path is **1.2x to 1.3x faster**, the Windows library 134 KB smaller, a corrupt file is refused with the decoder's own words, and building on x86 or x86-64 still needs `nasm` on `PATH`
   - `tiff`: a WebP- or JPEG-compressed strip is decoded here, and a compression code this reader does not take is refused by name at the probe
   - `tiff`: one, two or four bit gray, gray plus alpha, cmyk (with alpha for the first time), palette and ycbcr pages are all read now, and a ycbcr page comes out as its own yuv planes with `_Matrix` and `_Range` from its tags
   - `tiff`: a page that states an orientation, carries an ICC profile or is a BigTIFF now reports all three
@@ -33,6 +37,7 @@
   - A sequence honours the `ctts` composition offsets and an edit list that ends its media early, clamping a sample composed before zero and refusing by name an edit list that starts partway into the media
   - A twelve bit subsampled page is handed out as `YUV420P12` or `YUV422P12`
 - A PAM whose `MAXVAL` is above a byte but which names no `TUPLTYPE` is read at the width its `MAXVAL` states
+- Replace `libwebp` with `wpd` for WebP decoding.
 
 ### fixed
 
