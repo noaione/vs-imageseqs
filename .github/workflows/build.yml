@@ -329,7 +329,7 @@ jobs:
         env:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
 
-      - name: fetch the vcpkg manifest baseline
+      - name: use vcpkg at the manifest baseline
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -345,6 +345,10 @@ jobs:
           }
           git -C $vcpkgRoot cat-file -e $baselineFile
           if ($LASTEXITCODE -ne 0) { throw "vcpkg baseline $baseline is missing versions/baseline.json" }
+          git -C $vcpkgRoot checkout --force --detach $baseline
+          if ($LASTEXITCODE -ne 0) { throw "Could not check out vcpkg baseline $baseline" }
+          & (Join-Path $vcpkgRoot 'bootstrap-vcpkg.bat') -disableMetrics
+          if ($LASTEXITCODE -ne 0) { throw "Could not bootstrap vcpkg at baseline $baseline" }
 
       - name: prepare vcpkg cache directory
         if: runner.os == 'Windows'
