@@ -395,7 +395,8 @@ def check_bundled_staging() -> None:
     stem = "libvs_imageseqs"
     cases = (
         ("macos", "macosx_12_0_arm64", ".dylib", ("",),
-         ("lib/libdav1d.7.dylib", "lib/libde265.0.2.1.dylib", "lib/libheif.1.dylib")),
+         ("lib/libdav1d.7.dylib", "lib/libde265.0.2.1.dylib",
+          "lib/libheif.1.23.5.dylib")),
         ("linux", "manylinux_2_28_x86_64", ".so", ("", ".avx2", ".avx512"),
          ("lib/libdav1d-test.so.7", "lib/libde265-test.so.0", "lib/libheif-test.so.1",
           "lib/libdav1d-unversioned.so")),
@@ -542,7 +543,9 @@ def check_linux_wheel() -> None:
     linux_wheel(
         dist,
         MUSLLINUX_TAG,
-        libraries=("libdav1d-abc.so.7", "libde265-abc.so.0", "libheif-abc.so.1", "libstdc++-abc.so.6", "libgcc_s-abc.so.1"),
+        libraries=(
+            "libdav1d-abc.so.7", "libde265-abc.so.0", "libheif-abc.so.1", "libstdc++-abc.so.6", "libgcc_s-abc.so.1"
+        ),
     )
 
     result = run("check-linux-wheel.py", "--tag", MUSLLINUX_TAG, *allowed, str(dist))
@@ -695,12 +698,20 @@ def check_linux_native_cache() -> None:
         check(cache.fingerprint("manylinux") != original, "native cache: changing the container invalidates the key")
         workflow.write_text("container: first-image", encoding="utf-8")
         script.write_text("different native build options", encoding="utf-8")
-        check(cache.fingerprint("manylinux") != original, "native cache: changing the native recipe invalidates the key")
+        check(
+            cache.fingerprint("manylinux") != original, "native cache: changing the native recipe invalidates the key"
+        )
         script.write_text("native build options", encoding="utf-8")
         with patch.dict(os.environ, {"CFLAGS": "-march=native"}):
-            check(cache.fingerprint("manylinux") != original, "native cache: changing compiler flags invalidates the key")
-        with patch.object(cache.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "tool version 2", "")):
-            check(cache.fingerprint("manylinux") != original, "native cache: changing installed tools invalidates the key")
+            check(
+                cache.fingerprint("manylinux") != original, "native cache: changing compiler flags invalidates the key"
+            )
+        with patch.object(
+            cache.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "tool version 2", "")
+        ):
+            check(
+                cache.fingerprint("manylinux") != original, "native cache: changing installed tools invalidates the key"
+            )
 
     github_files = {name: str(SCRATCH / "native-cache" / name)
                     for name in ("GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT")}

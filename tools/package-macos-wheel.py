@@ -21,7 +21,7 @@ SYSTEM_PREFIXES = ("/usr/lib/", "/System/")
 EXPECTED_LIBRARIES = {
     "libdav1d.7.dylib",
     "libde265.0.2.1.dylib",
-    "libheif.1.dylib",
+    "libheif.1.23.5.dylib",
 }
 
 
