@@ -329,6 +329,23 @@ jobs:
         env:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
 
+      - name: fetch the vcpkg manifest baseline
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $manifest = Get-Content vcpkg.json -Raw | ConvertFrom-Json
+          $baseline = $manifest.'builtin-baseline'
+          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
+          if ([string]::IsNullOrWhiteSpace($vcpkgRoot)) { $vcpkgRoot = 'C:\vcpkg' }
+          $baselineFile = "${baseline}:versions/baseline.json"
+          git -C $vcpkgRoot cat-file -e $baselineFile 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            git -C $vcpkgRoot fetch --no-tags --depth=1 https://github.com/microsoft/vcpkg.git $baseline
+            if ($LASTEXITCODE -ne 0) { throw "Could not fetch vcpkg baseline $baseline" }
+          }
+          git -C $vcpkgRoot cat-file -e $baselineFile
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg baseline $baseline is missing versions/baseline.json" }
+
       - name: prepare vcpkg cache directory
         if: runner.os == 'Windows'
         shell: pwsh

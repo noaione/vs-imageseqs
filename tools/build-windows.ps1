@@ -32,6 +32,7 @@ $pkgconfig = Join-Path $InstallRoot "$triplet\lib\pkgconfig"
 if (-not (Test-Path -LiteralPath $vcpkg -PathType Leaf)) {
     throw "vcpkg was not found at '$vcpkg'. Set VCPKG_INSTALLATION_ROOT or pass -VcpkgRoot."
 }
+$env:VCPKG_ROOT = $VcpkgRoot
 
 Push-Location $repoRoot
 try {
