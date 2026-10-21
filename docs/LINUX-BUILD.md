@@ -10,7 +10,7 @@ The ordinary Hatch build produces an intermediate `linux_x86_64` wheel; only
 the repaired wheels are uploaded to PyPI or GitHub Releases. A glibc host
 cannot load the musl wheel and the other way round, which is why both exist.
 
-`tools/build-manylinux.sh` and `tools/build-musllinux.sh` build dav1d 1.5.3,
+`tools/build-manylinux.sh` and `tools/build-musllinux.sh` build dav1d 1.5.4,
 libde265 1.1.1, and libheif 1.23.5 as shared libraries inside their own
 container. Their source archive versions and SHA-512 hashes are pinned in the
 build scripts and `tools/libheif-pin.sh`. `tools/build-libheif.sh` enables only

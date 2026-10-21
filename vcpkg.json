@@ -18,7 +18,7 @@
     },
     {
       "name": "dav1d",
-      "version": "1.5.3"
+      "version": "1.5.4"
     }
   ],
   "builtin-baseline": "d2a7fe3b65d9da998303829e5d2c72d38f67748f",

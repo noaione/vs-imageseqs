@@ -3,7 +3,7 @@
 This directory contains the license texts and notices that accompany the
 native components used by the plugin, whether linked statically or bundled as
 shared libraries. Linux and macOS release wheels and plugin ZIPs bundle
-libheif 1.23.5, dav1d 1.5.3, and libde265 1.1.1 as shared libraries. The
+libheif 1.23.5, dav1d 1.5.4, and libde265 1.1.1 as shared libraries. The
 musllinux wheel also bundles the C++ runtime shared libheif needs, which the
 musl auditwheel policy does not promise the host provides. The accompanying
 `linux-relink-source.tar.gz` and `linux-musl-relink-source.tar.gz` provide the
@@ -14,7 +14,7 @@ build.
 
 These files are copied verbatim from the dependency sources used by the build:
 
-- `dav1d-COPYING.txt` — dav1d 1.5.3, BSD 2-Clause.
+- `dav1d-COPYING.txt` — dav1d 1.5.4, BSD 2-Clause.
 - `libheif-COPYING.txt` — libheif 1.23.5, including its LGPLv3 library text
   and the upstream bundled GPL/MIT license text sections.
 - `libde265-COPYING.txt` — libde265 1.1.1, including its LGPLv3 library text

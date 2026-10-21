@@ -24,9 +24,9 @@ fetch() {
     tar -xzf "$archive" --strip-components=1 -C "$temporary/$name"
 }
 
-fetch dav1d-1.5.3 https://github.com/videolan/dav1d/archive/1.5.3.tar.gz \
-    8d976b93135213d41385c20205475269a6826a68ebfd716c4d9a7a3ff2a79703e8df0573e43207c81b5db44807d2721db18ec84c0fc6bef98efab86a2cccb6cc
-meson setup "$temporary/dav1d-build" "$temporary/dav1d-1.5.3" \
+fetch dav1d-1.5.4 https://github.com/videolan/dav1d/archive/1.5.4.tar.gz \
+    7ee5906640495919462b2242c44a8c3cc577fdda52fc25257792f6df919429d54e4a48c315a7a11759385f044f68d3d6573fd720853f447e2d8520a13693827f
+meson setup "$temporary/dav1d-build" "$temporary/dav1d-1.5.4" \
     --prefix "$prefix" --libdir lib --buildtype release --default-library shared \
     -Denable_tests=false -Denable_tools=false
 meson compile -C "$temporary/dav1d-build"

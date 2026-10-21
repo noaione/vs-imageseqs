@@ -12,7 +12,7 @@ sources; Cargo.lock selects the OpenJPEG sources:
 
   * libheif 1.23.5
   * libde265 1.1.1
-  * dav1d 1.5.3
+  * dav1d 1.5.4
   * wpd 0.2.0, at the exact git revision named in `Cargo.toml`
   * OpenJPEG (vendored by openjpeg-sys 1.0.12)
 
@@ -32,7 +32,7 @@ Public License Version 2.0. See LICENSE.
 Native components
 -----------------
 
-dav1d 1.5.3
+dav1d 1.5.4
   License: BSD 2-Clause "Simplified" License
   Linkage: static on Windows; shared on Unix, bundled in Linux and macOS release artifacts
   Usage: the plugin's direct AVIF decoder and libheif's AVIF sequence backend

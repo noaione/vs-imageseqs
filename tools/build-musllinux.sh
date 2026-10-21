@@ -61,8 +61,8 @@ PY
 
 # Same upstream versions and archive hashes as the repository's Windows and
 # manylinux inputs.
-fetch dav1d-1.5.3 https://github.com/videolan/dav1d/archive/1.5.3.tar.gz \
-    8d976b93135213d41385c20205475269a6826a68ebfd716c4d9a7a3ff2a79703e8df0573e43207c81b5db44807d2721db18ec84c0fc6bef98efab86a2cccb6cc
+fetch dav1d-1.5.4 https://github.com/videolan/dav1d/archive/1.5.4.tar.gz \
+    7ee5906640495919462b2242c44a8c3cc577fdda52fc25257792f6df919429d54e4a48c315a7a11759385f044f68d3d6573fd720853f447e2d8520a13693827f
 fetch libde265-1.1.1 https://github.com/strukturag/libde265/archive/v1.1.1.tar.gz \
     fb2207f5a3ba901853f61f345c72130f000134918febbc4f3529c3d289fc79ee7457b3e61660110f698bb4ac15d62426e284034bf870bfbd1859ab3feaa52be8
 fetch "libheif-$LIBHEIF_VERSION" "$LIBHEIF_SOURCE_URL" "$LIBHEIF_SHA512"
@@ -73,7 +73,7 @@ if [ "$native_cached" != true ]; then
         reconfigure=--reconfigure
     fi
     # shellcheck disable=SC2086
-    meson setup $reconfigure "$work/dav1d-build" "$work/sources/dav1d-1.5.3" \
+    meson setup $reconfigure "$work/dav1d-build" "$work/sources/dav1d-1.5.4" \
         --prefix "$prefix" --libdir lib --buildtype release --default-library shared \
         -Denable_tests=false -Denable_tools=false
     meson compile -C "$work/dav1d-build"

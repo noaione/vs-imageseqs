@@ -11,6 +11,7 @@
 - Enable SIMD stuff on `zune-jpeg`
 - Bump jxl to `0.8.0`
   - This changes some internal stuff to use Event-driven API for decoding animation.
+- Bump dav1d to `1.5.4`
 
 ## [0.3.0] - 2026-10-13
 
