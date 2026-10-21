@@ -17,13 +17,13 @@
 //! **One of those fields is why this module exists.** A jpeg xl file states its
 //! orientation the way an exif tag does, and the decoder renders the picture that
 //! code describes: the raster it hands over is the *display* picture and the size
-//! it reports is the display size. There is no way to ask for the stored picture
-//! instead - `JxlDecoderOptions::adjust_orientation` is declared and read nowhere
-//! in 0.7.4 - and the adapter did not implement `orientation()`, so a file that
-//! states 6 was handed out the way 6 describes while `ImgSeqOrientation` said 1
-//! and `apply_rotation=False` changed nothing. This module reports the code, and
-//! turns rotation off by applying the code *inverted* to what the decoder
-//! produced, which is the stored picture. See `docs/improvements/11-jxl-direct.md`.
+//! it reports is the display size, and this module reports the code, turning
+//! rotation off by applying that code *inverted* to what the decoder produced,
+//! which is the stored picture. The decoder stays at its default
+//! `adjust_orientation`: asking for the codestream order would make the header
+//! report the stored size, and a probe names the display size beside the code
+//! whether rotation will be applied or not. See
+//! `docs/improvements/11-jxl-direct.md`.
 
 use std::{
     fs::File,
@@ -34,13 +34,10 @@ use std::{
 };
 
 use crate::layout::{ColorType, Orientation};
-use jxl::{
-    api::{
-        Endianness, JxlBitDepth, JxlColorEncoding, JxlColorProfile, JxlColorType, JxlDataFormat,
-        JxlDecoder, JxlDecoderOptions, JxlOutputBuffer, JxlPixelFormat, JxlPrimaries,
-        JxlTransferFunction, JxlWhitePoint, ProcessingResult, states,
-    },
-    headers::{Orientation as JxlOrientation, extra_channels::ExtraChannel},
+use jxl::api::{
+    Endianness, Event, ExtraChannel, JxlBitDepth, JxlColorEncoding, JxlColorProfile, JxlColorType,
+    JxlDataFormat, JxlDecoder, JxlDecoderOptions, JxlOutputBuffer, JxlPixelFormat, JxlPrimaries,
+    JxlTransferFunction, JxlWhitePoint, Orientation as JxlOrientation,
 };
 
 use crate::{
@@ -102,8 +99,10 @@ pub struct Header {
 impl Header {
     /// Reads everything the codestream states, from a decoder that has read the
     /// file header and nothing else.
-    pub fn read(decoder: &JxlDecoder<states::WithImageInfo>, path: &Path) -> Result<Self> {
-        let info = decoder.basic_info();
+    pub fn read(decoder: &JxlDecoder, path: &Path) -> Result<Self> {
+        let info = decoder
+            .basic_info()
+            .ok_or_else(|| image_error("decode", path, "the decoder holds no image info"))?;
         let (width, height) = size_of(info.size, path)?;
         let extra_channels = info.extra_channels.len();
         let has_alpha = info
@@ -113,14 +112,20 @@ impl Header {
         // The layout the decoder itself has for the file is what says whether it
         // is grayscale; the color profile is not asked, because a file may state
         // one as an icc profile, whose color space this does not interpret.
-        let grayscale = decoder.current_pixel_format().color_type.is_grayscale();
+        let grayscale = decoder
+            .current_pixel_format()
+            .ok_or_else(|| image_error("decode", path, "the decoder holds no pixel format"))?
+            .color_type
+            .is_grayscale();
         let (color_type, jxl_color_type, data_format) =
             output_format(&info.bit_depth, grayscale, has_alpha);
         let depth = match &info.bit_depth {
             JxlBitDepth::Int { bits_per_sample } => *bits_per_sample,
             JxlBitDepth::Float { .. } => 32,
         };
-        let profile = decoder.embedded_color_profile();
+        let profile = decoder
+            .embedded_color_profile()
+            .ok_or_else(|| image_error("decode", path, "the decoder holds no color profile"))?;
         Ok(Self {
             width,
             height,
@@ -415,7 +420,7 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
         .decoder
         .set_pixel_format(header.pixel_format())
         .map_err(|error| decode_error(&info.path, error))?;
-    let decoder = to_frame(opened.decoder, &mut opened.input, &info.path)?;
+    to_frame(&mut opened.decoder, &mut opened.input, &info.path)?;
 
     let rows = usize::try_from(header.height)
         .map_err(|_| ImgSeqError::new("image height does not fit in memory"))?;
@@ -436,7 +441,7 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     let read_started = Instant::now();
     if pixels.as_ptr().align_offset(sample_bytes) == 0 {
         draw(
-            decoder,
+            &mut opened.decoder,
             &mut opened.input,
             &mut pixels,
             rows,
@@ -451,7 +456,7 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
         // that path.
         let mut aligned = Aligned::new(size, sample_bytes);
         draw(
-            decoder,
+            &mut opened.decoder,
             &mut opened.input,
             aligned.bytes(),
             rows,
@@ -483,7 +488,7 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
 /// A file whose header has been read, with its decoder waiting for the frame.
 struct Opened {
     input: BufReader<File>,
-    decoder: JxlDecoder<states::WithImageInfo>,
+    decoder: JxlDecoder,
     /// Time the file handle took, which is the two probes below.
     open: Duration,
     /// Time the file header took, which is the size, the depth, the orientation
@@ -504,8 +509,8 @@ fn open_header(path: &Path) -> Result<Opened> {
     let open = open_started.elapsed();
 
     let metadata_started = Instant::now();
-    let decoder = JxlDecoder::<states::Initialized>::new(JxlDecoderOptions::default());
-    let decoder = to_image_info(decoder, &mut input, path)?;
+    let mut decoder = JxlDecoder::new(JxlDecoderOptions::default());
+    to_image_info(&mut decoder, &mut input, path)?;
     let metadata = metadata_started.elapsed();
 
     Ok(Opened {
@@ -522,16 +527,14 @@ fn open_header(path: &Path) -> Result<Opened> {
 /// once the header is in -- which is what lets it share the probe's one open
 /// rather than make one whose lifetime is the header's. [`open_header`] is the
 /// decode's form and still owns its reader, because the decode goes on reading.
-fn header_over(
-    file: &mut BufReader<File>,
-    path: &Path,
-) -> Result<JxlDecoder<states::WithImageInfo>> {
+fn header_over(file: &mut BufReader<File>, path: &Path) -> Result<JxlDecoder> {
     // The signatures are at the front of the file and the decoder is handed the
     // same reader below, so it needs the file from its first byte.
     std::io::Seek::rewind(file).map_err(|error| image_error("open", path, error))?;
     check_signature(file, path)?;
-    let decoder = JxlDecoder::<states::Initialized>::new(JxlDecoderOptions::default());
-    to_image_info(decoder, file, path)
+    let mut decoder = JxlDecoder::new(JxlDecoderOptions::default());
+    to_image_info(&mut decoder, file, path)?;
+    Ok(decoder)
 }
 
 /// Whether a jpeg xl codestream states that it holds a timeline.
@@ -547,7 +550,9 @@ fn header_over(
 /// be read.
 pub(crate) fn states_animation(file: &mut BufReader<File>, path: &Path) -> Result<bool> {
     let decoder = header_over(file, path)?;
-    Ok(decoder.basic_info().animation.is_some())
+    Ok(decoder
+        .basic_info()
+        .is_some_and(|info| info.animation.is_some()))
 }
 
 /// Reads the two signatures a jpeg xl file starts with, without using the bytes
@@ -568,41 +573,47 @@ fn check_signature(input: &mut BufReader<File>, path: &Path) -> Result<()> {
 }
 
 /// Reads the file header of a file whose decoder has just been created.
-fn to_image_info(
-    mut decoder: JxlDecoder<states::Initialized>,
-    input: &mut BufReader<File>,
-    path: &Path,
-) -> Result<JxlDecoder<states::WithImageInfo>> {
+fn to_image_info(decoder: &mut JxlDecoder, input: &mut BufReader<File>, path: &Path) -> Result<()> {
     loop {
         match decoder
-            .process(input, None)
+            .process(input, None, None)
             .map_err(|error| decode_error(path, error))?
         {
-            ProcessingResult::Complete { result } => return Ok(result),
-            ProcessingResult::NeedsMoreInput { fallback, .. } => {
-                decoder = fallback;
-                more_input(input, path)?;
+            Event::BasicInfo => return Ok(()),
+            Event::NeedMoreInput { .. } => more_input(input, path)?,
+            // A file that ends before its header cannot be described, and the
+            // decoder reports that as the end of a decode it never started.
+            Event::Complete => {
+                return Err(image_error(
+                    "decode",
+                    path,
+                    "the file ended before its image header",
+                ));
             }
+            // The frame events cannot come before the image info that names
+            // them, so anything else is a decode that already moved on.
+            _ => {}
         }
     }
 }
 
 /// Reads the frame header of a file whose image info has just been read.
-fn to_frame(
-    mut decoder: JxlDecoder<states::WithImageInfo>,
-    input: &mut BufReader<File>,
-    path: &Path,
-) -> Result<JxlDecoder<states::WithFrameInfo>> {
+fn to_frame(decoder: &mut JxlDecoder, input: &mut BufReader<File>, path: &Path) -> Result<()> {
     loop {
         match decoder
-            .process(input, None)
+            .process(input, None, None)
             .map_err(|error| decode_error(path, error))?
         {
-            ProcessingResult::Complete { result } => return Ok(result),
-            ProcessingResult::NeedsMoreInput { fallback, .. } => {
-                decoder = fallback;
-                more_input(input, path)?;
+            Event::FrameHeader => return Ok(()),
+            Event::NeedMoreInput { .. } => more_input(input, path)?,
+            Event::Complete => {
+                return Err(image_error(
+                    "decode",
+                    path,
+                    "the file ended before its first frame",
+                ));
             }
+            _ => {}
         }
     }
 }
@@ -613,7 +624,7 @@ fn to_frame(
 /// is why this is a loop: the frame can arrive in any number of pieces, and only
 /// the last answer means the buffer holds the whole picture.
 fn draw(
-    mut decoder: JxlDecoder<states::WithFrameInfo>,
+    decoder: &mut JxlDecoder,
     input: &mut BufReader<File>,
     buffer: &mut [u8],
     rows: usize,
@@ -623,14 +634,19 @@ fn draw(
     let mut output = JxlOutputBuffer::new(buffer, rows, row_bytes);
     loop {
         match decoder
-            .process(&mut *input, std::slice::from_mut(&mut output), None)
+            .process(input, Some(std::slice::from_mut(&mut output)), None)
             .map_err(|error| decode_error(path, error))?
         {
-            ProcessingResult::Complete { .. } => return Ok(()),
-            ProcessingResult::NeedsMoreInput { fallback, .. } => {
-                decoder = fallback;
-                more_input(input, path)?;
+            Event::FrameComplete { .. } => return Ok(()),
+            Event::NeedMoreInput { .. } => more_input(input, path)?,
+            Event::Complete => {
+                return Err(image_error(
+                    "decode",
+                    path,
+                    "the file ended before the picture did",
+                ));
             }
+            _ => {}
         }
     }
 }

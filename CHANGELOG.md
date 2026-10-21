@@ -9,6 +9,8 @@
   - Also, CI now pin the native builds to this version on every platform for consistency.
   - Drop `embedded_libheif` feature, which was only used for the Linux build and is now unnecessary.
 - Enable SIMD stuff on `zune-jpeg`
+- Bump jxl to `0.8.0`
+  - This changes some internal stuff to use Event-driven API for decoding animation.
 
 ## [0.3.0] - 2026-10-13
 

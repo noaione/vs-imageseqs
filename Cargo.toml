@@ -35,7 +35,7 @@ exr = "1.74.2"
 libheif-rs = { version = "3.0.0", default-features = false, features = [
     "v1_23", # expose the 1.23 API; CI pins the native library to 1.23.5
 ] }
-jxl = { version = "0.7.4", default-features = false, features = [
+jxl = { version = "0.8.0", default-features = false, features = [
     "all-simd"
 ] }
 dav1d = { version = "0.11.1", default-features = false }

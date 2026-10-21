@@ -24,9 +24,7 @@ use std::{
     sync::Arc,
 };
 
-use jxl::api::{
-    JxlDecoder, JxlDecoderOptions, JxlOutputBuffer, ProcessingResult, VisibleFrameInfo, states,
-};
+use jxl::api::{Event, JxlDecoder, JxlDecoderOptions, JxlOutputBuffer, VisibleFrameInfo};
 
 use crate::{
     decoder::{DecodeTimings, DecodedImage, Pixels, image_error},
@@ -139,54 +137,34 @@ fn scan(bytes: &[u8], path: &Path) -> Result<Option<Scan>> {
     // animation is indexed without decoding a pixel of it.
     options.scan_frames_only = true;
     let mut input = bytes;
-    let mut decoder = JxlDecoder::<states::Initialized>::new(options);
-    let mut with_info = loop {
-        match decoder
-            .process(&mut input, None)
-            .map_err(|error| decode_error(path, error))?
-        {
-            ProcessingResult::Complete { result } => break result,
-            ProcessingResult::NeedsMoreInput { fallback, .. } => decoder = fallback,
-        }
-    };
+    let mut decoder = JxlDecoder::new(options);
+    to_basic_info(&mut decoder, &mut input, path)?;
 
-    let Some(animation) = with_info.basic_info().animation.as_ref() else {
+    let Some(animation) = decoder
+        .basic_info()
+        .and_then(|info| info.animation.as_ref())
+    else {
         return Ok(None);
     };
     let timescale = (animation.tps_numerator, animation.tps_denominator);
-    if !with_info.has_more_frames() {
-        return Ok(None);
-    }
     // The header is read before the scan advances the decoder, because the
-    // state it is read from is the one the scan leaves behind.
-    let header = Header::read(&with_info, path)?;
+    // layout it reports is the one the file states rather than the one a
+    // rendered frame is laid out in.
+    let header = Header::read(&decoder, path)?;
 
     loop {
-        let mut with_frame = loop {
-            match with_info
-                .process(&mut input, None)
-                .map_err(|error| decode_error(path, error))?
-            {
-                ProcessingResult::Complete { result } => break result,
-                ProcessingResult::NeedsMoreInput { fallback, .. } => with_info = fallback,
-            }
-        };
-        with_info = loop {
-            match with_frame
-                .skip_frame(&mut input)
-                .map_err(|error| decode_error(path, error))?
-            {
-                ProcessingResult::Complete { result } => break result,
-                ProcessingResult::NeedsMoreInput { fallback, .. } => with_frame = fallback,
-            }
-        };
-        if !with_info.has_more_frames() {
-            break;
+        match decoder
+            .process(&mut input, None, None)
+            .map_err(|error| decode_error(path, error))?
+        {
+            Event::Complete => break,
+            Event::NeedMoreInput { .. } => more_input(input, path)?,
+            _ => {}
         }
     }
 
     Ok(Some(Scan {
-        frames: with_info.scanned_frames().to_vec(),
+        frames: decoder.scanned_frames().to_vec(),
         timescale,
         header,
     }))
@@ -222,20 +200,6 @@ impl JxlSource {
                 self.path.display()
             ))
         })?;
-        let offset =
-            usize::try_from(target.seek_target.decode_start_file_offset).map_err(|_| {
-                ImgSeqError::new(format!(
-                    "animated image '{}' seeks past what this build can address",
-                    self.path.display()
-                ))
-            })?;
-        let mut input = self.bytes.get(offset..).ok_or_else(|| {
-            ImgSeqError::new(format!(
-                "animated image '{}' seeks past the end of its own data",
-                self.path.display()
-            ))
-        })?;
-
         // A decoder is built per presentation and started at that frame's own
         // checkpoint. Walking one decoder through successive frames instead is
         // measurably cheaper, and was tried: it fails on a codestream whose
@@ -244,32 +208,32 @@ impl JxlSource {
         // decoder's own setup rather than the file's structure, because the
         // header was read once when the file was scanned.
         let options = JxlDecoderOptions::default();
+        let mut decoder = JxlDecoder::new(options);
         let mut head = self.bytes.as_ref();
-        let mut decoder = JxlDecoder::<states::Initialized>::new(options);
-        let mut with_info = loop {
-            match decoder
-                .process(&mut head, None)
-                .map_err(|error| decode_error(&self.path, error))?
-            {
-                ProcessingResult::Complete { result } => break result,
-                ProcessingResult::NeedsMoreInput { fallback, .. } => decoder = fallback,
-            }
-        };
-        with_info
+        to_basic_info(&mut decoder, &mut head, &self.path)?;
+        decoder
             .set_pixel_format(self.header.pixel_format())
             .map_err(|error| decode_error(&self.path, error))?;
-        with_info.start_new_frame(target.seek_target);
+        // The seek target names the file offset the decoder wants next, which
+        // is not always the frame's own start: a frame that references earlier
+        // ones asks for the earliest they were stored at.
+        let offset = decoder
+            .start_new_frame(target.seek_target)
+            .map_err(|error| decode_error(&self.path, error))?;
+        let offset = usize::try_from(offset).map_err(|_| {
+            ImgSeqError::new(format!(
+                "animated image '{}' seeks past what this build can address",
+                self.path.display()
+            ))
+        })?;
+        let mut input = self.bytes.get(offset..).ok_or_else(|| {
+            ImgSeqError::new(format!(
+                "animated image '{}' seeks past the end of its own data",
+                self.path.display()
+            ))
+        })?;
+        to_frame(&mut decoder, &mut input, &self.path)?;
         let header = &self.header;
-
-        let with_frame = loop {
-            match with_info
-                .process(&mut input, None)
-                .map_err(|error| decode_error(&self.path, error))?
-            {
-                ProcessingResult::Complete { result } => break result,
-                ProcessingResult::NeedsMoreInput { fallback, .. } => with_info = fallback,
-            }
-        };
 
         let rows = usize::try_from(header.height)
             .map_err(|_| ImgSeqError::new("image height does not fit in memory"))?;
@@ -288,7 +252,7 @@ impl JxlSource {
         // can be written; a buffer already aligned for that is used directly.
         if pixels.as_ptr().align_offset(sample_bytes) == 0 {
             render_into(
-                with_frame,
+                &mut decoder,
                 &mut input,
                 &mut pixels,
                 rows,
@@ -298,7 +262,7 @@ impl JxlSource {
         } else {
             let mut aligned = Aligned::new(size, sample_bytes);
             render_into(
-                with_frame,
+                &mut decoder,
                 &mut input,
                 aligned.bytes(),
                 rows,
@@ -329,7 +293,7 @@ impl JxlSource {
 
 /// Draws one frame into `buffer`, asking for more input as the decoder wants it.
 fn render_into(
-    mut decoder: JxlDecoder<states::WithFrameInfo>,
+    decoder: &mut JxlDecoder,
     input: &mut &[u8],
     buffer: &mut [u8],
     rows: usize,
@@ -339,22 +303,75 @@ fn render_into(
     let mut output = JxlOutputBuffer::new(buffer, rows, row_bytes);
     loop {
         match decoder
-            .process(&mut *input, std::slice::from_mut(&mut output), None)
+            .process(&mut *input, Some(std::slice::from_mut(&mut output)), None)
             .map_err(|error| decode_error(path, error))?
         {
-            ProcessingResult::Complete { .. } => return Ok(()),
-            ProcessingResult::NeedsMoreInput { fallback, .. } => {
-                if input.is_empty() {
-                    return Err(image_error(
-                        "decode",
-                        path,
-                        "the file ended before the picture did",
-                    ));
-                }
-                decoder = fallback;
+            Event::FrameComplete { .. } => return Ok(()),
+            Event::NeedMoreInput { .. } => more_input(input, path)?,
+            Event::Complete => {
+                return Err(image_error(
+                    "decode",
+                    path,
+                    "the file ended before the picture did",
+                ));
             }
+            _ => {}
         }
     }
+}
+
+/// Drives a decoder that has just been created until it has the image header.
+fn to_basic_info(decoder: &mut JxlDecoder, input: &mut &[u8], path: &Path) -> Result<()> {
+    loop {
+        match decoder
+            .process(&mut *input, None, None)
+            .map_err(|error| decode_error(path, error))?
+        {
+            Event::BasicInfo => return Ok(()),
+            Event::NeedMoreInput { .. } => more_input(input, path)?,
+            Event::Complete => {
+                return Err(image_error(
+                    "decode",
+                    path,
+                    "the file ended before its image header",
+                ));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Drives a decoder that has its image header until it has the frame header.
+fn to_frame(decoder: &mut JxlDecoder, input: &mut &[u8], path: &Path) -> Result<()> {
+    loop {
+        match decoder
+            .process(&mut *input, None, None)
+            .map_err(|error| decode_error(path, error))?
+        {
+            Event::FrameHeader => return Ok(()),
+            Event::NeedMoreInput { .. } => more_input(input, path)?,
+            Event::Complete => {
+                return Err(image_error(
+                    "decode",
+                    path,
+                    "the file ended before its first frame",
+                ));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Reports a decoder that asked for more bytes than the slice holds.
+fn more_input(input: &[u8], path: &Path) -> Result<()> {
+    if input.is_empty() {
+        return Err(image_error(
+            "decode",
+            path,
+            "the file ended before the picture did",
+        ));
+    }
+    Ok(())
 }
 
 fn decode_error(path: &Path, error: jxl::error::Error) -> ImgSeqError {

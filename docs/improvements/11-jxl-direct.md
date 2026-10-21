@@ -214,9 +214,11 @@ them:
   to, so the stored size and the code can only be had from a second header parse.
   It costs 0.065 ms per file and only when `apply_rotation=False`, and it is what
   makes `ImgSeqOrientation` non-empty for a jxl at all.
-- **`adjust_orientation` is a trap for a future upgrade**: the option exists in
-  0.7.4, is read nowhere, and the render applies the codestream's code whatever it
-  says. If a later version honours it, the option must be left `true` — the
+- **`adjust_orientation` is honoured since `jxl 0.8.0`**: the option existed in
+  0.7.4 and was read nowhere, so the render applied the codestream's code
+  whatever it said. 0.8.0 reads it, and the option must stay `true`: asking for
+  the codestream order would make `basic_info()` report the stored size, and
+  this module reports the display size beside the code — the
   `src/formats/jxl.rs` module doc and the size coupling above record the
   reasoning.
 - **decoding straight into the frame's planes**: `JxlOutputBuffer::new_from_ptr`
