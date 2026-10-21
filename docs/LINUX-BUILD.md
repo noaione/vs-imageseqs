@@ -10,12 +10,13 @@ The ordinary Hatch build produces an intermediate `linux_x86_64` wheel; only
 the repaired wheels are uploaded to PyPI or GitHub Releases. A glibc host
 cannot load the musl wheel and the other way round, which is why both exist.
 
-`tools/build-manylinux.sh` and `tools/build-musllinux.sh` each build dav1d
-1.5.3 and libde265 1.1.1 as shared libraries inside their own container. Their
-archive versions and SHA-512 hashes are pinned in both. Cargo.lock selects the
-embedded libheif and OpenJPEG sources, the webp decoder is the `wpd` crate's
-own assembler output, and the same CMake toolchain file disables
-discovery of extra libheif codecs, including x265, on either platform. The musl
+`tools/build-manylinux.sh` and `tools/build-musllinux.sh` build dav1d 1.5.3,
+libde265 1.1.1, and libheif 1.23.5 as shared libraries inside their own
+container. Their source archive versions and SHA-512 hashes are pinned in the
+build scripts and `tools/libheif-pin.sh`. `tools/build-libheif.sh` enables only
+the libde265 and dav1d backends, while the CMake toolchain disables discovery
+of extra codecs, including x265. Cargo.lock selects the OpenJPEG sources and
+the webp decoder is the `wpd` crate's own assembler output. The musl
 build adds what Alpine calls its toolchain: `nasm` and `pkgconf` from `apk`,
 cmake, meson and ninja from PyPI, and the Rust toolchain the script installs
 with rustup because the image carries none. It builds the plugin for
@@ -37,11 +38,11 @@ either build script still prepare their own environment. See
 timing checks.
 
 Auditwheel checks the requested ABI baseline and bundles the non-system shared
-libraries with rewritten names. What counts as a system library is the
-platform's policy, and the two differ: on glibc the C++ runtime the embedded
-libheif needs is part of the policy, and on musl only libc and libz are, so
-auditwheel bundles libstdc++ and libgcc_s into the musl wheel rather than
-leave the plugin needing one Alpine does not install by default.
+libraries with rewritten names, including libheif. What counts as a system
+library is the platform's policy, and the two differ: on glibc the C++ runtime
+the shared libheif needs is part of the policy, and on musl only libc and libz
+are, so auditwheel bundles libstdc++ and libgcc_s into the musl wheel rather
+than leave the plugin needing one Alpine does not install by default.
 `tools/package-linux-wheel.py` moves whatever was bundled into
 `vapoursynth/plugins/imageseqs/lib/`, sets the plugin loader path to
 `$ORIGIN/lib`, and repacks with regenerated RECORD hashes. The final wheel is
@@ -89,9 +90,9 @@ Each Linux build also includes a relinking source archive,
 `linux-relink-source.tar.gz` for the manylinux wheel and
 `linux-musl-relink-source.tar.gz` for the musllinux one, containing the
 application source and build scripts, the three checked native source archives,
-all Cargo dependencies (including vendored libheif and OpenJPEG), Cargo.lock,
-and the build tool versions. The source tree's `.cargo/config.toml` selects the
-included Rust dependencies instead of downloading them from crates.io.
+all Cargo dependencies (including vendored OpenJPEG), Cargo.lock, and the build
+tool versions. The source tree's `.cargo/config.toml` selects the included Rust
+dependencies instead of downloading them from crates.io.
 
 To rebuild, unpack that platform's bundle and use the container it was built in.
 Install Rust (see `BUILD-ENVIRONMENT.txt` for the recorded compiler version) and
@@ -104,14 +105,13 @@ sh tools/build-musllinux.sh   # in quay.io/pypa/musllinux_1_2_x86_64
 ```
 
 The scripts install their Python build tools and produce `dist/*.whl` and
-`native/`; the musl one installs its Rust toolchain as well. To relink with a
-modified libheif, edit its sources under the vendored `libheif-sys` directory
-and update Cargo's vendor checksum metadata for the changed files, or use a
-local path override. To rebuild a modified libde265, update its input archive
-and the corresponding checksum in the build script. The same commands then
-rebuild and repair the plugin with that library. The standalone bundle's shared
-libde265 can also be replaced by an ABI-compatible build retaining the bundled
-filename and SONAME.
+`native/`; the musl one installs its Rust toolchain as well. To change the
+libheif version, update `tools/libheif-pin.sh`, `vcpkg.json`, and the vcpkg
+overlay, then rebuild with `tools/build-libheif.sh`. To rebuild a modified
+libde265, update its input archive and checksum in the build script. The same
+commands then rebuild and repair the plugin with that library. The standalone
+bundle's shared libheif and libde265 can also be replaced by ABI-compatible
+builds retaining their bundled filenames and SONAMEs.
 
 The container images are pinned by digest. Python build-tool versions may
 the recorded build environment identifies the versions used for each release.

@@ -23,9 +23,9 @@ PLUGIN_EXTENSION = ".so"
 MANIFEST = "vapoursynth/plugins/imageseqs/manifest.vs"
 LIBRARIES = "vapoursynth/plugins/imageseqs/lib"
 TAG = "py3-none-manylinux_2_28_x86_64"
-#: The bundled codecs every Linux wheel holds, because no auditwheel policy
-#: promises them on the host.
-CODEC_LIBRARIES = ("libdav1d-", "libde265-")
+#: The bundled native libraries every Linux wheel holds, because no auditwheel
+#: policy promises them on the host.
+NATIVE_LIBRARIES = ("libdav1d-", "libde265-", "libheif-")
 
 
 def is_plugin_variant(name: str) -> bool:
@@ -60,7 +60,7 @@ def check_wheel(wheel: Path, tag: str, allowed: tuple[str, ...]) -> None:
         if missing := required - names:
             raise ValueError(f"missing wheel contents: {sorted(missing)}")
         libraries = {name for name in names if name.startswith(f"{LIBRARIES}/") and not name.endswith("/")}
-        for library in CODEC_LIBRARIES:
+        for library in NATIVE_LIBRARIES:
             if not any(PurePosixPath(name).name.startswith(library) for name in libraries):
                 raise ValueError(f"missing auditwheel-bundled {library} library")
         for name in names:
@@ -72,7 +72,7 @@ def check_wheel(wheel: Path, tag: str, allowed: tuple[str, ...]) -> None:
             permitted = (name in required) or name.startswith(("LICENSES/", f"{LIBRARIES}/"))
             if not permitted and not is_plugin_variant(name):
                 raise ValueError(f"unexpected content in plugin-only wheel: {name}")
-            if name in libraries and not path.name.startswith(CODEC_LIBRARIES + allowed):
+            if name in libraries and not path.name.startswith(NATIVE_LIBRARIES + allowed):
                 raise ValueError(f"unexpected bundled dependency; review its license: {name}")
         if archive.read(MANIFEST) != b"[VapourSynth Manifest V1]\nlibvs_imageseqs\n":
             raise ValueError("manifest must list only the plugin, without its extension")
@@ -87,7 +87,7 @@ def check_wheel(wheel: Path, tag: str, allowed: tuple[str, ...]) -> None:
             expected = "sha256=" + base64.urlsafe_b64encode(hashlib.sha256(content).digest()).rstrip(b"=").decode()
             if digest != expected or size != str(len(content)):
                 raise ValueError(f"invalid RECORD hash or size: {name}")
-    print(f"checked {wheel.name}: plugin, bundled codecs, legal files, and ABI tag")
+    print(f"checked {wheel.name}: plugin, bundled native libraries, legal files, and ABI tag")
 
 
 def main() -> None:

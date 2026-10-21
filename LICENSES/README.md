@@ -2,20 +2,20 @@
 
 This directory contains the license texts and notices that accompany the
 native components used by the plugin, whether linked statically or bundled as
-shared libraries. Linux release wheels and plugin ZIPs bundle dav1d 1.5.3 and
-libde265 1.1.1 as shared libraries; their upstream license texts below are the
-same as the Windows inputs. The musllinux wheel also bundles the C++ runtime the
-embedded libheif needs, which the musl auditwheel policy does not promise the
-host provides. The accompanying `linux-relink-source.tar.gz` and
-`linux-musl-relink-source.tar.gz` provide the exact source inputs and rebuild
-instructions for the artifacts of each Linux build.
+shared libraries. Linux and macOS release wheels and plugin ZIPs bundle
+libheif 1.23.5, dav1d 1.5.3, and libde265 1.1.1 as shared libraries. The
+musllinux wheel also bundles the C++ runtime shared libheif needs, which the
+musl auditwheel policy does not promise the host provides. The accompanying
+`linux-relink-source.tar.gz` and `linux-musl-relink-source.tar.gz` provide the
+exact source inputs and rebuild instructions for the artifacts of each Linux
+build.
 
 ## Native components
 
 These files are copied verbatim from the dependency sources used by the build:
 
 - `dav1d-COPYING.txt` — dav1d 1.5.3, BSD 2-Clause.
-- `libheif-COPYING.txt` — libheif 1.23.1, including its LGPLv3 library text
+- `libheif-COPYING.txt` — libheif 1.23.5, including its LGPLv3 library text
   and the upstream bundled GPL/MIT license text sections.
 - `libde265-COPYING.txt` — libde265 1.1.1, including its LGPLv3 library text
   and the upstream bundled GPL/MIT license text sections.
@@ -48,8 +48,9 @@ of the refreshed install or current native dependency set. If HEVC encoding
 is enabled later, add x265's exact `COPYING` file and update the notices
 before distributing the resulting binary.
 
-Windows libheif also uses the existing dav1d decoder for AVIF sequences, built
-into libheif rather than loaded as a separate codec plugin. The native license
-texts above cover that backend. `vcpkg-LICENSE.txt` preserves Microsoft's MIT
-license for the repository-local libheif port's build recipes and patches,
-copied from the manifest's pinned vcpkg baseline.
+The Windows static libheif build also uses the existing dav1d decoder for AVIF
+sequences, built into libheif rather than loaded as a separate codec plugin.
+The native license texts above cover that backend. `vcpkg-LICENSE.txt`
+preserves Microsoft's MIT license for the repository-local libheif port's
+build recipes and patches, originally copied from vcpkg commit
+`40a9bd4ccdf5dc14ff76d4ed47d46a226ce84a83`.

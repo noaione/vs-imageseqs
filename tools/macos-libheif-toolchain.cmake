@@ -1,8 +1,11 @@
-# libheif-sys enables every codec backend while building its embedded copy.
-# This plugin needs libde265 for HEIC and dav1d for animated AVIF tracks.
-# Still AVIF items also use dav1d directly. Disable unused backends so the Mac
-# binary cannot pick up optional codecs installed on the build runner.
+# Build the pinned system libheif used by the macOS wheel. The plugin needs
+# libde265 for HEIC and dav1d for animated AVIF tracks. Still AVIF items also
+# use dav1d directly. Disable unused backends so the library cannot pick up
+# optional codecs installed on the build runner.
 set(WITH_LIBDE265 ON CACHE BOOL "" FORCE)
+set(WITH_DAV1D ON CACHE BOOL "" FORCE)
+set(WITH_DAV1D_PLUGIN OFF CACHE BOOL "" FORCE)
+set(WITH_LIBDE265_PLUGIN OFF CACHE BOOL "" FORCE)
 
 foreach(codec IN ITEMS
     AOM_DECODER
@@ -26,9 +29,8 @@ foreach(codec IN ITEMS
     set(WITH_${codec} OFF CACHE BOOL "" FORCE)
 endforeach()
 
-# libheif-sys asks libheif for its libsharpyuv colour transforms too, and the
-# runner image has homebrew's webp installed, so libheif found it. Nothing
-# here encodes, and leaving it on put libsharpyuv.0.1.2.dylib in the delocated
-# bundle, where no symbol referred to it and `package-macos-wheel.py` refused
-# it by name.
+set(CMAKE_DISABLE_FIND_PACKAGE_Brotli TRUE CACHE BOOL "" FORCE)
+
+# The runner image has homebrew's webp installed. Nothing here encodes, so do
+# not link libsharpyuv into the bundle.
 set(WITH_LIBSHARPYUV OFF CACHE BOOL "" FORCE)

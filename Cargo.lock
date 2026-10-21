@@ -125,15 +125,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
-name = "cmake"
-version = "0.1.58"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "crc32fast"
 version = "1.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -456,7 +447,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f554864c5f34c7f285ff6acdcadb64bcc2a3de1609e9135cec702c5edc703864"
 dependencies = [
  "cfg-if",
- "cmake",
  "libc",
  "system-deps 8.0.0",
  "vcpkg",
@@ -1021,7 +1011,7 @@ checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 [[package]]
 name = "wpd"
 version = "0.2.0"
-source = "git+https://github.com/halidecx/wpd?rev=97da18b74888aea251d2b71db2f116aff66b23e9#97da18b74888aea251d2b71db2f116aff66b23e9"
+source = "git+https://github.com/halidecx/wpd?rev=2e1400f00089a68c7939eb9593d5b49b1144b8e0#2e1400f00089a68c7939eb9593d5b49b1144b8e0"
 dependencies = [
  "cc",
  "nasm-rs",

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import os
 import platform
 import shutil
@@ -116,24 +115,6 @@ def release_directory(root: Path, environment: dict[str, str]) -> Path:
 
 def cargo_environment(root: Path) -> dict[str, str]:
     environment = os.environ.copy()
-
-    if sys.platform == "darwin":
-        # Keep the embedded libheif build independent of optional codecs found
-        # on the build host. The content-addressed path makes Cargo rerun the
-        # dependency build script when these options change. Respect an
-        # explicit toolchain selected by callers.
-        toolchain = root / "tools" / "macos-libheif-toolchain.cmake"
-        toolchain_hash = hashlib.sha256(toolchain.read_bytes()).hexdigest()[:16]
-        generated_toolchain = (
-            root / "target" / "macos-native" / "toolchains" / f"{toolchain_hash}.cmake"
-        )
-        generated_toolchain.parent.mkdir(parents=True, exist_ok=True)
-        if not generated_toolchain.is_file():
-            shutil.copy2(toolchain, generated_toolchain)
-        environment.setdefault(
-            "CMAKE_TOOLCHAIN_FILE",
-            str(generated_toolchain),
-        )
 
     # cargo-vcpkg exposes the repository-local installed packages through
     # this generated vcpkg root. Respect an explicit VCPKG_ROOT when the

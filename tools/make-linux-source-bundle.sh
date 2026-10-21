@@ -6,9 +6,8 @@
 # Run from the repository root, with a Rust toolchain, cmake and the Python the
 # build itself uses on PATH: the bundle records their versions and vendors every
 # Cargo dependency, so a wheel can be rebuilt from it without a network. Each
-# Linux build calls this once, because the libheif it statically links is what
-# makes the corresponding source a distribution obligation; the license section
-# of THIRD_PARTY_NOTICES is where that reasoning lives.
+# Linux build also includes its checked libheif source archive and build recipe,
+# so the shared LGPL library can be rebuilt from the exact source used.
 set -eu
 
 if [ "$#" -ne 3 ]; then

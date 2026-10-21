@@ -5,13 +5,9 @@
 //! about that path are not what a frame needs, and both are why this module is
 //! more than a call:
 //!
-//! - **the timing is not asked of the decoder.** The embedded libheif 1.23.1
-//!   build reports the duration of the sample being fed into the decoder rather
-//!   than the one being returned, so every avif frame comes back as the first
-//!   frame's duration. The container's own sample table is the normative
-//!   statement and is what [`super::sequence`] reads; the same table is also
-//!   how the sample count is known at all, because `libheif-rs 3.0.0` exposes
-//!   no other way to count a track.
+//! - **the timing is read from the container.** Its sample table is the
+//!   normative timing source and supplies the sample count, which
+//!   `libheif-rs 3.0.0` does not expose. [`super::sequence`] reads that table.
 //! - **the presentation crop is not applied.** A track's coded pictures can be
 //!   larger than the aperture it presents; the fixture's are 64x64 coded for a
 //!   16x12 aperture. `decode_next_image` hands back the coded pixels, so the

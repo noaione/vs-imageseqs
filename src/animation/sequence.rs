@@ -5,14 +5,10 @@
 //! file format's sample tables. Two things are read here rather than asked of
 //! `libheif`:
 //!
-//! - **the per-sample timing.** The embedded libheif 1.23.1 build reports the
-//!   wrong duration for every avif sample: it looks the timing up by the sample
-//!   being fed into the decoder instead of by the one being returned, and the
-//!   two run apart. The `stts` box is where that timing is stated, and no
-//!   published `libheif-sys` carries the fix, so the table is read here. The
-//!   same table is also what says how many samples a track holds, which
-//!   `libheif-rs 3.0.0` exposes no other way; see
-//!   `docs/improvements/21-animated-images.md`.
+//! - **the per-sample timing and count.** The `stts` box is the container's
+//!   normative timing source, and its sample count is needed to size the
+//!   sequence. `libheif-rs 3.0.0` exposes no other way to count a track, so the
+//!   table is read here rather than asking the decoder for timing.
 //! - **the presentation crop.** A track's coded pictures can be larger than
 //!   the picture it presents, and the `clap` clean-aperture box is what states
 //!   the difference. `decode_next_image()` hands back the coded pixels, so the
@@ -740,7 +736,7 @@ mod tests {
     }
 
     /// An avif sequence states four samples whose durations are the ones the
-    /// `stts` box holds, which is what the embedded libheif reports wrongly.
+    /// `stts` box holds, which is the sequence's stated timing.
     #[test]
     fn an_avif_sequence_states_its_own_sample_timing() {
         let sequence = read_file(&fixture("animation.avif"))

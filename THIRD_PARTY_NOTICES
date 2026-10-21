@@ -5,16 +5,12 @@ This distribution contains the vs-imageseqs VapourSynth plugin and native
 code from the projects listed below. The files in LICENSES/ are part of the
 distribution and preserve the applicable license texts and notices.
 
-The exact native inputs recorded here are from the x64-windows-static-md
-vcpkg installation used to build the Windows wheel. The two Linux builds pin
-dav1d and libde265 in `tools/build-manylinux.sh` and
-`tools/build-musllinux.sh`; Cargo.lock selects the embedded libheif and OpenJPEG
-sources. The macOS arm64 build uses
-the same pinned dav1d and libde265 source versions, builds them as shared
-libraries, bundles them, and disables unused libheif codec backends so
-machine-local codecs are not linked:
+The Windows wheel uses the x64-windows-static-md vcpkg installation. The
+Linux and macOS builds pin their native sources in the platform build scripts.
+Each Unix wheel bundles shared libheif, libde265, and dav1d built from these
+sources; Cargo.lock selects the OpenJPEG sources:
 
-  * libheif 1.23.1
+  * libheif 1.23.5
   * libde265 1.1.1
   * dav1d 1.5.3
   * wpd 0.2.0, at the exact git revision named in `Cargo.toml`
@@ -43,9 +39,9 @@ dav1d 1.5.3
   Notice: LICENSES/dav1d-COPYING.txt
   Upstream: https://code.videolan.org/videolan/dav1d
 
-libheif 1.23.1
+libheif 1.23.5
   License: GNU Lesser General Public License, version 3
-  Linkage: statically linked
+  Linkage: static on Windows; shared on Unix, bundled in Linux and macOS release artifacts
   Notice and license text: LICENSES/libheif-COPYING.txt
   Upstream: https://github.com/strukturag/libheif
 
@@ -55,7 +51,7 @@ libde265 1.1.1
   Notice and license text: LICENSES/libde265-COPYING.txt
   Upstream: https://github.com/strukturag/libde265
 
-wpd 0.2.0 (git revision 97da18b74888aea251d2b71db2f116aff66b23e9)
+wpd 0.2.0 (git revision 2e1400f00089a68c7939eb9593d5b49b1144b8e0)
   License: BSD 2-Clause "Simplified" License
   Linkage: statically linked, assembled from the crate's own NASM sources on
     x86 and x86-64 and from its assembler sources on ARM
@@ -73,22 +69,21 @@ openjpeg (vendored by openjpeg-sys 1.0.12)
 libstdc++ and libgcc_s, the GCC runtime libraries
   License: GNU General Public License, version 3, with the GCC Runtime Library
     Exception, version 3.1
-  Linkage: linked by every Linux build, which reaches them through the embedded
-    libheif; the manylinux wheel leaves them to the system, whose policy allows
-    them, and the musllinux wheel bundles them, because the musl policy allows
-    only libc and libz
+  Linkage: linked by Linux libheif; the manylinux wheel leaves them to the
+    system, whose policy allows them, and the musllinux wheel bundles them,
+    because the musl policy allows only libc and libz
   Notice and license text: LICENSES/gcc-runtime-COPYING.txt
   Upstream: https://gcc.gnu.org/
 
 The current vcpkg manifest disables libheif default features, so x265 is not
-selected on Windows. Its repository-local libheif overlay enables the built-in
-dav1d decoder using the dav1d version already listed above. The overlay's build
-recipes and patches derive from Microsoft's vcpkg baseline
+selected on Windows. Its repository-local libheif 1.23.5 overlay enables the
+built-in dav1d decoder using the dav1d version already listed above. The
+overlay's build recipes and patches derive from Microsoft's vcpkg baseline
 40a9bd4ccdf5dc14ff76d4ed47d46a226ce84a83 and retain its MIT license in
 LICENSES/vcpkg-LICENSE.txt. These recipes are source/build inputs, not another
-native runtime dependency. The macOS CMake toolchain also disables the optional
-libheif backends this plugin does not use, including x265. Always verify the
-final native link output after changing either dependency configuration.
+native runtime dependency. The Unix CMake toolchains disable optional libheif
+backends this plugin does not use, including x265. Always verify the final
+native link output after changing either dependency configuration.
 
 Ported source code
 ------------------
@@ -126,7 +121,8 @@ Static-linking release checklist
 The license files and notices above satisfy the accompanying-text part of
 the distribution. They do not by themselves satisfy every source and
 relinking requirement that can apply to a statically linked LGPL library.
-Before publishing a wheel containing this DLL, the release should also:
+Before publishing a Windows wheel containing this statically linked library,
+the release should also:
 
   1. Make the Corresponding Source for the exact libheif and libde265
      binaries available, including the build configuration and any changes.
@@ -143,12 +139,13 @@ written offer/source URL for every published binary as part of release work.
 Each Linux build's artifacts are accompanied by a relinking source archive:
 `linux-relink-source.tar.gz` for the manylinux wheel and
 `linux-musl-relink-source.tar.gz` for the musllinux one. Each contains the
-application and dependency sources used by that build, including the vendored
-libheif and OpenJPEG sources, and the build/relink instructions in BUILDING.md.
-The Linux and macOS wheels and plugin ZIPs include dav1d and libde265 as
-separate shared libraries with relative loader paths. Their license texts
-remain under LICENSES/. The existing Windows source/relinking requirements
-above remain applicable to the static Windows binaries.
+application and dependency sources used by that build, including the checked
+libheif 1.23.5 source archive and vendored OpenJPEG sources, and the
+build/relink instructions in BUILDING.md. The Linux and macOS wheels and plugin
+ZIPs include libheif, dav1d, and libde265 as separate shared libraries with
+relative loader paths. Their license texts remain under LICENSES/. The Windows
+source/relinking requirements above remain applicable to the static Windows
+binaries.
 
 License URLs
 ------------

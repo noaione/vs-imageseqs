@@ -395,9 +395,10 @@ def check_bundled_staging() -> None:
     stem = "libvs_imageseqs"
     cases = (
         ("macos", "macosx_12_0_arm64", ".dylib", ("",),
-         ("lib/libdav1d.7.dylib", "lib/libde265.0.2.1.dylib")),
+         ("lib/libdav1d.7.dylib", "lib/libde265.0.2.1.dylib", "lib/libheif.1.dylib")),
         ("linux", "manylinux_2_28_x86_64", ".so", ("", ".avx2", ".avx512"),
-         ("lib/libdav1d-test.so.7", "lib/libde265-test.so.0", "lib/libdav1d-unversioned.so")),
+         ("lib/libdav1d-test.so.7", "lib/libde265-test.so.0", "lib/libheif-test.so.1",
+          "lib/libdav1d-unversioned.so")),
     )
     for platform, tag, extension, variants, dependencies in cases:
         dist = SCRATCH / f"{platform}-dist"
@@ -466,7 +467,9 @@ def linux_wheel(
     directory: Path,
     tag: str,
     *,
-    libraries: tuple[str, ...] = ("libdav1d-abc.so.7", "libde265-abc.so.0"),
+    libraries: tuple[str, ...] = (
+        "libdav1d-abc.so.7", "libde265-abc.so.0", "libheif-abc.so.1",
+    ),
     licenses: tuple[str, ...] = LINUX_LICENSES,
 ) -> Path:
     """A repaired Linux wheel holding what the checker reads, and nothing else."""
@@ -499,7 +502,7 @@ def linux_wheel(
 def check_linux_wheel() -> None:
     """The tag and the bundled dependencies a platform's policy allows.
 
-    A glibc wheel leaves the C++ runtime the embedded libheif needs to the
+    A glibc wheel leaves the C++ runtime the shared libheif needs to the
     manylinux policy, which allows it, and a musl wheel carries it because the
     musl policy allows only libc and libz. The checker has to accept both, and
     refuse a wheel that bundles something its build did not name.
@@ -526,7 +529,7 @@ def check_linux_wheel() -> None:
     linux_wheel(
         dist,
         MUSLLINUX_TAG,
-        libraries=("libdav1d-abc.so.7", "libde265-abc.so.0", "libstdc++-abc.so.6"),
+        libraries=("libdav1d-abc.so.7", "libde265-abc.so.0", "libheif-abc.so.1", "libstdc++-abc.so.6"),
     )
     result = run("check-linux-wheel.py", "--tag", MUSLLINUX_TAG, str(dist))
     check(
@@ -539,15 +542,18 @@ def check_linux_wheel() -> None:
     linux_wheel(
         dist,
         MUSLLINUX_TAG,
-        libraries=("libdav1d-abc.so.7", "libde265-abc.so.0", "libstdc++-abc.so.6", "libgcc_s-abc.so.1"),
+        libraries=("libdav1d-abc.so.7", "libde265-abc.so.0", "libheif-abc.so.1", "libstdc++-abc.so.6", "libgcc_s-abc.so.1"),
     )
 
     result = run("check-linux-wheel.py", "--tag", MUSLLINUX_TAG, *allowed, str(dist))
     check(result.returncode == 0, f"linux wheel: a declared bundled runtime passes ({message_of(result)[:160]})")
 
-    # Both codecs are required whatever else the platform bundles.
+    # All three native libraries are required whatever else the platform bundles.
     build_output.clear(dist)
-    linux_wheel(dist, MUSLLINUX_TAG, libraries=("libdav1d-abc.so.7",))
+    linux_wheel(
+        dist, MUSLLINUX_TAG,
+        libraries=("libdav1d-abc.so.7", "libheif-abc.so.1"),
+    )
     result = run("check-linux-wheel.py", "--tag", MUSLLINUX_TAG, *allowed, str(dist))
     check(
         result.returncode != 0 and "libde265-" in message_of(result),

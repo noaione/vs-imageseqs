@@ -19,6 +19,7 @@ musl_target=x86_64-unknown-linux-musl
 
 export IMGSEQS_LINUX_PLATFORM=musllinux
 . "$PWD/tools/setup-linux-build.sh"
+. "$PWD/tools/libheif-pin.sh"
 
 # This script owns the wheels in these three directories, and the checkers below
 # require exactly one of them: a second run in the same checkout has to start
@@ -64,6 +65,7 @@ fetch dav1d-1.5.3 https://github.com/videolan/dav1d/archive/1.5.3.tar.gz \
     8d976b93135213d41385c20205475269a6826a68ebfd716c4d9a7a3ff2a79703e8df0573e43207c81b5db44807d2721db18ec84c0fc6bef98efab86a2cccb6cc
 fetch libde265-1.1.1 https://github.com/strukturag/libde265/archive/v1.1.1.tar.gz \
     fb2207f5a3ba901853f61f345c72130f000134918febbc4f3529c3d289fc79ee7457b3e61660110f698bb4ac15d62426e284034bf870bfbd1859ab3feaa52be8
+fetch "libheif-$LIBHEIF_VERSION" "$LIBHEIF_SOURCE_URL" "$LIBHEIF_SHA512"
 
 if [ "$native_cached" != true ]; then
     reconfigure=""
@@ -82,6 +84,9 @@ if [ "$native_cached" != true ]; then
         -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_SHARED_LIBS=ON -DENABLE_SDL=OFF
     cmake --build "$work/de265-build" --parallel
     cmake --install "$work/de265-build"
+
+    bash tools/build-libheif.sh \
+        "$work/sources/libheif-$LIBHEIF_VERSION" "$work/libheif-build" "$prefix"
 
     python tools/linux-native-cache.py mark "$prefix" "$IMGSEQS_NATIVE_CACHE_KEY"
 fi
@@ -105,7 +110,7 @@ auditwheel repair --plat musllinux_1_2_x86_64 --only-plat \
 python tools/package-linux-wheel.py "$work/repaired" dist
 auditwheel show dist/*.whl
 # auditwheel's musl policy allows libc and libz and nothing else, so the C++
-# runtime the plugin links through the embedded libheif is bundled beside it
+# runtime the plugin links through libheif is bundled beside it
 # rather than left to a host that is not promised to have one.
 python tools/check-linux-wheel.py \
     --tag py3-none-musllinux_1_2_x86_64 \

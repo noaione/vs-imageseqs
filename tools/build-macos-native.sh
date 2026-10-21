@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Build the two shared codec libraries the macOS release wheel bundles.
+# Build the pinned shared codecs and libheif that the macOS release wheel bundles.
 set -euo pipefail
+. "$PWD/tools/libheif-pin.sh"
 
 if [[ "$(uname -m)" != "arm64" ]]; then
     echo "macOS release dependencies must be built on arm64" >&2
@@ -44,4 +45,12 @@ cmake --install "$temporary/libde265-build"
 # to @loader_path/lib/... in the final wheel.
 install_name_tool -id "$prefix/lib/libde265.0.dylib" "$prefix/lib/libde265.0.2.1.dylib"
 
-echo "built dav1d and libde265 for macOS $MACOSX_DEPLOYMENT_TARGET in $prefix"
+fetch "libheif-$LIBHEIF_VERSION" "$LIBHEIF_SOURCE_URL" "$LIBHEIF_SHA512"
+
+export CMAKE_TOOLCHAIN_FILE="$PWD/tools/macos-libheif-toolchain.cmake"
+export CMAKE_PREFIX_PATH="$prefix"
+export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"
+bash tools/build-libheif.sh \
+    "$temporary/libheif-$LIBHEIF_VERSION" "$temporary/libheif-build" "$prefix"
+
+echo "built dav1d, libde265, and libheif $LIBHEIF_VERSION for macOS $MACOSX_DEPLOYMENT_TARGET in $prefix"

@@ -9,11 +9,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # libheif-sys builds libheif with the codec support its own defaults ask for,
-  # which on this runner included libsharpyuv: a library this plugin never
-  # calls into and that apt no longer installs here. The toolchain file is what
-  # narrows the build to what the plugin reads, and it is the same file the
-  # Linux wheels are built with.
+  # Use the same optional-codec policy when building the pinned system libheif
+  # for tests and when building the Linux wheels.
   CMAKE_TOOLCHAIN_FILE: ${{ github.workspace }}/tools/manylinux-toolchain.cmake
 
 concurrency:
@@ -40,11 +37,9 @@ jobs:
       - name: cache rust dependencies
         uses: Swatinem/rust-cache@v2
 
-      # libheif-sys records the link flags its CMake configuration produced and
-      # does not treat that configuration as an input, so a cache restored from a
-      # run that used a different toolchain would replay them. Both profiles are
-      # cleared: the tests below are a debug build and the plugin is a release
-      # one.
+      # libheif-sys records pkg-config's link configuration and does not treat
+      # the installed native library as an input. Clear both profiles before
+      # linking against the pinned 1.23.5 build.
       - name: clear the cached libheif configuration
         run: |
           cargo clean --package libheif-sys
@@ -56,6 +51,24 @@ jobs:
           # nasm assembles wpd's x86-64 decode routines; without it its build
           # script fails before the crate is compiled.
           sudo apt-get install --yes cmake ninja-build pkg-config nasm libdav1d-dev libde265-dev
+          . tools/libheif-pin.sh
+          native="$GITHUB_WORKSPACE/target/rust-test-native"
+          mkdir -p "$native/archives" "$native/sources/libheif-$LIBHEIF_VERSION"
+          curl --fail --location --retry 3 \
+            "$LIBHEIF_SOURCE_URL" \
+            --output "$native/archives/libheif-$LIBHEIF_VERSION.tar.gz"
+          printf '%s  %s\n' "$LIBHEIF_SHA512" \
+            "$native/archives/libheif-$LIBHEIF_VERSION.tar.gz" | sha512sum --check
+          tar -xzf "$native/archives/libheif-$LIBHEIF_VERSION.tar.gz" \
+            --strip-components=1 -C "$native/sources/libheif-$LIBHEIF_VERSION"
+          export PKG_CONFIG_PATH="$native/prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          export CMAKE_PREFIX_PATH="$native/prefix${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
+          export LD_LIBRARY_PATH="$native/prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          bash tools/build-libheif.sh \
+            "$native/sources/libheif-$LIBHEIF_VERSION" "$native/libheif-build" "$native/prefix"
+          echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+          echo "CMAKE_PREFIX_PATH=$CMAKE_PREFIX_PATH" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
 
       - name: run rust tests
         run: cargo test --locked

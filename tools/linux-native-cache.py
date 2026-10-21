@@ -14,8 +14,10 @@ ROOT = Path(__file__).resolve().parent.parent
 STAMP = ".imgseqs-native-cache"
 REQUIRED = (
     "include/dav1d/dav1d.h", "include/libde265/de265.h",
+    "include/libheif/heif.h", "include/libheif/heif_version.h",
     "lib/libdav1d.so", "lib/libde265.so",
-    "lib/pkgconfig/dav1d.pc", "lib/pkgconfig/libde265.pc",
+    "lib/libheif.so", "lib/pkgconfig/dav1d.pc", "lib/pkgconfig/libde265.pc",
+    "lib/pkgconfig/libheif.pc",
 )
 
 
@@ -24,7 +26,8 @@ def fingerprint(platform: str) -> str:
     # A source bundle has no .github directory, and never restores a CI cache.
     inputs = [
         ".github/workflows/build.yml", f"tools/build-{platform}.sh",
-        "tools/setup-linux-build.sh", "tools/linux-native-cache.py",
+        "tools/build-libheif.sh", "tools/libheif-pin.sh", "tools/setup-linux-build.sh",
+        "tools/linux-native-cache.py",
         "tools/manylinux-toolchain.cmake",
     ]
     data: dict[str, object] = {

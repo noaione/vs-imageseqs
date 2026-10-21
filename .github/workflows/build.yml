@@ -320,7 +320,7 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install cmake meson ninja pkg-config
 
-      - name: build pinned macOS codec libraries
+      - name: build pinned macOS codec libraries and libheif
         if: runner.os == 'macOS'
         run: |
           bash tools/build-macos-native.sh
@@ -490,6 +490,7 @@ jobs:
           for file in \
             build.rs Cargo.toml Cargo.lock vcpkg.json hatch_build.py \
             pyproject.toml CHANGELOG.md tools/build-macos-native.sh \
+            tools/build-libheif.sh tools/libheif-pin.sh \
             tools/build-manylinux.sh tools/build-musllinux.sh \
             tools/setup-linux-build.sh tools/linux-native-cache.py \
             tools/make-linux-source-bundle.sh \

@@ -112,9 +112,9 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   port of libwebp's integer alpha blending. `jxl.rs`
   scans frame headers without rendering and decodes each presentation from its
   own seek checkpoint. `sequence.rs` reads an avif or heif sequence's sample
-  table and clean aperture from the container, because the embedded libheif
-  1.23.1 build reports the wrong per-sample duration and `libheif-rs 3.0.0`
-  exposes no sample count. `heif.rs` replays a visual track and applies the
+  table and clean aperture from the container, because `libheif-rs 3.0.0`
+  exposes no sample count and the table is the normative timeline. CI pins
+  system libheif 1.23.5. `heif.rs` replays a visual track and applies the
   aperture per plane; a colour-only read of one still decodes its linked alpha
   track, which that wrapper exposes no way to skip.
 - `src/prefetch.rs`: the lookahead pool, its window, and its byte budget.
@@ -324,15 +324,12 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   `make-linux-source-bundle.sh` writes the relinking source archive both Linux
   builds ship, and `build-manylinux.sh` and `build-musllinux.sh` build and
   repair a wheel in their own pinned container.
-- `tools/macos-libheif-toolchain.cmake`: the macOS wheel build disables unused
-  embedded libheif codec backends and its `libsharpyuv` colour transforms; the
-  plugin decodes HEIC with libde265 and AVIF with dav1d directly. Both are
-  switched off through the toolchain file because `libheif-sys` turns them on
-  itself and a toolchain file is read after the command line, so its `FORCE`
-  wins. `tools/manylinux-toolchain.cmake` does the same for the Linux builds,
-  where the same optional dependency would otherwise be whichever one the build
-  image has installed: `libwebp-dev` supplied its sharpyuv to the test job, and
-  homebrew's `webp` does on the macOS runner.
+- `tools/build-libheif.sh` and `tools/macos-libheif-toolchain.cmake`: Linux and
+  macOS builds compile pinned libheif 1.23.5 as a shared library with only its
+  libde265 and dav1d decoder backends. The toolchain files disable optional
+  codecs discovered on the build host and `libsharpyuv`, which this plugin does
+  not use. Windows uses the repository's vcpkg overlay at the same version and
+  keeps the library static.
   `tools/package-macos-wheel.py` bundles and checks the macOS runtime dylibs
   before the final wheel is staged.
 - `docs/IMPLEMENTATION.md`: design notes and deferred ideas.
@@ -393,12 +390,13 @@ if the local vcpkg adapter is missing, recreate it before building or use the
 repository's established cargo-vcpkg setup. do not commit generated
 `vcpkg_installed/` or `target/` contents.
 
-the manifest selects `tools/vcpkg-ports/libheif/`, whose `dav1d` feature builds
-libheif's AVIF sequence decoder into the library. the upstream vcpkg port
-disables that backend, so installing dav1d alone only fixes the direct still
-reader. keep libheif's default features disabled. after replacing the installed
-libheif archive, run `cargo clean --release --package libheif-sys` before the
-release build so Cargo does not reuse the old native link configuration.
+the manifest selects `tools/vcpkg-ports/libheif/` at version 1.23.5. its
+`dav1d` feature builds libheif's AVIF sequence decoder into the Windows static
+library. the upstream vcpkg port disables that backend, so installing dav1d
+alone only fixes the direct still reader. keep libheif's default features
+disabled. after replacing the installed libheif archive, run
+`cargo clean --release --package libheif-sys` before the release build so Cargo
+does not reuse the old native link configuration.
 
 ## python packaging
 
@@ -483,27 +481,25 @@ bundle. Both Linux layouts include shared dav1d/libde265 with relative loader
 paths, and a fresh container validates them before publishing. Each Linux build
 includes a relinking source archive; see `docs/LINUX-BUILD.md`.
 
-the current native set is dav1d, libheif, libde265, the `wpd` decoder
-the crate builds and links into the plugin, and the OpenJPEG
-sources vendored by `openjpeg-sys`. dav1d, OpenJPEG and wpd use the
-bsd-2-clause license. libheif and libde265 are lgplv3 and are
-statically linked. keep the exact upstream texts in `LICENSES/`.
+the current native set is dav1d, libheif 1.23.5, libde265, the `wpd` decoder
+the crate builds and links into the plugin, and the OpenJPEG sources vendored
+by `openjpeg-sys`. dav1d, OpenJPEG and wpd use the bsd-2-clause license.
+libheif and libde265 are lgplv3; Unix wheels bundle them as shared libraries,
+while Windows links them statically. keep the exact upstream texts in
+`LICENSES/`.
 
 the musllinux wheel also carries the gcc runtime libraries (`libstdc++`,
-`libgcc_s`) the embedded libheif links, because auditwheel's musl policy
+`libgcc_s`) the shared libheif links, because auditwheel's musl policy
 promises the host only libc and libz; `LICENSES/gcc-runtime-COPYING.txt` is the
 exception they are conveyed under.
 
 on windows the vcpkg `x64-windows-static-md` triplet makes every vcpkg native
 library static. `jpeg2k` compiles its vendored OpenJPEG sources on every
 platform. every webp is decoded by the `wpd` crate, which the plugin links
-and which needs no library found at build time; `build.rs` locates nothing any
-more, and nothing else is linked from a pkg-config interface either: the
-embedded libheif is built with its optional backends off, `libsharpyuv` among
-them. the `embedded-libheif` feature builds libheif into the plugin,
-so libheif is static there as well; dav1d and libde265 are the system shared
-libraries. the static lgpl obligation below therefore applies to libheif on
-every platform and to libde265 on windows only.
+and which needs no library found at build time. Unix builds find libheif 1.23.5
+through pkg-config and bundle its shared library with shared dav1d and libde265;
+Windows gets all three as static libraries through vcpkg. The static LGPL
+obligations below apply to the Windows libheif and libde265 linkage.
 
 if x265 or another codec is enabled, inspect the actual linker output and add
 its license text and distribution obligations before shipping a wheel. for

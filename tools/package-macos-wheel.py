@@ -18,7 +18,11 @@ from delocate.tools import set_install_id
 PLUGIN = PurePosixPath("vapoursynth/plugins/imageseqs/libvs_imageseqs.dylib")
 LIBRARY_DIRECTORY = PurePosixPath("vapoursynth/plugins/imageseqs/lib")
 SYSTEM_PREFIXES = ("/usr/lib/", "/System/")
-EXPECTED_LIBRARIES = {"libdav1d.7.dylib", "libde265.0.2.1.dylib"}
+EXPECTED_LIBRARIES = {
+    "libdav1d.7.dylib",
+    "libde265.0.2.1.dylib",
+    "libheif.1.dylib",
+}
 
 
 def wheel_file(directory: Path) -> Path:

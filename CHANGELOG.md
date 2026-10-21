@@ -2,7 +2,13 @@
 
 ## unreleased
 
-nothing yet!
+### build
+
+- Bump wpd to `2e1400f00089a68c7939eb9593d5b49b1144b8e0`
+- Bump libheif to `1.23.5`
+  - Also, CI now pin the native builds to this version on every platform for consistency.
+  - Drop `embedded_libheif` feature, which was only used for the Linux build and is now unnecessary.
+- Enable SIMD stuff on `zune-jpeg`
 
 ## [0.3.0] - 2026-10-13
 

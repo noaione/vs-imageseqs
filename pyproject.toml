@@ -88,6 +88,8 @@ include = [
     "tools/package-linux-wheel.py",
     "tools/package-macos-wheel.py",
     "tools/build-macos-native.sh",
+    "tools/build-libheif.sh",
+    "tools/libheif-pin.sh",
     "tools/macos-libheif-toolchain.cmake",
     "tools/stage-native.py",
     "tools/manylinux-toolchain.cmake",

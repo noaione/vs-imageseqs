@@ -33,8 +33,7 @@ vapoursynth4-rs = { version = "0.5.1", default-features = false, features = [
 # then copies its bytes to the generic buffer; see `src/formats/exr.rs`
 exr = "1.74.2"
 libheif-rs = { version = "3.0.0", default-features = false, features = [
-    "v1_23", # target libheif v1.23.x
-    "embedded-libheif" # build on linux (v1.23.0)
+    "v1_23", # expose the 1.23 API; CI pins the native library to 1.23.5
 ] }
 jxl = { version = "0.7.4", default-features = false, features = [
     "all-simd"
@@ -57,7 +56,7 @@ png = { version = "0.18.1", default-features = false, features = [
 # type the two crates share, and it is named directly so that a decoder is
 # built by this module's own options rather than a default.
 zune-core = { version = "0.5.3", default-features = false, features = ["std"] }
-zune-jpeg = { version = "0.5.15", default-features = false, features = ["std"] }
+zune-jpeg = { version = "0.5.15", default-features = false, features = ["std", "neon", "x86"] }
 # animated gif is composed here, whose compositor is the one this replaces and whose
 # frame iterator decodes every picture to find the timeline; see `src/animation/gif.rs`
 gif = { version = "0.14.2", default-features = false, features = ["std"] }
@@ -68,7 +67,7 @@ qoi = { version = "0.4.1", default-features = false, features = ["std"] }
 # revision is pinned here because the crate is not published on crates.io. see
 # `src/formats/webp.rs`, `src/animation/webp.rs` and
 # `docs/improvements/35-wpd-webp-decoder.md`.
-wpd = { git = "https://github.com/halidecx/wpd", rev = "97da18b74888aea251d2b71db2f116aff66b23e9" }
+wpd = { git = "https://github.com/halidecx/wpd", rev = "2e1400f00089a68c7939eb9593d5b49b1144b8e0" }
 
 [profile.release]
 opt-level = 3
