@@ -2,6 +2,10 @@
 
 ## unreleased
 
+nothing yet!
+
+## [0.4.0] - 2026-10-25
+
 ### added
 
 - `core.imgseqs.PNGWrite(..., output_dir=...)` names each still after the source file (`ImgSeqPath`) and each animated frame after the writer's own frame index, creating the directory recursively. `output_path` and `output_dir` are mutually exclusive, and `start_number` applies only to `output_path`
