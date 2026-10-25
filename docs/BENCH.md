@@ -347,6 +347,13 @@ bestsource widens to 3.7x on frames, and a frame costs 11.8 ms.
 ones (`RGB24`, one of 44.7 MiB and two of 55.4 MiB). the rows below are one
 pass because jpeg 2000 decoding is expensive.
 
+**the decoder changed on 2026-10-25**: [43](improvements/43-hayro-jpeg-2000.md)
+replaced `jpeg2k` and its vendored OpenJPEG with the pure-Rust
+`hayro-jpeg2000`. The rows below are from this machine and that build; the
+comparison the swap was accepted on — every frame byte identical, 7.8% faster
+at the default window and 1.5x the peak memory at `prefetch=16` — is on an
+arm64 machine and is in that plan, not here.
+
 | reading the set | frames | median frame | open | total |
 | --- | --- | --- | --- | --- |
 | imgseqs `Read` | 13.637 s | 350.07 ms | 0.162 s | 13.799 s |

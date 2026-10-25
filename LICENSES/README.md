@@ -19,8 +19,7 @@ These files are copied verbatim from the dependency sources used by the build:
   and the upstream bundled GPL/MIT license text sections.
 - `libde265-COPYING.txt` — libde265 1.1.1, including its LGPLv3 library text
   and the upstream bundled GPL/MIT license text sections.
-- `openjpeg-COPYING.txt` — the OpenJPEG sources vendored by `openjpeg-sys`
-  1.0.12, BSD 2-Clause.
+
 - `wpd-COPYING.txt` — wpd, pinned to the revision in `Cargo.toml`, BSD 2-Clause.
   It is a Rust crate rather than a system library, but its x86-64 decode
   routines are hand-written NASM sources the crate builds and links into the

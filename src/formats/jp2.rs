@@ -26,7 +26,7 @@ use std::{
 };
 
 use crate::layout::ColorType;
-use jpeg2k::{ColorSpace, DecodeParameters, Image, ImagePixelData};
+use hayro_jpeg2000::{ComponentData, DecodeSettings, DecoderContext, Image};
 
 use crate::{
     color::{Cicp, UNSPECIFIED},
@@ -38,6 +38,26 @@ use crate::{
 const JP2_SIGNATURE: [u8; 12] = [0, 0, 0, 12, b'j', b'P', b' ', b' ', 0x0d, 0x0a, 0x87, 0x0a];
 const J2K_SIGNATURE: [u8; 4] = [0xff, 0x4f, 0xff, 0x51];
 
+/// The JP2 enumerated colour space the patch below rewrites: 18 is sYCC, and
+/// 16 (sRGB) differs from it in the value's last byte only.
+const SYCC_ENUMERATED: u32 = 18;
+/// The low byte of the sRGB enumerated colour space, 16.
+const SRGB_ENUMERATED_LOW: u8 = 16;
+
+/// Decoded samples one file may hold, across all of its components.
+///
+/// `hayro-jpeg2000` allocates one `f32` per sample per component before it
+/// checks anything (upstream issue #1549 is a 97 byte codestream claiming
+/// 100000x100000 that reaches tens of gigabytes), and a release build of this
+/// plugin aborts on a failed allocation rather than returning an error. The
+/// probe therefore refuses a size it cannot justify: 2^28 samples is a
+/// gigabyte of `f32` across three components and 4.5 times the largest page
+/// here (one 3672x5274 r,g,b page is 58.1 M samples).
+const MAX_DECODED_SAMPLES: u64 = 1 << 28;
+/// Tiles one file may divide its grid into, which is what bounds the decoder's
+/// per-tile bookkeeping. A page tiled at 64 by 64 is 4,800 tiles, so this is
+/// far above a real file.
+const MAX_TILES: u64 = 1 << 16;
 /// Bytes of the front of a file a probe reads before it grows the window.
 ///
 /// Every fact a description reads lives in the signature, the `jp2h` superbox or
@@ -137,7 +157,8 @@ pub fn image_info_at(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
 #[inline(never)]
 pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     let open_started = Instant::now();
-    let data = std::fs::read(&info.path).map_err(|error| image_error("open", &info.path, error))?;
+    let mut data =
+        std::fs::read(&info.path).map_err(|error| image_error("open", &info.path, error))?;
     let open = open_started.elapsed();
 
     let metadata_started = Instant::now();
@@ -162,22 +183,59 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     let metadata = metadata_started.elapsed();
 
     let read_started = Instant::now();
-    // A palette page is decoded with its palette left alone: the codestream holds
-    // indices and the colour is in the container, so this reader asks for the
-    // codestream's own components and expands them itself.
-    let image = if header.palette.is_some() {
-        Image::from_bytes_with(&data, DecodeParameters::new().ignore_pclr_cmap_cdef())
-    } else {
-        Image::from_bytes(&data)
+    // `hayro-jpeg2000` converts an sYCC page to r,g,b inside its own decode and
+    // exposes no setting that keeps the components, while this reader hands the
+    // file's own y,cb,cr planes out ([`decode_yuv`]). The container states the
+    // colour space as a four byte enumerated value whose last byte separates 18
+    // (sYCC) from 16 (sRGB), so the one buffer the crate reads is told the page
+    // needs no conversion: no box moves and the probe has already read the
+    // original value.
+    if header.color == EnumeratedColor::Sycc {
+        patch_colr_srgb(&mut data, &info.path)?;
     }
-    .map_err(|error| image_error("decode", &info.path, error))?;
-    check_decoded_header(&image, &header, &info.path)?;
+    // A `cdef` channel of type 2 is a colour whose alpha is already folded in.
+    // This reader hands the samples out as they are and does not unpremultiply
+    // (see [`CHANNEL_PREMULTIPLIED`]), so the crate is told the channel is an
+    // ordinary opacity one; without that it drops the box, and a page this
+    // reader calls r,g,b and alpha would be read as four colour components.
+    if header.channels.is_some() {
+        normalize_cdef(&mut data, &info.path)?;
+    }
+    let settings = DecodeSettings {
+        // A palette page is expanded here from the codestream's own indices, so
+        // the crate is asked for the components rather than for the picture its
+        // `pclr` box would build from them.
+        resolve_palette_indices: header.palette.is_none(),
+        ..DecodeSettings::default()
+    };
+    let image =
+        Image::new(&data, &settings).map_err(|error| image_error("decode", &info.path, error))?;
+    if (image.width(), image.height()) != (header.width, header.height) {
+        return Err(image_error(
+            "decode",
+            &info.path,
+            "the decoder returned dimensions different from the header",
+        ));
+    }
+    let mut context = DecoderContext::default();
+    let decoded = image
+        .decode(&mut context)
+        .map_err(|error| image_error("decode", &info.path, error))?;
+    let components = decoded.components();
+    check_decoded_header(components, &header, &info.path)?;
+    if header.palette.is_none() && image.has_alpha() != color_type.has_alpha() {
+        return Err(image_error(
+            "decode",
+            &info.path,
+            "the decoder disagreed with the header about the alpha component",
+        ));
+    }
     let pixels = if let Some(palette) = &header.palette {
-        palette_buffer(&image, palette, &info.path)?
+        palette_buffer(components, &header, palette, &info.path)?
     } else if format.color_family() == vapoursynth4_rs::ColorFamily::YUV {
-        decode_yuv(&image, format, &info.path)?
+        decode_yuv(components, &header, format, &info.path)?
     } else {
-        decode_interleaved(&image, color_type, &info.path)?
+        decode_interleaved(&decoded, &header, color_type, &info.path)?
     };
     let read = read_started.elapsed();
 
@@ -244,11 +302,54 @@ fn output_format(header: &Header, path: &Path) -> Result<(ColorType, PixelFormat
         )));
     }
 
+    // This decoder reduces a file whose components all state one subsampling
+    // factor to that factor's resolution rather than to the grid the file
+    // states, so a frame of the stated size would hold a picture that does not
+    // exist. Nothing else here reads such a file either, so it is refused by
+    // name rather than handed out at half size.
+    if let Some(first) = header.components.first()
+        && (first.dx, first.dy) != (1, 1)
+        && header
+            .components
+            .iter()
+            .all(|component| (component.dx, component.dy) == (first.dx, first.dy))
+    {
+        return Err(ImgSeqError::new(format!(
+            "image '{}' subsamples every JPEG 2000 component by {}x{}, so its stated size describes no pixels",
+            path.display(),
+            first.dx,
+            first.dy
+        )));
+    }
+
     // The container's own statement comes first. A `cdef` box names which
+    // component is colour and which is opacity, and the component count cannot:
+    // two components might be gray and alpha, or a colour channel beside
+    // something else. A file that states no `cdef` -- a bare codestream has no
+    // box to state one in -- keeps the count rule below rather than being
+    // guessed at.
+    if let Some(channels) = &header.channels
+        && channels.len() == header.components.len()
+    {
+        let color = channels
+            .iter()
+            .filter(|channel| channel.kind == CHANNEL_COLOR)
+            .count();
+        let opacity = channels
+            .iter()
+            .filter(|channel| matches!(channel.kind, CHANNEL_OPACITY | CHANNEL_PREMULTIPLIED))
+            .count();
+        match (color, opacity) {
+            (1, 1) => return Ok(gray_alpha(depth)),
+            (3, 1) => return Ok(rgba(depth)),
+            _ => {}
+        }
+    }
     // A palette is expanded here rather than by the codec: the codestream holds
     // indices and the colour is in the `pclr` box beside them, so the shape the
-    // frame is handed out as is the palette's own. The decode reads the indices with
-    // the palette left alone and expands them itself; see [`palette_buffer`].
+    // frame is handed out as is the palette's own. The decode reads the indices
+    // with the palette left alone and expands them itself; see
+    // [`palette_buffer`].
     if let Some(palette) = &header.palette {
         if !header.palette_mapping {
             return Err(ImgSeqError::new(format!(
@@ -271,28 +372,6 @@ fn output_format(header: &Header, path: &Path) -> Result<(ColorType, PixelFormat
         let format = PixelFormat::from_color_type(color_type)
             .expect("a JPEG 2000 palette color type is supported");
         return Ok((color_type, format));
-    }
-    // component is colour and which is opacity, and the component count cannot:
-    // two components might be gray and alpha, or a colour channel beside
-    // something else. A file that states no `cdef` -- a bare codestream has no
-    // box to state one in -- keeps the count rule below rather than being
-    // guessed at.
-    if let Some(channels) = &header.channels
-        && channels.len() == header.components.len()
-    {
-        let color = channels
-            .iter()
-            .filter(|channel| channel.kind == CHANNEL_COLOR)
-            .count();
-        let opacity = channels
-            .iter()
-            .filter(|channel| matches!(channel.kind, CHANNEL_OPACITY | CHANNEL_PREMULTIPLIED))
-            .count();
-        match (color, opacity) {
-            (1, 1) => return Ok(gray_alpha(depth)),
-            (3, 1) => return Ok(rgba(depth)),
-            _ => {}
-        }
     }
     match header.components.len() {
         1 => {
@@ -400,31 +479,190 @@ fn rgba(depth: u32) -> (ColorType, PixelFormat) {
     (color_type, format)
 }
 
-fn check_decoded_header(image: &Image, header: &Header, path: &Path) -> Result<()> {
-    if (image.orig_width(), image.orig_height()) != (header.width, header.height)
-        || usize::try_from(image.num_components()).ok() != Some(header.components.len())
-    {
+impl ComponentHeader {
+    /// Where the decoder's replicated component buffer holds a plane's pixel.
+    ///
+    /// `hayro-jpeg2000` decodes every component at the picture's own width and
+    /// height, repeating a subsampled sample over the `dx` by `dy` block it
+    /// covers, so plane pixel `(x, y)` is the buffer's `(x * dx, y * dy)`:
+    /// clamped, because the last block is clipped rather than padded.
+    fn sample_index(self, x: usize, y: usize, width: usize, height: usize) -> usize {
+        let column = (x * usize::from(self.dx)).min(width.saturating_sub(1));
+        let row = (y * usize::from(self.dy)).min(height.saturating_sub(1));
+        row * width + column
+    }
+}
+
+/// Visits every metadata box of a JP2 container, giving its payload's range.
+///
+/// The walk is the one [`walk_boxes`] makes, and it hands out offsets rather
+/// than parsed values because the two patches below rewrite fields the probe
+/// has already read. A box that runs past the buffer ends the walk: the probe
+/// has parsed this file already, so a truncated box here would mean the file
+/// changed under the decode, and the caller reports that by its own check.
+fn for_each_metadata_box(data: &[u8], mut visit: impl FnMut(&[u8; 4], std::ops::Range<usize>)) {
+    fn walk(
+        data: &[u8],
+        mut offset: usize,
+        end: usize,
+        visit: &mut impl FnMut(&[u8; 4], std::ops::Range<usize>),
+    ) {
+        while offset + 8 <= end {
+            let length = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap());
+            let kind: [u8; 4] = data[offset + 4..offset + 8].try_into().unwrap();
+            let (header_size, box_len) = match length {
+                0 => (8, end - offset),
+                1 if offset + 16 <= end => {
+                    let length =
+                        u64::from_be_bytes(data[offset + 8..offset + 16].try_into().unwrap());
+                    let Ok(length) = usize::try_from(length) else {
+                        return;
+                    };
+                    (16, length)
+                }
+                length => (8, usize::try_from(length).unwrap_or(usize::MAX)),
+            };
+            if box_len < header_size || box_len > end - offset {
+                return;
+            }
+            let payload = offset + header_size..offset + box_len;
+            if &kind == b"jp2h" {
+                walk(data, payload.start, payload.end, visit);
+            } else {
+                visit(&kind, payload);
+            }
+            offset += box_len;
+        }
+    }
+    walk(data, 0, data.len(), &mut visit);
+}
+
+/// Tells the decoder that an sYCC page needs no colour conversion.
+///
+/// Returns an error when the probe read an sYCC `colr` box but the patch could
+/// not find it, because then the crate would convert the planes this module is
+/// about to hand out.
+fn patch_colr_srgb(data: &mut [u8], path: &Path) -> Result<()> {
+    let mut ranges = Vec::new();
+    for_each_metadata_box(data, |kind, payload| {
+        if kind == b"colr" && payload.len() >= 7 {
+            ranges.push(payload);
+        }
+    });
+    let mut patched = false;
+    for payload in ranges {
+        // The box states a method, a precedence, an approximation and then the
+        // enumerated colour space, which is a big-endian four byte value.
+        if data[payload.start] != 1 {
+            continue;
+        }
+        let value = u32::from_be_bytes(
+            data[payload.start + 3..payload.start + 7]
+                .try_into()
+                .unwrap(),
+        );
+        if value == SYCC_ENUMERATED {
+            data[payload.start + 6] = SRGB_ENUMERATED_LOW;
+            patched = true;
+        }
+    }
+    if !patched {
         return Err(image_error(
             "decode",
             path,
-            "OpenJPEG returned dimensions or components different from the header",
+            "the JP2 states sYCC but no colour specification box names it",
         ));
     }
-    let components = image.components();
+    Ok(())
+}
+
+/// Moves an opacity channel to the end of a `cdef` box and makes a
+/// premultiplied one an ordinary opacity channel.
+///
+/// The crate reads a channel type of 2 as no channel at all and then drops the
+/// whole box, and it decides whether the page has alpha from the box's *last*
+/// entry, so a box that names opacity anywhere else loses the alpha clip.
+/// Neither is a rewrite the crate offers, so the box the probe already parsed is
+/// rewritten in place: the entries keep their length and their component
+/// indices, and only their order and one type word move.
+fn normalize_cdef(data: &mut [u8], path: &Path) -> Result<()> {
+    let mut ranges = Vec::new();
+    for_each_metadata_box(data, |kind, payload| {
+        if kind == b"cdef" && payload.len() >= 2 {
+            ranges.push(payload);
+        }
+    });
+    let Some(payload) = ranges.first().cloned() else {
+        return Err(image_error(
+            "decode",
+            path,
+            "the JP2 states channel definitions but has no cdef box",
+        ));
+    };
+    let count = usize::from(u16::from_be_bytes(
+        data[payload.start..payload.start + 2].try_into().unwrap(),
+    ));
+    let Some(end) = count
+        .checked_mul(6)
+        .and_then(|bytes| payload.start.checked_add(2 + bytes))
+        .filter(|&end| end <= payload.end)
+    else {
+        return Err(image_error("decode", path, "the JP2 cdef box is truncated"));
+    };
+    let mut entries = data[payload.start + 2..end].to_vec();
+    let mut colour = Vec::new();
+    let mut opacity = Vec::new();
+    for entry in entries.as_chunks::<6>().0 {
+        let mut entry = *entry;
+        let kind = u16::from_be_bytes([entry[2], entry[3]]);
+        let association = u16::from_be_bytes([entry[4], entry[5]]);
+        if kind == CHANNEL_COLOR {
+            colour.push((association, entry));
+        } else {
+            // An opacity channel, or one flagged premultiplied, which this
+            // reader treats the same way. The probe's own read is what decided
+            // this page has an alpha channel, so every entry that is not a
+            // colour channel is one of those two.
+            debug_assert!(matches!(kind, CHANNEL_OPACITY | CHANNEL_PREMULTIPLIED));
+            entry[2] = 0;
+            entry[3] = CHANNEL_OPACITY as u8;
+            opacity.push((association, entry));
+        }
+    }
+    if opacity.is_empty() {
+        return Ok(());
+    }
+    colour.sort_by_key(|(association, _)| *association);
+    opacity.sort_by_key(|(association, _)| *association);
+    entries.clear();
+    for (_, entry) in colour.iter().chain(&opacity) {
+        entries.extend_from_slice(entry);
+    }
+    data[payload.start + 2..end].copy_from_slice(&entries);
+    Ok(())
+}
+
+/// Checks that what the decoder produced is the component layout the SIZ header
+/// states, which is what a header that lies about itself fails on.
+fn check_decoded_header(components: &[ComponentData], header: &Header, path: &Path) -> Result<()> {
+    if components.len() != header.components.len() {
+        return Err(image_error(
+            "decode",
+            path,
+            "the decoder returned components different from the header",
+        ));
+    }
     if components
         .iter()
         .zip(&header.components)
         .any(|(decoded, expected)| {
-            decoded.precision() != expected.precision
-                || decoded.is_signed() != expected.signed
-                || decoded.width() == 0
-                || decoded.height() == 0
+            u32::from(decoded.bit_depth()) != expected.precision || decoded.samples().is_empty()
         })
     {
         return Err(image_error(
             "decode",
             path,
-            "OpenJPEG returned component metadata different from the header",
+            "the decoder returned component metadata different from the header",
         ));
     }
     Ok(())
@@ -432,18 +670,22 @@ fn check_decoded_header(image: &Image, header: &Header, path: &Path) -> Result<(
 
 /// Expands a palette page's indices into the colour its `pclr` box states.
 ///
-/// The codestream holds one index a pixel, which is why the decode asks OpenJPEG
-/// for the codestream's own components rather than for the picture it would build
-/// from the palette itself. What is left is the expansion the TIFF and png palette
-/// paths already make: one entry looked up per index, into a frame of the palette's
-/// own shape.
+/// The codestream holds one index a pixel, which is why the decode asks the
+/// crate for the codestream's own components rather than for the picture it
+/// would build from the palette itself. What is left is the expansion the TIFF
+/// and png palette paths already make: one entry looked up per index, into a
+/// frame of the palette's own shape.
 ///
 /// # Errors
 ///
-/// Returns [`ImgSeqError`] for a page whose index component is missing or empty and
-/// for an index past the end of the palette.
-fn palette_buffer(image: &Image, palette: &Palette, path: &Path) -> Result<Pixels> {
-    let components = image.components();
+/// Returns [`ImgSeqError`] for a page whose index component is missing or empty
+/// and for an index past the end of the palette.
+fn palette_buffer(
+    components: &[ComponentData],
+    header: &Header,
+    palette: &Palette,
+    path: &Path,
+) -> Result<Pixels> {
     let Some(index) = components.first() else {
         return Err(image_error(
             "decode",
@@ -451,9 +693,10 @@ fn palette_buffer(image: &Image, palette: &Palette, path: &Path) -> Result<Pixel
             "the palette page holds no index component",
         ));
     };
-    let width = usize::try_from(index.width()).unwrap_or(0);
-    let height = usize::try_from(index.height()).unwrap_or(0);
-    if width == 0 || height == 0 {
+    let width = usize::try_from(header.width).unwrap_or(0);
+    let height = usize::try_from(header.height).unwrap_or(0);
+    let samples = width.saturating_mul(height);
+    if samples == 0 || index.samples().len() < samples {
         return Err(image_error(
             "decode",
             path,
@@ -462,17 +705,12 @@ fn palette_buffer(image: &Image, palette: &Palette, path: &Path) -> Result<Pixel
     }
     let channels = usize::from(palette.components);
     let wide = palette.bits == 16;
-    // The crate hands a component over scaled into the word it fits, so the index is
-    // scaled back to the precision the codestream states before it is looked up.
-    let scale = if palette.bits >= 16 {
-        1.0
-    } else {
-        f64::from((1u32 << u32::from(palette.bits)) - 1) / f64::from(u16::MAX)
-    };
-    let mut buffer = Vec::with_capacity(width * height * channels * if wide { 2 } else { 1 });
-    for value in index.data_u16() {
-        let index = ((f64::from(value) * scale).round() as u32) as usize;
-        let at = index * channels;
+    let mut buffer = Vec::with_capacity(samples * channels * if wide { 2 } else { 1 });
+    for sample in &index.samples()[..samples] {
+        // The crate hands the index over at the precision the codestream states,
+        // which is what the palette is indexed with; OpenJPEG scaled it into a
+        // wider word, so the scale that undid that is gone.
+        let at = (sample.round().max(0.0) as usize).saturating_mul(channels);
         let Some(entry) = palette.values.get(at..at + channels) else {
             return Err(image_error(
                 "decode",
@@ -498,173 +736,249 @@ fn palette_buffer(image: &Image, palette: &Palette, path: &Path) -> Result<Pixel
     Ok(Pixels::Interleaved { color_type, buffer })
 }
 
-fn decode_interleaved(image: &Image, color_type: ColorType, path: &Path) -> Result<Pixels> {
-    if matches!(image.color_space(), ColorSpace::SYCC) {
-        return decode_sycc_rgb(image, color_type, path);
+/// The channels one pixel of a layout holds.
+fn channel_count(color_type: ColorType) -> usize {
+    match color_type {
+        ColorType::L8 | ColorType::L16 | ColorType::L32F => 1,
+        ColorType::La8 | ColorType::La16 | ColorType::La32F => 2,
+        ColorType::Rgb8 | ColorType::Rgb16 | ColorType::Rgb32F => 3,
+        ColorType::Rgba8 | ColorType::Rgba16 | ColorType::Rgba32F => 4,
     }
-    let data = image
-        .get_pixels(None)
-        .map_err(|error| image_error("decode", path, error))?;
-    let buffer = match (color_type, data.data) {
-        (ColorType::L8, ImagePixelData::L8(buffer))
-        | (ColorType::La8, ImagePixelData::La8(buffer))
-        | (ColorType::Rgb8, ImagePixelData::Rgb8(buffer))
-        | (ColorType::Rgba8, ImagePixelData::Rgba8(buffer)) => buffer,
-        (ColorType::L16, ImagePixelData::L16(buffer))
-        | (ColorType::La16, ImagePixelData::La16(buffer))
-        | (ColorType::Rgb16, ImagePixelData::Rgb16(buffer))
-        | (ColorType::Rgba16, ImagePixelData::Rgba16(buffer)) => u16_bytes(buffer),
-        (expected, actual) => {
-            return Err(image_error(
-                "decode",
-                path,
-                format!("OpenJPEG returned {actual:?}, expected {expected:?}"),
-            ));
-        }
+}
+
+/// Whether a layout stores its samples in a sixteen bit word.
+fn is_wide(color_type: ColorType) -> bool {
+    matches!(
+        color_type,
+        ColorType::L16 | ColorType::La16 | ColorType::Rgb16 | ColorType::Rgba16
+    )
+}
+
+/// One decoded sample, as the word a frame of `depth` bits takes.
+///
+/// `hayro-jpeg2000` hands each component over as the file's own integer sample
+/// in an `f32`, where `jpeg2k` handed over a word scaled to the sixteen bit
+/// buffer. The writer moves either down by `word_bits - frame_bits`, so the
+/// same left shift here keeps every frame byte identical.
+fn sample_word(
+    component: &ComponentData,
+    index: usize,
+    depth: u32,
+    wide: bool,
+    path: &Path,
+) -> Result<u16> {
+    let Some(&sample) = component.samples().get(index) else {
+        return Err(image_error(
+            "decode",
+            path,
+            "the decoder returned fewer samples than the header states",
+        ));
     };
+    let ceiling = (1_u32 << depth) - 1;
+    let value = sample.round().clamp(0.0, ceiling as f32) as u32;
+    if wide {
+        Ok((value << (16 - depth)) as u16)
+    } else {
+        Ok(u16::from(u8::try_from(value).unwrap_or(u8::MAX)))
+    }
+}
+
+/// Appends one sample in the word width of the buffer it goes into.
+fn push_word(buffer: &mut Vec<u8>, word: u16, wide: bool) {
+    if wide {
+        buffer.extend_from_slice(&word.to_ne_bytes());
+    } else {
+        buffer.push(word as u8);
+    }
+}
+
+fn decode_interleaved(
+    decoded: &hayro_jpeg2000::DecodedImage<'_>,
+    header: &Header,
+    color_type: ColorType,
+    path: &Path,
+) -> Result<Pixels> {
+    let components = decoded.components();
+    // A page whose container states sYCC but whose sampling no VapourSynth yuv
+    // format names is converted here, so no component leaves this module as the
+    // y,cb,cr it was coded as.
+    if header.color == EnumeratedColor::Sycc {
+        return decode_sycc_rgb(components, header, color_type, path);
+    }
+    let width = usize::try_from(header.width).unwrap_or(0);
+    let height = usize::try_from(header.height).unwrap_or(0);
+    let depth = header
+        .components
+        .first()
+        .map_or(0, |component| component.precision);
+    let wide = is_wide(color_type);
+    let channels = channel_count(color_type);
+    if components.len() < channels {
+        return Err(image_error(
+            "decode",
+            path,
+            "the decoder returned fewer components than the colour type needs",
+        ));
+    }
+    let samples = width.saturating_mul(height);
+    // Eight bit components need no widening, and the crate's own interleave
+    // rounds a whole component at a time through a map the compiler
+    // vectorises, so it is memory-bound where the loop below is
+    // compute-bound: measured over the corpus it is 1.7 ms against 19.8 ms for
+    // a 19.4 M sample gray page. It is the same bytes, because the crate
+    // rounds with `f32::round` and casts to `u8` exactly as this module does.
+    if !wide {
+        let buffer = decoded.data_u8();
+        if buffer.len() == samples.saturating_mul(channels) {
+            return Ok(Pixels::Interleaved { color_type, buffer });
+        }
+    }
+    let mut buffer = Vec::with_capacity(samples.saturating_mul(channels).saturating_mul(if wide {
+        2
+    } else {
+        1
+    }));
+    for pixel in 0..samples {
+        for component in components.iter().take(channels) {
+            let word = sample_word(component, pixel, depth, wide, path)?;
+            push_word(&mut buffer, word, wide);
+        }
+    }
     Ok(Pixels::Interleaved { color_type, buffer })
 }
 
 /// Convert an sYCC page to RGB when its SIZ sampling or depth is not one this
-/// plugin can hand out as a VapourSynth yuv format. The JP2 enumerated colour
-/// space uses full-range sRGB/BT.601 coefficients; supported layouts stay
-/// planar and never enter this conversion.
-fn decode_sycc_rgb(image: &Image, color_type: ColorType, path: &Path) -> Result<Pixels> {
-    let components = image.components();
+/// plugin can hand out as a VapourSynth yuv format.
+///
+/// The JP2 enumerated colour space uses full-range sRGB/BT.601 coefficients;
+/// supported layouts stay planar and never enter this conversion.
+fn decode_sycc_rgb(
+    components: &[ComponentData],
+    header: &Header,
+    color_type: ColorType,
+    path: &Path,
+) -> Result<Pixels> {
     if components.len() != 3 {
         return Err(image_error(
             "decode",
             path,
-            "OpenJPEG returned an invalid sYCC component count",
+            "the decoder returned a component count that is not three for an sYCC page",
         ));
     }
-    let width = usize::try_from(image.orig_width())
-        .map_err(|_| image_error("decode", path, "image width does not fit in memory"))?;
-    let height = usize::try_from(image.orig_height())
-        .map_err(|_| image_error("decode", path, "image height does not fit in memory"))?;
-    let wide = matches!(color_type, ColorType::Rgb16);
-    let planes = components
-        .iter()
-        .map(|component| {
-            let values = if wide {
-                component
-                    .data_u16()
-                    .map(|value| value as f32 / f32::from(u16::MAX))
-                    .collect::<Vec<_>>()
+    let width = usize::try_from(header.width).unwrap_or(0);
+    let height = usize::try_from(header.height).unwrap_or(0);
+    let depth = header
+        .components
+        .first()
+        .map_or(0, |component| component.precision);
+    let ceiling = (1_u32 << depth) - 1;
+    let normalizer = ceiling as f32;
+    let wide = is_wide(color_type);
+    let samples = width.saturating_mul(height);
+    let mut buffer =
+        Vec::with_capacity(
+            samples
+                .saturating_mul(3)
+                .saturating_mul(if wide { 2 } else { 1 }),
+        );
+    for pixel in 0..samples {
+        // Every component is decoded at the picture's own size, with a subsampled
+        // sample repeated over the block it covers, so the conversion reads the
+        // picture's pixel in each plane and upsamples nothing itself.
+        let luma = normalized(&components[0], pixel, normalizer, path)?;
+        let cb = normalized(&components[1], pixel, normalizer, path)?;
+        let cr = normalized(&components[2], pixel, normalizer, path)?;
+        let r = luma + 1.402 * (cr - 0.5);
+        let g = luma - 0.344_136 * (cb - 0.5) - 0.714_136 * (cr - 0.5);
+        let b = luma + 1.772 * (cb - 0.5);
+        for value in [r, g, b] {
+            let value = (value.clamp(0.0, 1.0) * normalizer).round() as u32;
+            let word = if wide {
+                (value << (16 - depth)) as u16
             } else {
-                component
-                    .data_u8()
-                    .map(|value| f32::from(value) / f32::from(u8::MAX))
-                    .collect::<Vec<_>>()
+                u16::from(u8::try_from(value).unwrap_or(u8::MAX))
             };
-            (
-                usize::try_from(component.width()).unwrap_or(0),
-                usize::try_from(component.height()).unwrap_or(0),
-                values,
-            )
-        })
-        .collect::<Vec<_>>();
-    if planes.iter().any(|(plane_width, plane_height, values)| {
-        *plane_width == 0 || *plane_height == 0 || values.len() != plane_width * plane_height
-    }) {
-        return Err(image_error(
-            "decode",
-            path,
-            "OpenJPEG returned an invalid sYCC plane",
-        ));
-    }
-
-    if wide {
-        let mut buffer = Vec::with_capacity(width.saturating_mul(height).saturating_mul(6));
-        for y in 0..height {
-            for x in 0..width {
-                let luma = sycc_sample(&planes[0], x, y, width, height);
-                let cb = sycc_sample(&planes[1], x, y, width, height);
-                let cr = sycc_sample(&planes[2], x, y, width, height);
-                let r = luma + 1.402 * (cr - 0.5);
-                let g = luma - 0.344_136 * (cb - 0.5) - 0.714_136 * (cr - 0.5);
-                let b = luma + 1.772 * (cb - 0.5);
-                for value in [r, g, b] {
-                    buffer.extend_from_slice(
-                        &((value.clamp(0.0, 1.0) * f32::from(u16::MAX)).round() as u16)
-                            .to_ne_bytes(),
-                    );
-                }
-            }
-        }
-        return Ok(Pixels::Interleaved { color_type, buffer });
-    }
-
-    let mut buffer = Vec::with_capacity(width.saturating_mul(height).saturating_mul(3));
-    for y in 0..height {
-        for x in 0..width {
-            let luma = sycc_sample(&planes[0], x, y, width, height);
-            let cb = sycc_sample(&planes[1], x, y, width, height);
-            let cr = sycc_sample(&planes[2], x, y, width, height);
-            let r = luma + 1.402 * (cr - 0.5);
-            let g = luma - 0.344_136 * (cb - 0.5) - 0.714_136 * (cr - 0.5);
-            let b = luma + 1.772 * (cb - 0.5);
-            buffer.extend([
-                (r.clamp(0.0, 1.0) * f32::from(u8::MAX)).round() as u8,
-                (g.clamp(0.0, 1.0) * f32::from(u8::MAX)).round() as u8,
-                (b.clamp(0.0, 1.0) * f32::from(u8::MAX)).round() as u8,
-            ]);
+            push_word(&mut buffer, word, wide);
         }
     }
     Ok(Pixels::Interleaved { color_type, buffer })
 }
 
-fn sycc_sample(
-    plane: &(usize, usize, Vec<f32>),
-    x: usize,
-    y: usize,
-    full_width: usize,
-    full_height: usize,
-) -> f32 {
-    let (width, height, values) = plane;
-    let x = (x * width / full_width).min(width.saturating_sub(1));
-    let y = (y * height / full_height).min(height.saturating_sub(1));
-    values[y * width + x]
-}
-
-fn decode_yuv(image: &Image, format: PixelFormat, path: &Path) -> Result<Pixels> {
-    if !matches!(image.color_space(), ColorSpace::SYCC) {
+/// One component's sample at `index`, normalized to `[0, 1]`.
+fn normalized(
+    component: &ComponentData,
+    index: usize,
+    normalizer: f32,
+    path: &Path,
+) -> Result<f32> {
+    let Some(&sample) = component.samples().get(index) else {
         return Err(image_error(
             "decode",
             path,
-            "OpenJPEG did not preserve the declared sYCC color space",
+            "the decoder returned fewer samples than the header states",
+        ));
+    };
+    Ok(sample.clamp(0.0, normalizer) / normalizer)
+}
+
+fn decode_yuv(
+    components: &[ComponentData],
+    header: &Header,
+    format: PixelFormat,
+    path: &Path,
+) -> Result<Pixels> {
+    if header.color != EnumeratedColor::Sycc {
+        return Err(image_error(
+            "decode",
+            path,
+            "the decoder did not preserve the declared sYCC color space",
         ));
     }
-    let components = image.components();
     if components.len() != 3 {
         return Err(image_error(
             "decode",
             path,
-            "OpenJPEG returned a non-RGB component count",
+            "the decoder returned a component count that is not three",
         ));
     }
-    let planes = components
-        .iter()
-        .map(|component| {
-            if format.bytes_per_sample() == 1 {
-                component.data_u8().collect()
-            } else {
-                u16_bytes(component.data_u16().collect())
+    let width = usize::try_from(header.width).unwrap_or(0);
+    let height = usize::try_from(header.height).unwrap_or(0);
+    let depth = header
+        .components
+        .first()
+        .map_or(0, |component| component.precision);
+    let wide = format.bytes_per_sample() == 2;
+    let mut planes = Vec::with_capacity(3);
+    for (plane, component) in components.iter().enumerate() {
+        let Some(sampling) = header.components.get(plane) else {
+            return Err(image_error(
+                "decode",
+                path,
+                "the header states fewer components than the page has",
+            ));
+        };
+        let (plane_width, plane_height) = format.plane_dimensions(plane, width, height);
+        let mut buffer = Vec::with_capacity(
+            plane_width
+                .saturating_mul(plane_height)
+                .saturating_mul(if wide { 2 } else { 1 }),
+        );
+        for y in 0..plane_height {
+            for x in 0..plane_width {
+                // The crate decodes every component at the picture's own size,
+                // repeating a subsampled sample over the `dx` by `dy` block it
+                // covers, so the plane's pixel is the buffer's `x * dx, y * dy`.
+                let source = sampling.sample_index(x, y, width, height);
+                let word = sample_word(component, source, depth, wide, path)?;
+                push_word(&mut buffer, word, wide);
             }
-        })
-        .collect();
+        }
+        planes.push(buffer);
+    }
     Ok(Pixels::Planar {
         planes,
         alpha: None,
     })
-}
-
-fn u16_bytes(values: Vec<u16>) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(values.len() * 2);
-    for value in values {
-        bytes.extend_from_slice(&value.to_ne_bytes());
-    }
-    bytes
 }
 
 fn cicp(color: EnumeratedColor) -> Option<Cicp> {
@@ -1105,6 +1419,41 @@ fn parse_siz(data: &[u8], path: &Path) -> Result<SizHeader> {
             "the JPEG 2000 component sampling is invalid",
         ));
     }
+    // A size the decoder would have to allocate is checked before it is asked
+    // to; see [`MAX_DECODED_SAMPLES`] for why that is the probe's job.
+    let width = x_size - x_offset;
+    let height = y_size - y_offset;
+    let samples = u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(u64::from(component_count));
+    if samples > MAX_DECODED_SAMPLES {
+        return Err(ImgSeqError::new(format!(
+            "image '{}' states {width}x{height} with {component_count} components, which is {samples} samples, more than this reader decodes",
+            path.display()
+        )));
+    }
+    let tile_width = u32::from_be_bytes(data[marker + 22..marker + 26].try_into().unwrap());
+    let tile_height = u32::from_be_bytes(data[marker + 26..marker + 30].try_into().unwrap());
+    let tile_x = u32::from_be_bytes(data[marker + 30..marker + 34].try_into().unwrap());
+    let tile_y = u32::from_be_bytes(data[marker + 34..marker + 38].try_into().unwrap());
+    if tile_width == 0 || tile_height == 0 {
+        return Err(image_error(
+            "identify",
+            path,
+            "the JPEG 2000 tile size is invalid",
+        ));
+    }
+    let tiles_x =
+        (u64::from(x_size).saturating_sub(u64::from(tile_x))).div_ceil(u64::from(tile_width));
+    let tiles_y =
+        (u64::from(y_size).saturating_sub(u64::from(tile_y))).div_ceil(u64::from(tile_height));
+    let tiles = tiles_x.max(1).saturating_mul(tiles_y.max(1));
+    if tiles > MAX_TILES {
+        return Err(ImgSeqError::new(format!(
+            "image '{}' divides its {width}x{height} grid into {tiles} tiles, more than this reader decodes",
+            path.display()
+        )));
+    }
     Ok(SizHeader {
         width: x_size - x_offset,
         height: y_size - y_offset,
@@ -1183,6 +1532,51 @@ mod tests {
             data.extend_from_slice(&[component.0, component.1, component.2]);
         }
         data
+    }
+
+    #[test]
+    fn a_size_past_what_the_reader_decodes_is_refused() {
+        // The decoder allocates a sample per pixel per component before it
+        // checks anything, and the release build aborts on a failed
+        // allocation, so a codestream that claims a picture nothing could hold
+        // has to be refused here.
+        let data = siz(100_000, 100_000, &[(7, 1, 1), (7, 1, 1), (7, 1, 1)]);
+        let error = parse_siz(&data, Path::new("huge.jp2")).expect_err("a huge claim is refused");
+        assert!(
+            error.to_string().contains("more than this reader decodes"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_tile_grid_past_what_the_reader_decodes_is_refused() {
+        // The SIZ marker's tile size is written at the picture's own size by
+        // [`siz`]; one pixel a tile is what turns an ordinary page into a grid
+        // of 67 M tiles.
+        let mut data = siz(8192, 8192, &[(7, 1, 1)]);
+        data[24..28].copy_from_slice(&1u32.to_be_bytes());
+        data[28..32].copy_from_slice(&1u32.to_be_bytes());
+        let error = parse_siz(&data, Path::new("tiles.jp2")).expect_err("a tile grid is refused");
+        assert!(error.to_string().contains("tiles, more than"), "{error}");
+    }
+
+    #[test]
+    fn a_subsampled_plane_reads_the_block_its_sample_covers() {
+        // The decoder repeats a subsampled sample over the block it covers, so
+        // plane pixel `(x, y)` is the buffer's `(x * dx, y * dy)`. The last
+        // block of an odd picture is clipped rather than padded, which is what
+        // the clamp is for.
+        let component = ComponentHeader {
+            precision: 8,
+            signed: false,
+            dx: 2,
+            dy: 2,
+        };
+        assert_eq!(component.sample_index(0, 0, 4, 4), 0);
+        assert_eq!(component.sample_index(1, 0, 4, 4), 2);
+        assert_eq!(component.sample_index(0, 1, 4, 4), 8);
+        assert_eq!(component.sample_index(1, 1, 4, 4), 10);
+        assert_eq!(component.sample_index(2, 2, 5, 5), 24);
     }
 
     #[test]

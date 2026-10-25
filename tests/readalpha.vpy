@@ -391,6 +391,29 @@ def test_jpeg2000() -> None:
         "jp2-palette-indices: the indices are the samples",
     )
 
+    # A JP2 whose `colr` box states sYCC keeps its own y,cb,cr planes: the
+    # reader hands them out as Yuv444P8 rather than converting them to rgb, and
+    # the fixture is the rgb8 page with its colour space relabelled, so its
+    # three planes are that page's three planes unchanged. This is the only
+    # check of the sYCC path, and it is what the `colr` rewrite that keeps the
+    # decoder from converting is measured against.
+    sycc = core.imgseqs.Read(files=[fixture("sycc-jp2-444.jp2")])
+    check(
+        sycc.format.name == "YUV444P8",
+        f"sycc-jp2-444: the file's own planes are handed out (got {sycc.format.name})",
+    )
+    sycc_frame = sycc.get_frame(0)
+    check(
+        sycc_frame.props.get("_Matrix") == 6 and sycc_frame.props.get("_Range") == 1,
+        "sycc-jp2-444: the frame states the sYCC matrix and full range",
+    )
+    rgb = core.imgseqs.Read(files=[fixture("alpha-jp2-rgb8.jp2")]).get_frame(0)
+    for plane in range(3):
+        check(
+            samples(sycc_frame, plane) == samples(rgb, plane),
+            f"sycc-jp2-444: plane {plane} is the component the codestream holds",
+        )
+
 
 def test_opaque_fill() -> None:
     _, alpha = read_alpha(files=[fixture("alpha-rgb8.png")])

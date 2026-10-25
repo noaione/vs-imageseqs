@@ -16,7 +16,20 @@
 - Bump jxl to `0.8.0`
   - This changes some internal stuff to use Event-driven API for decoding animation.
 - Bump dav1d to `1.5.4`
+- Replace `jpeg2k` and the OpenJPEG sources `openjpeg-sys` vendored with `hayro-jpeg2000`, a pure-Rust decoder.
+  - No C toolchain and no `build.rs` on any platform, so the one dependency whose build failed without a diagnostic is gone.
+  - `openjpeg-COPYING.txt` and OpenJPEG's entries leave `THIRD_PARTY_NOTICES` and `LICENSES/`, and the plugin links no OpenJPEG at all.
 
+### changed
+
+- JPEG 2000 frames are decoded by `hayro-jpeg2000` now, at the depth, alpha and palette the file states.
+  - Every frame of the 35 page corpus and of the jpeg 2000 fixtures is byte for byte what the OpenJPEG build produced: same planes, same formats, same `_Primaries`/`_Transfer`/`_Matrix`/`_Range`.
+  - An sYCC page still comes out as its own yuv planes, and a page whose every component states one subsampling factor is refused by name instead of handed out at a size its pixels do not have.
+  - The decode is faster than the OpenJPEG build: 7.8% at the default window and 7% serial over the 35 page corpus, level at `prefetch=16`. Peak memory is 1.5x at a deep window (3271 against 2139 MB at `prefetch=16`), because the decoder holds `f32` components.
+
+### fixed
+
+- Freeing a clip could hang when the lookahead pool was torn down while a worker sat between its stop check and its wait; the stop and its notification are made under the pool's own lock now
 ## [0.3.0] - 2026-10-13
 
 ### added

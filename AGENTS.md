@@ -148,7 +148,7 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   for every colour avif, which `dav1d` decodes and which also answers
   `decoder::probe` from the container boxes and the av1 sequence header so that
   probing an avif does not decode it, `jxl.rs` for every jpeg xl, which the `jxl`
-  crate decodes directly, `jp2.rs` for JPEG 2000 header probing and OpenJPEG
+  crate decodes directly, `jp2.rs` for JPEG 2000 header probing and `hayro-jpeg2000`
   decoding, `png.rs` for the `cICP` chunk and for the png files whose rows it
   walks straight into the frame instead of buffering the picture whole — which
   includes expanding a palette page's indices itself — and
@@ -481,9 +481,10 @@ bundle. Both Linux layouts include shared dav1d/libde265 with relative loader
 paths, and a fresh container validates them before publishing. Each Linux build
 includes a relinking source archive; see `docs/LINUX-BUILD.md`.
 
-the current native set is dav1d, libheif 1.23.5, libde265, the `wpd` decoder
-the crate builds and links into the plugin, and the OpenJPEG sources vendored
-by `openjpeg-sys`. dav1d, OpenJPEG and wpd use the bsd-2-clause license.
+the current native set is dav1d, libheif 1.23.5, libde265 and the `wpd` decoder
+the crate builds and links into the plugin. dav1d and wpd use the bsd-2-clause
+license. jpeg 2000 is decoded by the pure-Rust `hayro-jpeg2000`, so no C
+decoder for it ships at all.
 libheif and libde265 are lgplv3; Unix wheels bundle them as shared libraries,
 while Windows links them statically. keep the exact upstream texts in
 `LICENSES/`.
@@ -494,9 +495,9 @@ promises the host only libc and libz; `LICENSES/gcc-runtime-COPYING.txt` is the
 exception they are conveyed under.
 
 on windows the vcpkg `x64-windows-static-md` triplet makes every vcpkg native
-library static. `jpeg2k` compiles its vendored OpenJPEG sources on every
-platform. every webp is decoded by the `wpd` crate, which the plugin links
-and which needs no library found at build time. Unix builds find libheif 1.23.5
+library static. every webp is decoded by the `wpd` crate, which the plugin links
+and which needs no library found at build time; every jpeg 2000 is decoded
+in Rust by `hayro-jpeg2000`. Unix builds find libheif 1.23.5
 through pkg-config and bundle its shared library with shared dav1d and libde265;
 Windows gets all three as static libraries through vcpkg. The static LGPL
 obligations below apply to the Windows libheif and libde265 linkage.
