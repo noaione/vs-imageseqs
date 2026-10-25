@@ -1448,6 +1448,22 @@ makes it unusable. `ReadAlpha` therefore:
 The reference counts stay balanced and no dependency has to be patched or
 vendored.
 
+## PNGWrite destination modes
+
+`PNGWrite` has two destination modes. `output_path` is the template grammar
+(`%d`, `%0Nd`, `%%`) numbered by the writer's frame index plus
+`start_number`; a literal path is allowed for one frame. `output_dir` is a
+directory created recursively while the node is created. A still is named
+`<ImgSeqPath stem>.png`. An animation's `ImgSeqAnimationIndex` repeats while a
+picture is held, so its output frames take the writer's own frame index
+instead, `<stem>-0000.png`, `<stem>-0001.png`, and so on.
+
+A per-instance map from destination to frame index refuses two different
+frames that resolve to one path, including two stills with the same stem. A
+repeat of the same frame is allowed, which is what `always_save` needs. The
+map's key is case-folded on Windows. `output_dir` and `output_path` are
+mutually exclusive; `start_number` applies only to `output_path`.
+
 ## Validation
 
 `cargo test` covers the pixel plumbing — including the format each nominal

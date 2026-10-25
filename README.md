@@ -113,7 +113,7 @@ values VapourSynth supports.
 ## write PNGs
 
 `PNGWrite` creates a node with the same frames as its input clip. Requesting a
-frame writes it as a PNG; creating the node alone writes nothing:
+frame writes it as a PNG; creating the node alone writes no PNG:
 
 ```python
 writer = core.imgseqs.PNGWrite(
@@ -126,18 +126,32 @@ for n in range(writer.num_frames):
         pass
 ```
 
+To keep each source file's own name, give `output_dir` instead of
+`output_path`:
+
+```python
+writer = core.imgseqs.PNGWrite(clip, output_dir=r"exports")
+```
+
+The directory is created recursively. `output_path` and `output_dir` are
+mutually exclusive.
+
 Use a literal path for a one-frame clip, or a numbered path such as `%d`,
 `%04d`, or `%06d` for a longer clip. `%%` writes a literal percent sign. The
-output directory must already exist.
+`output_path` directory must already exist. With `output_dir`, a still is
+written as `<stem>.png` from `ImgSeqPath`; an animated file's output frames
+use the writer's own frame index, `<stem>-0000.png`, `<stem>-0001.png`, and so
+on, because the picture index repeats while a picture is held.
 
 | option | default | description |
 | --- | --- | --- |
 | `clip` | required | Gray, RGB, or YUV integer frames from 8 to 16 bits, or float gray/RGB. |
-| `output_path` | required | One filename or a numbered filename template. |
+| `output_path` | `None` | One filename or a numbered filename template. Required unless `output_dir` is given. |
+| `output_dir` | `None` | Directory to write into; a still is named from `ImgSeqPath`, an animated frame from the writer's index; created recursively. Required unless `output_path` is given. |
 | `alpha` | `None` | Matching gray clip to write as alpha. |
 | `depth` | `8` for 8-bit input, otherwise `16` | PNG sample depth: `1`, `2`, `4`, `8`, or `16`. Packed depths are for gray clips. |
 | `compression` | `6` | Lossless compression level from `0` to `9`. |
-| `start_number` | `0` | Number added to the writer's frame index. |
+| `start_number` | `0` | Number added to the writer's frame index. Only with `output_path`. |
 | `always_save` | `False` | Write a frame again if this writer has already saved it. |
 | `overwrite` | `False` | Allow replacing an existing destination. |
 | `icc_profile` | `False` | Embed the frame's raw `ICCProfile` property. |

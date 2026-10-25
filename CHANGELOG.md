@@ -2,6 +2,10 @@
 
 ## unreleased
 
+### added
+
+- `core.imgseqs.PNGWrite(..., output_dir=...)` names each still after the source file (`ImgSeqPath`) and each animated frame after the writer's own frame index, creating the directory recursively. `output_path` and `output_dir` are mutually exclusive, and `start_number` applies only to `output_path`
+
 ### build
 
 - Bump wpd to `2e1400f00089a68c7939eb9593d5b49b1144b8e0`

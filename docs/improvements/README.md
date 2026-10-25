@@ -143,6 +143,18 @@ open plus frames to 4.99 s.
 
 ## plans
 
+### PNGWrite source names — 2026-10-25
+
+[42 PNGWrite source names](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/42-png-write-source-names.md)
+is implemented: an `output_dir` mode on `PNGWrite` names each still after the file
+it came from, through `ImgSeqPath`; an animated file's output frames carry the
+writer's own frame index (`-0000`, ...) because the picture index repeats while
+a picture is held. The directory is created recursively, and the mode removes
+the numbered template and the caller's staging rename for the nmanga save
+path. The existing `output_path` grammar is unchanged, a collision between two
+frames resolving to one name is refused, and no benchmark is planned because
+the encode path is unchanged.
+
 ### NEON yuv conversion kernel — 2026-10-08
 
 [41 NEON yuv conversion kernel](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/41-neon-convert-kernel.md)

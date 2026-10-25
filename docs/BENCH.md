@@ -1561,3 +1561,11 @@ than anything this change did: the same comparison in one session is the one
 above. An intermediate version of the row writer was 7% slower — the storage of
 a sample was decided inside the sample loop — and moving that decision to the
 row took it back.
+
+### destination names
+
+`PNGWrite`'s `output_dir` mode (plan 42) changes only how a destination is named,
+not the encode: the tables above still measure the writer. A three-pass rerun
+after the change kept the six-deep and twelve-deep plugin rows at 0.74x and
+0.55x of six-worker Pillow with the same file sizes, inside the session drift
+this page records.

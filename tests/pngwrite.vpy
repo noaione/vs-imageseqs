@@ -777,6 +777,119 @@ def test_paths() -> None:
     )
 
 
+def test_source_names() -> None:
+    """output_dir names a still from its source and an animation from its frame."""
+    out = directory("source-names")
+    stills = out / "nested" / "stills"
+    still_clip = core.imgseqs.Read(
+        files=[fixture("png-plain-gray8.png"), fixture("alpha-rgb8.png")],
+        mismatch=True,
+    )
+    check(not stills.exists(), "the nested output_dir is not there yet")
+    writer = core.imgseqs.PNGWrite(still_clip, output_dir=str(stills))
+    check(stills.is_dir(), "creating the writer creates the nested output_dir")
+    check(list(stills.iterdir()) == [], "creating the writer writes no PNG")
+    names = ["png-plain-gray8.png", "alpha-rgb8.png"]
+    for index, name in enumerate(names):
+        with still_clip.get_frame(index) as frame:
+            expected = expected_rows(frame, None, frame.format.bits_per_sample)
+            size = (frame.width, frame.height)
+        with writer.get_frame(index) as frame:
+            check(
+                Path(str(frame.props["ImgSeqPNGWritePath"])) == stills / name,
+                f"still {index} names its source",
+            )
+            check(int(frame.props["ImgSeqPNGWritePerformed"]) == 1, f"still {index} writes")
+        page = Png(stills / name)
+        check((page.width, page.height) == size, f"still {index} keeps its size")
+        check(page.rows == expected, f"still {index} keeps its samples")
+    check(
+        sorted(path.name for path in stills.iterdir()) == sorted(names),
+        "the still names are the source stems",
+    )
+
+    animation = out / "animation"
+    animation_clip = core.imgseqs.Read(files=[fixture("animation.gif")], mismatch=True)
+    writer = core.imgseqs.PNGWrite(animation_clip, output_dir=str(animation))
+    for index in range(writer.num_frames):
+        with animation_clip.get_frame(index) as frame:
+            expected = expected_rows(frame, None, frame.format.bits_per_sample)
+        with writer.get_frame(index) as frame:
+            name = f"animation-{index:04d}.png"
+            check(
+                Path(str(frame.props["ImgSeqPNGWritePath"])) == animation / name,
+                f"animation frame {index} names its frame index",
+            )
+        check(Png(animation / name).rows == expected, f"animation frame {index} keeps its samples")
+    check(
+        sorted(path.name for path in animation.iterdir())
+        == [f"animation-{index:04d}.png" for index in range(writer.num_frames)],
+        "the animation names use four padded frame digits",
+    )
+
+    first = out / "collision" / "a" / "page.png"
+    second = out / "collision" / "b" / "page.png"
+    first.parent.mkdir(parents=True)
+    second.parent.mkdir(parents=True)
+    shutil.copy2(fixture("alpha-rgb8.png"), first)
+    shutil.copy2(fixture("alpha-rgb8.png"), second)
+    collision_out = out / "collision-out"
+    clip = core.imgseqs.Read(files=[str(first), str(second)], mismatch=True)
+    writer = core.imgseqs.PNGWrite(clip, output_dir=str(collision_out))
+    with writer.get_frame(0):
+        pass
+    message = raised(lambda: writer.get_frame(1))
+    check(
+        message is not None and "same destination" in message and "page.png" in message,
+        f"two stills with one stem are refused ({message})",
+    )
+
+    blank = core.std.BlankClip(width=4, height=4, format=vs.GRAY8)
+    blank_out = out / "blank"
+    writer = core.imgseqs.PNGWrite(blank, output_dir=str(blank_out))
+    message = raised(lambda: writer.get_frame(0))
+    check(
+        message is not None and "ImgSeqPath" in message and "output_path" in message,
+        f"a clip without ImgSeqPath is refused ({message})",
+    )
+
+    message = raised(
+        lambda: core.imgseqs.PNGWrite(blank, output_dir=str(out / "bad"), start_number=0)
+    )
+    check(
+        message is not None and "start_number" in message,
+        f"start_number is refused with output_dir ({message})",
+    )
+    message = raised(
+        lambda: core.imgseqs.PNGWrite(
+            blank, output_path=str(out / "both.png"), output_dir=str(out / "both")
+        )
+    )
+    check(message is not None and "not both" in message, f"both destinations are refused ({message})")
+    message = raised(lambda: core.imgseqs.PNGWrite(blank))
+    check(
+        message is not None and "needs output_path or output_dir" in message,
+        f"no destination is refused ({message})",
+    )
+
+    existing = out / "existing"
+    one = core.imgseqs.Read(files=[fixture("png-plain-gray8.png")])
+    writer = core.imgseqs.PNGWrite(one, output_dir=str(existing))
+    with writer.get_frame(0):
+        pass
+    page = existing / "png-plain-gray8.png"
+    check(page.is_file(), "the first output_dir write lands")
+    writer = core.imgseqs.PNGWrite(one, output_dir=str(existing), overwrite=False)
+    message = raised(lambda: writer.get_frame(0))
+    check(
+        message is not None and str(page) in message,
+        f"an existing output_dir destination is refused ({message})",
+    )
+    writer = core.imgseqs.PNGWrite(one, output_dir=str(existing), overwrite=True)
+    with writer.get_frame(0) as frame:
+        check(int(frame.props["ImgSeqPNGWritePerformed"]) == 1, "overwrite replaces it")
+
+
 def test_repeat() -> None:
     """A saved frame is skipped, and always_save turns that off."""
     out = directory("repeat")
@@ -1329,6 +1442,7 @@ def main() -> int:
         test_compression,
         test_metadata,
         test_paths,
+        test_source_names,
         test_repeat,
         test_errors,
         test_yuv,

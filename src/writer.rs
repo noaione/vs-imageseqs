@@ -3,7 +3,8 @@
 //! `PNGWrite` is the other end of `Read`. It is a video node whose frames are
 //! the frames of the clip it was given, so a graph can sit behind it unchanged,
 //! and evaluating one of its frames writes that frame to a PNG before the
-//! request returns. Creating the node writes nothing: a frame that is never
+//! request returns. Creating the node writes no PNG; an `output_dir` call
+//! creates that directory while the node is created. A frame that is never
 //! requested is never written.
 //!
 //! A PNG holds integer gray, r,g,b or an index into a palette, so a frame that
@@ -30,6 +31,7 @@
 
 use std::{
     borrow::Cow,
+    collections::HashMap,
     ffi::{CStr, c_void},
     fs::{self, File, OpenOptions},
     io::{self, BufWriter, Write},
@@ -57,7 +59,7 @@ use vapoursynth4_rs::{
 };
 
 /// Arguments accepted by `PNGWrite`.
-const PNG_WRITE_ARGS: &CStr = c"clip:vnode;output_path:data;alpha:vnode:opt;always_save:int:opt;compression:int:opt;overwrite:int:opt;start_number:int:opt;icc_profile:int:opt;depth:int:opt;matrix:int:opt;debug:int:opt;";
+const PNG_WRITE_ARGS: &CStr = c"clip:vnode;output_path:data:opt;output_dir:data:opt;alpha:vnode:opt;always_save:int:opt;compression:int:opt;overwrite:int:opt;start_number:int:opt;icc_profile:int:opt;depth:int:opt;matrix:int:opt;debug:int:opt;";
 
 /// The compression level a caller gets when it asks for none.
 const DEFAULT_COMPRESSION: i64 = 6;
@@ -264,6 +266,57 @@ impl Ledger {
             self.bits.resize(word + 1, 0);
         }
         self.bits[word] |= 1 << (index % 64);
+    }
+}
+
+/// The destination each frame of one writer instance has claimed.
+///
+/// `Parallel` completion can have several frames in flight, so two frames that
+/// derive the same destination have to be told apart before either writes.
+/// Repeats of one frame are allowed, which is what `always_save` needs.
+#[derive(Debug, Default)]
+struct DestinationClaims {
+    seen: Mutex<HashMap<PathBuf, usize>>,
+}
+
+impl DestinationClaims {
+    /// Claims `destination` for `index`, or refuses it for another frame.
+    fn claim(&self, destination: &Path, index: usize) -> Result<bool> {
+        let key = destination_key(destination);
+        let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+        match seen.get(&key).copied() {
+            Some(other) if other != index => Err(ImgSeqError::new(format!(
+                "PNGWrite would write frame {other} and frame {index} to the same destination '{}'; give the sequence a numbered output_path or a unique source name",
+                destination.display()
+            ))),
+            Some(_) => Ok(false),
+            None => {
+                seen.insert(key, index);
+                Ok(true)
+            }
+        }
+    }
+
+    /// Drops a claim that did not publish, so a retry can claim it again.
+    fn release(&self, destination: &Path) {
+        let key = destination_key(destination);
+        let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+        seen.remove(&key);
+    }
+}
+
+/// The key two destinations are compared by.
+///
+/// Windows resolves two paths that differ only by case to one file, so the key
+/// is folded there; the other platforms keep the path as it is.
+fn destination_key(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(path.to_string_lossy().to_lowercase())
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_path_buf()
     }
 }
 
@@ -691,89 +744,206 @@ fn unsupported_family(family: ColorFamily, sample_type: SampleType) -> ImgSeqErr
     ))
 }
 
-/// The output path and the frame numbering a call was created with.
+/// The destination mode a call was created with.
 #[derive(Debug)]
-struct Destinations {
-    template: Template,
-    start_number: i64,
+enum Destinations {
+    Template {
+        template: Template,
+        start_number: i64,
+    },
+    SourceName {
+        directory: PathBuf,
+    },
 }
 
 impl Destinations {
-    /// Reads, resolves and checks the template of one call.
+    /// Reads the destination mode of one call.
     ///
-    /// A relative path is resolved here, while the filter is being created,
-    /// because a later frame request must not depend on the process directory
-    /// another part of the script may have moved.
-    fn read(text: &str, start_number: i64, frames: i64) -> Result<Self> {
-        if text.is_empty() {
-            return Err(ImgSeqError::new("PNGWrite needs a non-empty output_path"));
+    /// `output_path` and `output_dir` are mutually exclusive. A relative path is
+    /// resolved here, while the filter is being created, because a later frame
+    /// request must not depend on the process directory another part of the
+    /// script may have moved. `output_dir` is created recursively; a template's
+    /// directory is still the caller's to create.
+    fn read(
+        output_path: Option<&str>,
+        output_dir: Option<&str>,
+        start_number: Option<i64>,
+        frames: i64,
+    ) -> Result<Self> {
+        match (output_path, output_dir) {
+            (Some(_), Some(_)) => Err(ImgSeqError::new(
+                "PNGWrite takes output_path or output_dir, not both",
+            )),
+            (None, None) => Err(ImgSeqError::new("PNGWrite needs output_path or output_dir")),
+            (Some(text), None) => {
+                let start_number = start_number.unwrap_or(0);
+                if start_number < 0 {
+                    return Err(ImgSeqError::new(format!(
+                        "start_number must not be negative, got {start_number}"
+                    )));
+                }
+                if text.is_empty() {
+                    return Err(ImgSeqError::new("PNGWrite needs a non-empty output_path"));
+                }
+                if text.contains('\0') {
+                    return Err(ImgSeqError::new(
+                        "PNGWrite needs an output_path without a NUL byte",
+                    ));
+                }
+                let resolved = resolve_path(text)?;
+                let resolved = resolved.to_str().ok_or_else(|| {
+                    ImgSeqError::new("the PNGWrite output_path is not valid Unicode")
+                })?;
+                let template = Template::parse(resolved)?;
+                if frames > 1 && !template.numbered() {
+                    return Err(ImgSeqError::new(format!(
+                        "PNGWrite over {frames} frames needs a numbered output_path such as 'frame%06d.png', because a literal path names one destination"
+                    )));
+                }
+                check_template_parent(&template, start_number)?;
+                if frames > 1 {
+                    // The last destination is checked too, so a start_number that
+                    // cannot be numbered that far is refused before a frame is
+                    // requested rather than wrapping into a path of its own.
+                    let last = start_number.checked_add(frames - 1).ok_or_else(|| {
+                        ImgSeqError::new(
+                            "the PNGWrite start_number and frame count cannot be numbered without overflow",
+                        )
+                    })?;
+                    check_template_parent(&template, last)?;
+                }
+                Ok(Self::Template {
+                    template,
+                    start_number,
+                })
+            }
+            (None, Some(text)) => {
+                if start_number.is_some() {
+                    return Err(ImgSeqError::new(
+                        "start_number cannot be used with output_dir",
+                    ));
+                }
+                if text.is_empty() {
+                    return Err(ImgSeqError::new("PNGWrite needs a non-empty output_dir"));
+                }
+                if text.contains('\0') {
+                    return Err(ImgSeqError::new(
+                        "PNGWrite needs an output_dir without a NUL byte",
+                    ));
+                }
+                let directory = resolve_path(text)?;
+                if directory.exists() && !directory.is_dir() {
+                    return Err(ImgSeqError::new(format!(
+                        "the PNGWrite output_dir '{}' is not a directory",
+                        directory.display()
+                    )));
+                }
+                fs::create_dir_all(&directory).map_err(|error| {
+                    ImgSeqError::new(format!(
+                        "PNGWrite could not create the output_dir '{}': {error}",
+                        directory.display()
+                    ))
+                })?;
+                if !directory.is_dir() {
+                    return Err(ImgSeqError::new(format!(
+                        "the PNGWrite output_dir '{}' is not a directory",
+                        directory.display()
+                    )));
+                }
+                Ok(Self::SourceName { directory })
+            }
         }
-        if text.contains('\0') {
-            return Err(ImgSeqError::new(
-                "PNGWrite needs an output_path without a NUL byte",
-            ));
-        }
-        let resolved = if Path::new(text).is_absolute() {
-            PathBuf::from(text)
-        } else {
-            std::env::current_dir()
-                .map_err(ImgSeqError::from_display)?
-                .join(text)
-        };
-        let resolved = resolved
-            .to_str()
-            .ok_or_else(|| ImgSeqError::new("the PNGWrite output_path is not valid Unicode"))?;
-        let template = Template::parse(resolved)?;
-        if frames > 1 && !template.numbered() {
-            return Err(ImgSeqError::new(format!(
-                "PNGWrite over {frames} frames needs a numbered output_path such as 'frame%06d.png', because a literal path names one destination"
-            )));
-        }
-        let destinations = Self {
-            template,
-            start_number,
-        };
-        destinations.check_parent(start_number)?;
-        if frames > 1 {
-            // The last destination is checked too, so a start_number that
-            // cannot be numbered that far is refused before a frame is
-            // requested rather than wrapping into a path of its own.
-            let last = start_number.checked_add(frames - 1).ok_or_else(|| {
-                ImgSeqError::new(
-                    "the PNGWrite start_number and frame count cannot be numbered without overflow",
-                )
-            })?;
-            destinations.check_parent(last)?;
-        }
-        Ok(destinations)
     }
 
     /// The destination one frame index is written to.
-    fn of(&self, index: usize) -> Result<PathBuf> {
-        let number = i64::try_from(index)
-            .ok()
-            .and_then(|index| self.start_number.checked_add(index))
-            .ok_or_else(|| ImgSeqError::new("the PNGWrite frame number overflowed"))?;
-        Ok(PathBuf::from(self.template.render(number)))
+    fn of(&self, index: usize, frame: Option<&VideoFrame>) -> Result<PathBuf> {
+        match self {
+            Self::Template {
+                template,
+                start_number,
+            } => {
+                let number = i64::try_from(index)
+                    .ok()
+                    .and_then(|index| start_number.checked_add(index))
+                    .ok_or_else(|| ImgSeqError::new("the PNGWrite frame number overflowed"))?;
+                Ok(PathBuf::from(template.render(number)))
+            }
+            Self::SourceName { directory } => {
+                let frame = frame.ok_or_else(|| {
+                    ImgSeqError::new(
+                        "PNGWrite needs a frame to derive a source name; use output_path",
+                    )
+                })?;
+                let path = property_string(frame, key!(c"ImgSeqPath"), "ImgSeqPath")?
+                    .ok_or_else(|| {
+                        ImgSeqError::new(
+                            "PNGWrite's output_dir mode needs the frame's ImgSeqPath; use output_path for a clip that does not come from Read",
+                        )
+                    })?;
+                let stem = Path::new(&path)
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .filter(|stem| !stem.is_empty())
+                    .ok_or_else(|| {
+                        ImgSeqError::new(format!(
+                            "the PNGWrite source path '{}' has no usable file name",
+                            path
+                        ))
+                    })?;
+                let animated = property_optional_int(
+                    frame,
+                    key!(c"ImgSeqAnimationIndex"),
+                    "ImgSeqAnimationIndex",
+                )?
+                .is_some();
+                let name = source_file_name(stem, animated, index);
+                Ok(directory.join(name))
+            }
+        }
     }
 
-    /// Refuses a destination whose directory does not exist yet.
-    ///
-    /// Creating the directory is the caller's, because a writer that made one
-    /// would have to guess whether a typo in the path was meant to make a tree.
-    fn check_parent(&self, number: i64) -> Result<()> {
-        let destination = PathBuf::from(self.template.render(number));
-        let parent = destination
-            .parent()
-            .ok_or_else(|| ImgSeqError::new("the PNGWrite output_path has no directory"))?;
-        if !parent.is_dir() {
-            return Err(ImgSeqError::new(format!(
-                "the PNGWrite output directory '{}' does not exist",
-                parent.display()
-            )));
+    /// A short description of the first destination for the create-time log.
+    fn describe_first(&self) -> String {
+        match self {
+            Self::Template {
+                template,
+                start_number,
+            } => template.render(*start_number),
+            Self::SourceName { directory } => directory
+                .join("<ImgSeqPath stem>.png")
+                .display()
+                .to_string(),
         }
-        Ok(())
     }
+}
+
+/// Resolves a caller path against the process directory.
+fn resolve_path(text: &str) -> Result<PathBuf> {
+    if Path::new(text).is_absolute() {
+        return Ok(PathBuf::from(text));
+    }
+    Ok(std::env::current_dir()
+        .map_err(ImgSeqError::from_display)?
+        .join(text))
+}
+
+/// Refuses a template destination whose directory does not exist yet.
+///
+/// Creating the directory is the caller's for a template, because a writer that
+/// made one would have to guess whether a typo in the path was meant to make a
+/// tree. `output_dir` is the mode that creates it.
+fn check_template_parent(template: &Template, number: i64) -> Result<()> {
+    let destination = PathBuf::from(template.render(number));
+    let parent = destination
+        .parent()
+        .ok_or_else(|| ImgSeqError::new("the PNGWrite output_path has no directory"))?;
+    if !parent.is_dir() {
+        return Err(ImgSeqError::new(format!(
+            "the PNGWrite output directory '{}' does not exist",
+            parent.display()
+        )));
+    }
+    Ok(())
 }
 
 /// Validated arguments of one `PNGWrite` call.
@@ -802,9 +972,8 @@ impl WriteArgs {
             Err(MapPropertyError::KeyNotFound) => None,
             Err(error) => return Err(map_error("alpha", 0, error)),
         };
-        let path = input
-            .get_utf8(key!(c"output_path"), 0)
-            .map_err(|error| map_error("output_path", 0, error))?;
+        let output_path = read_optional_utf8(input, key!(c"output_path"), "output_path")?;
+        let output_dir = read_optional_utf8(input, key!(c"output_dir"), "output_dir")?;
 
         let always_save =
             read_optional_int(input, key!(c"always_save"), "always_save")?.unwrap_or(0) != 0;
@@ -820,13 +989,7 @@ impl WriteArgs {
                 "compression must be between 0 and 9, got {compression}"
             )));
         }
-        let start_number =
-            read_optional_int(input, key!(c"start_number"), "start_number")?.unwrap_or(0);
-        if start_number < 0 {
-            return Err(ImgSeqError::new(format!(
-                "start_number must not be negative, got {start_number}"
-            )));
-        }
+        let start_number = read_optional_int(input, key!(c"start_number"), "start_number")?;
         let depth = read_optional_int(input, key!(c"depth"), "depth")?
             .map(|depth| {
                 u32::try_from(depth)
@@ -845,7 +1008,12 @@ impl WriteArgs {
 
         let info = color.info().clone();
         check_output_format(&info, alpha.as_ref().map(|alpha| alpha.info()), depth)?;
-        let destinations = Destinations::read(path, start_number, i64::from(info.num_frames))?;
+        let destinations = Destinations::read(
+            output_path.as_deref(),
+            output_dir.as_deref(),
+            start_number,
+            i64::from(info.num_frames),
+        )?;
 
         Ok(Self {
             color,
@@ -874,6 +1042,7 @@ impl WriteArgs {
             debug: self.debug,
             depth: self.depth,
             matrix: self.matrix,
+            claims: DestinationClaims::default(),
             ledger: Mutex::new(Ledger::default()),
             counter: AtomicU64::new(0),
         }
@@ -945,6 +1114,8 @@ pub struct PNGWrite {
     depth: Option<u32>,
     /// The matrix a yuv frame that states none is read with.
     matrix: Option<ffi::VSMatrixCoefficients>,
+    /// Which destination each frame has claimed, in output_dir mode.
+    claims: DestinationClaims,
     /// Which frames this instance has published. Shared by the threads
     /// VapourSynth may complete frames on, and separate from the pixel cache
     /// because a frame going out of cache must not forget a finished write.
@@ -983,7 +1154,8 @@ impl PNGWrite {
         let plan = FramePlan::of(&color, alpha.as_ref(), self.depth, self.matrix)?;
         let index =
             usize::try_from(n).map_err(|_| ImgSeqError::new(format!("invalid frame {n}")))?;
-        let destination = self.destinations.of(index)?;
+        let destination = self.destinations.of(index, Some(&color))?;
+        let claimed = self.claims.claim(&destination, index)?;
 
         // A frame this instance already published needs no second write, which
         // is what `always_save` turns off.
@@ -1010,20 +1182,22 @@ impl PNGWrite {
             .flatten();
         let cicp = frame_cicp(&color, matches!(plan.source, Source::Yuv(_)));
         let encode_started = Instant::now();
-        self.write_destination(
+        if let Err(error) = self.write_destination(
             &destination,
             &plan,
             &color,
             alpha.as_ref(),
             icc.as_deref(),
             cicp,
-        )
-        .map_err(|error| {
-            ImgSeqError::new(format!(
+        ) {
+            if claimed {
+                self.claims.release(&destination);
+            }
+            return Err(ImgSeqError::new(format!(
                 "PNGWrite could not write frame {n} to '{}': {error}",
                 destination.display()
-            ))
-        })?;
+            )));
+        }
         let encode = encode_started.elapsed();
         self.ledger().insert(index);
         set_receipts(&mut output, &destination, true, true)?;
@@ -1145,7 +1319,7 @@ impl Filter for PNGWrite {
         let dependencies =
             Dependencies::new(&dependencies).expect("a writer has one or two dependencies");
         if args.debug {
-            let first = args.destinations.of(0)?;
+            let first = args.destinations.describe_first();
             log_debug(
                 &mut core,
                 format_args!(
@@ -1155,7 +1329,7 @@ impl Filter for PNGWrite {
                     args.always_save,
                     args.overwrite,
                     args.compression,
-                    first.display()
+                    first
                 ),
             );
         }
@@ -1538,6 +1712,39 @@ fn property_int(frame: &VideoFrame, key: &KeyStr) -> Option<i64> {
     frame.properties()?.get_int(key, 0).ok()
 }
 
+/// Reads one optional string frame property.
+fn property_string(frame: &VideoFrame, key: &KeyStr, name: &str) -> Result<Option<String>> {
+    let Some(properties) = frame.properties() else {
+        return Ok(None);
+    };
+    match properties.get_utf8(key, 0) {
+        Ok(value) => Ok(Some(value.to_owned())),
+        Err(MapPropertyError::KeyNotFound) => Ok(None),
+        Err(error) => Err(map_error(name, 0, error)),
+    }
+}
+
+/// Reads one optional integer frame property, refusing a wrong type.
+fn property_optional_int(frame: &VideoFrame, key: &KeyStr, name: &str) -> Result<Option<i64>> {
+    let Some(properties) = frame.properties() else {
+        return Ok(None);
+    };
+    match properties.get_int(key, 0) {
+        Ok(value) => Ok(Some(value)),
+        Err(MapPropertyError::KeyNotFound) => Ok(None),
+        Err(error) => Err(map_error(name, 0, error)),
+    }
+}
+
+/// The file name an `output_dir` frame is written under.
+fn source_file_name(stem: &str, animated: bool, index: usize) -> String {
+    if animated {
+        format!("{stem}-{index:04}.png")
+    } else {
+        format!("{stem}.png")
+    }
+}
+
 /// Publishes a finished temporary file as `destination`.
 ///
 /// `overwrite` is a rename, which replaces whatever was there. Without it the
@@ -1622,6 +1829,15 @@ const fn color_type_name(color_type: ColorType) -> &'static str {
 fn read_optional_int(input: &MapRef, key: &KeyStr, name: &str) -> Result<Option<i64>> {
     match input.get_int(key, 0) {
         Ok(value) => Ok(Some(value)),
+        Err(MapPropertyError::KeyNotFound) => Ok(None),
+        Err(error) => Err(map_error(name, 0, error)),
+    }
+}
+
+/// Reads one optional string argument, distinguishing absent from empty.
+fn read_optional_utf8(input: &MapRef, key: &KeyStr, name: &str) -> Result<Option<String>> {
+    match input.get_utf8(key, 0) {
+        Ok(value) => Ok(Some(value.to_owned())),
         Err(MapPropertyError::KeyNotFound) => Ok(None),
         Err(error) => Err(map_error(name, 0, error)),
     }
@@ -1819,18 +2035,78 @@ mod tests {
     fn destinations_check_the_number_and_the_directory() {
         let directory = std::env::temp_dir();
         let text = directory.join("imgseqs-writer-%03d.png");
-        let destinations = Destinations::read(&text.to_string_lossy(), 5, 3).unwrap();
-        let first = destinations.of(0).unwrap();
+        let destinations =
+            Destinations::read(Some(&text.to_string_lossy()), None, Some(5), 3).unwrap();
+        let first = destinations.of(0, None).unwrap();
         assert!(first.to_string_lossy().ends_with("imgseqs-writer-005.png"));
-        let last = destinations.of(2).unwrap();
+        let last = destinations.of(2, None).unwrap();
         assert!(last.to_string_lossy().ends_with("imgseqs-writer-007.png"));
 
         let missing = directory.join("imgseqs-writer-missing").join("%03d.png");
-        assert!(Destinations::read(&missing.to_string_lossy(), 0, 1).is_err());
+        assert!(Destinations::read(Some(&missing.to_string_lossy()), None, Some(0), 1).is_err());
         // A literal destination names one frame, so a sequence is refused.
         let literal = directory.join("imgseqs-writer.png");
-        assert!(Destinations::read(&literal.to_string_lossy(), 0, 1).is_ok());
-        assert!(Destinations::read(&literal.to_string_lossy(), 0, 2).is_err());
-        assert!(Destinations::read("", 0, 1).is_err());
+        assert!(Destinations::read(Some(&literal.to_string_lossy()), None, Some(0), 1).is_ok());
+        assert!(Destinations::read(Some(&literal.to_string_lossy()), None, Some(0), 2).is_err());
+        assert!(Destinations::read(Some(""), None, None, 1).is_err());
+        assert!(Destinations::read(Some(&text.to_string_lossy()), None, Some(-1), 1).is_err());
+        assert!(Destinations::read(None, None, None, 1).is_err());
+        assert!(Destinations::read(Some(&text.to_string_lossy()), Some("out"), None, 1).is_err());
+    }
+
+    #[test]
+    fn an_output_dir_is_created_recursively() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("imgseqs-writer-dir-{unique}"));
+        let nested = root.join("one").join("two");
+        let destinations =
+            Destinations::read(None, Some(&nested.to_string_lossy()), None, 1).unwrap();
+        assert!(nested.is_dir());
+        // Source-name mode needs a frame; creation alone does not name one.
+        assert!(destinations.of(0, None).is_err());
+        assert!(Destinations::read(None, Some(&nested.to_string_lossy()), Some(0), 1).is_err());
+        assert!(Destinations::read(None, Some(""), None, 1).is_err());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_output_dir_that_is_a_file_is_refused() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let file = std::env::temp_dir().join(format!("imgseqs-writer-file-{unique}"));
+        std::fs::write(&file, b"x").unwrap();
+        assert!(Destinations::read(None, Some(&file.to_string_lossy()), None, 1).is_err());
+        std::fs::remove_file(&file).unwrap();
+    }
+
+    #[test]
+    fn a_source_name_uses_the_frame_index_for_an_animation() {
+        assert_eq!(source_file_name("page", false, 0), "page.png");
+        assert_eq!(source_file_name("page", true, 0), "page-0000.png");
+        assert_eq!(source_file_name("page", true, 12), "page-0012.png");
+    }
+
+    #[test]
+    fn destination_claims_allow_a_repeat_but_not_two_frames() {
+        let claims = DestinationClaims::default();
+        let path = PathBuf::from("out/page.png");
+        assert!(claims.claim(&path, 0).unwrap());
+        assert!(!claims.claim(&path, 0).unwrap());
+        assert!(claims.claim(&path, 1).is_err());
+        claims.release(&path);
+        assert!(claims.claim(&path, 1).unwrap());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn destination_claims_fold_case_on_windows() {
+        let claims = DestinationClaims::default();
+        assert!(claims.claim(Path::new("out/Page.png"), 0).unwrap());
+        assert!(claims.claim(Path::new("out/page.png"), 1).is_err());
     }
 }
