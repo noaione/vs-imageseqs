@@ -4,6 +4,12 @@
 
 nothing yet!
 
+## [0.4.1] - 2026-10-25
+
+### build
+
+- Actually bump the cargo version to 0.4.x, this was missed in the last release. The plugin manifest version is already 0.4.1, so this is just to keep the cargo version in sync.
+
 ## [0.4.0] - 2026-10-25
 
 ### added
