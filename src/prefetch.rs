@@ -330,8 +330,17 @@ impl<P: Prepare> Prefetcher<P> {
 
 impl<P: Prepare> Drop for Prefetcher<P> {
     fn drop(&mut self) {
-        self.shared.stop.store(true, Ordering::Relaxed);
-        self.shared.signal.notify_all();
+        // A worker tests `stop` and then waits on the same mutex, so the store
+        // and the notification are made with that mutex held: a worker that has
+        // already tested `stop` would otherwise be able to enter `wait` after
+        // the notification was delivered and sleep until the process exits.
+        // Without the lock, freeing a clip hangs in `worker.join()`
+        // intermittently; see `docs/improvements/43-hayro-jpeg-2000.md`.
+        {
+            let _state = self.lock();
+            self.shared.stop.store(true, Ordering::Relaxed);
+            self.shared.signal.notify_all();
+        }
         for worker in self.workers.drain(..) {
             let _ = worker.join();
         }
