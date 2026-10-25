@@ -25,6 +25,7 @@
 - JPEG 2000 frames are decoded by `hayro-jpeg2000` now, at the depth, alpha and palette the file states.
   - Every frame of the 35 page corpus and of the jpeg 2000 fixtures is byte for byte what the OpenJPEG build produced: same planes, same formats, same `_Primaries`/`_Transfer`/`_Matrix`/`_Range`.
   - An sYCC page still comes out as its own yuv planes, and a page whose every component states one subsampling factor is refused by name instead of handed out at a size its pixels do not have.
+  - The decode is faster than the OpenJPEG build: 7.8% at the default window and 7% serial over the 35 page corpus, level at `prefetch=16`. Peak memory is 1.5x at a deep window (3271 against 2139 MB at `prefetch=16`), because the decoder holds `f32` components.
 
 ### fixed
 

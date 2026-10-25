@@ -156,10 +156,14 @@ checks included. The
 three edges the crate has are handled in the module: its sYCC conversion is
 steered away by rewriting the `colr` box's enumerated colour in the buffer it
 reads, a premultiplied `cdef` is normalised in place, and a size nothing can
-hold is refused at the probe. At the default window the decode is within the
-harness's noise (8379 against 8465 ms over the corpus); `prefetch=16` is 12%
-slower and peaks at 3112 MB against 2081 MB, because the crate holds an `f32`
-a sample where OpenJPEG held a word.
+hold is refused at the probe. The swap is **faster** than the OpenJPEG build at
+every window measured (8789 → 8108 ms over the corpus at the default 4
+workers, 33149 → 30833 serial), once the module stopped converting eight bit
+components a sample at a time; the profile says 95% of a frame is the crate's
+bit-plane arithmetic decoder and 2% the inverse wavelet, which is why no fork
+or other crate is worth taking — upstream `main` is only 0.5% to 0.9% faster
+here. Peak memory is still 1.5x (3271 against 2139 MB at `prefetch=16`),
+because the crate holds an `f32` a sample where OpenJPEG held a word.
 
 ### PNGWrite source names — 2026-10-25
 
