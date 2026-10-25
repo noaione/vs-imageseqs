@@ -39,8 +39,15 @@ jxl = { version = "0.8.0", default-features = false, features = [
     "all-simd"
 ] }
 dav1d = { version = "0.11.1", default-features = false }
-jpeg2k = { version = "0.10.1", default-features = false, features = [
-    "openjpeg-sys"
+# A pure-Rust jpeg 2000 decoder: `jpeg2k` and the OpenJPEG sources
+# `openjpeg-sys` compiled needed a C toolchain and a build directory on every
+# platform, and it was the one dependency whose build failed without a
+# diagnostic often enough to be a maintenance problem. `image` is left off, so
+# this is a decoder rather than the whole image crate and its colour
+# management; see `src/formats/jp2.rs`.
+hayro-jpeg2000 = { version = "0.4.1", default-features = false, features = [
+    "std",
+    "simd",
 ] }
 # `zlib-rs` is the deflate backend, not just a writer concern: this one crate
 # inflates every png the reader decodes and deflates every png `PNGWrite`

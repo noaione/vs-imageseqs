@@ -446,7 +446,6 @@ LINUX_LICENSES = (
     "LICENSES/gcc-runtime-COPYING.txt",
     "LICENSES/libde265-COPYING.txt",
     "LICENSES/libheif-COPYING.txt",
-    "LICENSES/openjpeg-COPYING.txt",
     "LICENSES/wpd-COPYING.txt",
 )
 MANYLINUX_TAG = "py3-none-manylinux_2_28_x86_64"

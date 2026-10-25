@@ -8,13 +8,12 @@ distribution and preserve the applicable license texts and notices.
 The Windows wheel uses the x64-windows-static-md vcpkg installation. The
 Linux and macOS builds pin their native sources in the platform build scripts.
 Each Unix wheel bundles shared libheif, libde265, and dav1d built from these
-sources; Cargo.lock selects the OpenJPEG sources:
+sources:
 
   * libheif 1.23.5
   * libde265 1.1.1
   * dav1d 1.5.4
   * wpd 0.2.0, at the exact git revision named in `Cargo.toml`
-  * OpenJPEG (vendored by openjpeg-sys 1.0.12)
 
 The native dependency versions and license expressions used by this build
 are recorded below. `wpd` is a Rust crate rather than a system library, but
@@ -60,11 +59,6 @@ wpd 0.2.0 (git revision 2e1400f00089a68c7939eb9593d5b49b1144b8e0)
   Notice and license text: LICENSES/wpd-COPYING.txt
   Upstream: https://github.com/halidecx/wpd
 
-openjpeg (vendored by openjpeg-sys 1.0.12)
-  License: BSD 2-Clause License
-  Linkage: statically compiled into the plugin by the jpeg2k dependency
-  Notice: LICENSES/openjpeg-COPYING.txt
-  Upstream: https://github.com/uclouvain/openjpeg
 
 libstdc++ and libgcc_s, the GCC runtime libraries
   License: GNU General Public License, version 3, with the GCC Runtime Library
@@ -140,7 +134,7 @@ Each Linux build's artifacts are accompanied by a relinking source archive:
 `linux-relink-source.tar.gz` for the manylinux wheel and
 `linux-musl-relink-source.tar.gz` for the musllinux one. Each contains the
 application and dependency sources used by that build, including the checked
-libheif 1.23.5 source archive and vendored OpenJPEG sources, and the
+libheif 1.23.5 source archive, and the
 build/relink instructions in BUILDING.md. The Linux and macOS wheels and plugin
 ZIPs include libheif, dav1d, and libde265 as separate shared libraries with
 relative loader paths. Their license texts remain under LICENSES/. The Windows
@@ -162,4 +156,3 @@ dependency installation used for this build.
   * libheif: https://github.com/strukturag/libheif/blob/master/COPYING
   * libde265: https://github.com/strukturag/libde265/blob/master/COPYING
   * wpd: https://github.com/halidecx/wpd/blob/main/LICENSE
-  * OpenJPEG: https://github.com/uclouvain/openjpeg/blob/master/LICENSE

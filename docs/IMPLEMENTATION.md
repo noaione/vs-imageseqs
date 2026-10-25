@@ -304,15 +304,14 @@ WebP
 └── wpd
 
 JPEG 2000
-└── jpeg2k
-    └── OpenJPEG
+└── hayro-jpeg2000
 ```
 
 Everything above is in the build. JPEG 2000 is implemented in
-`src/formats/jp2.rs` through `jpeg2k` and its vendored OpenJPEG sources; the
-probe walks the JP2/SIZ headers before decode. The `image` feature list below is
-the other half of this picture, and `dds` and `ff` are enabled as described by
-[07](improvements/07-dds-and-farbfeld.md).
+`src/formats/jp2.rs` through `hayro-jpeg2000`, a pure-Rust decoder with no C
+sources of its own; the probe walks the JP2/SIZ headers before decode. The
+`image` feature list below is the other half of this picture, and `dds` and `ff`
+are enabled as described by [07](improvements/07-dds-and-farbfeld.md).
 
 ### image-rs Configuration
 
@@ -625,7 +624,7 @@ struct DecodedImage {
 }
 ```
 
-The rest of the plugin should not care whether a frame originated from `image-rs`, `jxl`, `libheif`, or OpenJPEG.
+The rest of the plugin should not care whether a frame originated from `image-rs`, `jxl`, `libheif`, or `hayro-jpeg2000`.
 
 ```text
 file

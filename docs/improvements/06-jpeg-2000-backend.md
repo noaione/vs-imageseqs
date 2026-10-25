@@ -9,6 +9,11 @@
 - risk: medium — a vendored native decoder and a format path with no sandbox set
   behind it
 
+**backends.** written against `jpeg2k` 0.10.1 and its vendored OpenJPEG;
+[43](43-hayro-jpeg-2000.md) later replaced both with the pure-Rust
+`hayro-jpeg2000`, which is what `src/formats/jp2.rs` uses now. The probe,
+the formats and the fixtures this plan describes are unchanged.
+
 ## problem
 
 `docs/IMPLEMENTATION.md` names jpeg 2000 in two places. The backend plan has it

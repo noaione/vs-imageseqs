@@ -20,8 +20,9 @@ plus `src/source.rs`, 02 in `src/clip.rs` with the generic pool in
 type in `src/decoder.rs`. [09](09-exif-orientation.md) is implemented too, in
 `src/pixel.rs` and `src/clip.rs` behind `apply_rotation`.
 
-06 and 07 are implemented. 06 uses the `jpeg2k` wrapper with its vendored
-OpenJPEG backend; 07 landed through the two `image` features the doc's own configuration block lists
+06 and 07 are implemented. 06 was implemented with the `jpeg2k` wrapper and its
+vendored OpenJPEG backend, which [43](43-hayro-jpeg-2000.md) replaced with the
+pure-Rust `hayro-jpeg2000`; 07 landed through the two `image` features the doc's own configuration block lists
 (`dds` and `ff`), with hand-written DXT5 and farbfeld alpha fixtures. the three
 other rows the list was written from all landed —
 the colour properties its `# Color Metadata` section asks for, in `src/color.rs`
@@ -142,6 +143,23 @@ of clip creation, 183 ms per file, to 2 ms, and reading that set from 11.92 s of
 open plus frames to 4.99 s.
 
 ## plans
+
+### hayro jpeg 2000 backend — 2026-10-25
+
+[43 hayro jpeg 2000 backend](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/43-hayro-jpeg-2000.md)
+is implemented: `jpeg2k` and the OpenJPEG sources `openjpeg-sys` vendors are
+gone, replaced by the pure-Rust `hayro-jpeg2000` 0.4.1, so a wheel is built
+without a C toolchain on any platform. Every frame of the 35 page corpus and
+of the jpeg 2000 fixtures is byte for byte what the OpenJPEG build produced,
+properties included, and the validator passes on both, the new build's 1034
+checks included. The
+three edges the crate has are handled in the module: its sYCC conversion is
+steered away by rewriting the `colr` box's enumerated colour in the buffer it
+reads, a premultiplied `cdef` is normalised in place, and a size nothing can
+hold is refused at the probe. At the default window the decode is within the
+harness's noise (8379 against 8465 ms over the corpus); `prefetch=16` is 12%
+slower and peaks at 3112 MB against 2081 MB, because the crate holds an `f32`
+a sample where OpenJPEG held a word.
 
 ### PNGWrite source names — 2026-10-25
 
