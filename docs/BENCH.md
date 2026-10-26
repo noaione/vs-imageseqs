@@ -1,351 +1,123 @@
 # Benchmarks
 
-two plugins reading the same image sequence, one frame at a time. every
-measured pass recreates both clips, times each `get_frame` on its own, and
-alternates the order of the configurations so a slow period of the machine
-cannot favour one of them. the numbers below are the best pass of three unless
-the row says otherwise.
+read path only. two plugins reading the same image sequence, one frame at a
+time: every measured pass recreates the clips, times each `get_frame` on its own,
+and alternates the order of the configurations so a slow period of the machine
+cannot favour one of them. every number is the best pass of three (jpeg 2000 is
+one pass, because it decodes slowly).
 
 ```console
-.venv/Scripts/python.exe tests/bench-imgseqs-vs-bestsource.vpy --reps 3 --dir sandbox/webp --pattern "snek - p%03d.webp"
+.venv/Scripts/python.exe tests/bench-imgseqs-vs-bestsource.vpy --plugin target/avx512-bench/release/vs_imageseqs.dll --reps 3 --extra --prefetch 16 --dir sandbox/webp --pattern "snek - p%03d.webp"
 ```
 
-`--extra` adds the single-worker variants, `--prefetch N` adds an imgseqs run
-with that many lookahead workers, `--frames N` limits the run to the first `N`
-files, and `--select GLOB` picks the files when the glob of `--pattern` is not
-the wanted selection. the lookahead tables also record process CPU time per
-frame; those two probes live outside the repository.
+change `--dir` and the extension in `--pattern` for each set. `--extra` adds the
+single-worker rows, `--prefetch N` adds a row with that many lookahead workers.
 
-**machine**: windows 11, i5-11400h (12 threads), rust release build, plugins at
-their own defaults unless the row says otherwise.
+**machine**: windows 11, i5-11400h (12 threads), rust release build with
+`RUSTFLAGS="-C target-cpu=x86-64-v4"` (avx-512), plugin defaults unless the row
+says otherwise.
+
+## corpus
+
+`sandbox/` holds the same 35 pages in seven containers (`snek - p000` to
+`p034`). `p000` is 3312x4717 and the other 34 are 3672x5274; only `p000`,
+`p001` and `p002` hold colour (plus `p018`, which is grey content stored in a
+colour format). every set needs `mismatch=True`.
+
+| set | files | what imgseqs returns | decoded |
+| --- | --- | --- | --- |
+| webp | 35 | 35 `YUV420P8` | 964 MiB |
+| avif | 35 | 34 `YUV420P8` and one `Gray8` | 965 MiB |
+| heic | 35 | 31 `Gray8` and 4 `YUV420P8` | 685 MiB |
+| jp2 | 35 | 32 `Gray8` and 3 `RGB24` | 748 MiB |
+| jpeg, png, jxl | 35 | 31 `Gray8` and 4 `RGB24` | 784 MiB |
 
 ## fair comparison
 
-- bestsource is opened with `cachemode=0` (never read or write an index on
-  disk) and both plugins are given `apply_rotation=False`, so neither of them
-  moves a pixel and the comparison is the read path alone. Without it both
-  plugins rotate, and they agree about the file — the sandbox sets carry no exif
-  either way, so these numbers are unaffected. bestsource's `cachesize`,
-  `threads` and `maxdecoders` stay at the defaults, and `threads=1` is the row
-  that matches `prefetch=0`.
-- bestsource is never given `fpsnum`/`fpsden` for an image sequence: ffmpeg
-  reads image sequences at 25 fps, so any other rate resamples and silently
-  drops every 25th image.
-- the two plugins produce the same planes for webp and not for anything else.
-  imgseqs returns the image's own format when the file has one (`GRAY8` for
-  monochrome jpeg, png, jxl, heif and avif pages, `RGB24` for colour ones,
-  `YUV420P8` for a lossy webp without an alpha channel, and the file's own planes
-  for a colour heic or avif page whose container states a matrix — see
-  [12](improvements/12-heif-avif-yuv-output.md)), while bestsource keeps whatever
-  format its decoder emits: `YUV420P8` for webp, `YUV444P8` for jpeg, a
-  variable format for a mixed folder. on the webp set the two decoders agree
-  byte for byte; everywhere else this compares read throughput, not identical
-  output.
+- bestsource is opened with `cachemode=0` and both plugins get
+  `apply_rotation=False`, so the comparison is the read path alone. bestsource's
+  `cachesize`, `threads` and `maxdecoders` stay at the defaults; `threads=1` is
+  the row that matches `prefetch=0`.
+- bestsource is never given `fpsnum`/`fpsden`: ffmpeg reads image sequences at
+  25 fps, so any other rate drops every 25th image.
+- the plugins return the same planes only for webp. elsewhere this compares read
+  throughput, not identical output (bestsource keeps its decoder's format, for
+  example `YUV444P8` for jpeg).
 - `open` is the time to create the clip. bestsource indexes the sequence while
-  the clip is created, which for images means reading every file once.
+  creating it, which reads every file once.
 
-## sandbox corpus
+## overall status
 
-`sandbox/` holds the same 35 pages in six containers, so the formats can be
-compared like for like. the pages are not uniform: `p000` is 3312x4717 and the
-other 34 are 3672x5274, and only three of them (`p000`, `p001`, `p002`) hold
-colour. `p018` is grey content that every container still stores in a three
-channel format, so it decodes as `RGB24` or `YUV420P8` where the other grey
-pages are one channel. what imgseqs makes of them depends on the container:
+total time of the 35 frames (`get_frame` only, seconds, lower is better). "before"
+is the number this page held before this re-run; the change is before / now.
 
-| set | what imgseqs returns | decoded |
-| --- | --- | --- |
-| webp | 35 `YUV420P8` frames | 964 MiB, one 22.3 MiB frame and 34 of 27.7 MiB |
-| avif | 34 `YUV420P8` frames and one `Gray8` | 965 MiB: one 22.3 MiB frame, 33 of 27.7 MiB and one of 18.5 MiB |
-| heic | 31 `Gray8` frames of 18.5 MiB and 4 `YUV420P8` | 685 MiB, one 22.3 MiB frame and three of 27.7 MiB |
-| jp2 | 32 `Gray8` frames of 18.5 MiB and 3 `RGB24` | 748 MiB: one 44.7 MiB frame, two of 55.4 MiB and 32 of 18.5 MiB |
-| jpeg, png, jxl | 31 `Gray8` frames of 18.5 MiB and 4 `RGB24` | 784 MiB |
+| set | default before | default now | change | `prefetch=0` before | now | change | `prefetch=16` before | now | change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| webp | 3.39 | 2.48 | 1.37x faster | 11.94 | 8.58 | 1.39x faster | 1.87 | 1.38 | 1.35x faster |
+| jpeg | 2.75 | 2.42 | 1.14x faster | 9.32 | 8.08 | 1.15x faster | 2.04 | 1.74 | 1.17x faster |
+| png | 0.322 | 0.282 | 1.14x faster | 0.803 | 0.775 | 1.04x faster | 0.249 | 0.223 | 1.12x faster |
+| jxl | 6.50 | 4.12 | 1.58x faster | 18.86 | 13.22 | 1.43x faster | 4.57 | 2.80 | 1.63x faster |
+| avif | 2.04 | 2.36 | 1.16x slower | 4.94 | 5.58 | 1.13x slower | 1.99 | 2.37 | 1.19x slower |
+| heic | 7.21 | 6.72 | 1.07x faster | 23.20 | 22.57 | 1.03x faster | 4.80 | 4.52 | 1.06x faster |
+| jp2 | 13.64 | 13.36 | 1.02x faster | 46.27 | 47.00 | 1.02x slower | not run | 8.95 | |
 
-every set needs `mismatch=True` for this. the avif and heic rows are
-[12](improvements/12-heif-avif-yuv-output.md): those frames were `RGB24` of 55.4
-MiB and are now the file's own planes, which halved every colour frame (the
-`RGB24` frames left are the jpeg/png/jxl ones and the unspecified-matrix avif
-pages). those frame sizes are what the lookahead budget is up against: 192 MiB
-holds ten of the gray frames and seven of the yuv ones but only three and a half
-of a 55 MiB rgb page, so the budget is `max(192 MiB, window x largest frame)` and
-a deep lookahead on these pages is allowed to use more memory than that. see
-[01](improvements/01-lookahead-scheduling.md).
+webp, jpeg, png and jxl are clearly faster, jxl the most (1.4x to 1.6x). heic and
+jp2 are within a few percent. avif is the one set that came out slower than the
+number it replaces (13% to 19%); the earlier avif rows were already noted as
+sensitive to drift on this machine, so re-check it before treating it as a real
+regression. jp2's old pooled row used `prefetch=4`, so it has no like for like
+figure for `prefetch=16`.
 
-```console
-.venv/Scripts/python.exe tests/bench-imgseqs-vs-bestsource.vpy --reps 3 --extra --prefetch 16 --dir sandbox/webp --pattern "snek - p%03d.webp"
-```
-
-frames, best pass of three:
+against bestsource, default settings, frames only:
 
 | set | imgseqs | bestsource | verdict |
-| --- | --- | --- | --- |
-| webp | 3.39 s | 1.88 s | bestsource 1.80x faster on frames, imgseqs 1.14x including the open |
-| jpeg | 2.75 s | 7.49 s | imgseqs 2.73x faster, 4.98x including the open |
-| png | 0.62 s | 0.86 s | imgseqs 1.37x faster, 2.96x including the open |
-| jxl | 6.50 s | cannot read | 4.13x over imgseqs's own serial row |
-| avif | 3.19 s | cannot open | 2.09x over imgseqs's own serial row |
-| heic | 7.21 s | cannot open | 3.22x over imgseqs's own serial row |
+| --- | ---: | ---: | --- |
+| webp | 2.48 s | 1.60 s | bestsource 1.55x faster on frames, imgseqs 1.32x faster including the open |
+| jpeg | 2.42 s | 6.13 s | imgseqs 2.54x faster, 4.95x including the open |
+| png | 0.282 s | 0.661 s | imgseqs 2.34x faster, 5.30x including the open |
+| jxl | 4.12 s | 4.33 s | imgseqs 1.05x faster, 2.11x including the open |
+| jp2 | 13.36 s | 13.12 s | bestsource 1.02x faster on frames, imgseqs 1.96x faster including the open |
+| avif | 2.36 s | cannot open | |
+| heic | 6.72 s | cannot open | |
 
-`prefetch=16` is the best row on four of the six sets — webp, jpeg, png and jxl
-— and heic beats its default by 1.5x (4.80 s against 7.21 s), which is what
-[12](improvements/12-heif-avif-yuv-output.md)'s smaller colour frames did to a
-pool that used to re-decode what its budget could not hold; avif is now a tie
-(3.29 s against 3.19 s) for the same reason, where the default used to be 5.14 s
-and the deeper window's second decode was hidden rather than removed. the deeper
-pattern is in the single-worker rows: the lookahead is worth 2.1x to 6.4x over
-the serial row on every set, which is what
-[01](improvements/01-lookahead-scheduling.md) made reliable, and the webp figure
-nearly doubled when its frames halved in size
-([03](improvements/03-webp-yuv-output.md)). the sections below have the detail.
+bestsource now decodes jxl on this machine (it failed with `Video codec not
+found` before), so jxl has a real comparison for the first time.
 
 ## webp
 
-35 files, 146 MB, three colour pages (`p000` to `p002`) and 32 grey ones that
-the lossy encoder still stores as `YUV420P8`: `p000` is 3312x4717, 22.3 MiB
-decoded, and the other 34 are 3672x5274 at 27.7 MiB.
+35 files, 35 `YUV420P8` frames of 22.3 MiB (`p000`) and 27.7 MiB.
 
 | reading the set | frames | median frame | open | total |
-| --- | --- | --- | --- | --- |
-| imgseqs `Read` | 3.39 s | 81.5 ms | 0.003 s | 3.39 s |
-| imgseqs `Read`, `prefetch=0` | 11.94 s | 370.8 ms | 0.004 s | 11.95 s |
-| imgseqs `Read`, `prefetch=16` | 1.87 s | 10.6 ms | 0.004 s | 1.87 s |
-| bestsource `VideoSource` | 1.88 s | 19.6 ms | 2.00 s | 3.88 s |
-| bestsource `VideoSource`, `threads=1` | 11.70 s | 353.1 ms | 11.58 s | 23.28 s |
-
-the closest set of the six, and the first one where imgseqs reads the same
-pixels as bestsource: both decode the file with libwebp (ffmpeg's vp8 decoder
-uses it) and hand out `YUV420P8` planes that are byte-identical, tagged
-`_Matrix=5`/`_Range=0`, so this compares two decoders doing the same job.
-bestsource is 1.80x faster on frames, which is its slice threading — ffmpeg
-spreads one vp8 frame over every core, so `threads=1` to the default turns
-353 ms per frame into 20 ms — and imgseqs is 1.14x faster including the open,
-3.39 s against 3.88 s, because bestsource reads all 35 files while it creates
-the clip and imgseqs probes only headers. imgseqs turns its own lookahead into
-6.4x over its serial row, and `prefetch=16` delivers a frame every 10.6 ms.
-
-webp used to be read as `RGB24`, and this section used to report 5.66 s, 19.97 s
-and 4.12 s. the two changes behind the current numbers are
-[04](improvements/04-webp-decoder.md) (`image-webp` → libwebp) and
-[03](improvements/03-webp-yuv-output.md) (yuv planes instead of rgb):
-
-| build | frames | `prefetch=0` | `prefetch=16` |
-| --- | --- | --- | --- |
-| `image-webp`, `RGB24` | 5.66 s | 19.97 s | 4.12 s |
-| libwebp, `RGB24` | 4.24 s | 15.60 s | 2.62 s |
-| libwebp, `YUV420P8` | 3.39 s | 11.94 s | 1.87 s |
-
-lookahead depth, first 16 files, wall clock and process CPU per delivered frame
-(one serial frame is 313 ms of CPU; the row this table had before the two
-changes is in [03](improvements/03-webp-yuv-output.md)):
-
-| prefetch | wall | cpu | cores busy | cpu over serial |
-| --- | --- | --- | --- | --- |
-| 0 | 316.2 ms | 312.5 ms | 0.99 | 1.00x |
-| 2 | 160.7 ms | 331.1 ms | 2.06 | 1.06x |
-| 4 | 91.2 ms | 351.6 ms | 3.85 | 1.13x |
-| 6 | 71.9 ms | 382.8 ms | 5.32 | 1.23x |
-| 8 | 65.7 ms | 343.8 ms | 5.23 | 1.10x |
-| 12 | 56.6 ms | 416.0 ms | 7.35 | 1.33x |
-| 16 | 54.2 ms | 419.9 ms | 7.75 | 1.34x |
-
-the wasted work is what [01](improvements/01-lookahead-scheduling.md) fixed: cpu
-per delivered frame was 2.58x one serial decode at `prefetch=16`, is 1.43x
-before these two changes, and is 1.34x now, while the wall time improves all the
-way to 16 instead of turning around after 8 — the frames the budget has to hold
-are half the size, 27.7 MiB instead of 55.4 MiB, so the same depth keeps twice
-as many of them: `prefetch=16` is allowed the larger of 192 MiB and
-16 x 27.7 MiB, which is 443 MiB.
-
-### what a graph that needs rgb pays
-
-the 34 uniform files of this set, `prefetch=16`, read and then converted back:
-
-| pipeline | frames | per frame |
-| --- | --- | --- |
-| imgseqs `Read` | 1.89 s | 55.6 ms |
-| imgseqs `Read` + `Bicubic` to `RGB24` | 2.23 s | 65.5 ms |
-| imgseqs `Read` from the pre-[03](improvements/03-webp-yuv-output.md) build | 4.24 s | 121.5 ms |
-
-the conversion is +18% on the read, and it runs on the requesting thread, so
-the lookahead cannot hide it: the read is at 56 ms per frame while the pool
-decodes, and the copy into the frame plus the resize is what the caller waits
-for. even so, converting in the graph is 1.9x faster than having the decoder
-produce rgb, because the pool then carries twice the bytes per frame.
-
-a page whose width or height is odd cannot be converted at all: `zimg` refuses
-4:2:0 to rgb with `Resize error 1027` whatever the matrix arguments are, so the
-odd row and column are cropped away, the rest is converted, and the size is
-restored with an `RGB24` border. on a 2903x4128 page that costs the same as the
-conversion itself, 125 ms to 153 ms per frame at `prefetch=0` and 26 ms to 49 ms
-at `prefetch=8`. `std.Crop` and `std.AddBorders` need a constant clip
-(`Crop: constant format and dimensions needed`, `AddBorders: input needs to be
-constant format`), and `mismatch` makes the clip variable, so the crop cannot
-run on a clip that mixes formats or sizes: `target/bench/mixed-conversion.py`
-benches the two shapes that can, on both sandbox sets, best pass of two.
-
-`sandbox/mixed`, 35 files (19 `Gray8`, 11 `RGB24`, 5 `YUV420P8`, one 3312x4717
-and 34 of 3672x5274), `--corpus mixed --ogsov`:
-
-| pipeline | total | per frame | added |
-| --- | --- | --- | --- |
-| `Read` | 4.36 s | 124.4 ms | |
-| `Read` + `Bicubic` to `RGB24` | 4.46 s | 127.3 ms | +2.9 ms |
-| `Read` + `FrameEval` chains to `RGB24` | 4.90 s | 139.9 ms | +15.5 ms |
-| `Read` + `Bicubic` to `RGB24` + `GPUUpload` + `ogsov.AnalyzeVk` | 4.74 s | 135.5 ms | +11.1 ms |
-| the same through `ogsov.Analyze` on the cpu | 6.07 s | 173.3 ms | +48.9 ms |
-| `Read` at `prefetch=0` | 12.70 s | 363.0 ms | +238.5 ms |
-| `Read` + `Bicubic` to `RGB24` at `prefetch=0` | 13.14 s | 375.4 ms | +251.0 ms |
-
-five yuv frames among thirty-five cost 2.9 ms per frame at the default
-lookahead, and 12.5 ms per frame at `prefetch=0`, which is 88 ms for each of the
-five converted pages. the `FrameEval` row is the shape that also survives an odd
-page, for 12 ms per frame more.
-
-`sandbox/webp`, the same 35 pages all in webp, one of them 3312x4717 with an odd
-height, `--corpus webp --ogsov`:
-
-| pipeline | total | per frame | added |
-| --- | --- | --- | --- |
-| `Read` | 3.53 s | 101.0 ms | |
-| `Read` + `Bicubic` to `RGB24` | `Resize error 1027` | | |
-| `Read` + `FrameEval` chains to `RGB24` | 3.72 s | 106.4 ms | +5.4 ms |
-| `Read` + chains + declaring `resize` + `GPUUpload` + `ogsov.AnalyzeVk` | 3.75 s | 107.2 ms | +6.2 ms |
-| `Read` at `prefetch=0` | 12.30 s | 351.4 ms | +250.4 ms |
-
-`FrameEval` builds one small graph per frame and crops only the odd `4:2:0`
-frames, so the 34 uniform pages pay for the odd one: 5.4 ms per frame. it cannot
-promise one format for its result and `std.GPUUpload` needs a constant one, so
-the ogsov pipeline adds a declaring `resize` on top, which inside the pool is
-free (3.72 s to 3.75 s).
-
-ogsov agrees between the routes: `OGSOVIsColor` matches for all 35 webp frames
-against a pre-[03](improvements/03-webp-yuv-output.md) build's own `RGB24`, and
-the plane means differ by at most 0.07 of a level, 0.006 on average, worst frame
-the odd page and its restored border. `GPUUpload` refuses the `mismatch` clip
-itself (`ogsov.AnalyzeVk: clip must be a video node`), so the conversion is what
-makes an ogsov graph possible on a mixed sequence at all.
-
-### wpd as the still decoder
-
-[35](improvements/35-wpd-webp-decoder.md) moved an ordinary still webp off
-libwebp and onto `wpd`, and [39](improvements/39-libwebp-removal.md) moved the
-animated container's rectangle onto the same decoder and unlinked libwebp
-altogether. this compares two builds of the plugin, so the decoder is the only
-thing that differs between them.
-
-the headline, 35 files, `--reps 3 --extra --prefetch 16`, best pass of three,
-both builds measured in one session:
-
-| reading the set | before (libwebp) | after (wpd) | change |
-| --- | ---: | ---: | ---: |
-| imgseqs `Read` | 3.517 s | 2.689 s | 1.31x faster |
-| imgseqs `Read`, `prefetch=0` | 11.777 s | 9.039 s | 1.30x faster |
-| imgseqs `Read`, `prefetch=16` | 1.882 s | 1.542 s | 1.22x faster |
-| bestsource `VideoSource` | 1.534 s | 1.529 s | unchanged (control) |
-| bestsource `VideoSource`, `threads=1` | 10.111 s | 10.065 s | unchanged (control) |
-| open | 0.004 s | 0.004 s | unchanged |
-
-imgseqs closes most of the gap to bestsource on frames, from 2.29x behind to
-1.76x, and stays ahead including the open, where it was 1.10x behind on this
-run and is now 1.24x ahead. the control row moved by 0.3%, and the probe is
-untouched because the timeline and the metadata still come out of the
-container walk `wpd` does not touch.
-
-the single-thread rows are the cleanest comparison of the two decoders, because
-neither plugin has a pool behind it: bestsource with `threads=1` is a control at
-10.111 → 10.065 s, so libwebp is what the 11.777 s serial row above was paying
-for, and wpd's 9.039 s is 1.30x of it. imgseqs' own serial row therefore goes
-from 1.17x *behind* bestsource's single thread to 1.11x ahead of it, which the
-pooled rows cannot show: at `prefetch=16` bestsource's threads still win, and
-they are the reason its pooled row was and is ahead.
-
-where the time went, per frame at `prefetch=0` and `prefetch=4` over the first
-four files, from `debug=True` (`target/bench/p35-stage-split.py`, a copy of
-`stage-split.py` that disables auto loading so each build is named by path):
-
-| stage | `p=0` libwebp | `p=0` wpd | `p=4` libwebp | `p=4` wpd |
 | --- | ---: | ---: | ---: | ---: |
-| `read` (the decode itself) | 185.50 ms | 125.24 ms | 213.40 ms | 155.69 ms |
-| `convert` (copy into the frame) | 8.32 ms | 0.00 ms | 7.91 ms | 0.00 ms |
-| `decode` (open + read + buffer) | 186.56 ms | 126.18 ms | 214.66 ms | 157.65 ms |
-| `total` | 196.84 ms | 128.46 ms | 100.56 ms | 81.41 ms |
+| imgseqs `Read` | 2.483 s | 74.71 ms | 0.004 s | 2.486 s |
+| imgseqs `Read`, `prefetch=0` | 8.576 s | 259.08 ms | 0.004 s | 8.580 s |
+| imgseqs `Read`, `prefetch=16` | 1.384 s | 0.10 ms | 0.004 s | 1.388 s |
+| bestsource `VideoSource` | 1.601 s | 17.82 ms | 1.674 s | 3.275 s |
+| bestsource `VideoSource`, `threads=1` | 10.282 s | 312.11 ms | 10.283 s | 20.565 s |
 
-two things are in the table. the decoder itself is 1.48x faster on this stage,
-which is `wpd`'s own work and not the plugin's, and the copy into the frame is
-gone because a still is a row stream: the frame is allocated first and the
-decoder's borrowed rows are written into it, so the picture never exists in a
-buffer of the plugin's. That is why `buffer` reads 0.00 ms and `convert` 0.00 ms
-on the wpd column, and why the `read` figure there is decode *and* transfer
-where libwebp's is decode alone.
-
-the serial row is the honest per decoder comparison of the two: 196.84 → 128.46
-ms per frame, 1.53x. the pooled rows gain less because the pool was already
-hiding some of the decode, and the deepest row gains least of all.
-
-pixels: 76 of 76 lines of `frame-parity.py` over `sandbox/webp`, every webp in
-`tests/fixtures` (lossless, alpha, orientation 2/6/8, the animated one) and the
-`mixed` and `fixed` controls are byte identical between the two builds, colour
-clip and alpha clip, plane by plane. the wider run over all seven sandbox sets
-is 91 of 91 lines identical. `tests/readalpha.vpy` passes 941 checks on both
-builds with no captured warning, and the webp fixture lines are part of that.
-
-the one visible cost of the first move was size: the Windows library grew
-8,292,864 → 9,039,872 bytes, because both decoders were linked at once. peak
-working set was not separated per decoder here; the plan page records the
-isolated measurement (about 206 → 207 MiB on the yuv corpus and 118 → 163 MiB
-on a large generated rgb one), which the user accepted before this was
-implemented. the removal takes that back and then some: the same library is
-8,902,656 bytes with no libwebp in the link at all, 13,824 bytes smaller than
-the build that had already stopped calling it.
-
-### the animated container's rectangle
-
-[39](improvements/39-libwebp-removal.md) hands an `ANMF` frame's own chunk
-sequence to the same decoder the stills use, so what this compares is the
-rectangle decode on its own. the corpus is 39 files and 510 frames: the webp
-fixtures, the 48 files of the upstream `wpd-test-data` tree, and three
-generated 512x512 and 384x384 animations, because the shipped fixture is 16x12
-and would measure the sampler rather than the decoder. medians of three
-alternating fresh processes:
-
-| animation read, 510 frames | before (libwebp) | after (wpd) | change |
-| --- | ---: | ---: | ---: |
-| `prefetch=0` | 0.5392 s | 0.4649 s | 1.16x faster |
-| `prefetch=4` | 0.4611 s | 0.4002 s | 1.15x faster |
-
-both builds share the compositor, the canvas and the frame write, so the gain
-is the decoder and the RIFF container the old path allocated per frame. the
-corpus matters as much as the numbers: of its 204 animated rectangles, 160 are
-`VP8L`, 15 are a bare `VP8`, and 29 are `ALPH` + `VP8`, so the branch
-`tests/fixtures/animation.webp` never reaches is the one most of it covers.
-every frame of both clips is byte identical between the two builds.
+the only set where both plugins hand out byte-identical planes. bestsource is
+faster on frames because ffmpeg spreads one vp8 frame over every core, but it
+indexes all 35 files while creating the clip. with one thread each, imgseqs is
+1.20x faster (8.58 s against 10.28 s).
 
 ## jpeg
 
-35 files, 213 MB. 31 of the pages are monochrome and come out as `Gray8` of
-18.5 MiB; the four colour ones are `RGB24` (`p000` at 44.7 MiB, `p001`, `p002`
-and `p018` at 55.4 MiB).
+35 files, 31 `Gray8` of 18.5 MiB and four `RGB24`.
 
 | reading the set | frames | median frame | open | total |
-| --- | --- | --- | --- | --- |
-| imgseqs `Read` | 2.75 s | 58.2 ms | 0.20 s | 2.95 s |
-| imgseqs `Read`, `prefetch=0` | 9.32 s | 255.4 ms | 0.20 s | 9.52 s |
-| imgseqs `Read`, `prefetch=16` | 2.04 s | 11.8 ms | 0.20 s | 2.24 s |
-| bestsource `VideoSource` | 7.49 s | 210.1 ms | 7.18 s | 14.67 s |
-| bestsource `VideoSource`, `threads=1` | 7.44 s | 208.3 ms | 7.15 s | 14.59 s |
+| --- | ---: | ---: | ---: | ---: |
+| imgseqs `Read` | 2.415 s | 65.86 ms | 0.003 s | 2.417 s |
+| imgseqs `Read`, `prefetch=0` | 8.077 s | 225.76 ms | 0.002 s | 8.079 s |
+| imgseqs `Read`, `prefetch=16` | 1.741 s | 0.08 ms | 0.003 s | 1.743 s |
+| bestsource `VideoSource` | 6.127 s | 176.72 ms | 5.847 s | 11.974 s |
+| bestsource `VideoSource`, `threads=1` | 6.181 s | 177.89 ms | 5.960 s | 12.141 s |
 
-the strongest result of the six containers: 2.73x faster than bestsource on
-frames and 4.98x including the open. bestsource reads all 35 files while it
-creates the clip, 7.18 s against imgseqs's 0.20 s, and gains nothing from its
-threads here (7.49 s against 7.44 s with one), so the win is imgseqs's
-lookahead, 4.6x over its own serial row. at `prefetch=16` the gap against
-bestsource widens to 3.7x on frames, and a frame costs 11.8 ms.
+bestsource gains nothing from its threads here, so the win is imgseqs's lookahead
+(3.3x over its own serial row).
 
 ## jpeg 2000
 
-35 files, 263 MB: 32 monochrome pages of 18.5 MiB (`Gray8`) and three colour
-ones (`RGB24`, one of 44.7 MiB and two of 55.4 MiB). the rows below are one
-pass because jpeg 2000 decoding is expensive.
+35 files: 32 `Gray8` of 18.5 MiB and three `RGB24`. one pass.
 
 **the decoder changed on 2026-10-25**: [43](improvements/43-hayro-jpeg-2000.md)
 replaced `jpeg2k` and its vendored OpenJPEG with the pure-Rust
@@ -355,1224 +127,131 @@ at the default window and 1.5x the peak memory at `prefetch=16` — is on an
 arm64 machine and is in that plan, not here.
 
 | reading the set | frames | median frame | open | total |
-| --- | --- | --- | --- | --- |
-| imgseqs `Read` | 13.637 s | 350.07 ms | 0.162 s | 13.799 s |
-| imgseqs `Read`, `prefetch=0` | 46.267 s | 1309.57 ms | 0.151 s | 46.418 s |
-| imgseqs `Read`, `prefetch=4` | 14.683 s | 339.37 ms | 0.147 s | 14.830 s |
-| bestsource `VideoSource` | 14.635 s | 24.22 ms | 16.389 s | 31.023 s |
-| bestsource `VideoSource`, `threads=1` | 87.336 s | 2475.90 ms | 85.440 s | 172.776 s |
-
-imgseqs is 1.07x faster than bestsource on frames and 2.25x faster including
-the open. lookahead is 3.4x faster than the serial row, while `prefetch=4` is
-effectively tied with the default. bestsource's single-threaded row is much
-slower at 87.336 s.
+| --- | ---: | ---: | ---: | ---: |
+| imgseqs `Read` | 13.363 s | 323.95 ms | 0.020 s | 13.384 s |
+| imgseqs `Read`, `prefetch=0` | 47.001 s | 1347.25 ms | 0.004 s | 47.005 s |
+| imgseqs `Read`, `prefetch=16` | 8.945 s | 0.13 ms | 0.004 s | 8.949 s |
+| bestsource `VideoSource` | 13.120 s | 26.05 ms | 13.081 s | 26.202 s |
+| bestsource `VideoSource`, `threads=1` | 78.985 s | 2226.41 ms | 76.966 s | 155.951 s |
 
 ## png
 
-35 files, 66 MB: 31 monochrome pages of 18.5 MiB (`Gray8`) and four colour ones
-(`RGB24`, one of 44.7 MiB and three of 55.4 MiB).
+35 files: 31 `Gray8` and four `RGB24`.
 
 | reading the set | frames | median frame | open | total |
-| --- | --- | --- | --- | --- |
-| imgseqs `Read` | 0.322 s | 2.86 ms | 0.006 s | 0.328 s |
-| imgseqs `Read`, `prefetch=0` | 0.803 s | 15.62 ms | 0.005 s | 0.808 s |
-| imgseqs `Read`, `prefetch=16` | 0.249 s | 0.14 ms | 0.006 s | 0.255 s |
-| bestsource `VideoSource` | 0.632 s | 9.61 ms | 0.876 s | 1.508 s |
-| bestsource `VideoSource`, `threads=1` | 1.970 s | 42.87 ms | 2.175 s | 4.144 s |
+| --- | ---: | ---: | ---: | ---: |
+| imgseqs `Read` | 0.282 s | 1.39 ms | 0.003 s | 0.285 s |
+| imgseqs `Read`, `prefetch=0` | 0.775 s | 15.06 ms | 0.002 s | 0.777 s |
+| imgseqs `Read`, `prefetch=16` | 0.223 s | 0.11 ms | 0.003 s | 0.226 s |
+| bestsource `VideoSource` | 0.661 s | 10.19 ms | 0.851 s | 1.512 s |
+| bestsource `VideoSource`, `threads=1` | 2.046 s | 44.64 ms | 2.209 s | 4.256 s |
 
-the closest of the six, and the change that moved a set the most:
-[22](improvements/22-png-decode-path.md) is a png whose rows the plugin
-places itself rather than building the picture in a buffer and copying it, and
-a palette page whose expansion is the plugin's rather than the decoder's. imgseqs
-is 1.97x faster on frames and 4.60x including the open, and it is the only set
-where it wins the serial comparison as well as the parallel one (0.803 s against
-1.970 s), so here the margin is the decoder and the skipped indexing pass rather
-than the lookahead: these frames fit the lookahead budget either way, so sixteen
-workers only edge out the default (0.249 s against 0.322 s). the serial row
-every other row on this page is measured on is itself 1.8x faster than it was,
-1.43 s to 0.803 s.
-
-this row was re-measured on its own after that change rather than in the batch
-the other sets' sections came from, so it is the one number here that is not
-from the same run as its neighbours. `sandbox/webp` was measured in the same
-batch as a control, against both builds: its serial row is unchanged (12.047 s
-before against 11.962 s after) and its pooled rows sit 15% to 22% above the
-record in its own section on *both* builds, which is this machine rather than
-either change.
-
-the comparison this page does not otherwise carry is against Pillow, timed
-through `target/bench/decode/png-decode.py`, one batch per set: Pillow's
-`open` + `load` + `convert("L")` is 1.284 s against imgseqs's 0.874 s on this
-set, 1.902 s against 1.662 s on `sandbox/posterize-check`, and 1.984 s against
-1.888 s on the jpeg set. imgseqs's stage split on this set is 24.44 ms of `read`
-and 0.00 ms of `convert`, because there is no buffer left to convert; the jpeg
-set's is 9.63 ms and 3.80 ms, which is that path unchanged. the tables are in
-[22](improvements/22-png-decode-path.md).
+imgseqs also wins the serial comparison (0.775 s against 2.046 s), because the
+plugin places the rows itself instead of buffering the picture.
 
 ## jxl
 
-35 files, 174 MB, same manga pages, again 31 `Gray8` and four `RGB24`.
-
-bestsource cannot read this set at all: `bs.VideoSource` fails with
-`Video codec not found`, because that ffmpeg build has no jpeg xl decoder. the
-bench reports the failure and then measures imgseqs on its own.
+35 files: 31 `Gray8` and four `RGB24`.
 
 | reading the set | frames | median frame | open | total |
-| --- | --- | --- | --- | --- |
-| imgseqs `Read` | 6.50 s | 117.9 ms | 0.004 s | 6.51 s |
-| imgseqs `Read`, `prefetch=0` | 18.86 s | 544.1 ms | 0.003 s | 18.86 s |
-| imgseqs `Read`, `prefetch=16` | 4.57 s | 10.6 ms | 0.005 s | 4.58 s |
-
-jxl needs the most cpu per frame of the six (485 ms in the stage table below)
-and gets the most from lookahead, 4.13x over its serial row, with a median frame
-that drops from 544.1 ms to 10.6 ms. `prefetch=16` is its best row, and opening
-the clip is free because the probe only reads the header.
+| --- | ---: | ---: | ---: | ---: |
+| imgseqs `Read` | 4.115 s | 87.54 ms | 0.003 s | 4.119 s |
+| imgseqs `Read`, `prefetch=0` | 13.220 s | 380.80 ms | 0.003 s | 13.223 s |
+| imgseqs `Read`, `prefetch=16` | 2.798 s | 0.12 ms | 0.004 s | 2.801 s |
+| bestsource `VideoSource` | 4.328 s | 122.65 ms | 4.377 s | 8.706 s |
+| bestsource `VideoSource`, `threads=1` | 13.160 s | 379.85 ms | 13.551 s | 26.712 s |
 
 ## avif
 
-35 files, 130 MB, 34 colour pages and one monochrome page. avif is the only set
-whose colour pages are all coded with three channels: the grey pages beside
-`p003` are stored that way too, so the 34 colour files come back as `YUV420P8` —
-their own planes, since [12](improvements/12-heif-avif-yuv-output.md) — and
-`p003`, the one file whose bitstream says `mono_chrome`, as `Gray8` of 18.5 MiB.
-965 MiB decoded, against 1244 MiB as `RGB24` and 1928 MiB before
-[05](improvements/05-monochrome-heif.md) corrected that page. bestsource cannot
-open the set.
+35 files: 34 `YUV420P8` and one `Gray8`. bestsource cannot open the set.
 
 | reading the set | frames | median frame | open | total |
-| --- | --- | --- | --- | --- |
-| imgseqs `Read` | 2.04 s | 13.0 ms | 0.002 s | 2.04 s |
-| imgseqs `Read`, `prefetch=0` | 4.94 s | 137.0 ms | 0.002 s | 4.94 s |
-| imgseqs `Read`, `prefetch=16` | 1.99 s | 0.1 ms | 0.002 s | 2.00 s |
-
-[15](improvements/15-avif-decoder-progress.md) is what the rows above read now,
-and it is the only change on this page that moved them without touching a sample:
-the item decoder is created for low-latency output, because one item is one frame
-and dav1d's default frame delay decodes it on a worker thread. best pass of three
-per configuration, both builds measured in the same batch:
-
-| avif 35 | before | after |
-| --- | --- | --- |
-| `Read` | 2.226 s | 2.044 s |
-| `Read`, `prefetch=0` | 5.350 s | 4.939 s |
-| `Read`, `prefetch=16` | 2.387 s | 1.994 s |
-| median frame | 47.91 ms | 13.01 ms |
-
-every row is faster, and the serial row by 8%: the pipeline a still image cannot
-use was not paying for itself. the earlier rows this section held (3.19/6.65/3.29)
-were already higher in this session than the same build measured here, so they
-were drift rather than a change; the paired columns are the evidence, and
-`target/bench/ab-sets.py` over the six sets says the same thing (avif 0.844,
-`hitokage` 0.570, and the untouched heic and png sets inside their own spread).
-
-before [12](improvements/12-heif-avif-yuv-output.md) the same three rows were
-4.99 s, 11.77 s and 5.14 s with a 121.4 ms median: the conversion to r,g,b that
-12 removed was 114.56 ms of every frame at `prefetch=4`, and it was also what the
-budget could not hold — 55.4 MiB frames against 192 MiB — so removing it helps
-the lookahead twice, once in the work and once in the memory. the paragraph below
-is the history of the budget itself, measured on the rgb frames; see
-[12](improvements/12-heif-avif-yuv-output.md) for the yuv figures.
-
-the rest of this section is how those frames behaved as `RGB24`, which is the
-state [01](improvements/01-lookahead-scheduling.md),
-[02](improvements/02-frame-write-path.md) and
-[05](improvements/05-monochrome-heif.md) were measured in, and its figures are
-this page's record of them. this is the set where the budget mattered most. the
-decode reported ~165 ms per frame as rgb: 98 ms building the decoder, which has
-to decode the picture before it can report a size, and 67 ms converting it to
-r,g,b and copying it into the frame. the frames were `RGB24` of 55.4 MiB, so the
-old fixed 192 MiB budget held three and a half of them and the pool re-decoded
-whatever it had to drop: the default was 9.25 s and `prefetch=16` was 19.11 s,
-twice as slow as doing nothing in parallel. with the budget following the window
-the same three rows became 4.99 s, 11.77 s and 5.14 s, so the default was then
-2.36x faster than the serial row and asking for sixteen workers cost nothing.
-[12](improvements/12-heif-avif-yuv-output.md) then halved the frames, which is
-why the same three rows read 3.19 s, 6.65 s and 3.29 s above.
-
-creating the clip took 6.43 s before [05](improvements/05-monochrome-heif.md)
-taught the probe to read the container instead of building the decoder, which
-decodes the picture and the alpha item before it can report a size. it is 2 ms
-now: 183 ms per file became 0.06 ms, so the set went from 6.43 s plus 5.49 s of
-frames to 0.002 s plus 4.99 s, 11.92 s of work against 4.99 s. a file used to be
-decoded twice, once to probe it and once for its frame, and the frame column moved
-the same way in the row with no lookahead, 12.58 s against 11.77 s. `prefetch=16`
-is the exception at 5.14 s against 5.06 s, which is inside the run to run spread
-of this machine: with sixteen workers the second decode was hidden behind the
-first rather than removed, so a cheaper probe has little left to give it.
+| --- | ---: | ---: | ---: | ---: |
+| imgseqs `Read` | 2.358 s | 24.10 ms | 0.005 s | 2.363 s |
+| imgseqs `Read`, `prefetch=0` | 5.577 s | 153.38 ms | 0.007 s | 5.584 s |
+| imgseqs `Read`, `prefetch=16` | 2.374 s | 0.12 ms | 0.004 s | 2.378 s |
 
 ## heic
 
-35 files, 236 MB, and bestsource cannot open the set. imgseqs reads all 35: 31
-monochrome pages decoded as `Gray8`, and the four colour pages — `p000` at
-44.7 MiB and three at 55.4 MiB as `RGB24` before
-[12](improvements/12-heif-avif-yuv-output.md) — as their own `YUV420P8` planes
-now, which is what their container's matrix says they are. it is the only set
-here whose frames mix formats and sizes.
+35 files: 31 `Gray8` and four `YUV420P8`. bestsource cannot open the set.
 
 | reading the set | frames | median frame | open | total |
-| --- | --- | --- | --- | --- |
-| imgseqs `Read` | 7.21 s | 164.9 ms | 0.007 s | 7.21 s |
-| imgseqs `Read`, `prefetch=0` | 23.20 s | 684.0 ms | 0.007 s | 23.21 s |
-| imgseqs `Read`, `prefetch=16` | 4.80 s | 0.1 ms | 0.007 s | 4.81 s |
-
-before [12](improvements/12-heif-avif-yuv-output.md) the same three rows were
-8.24 s, 25.17 s and 5.63 s with a 203.4 ms median. the colour frames are still
-three of the most expensive ones — libheif's decode dominates them, so 12's
--1.2% on this set is inside the spread — but they are half the size, which is why
-the default row moved 12% and the `prefetch=16` row moved 15% while the serial
-row only moved 8%. the paragraph below is the history of the budget, measured on
-the rgb frames; the default row once read 7.50 s with `prefetch=0` at 24.11 s,
-which is the machine drift of that pair of runs rather than a change, since the
-serial path is untouched by both.
-
-three of the frames are ten times the cost of the rest, so the median and the
-total disagree: the lookahead was worth 4.47x over the serial row as rgb, and the
-median frame fell from 749.7 ms to 11.4 ms at `prefetch=16`, the cheapest median
-there. `prefetch=16` is 1.5x faster than the default on this set, which is what
-the budget change was for: the 31 gray frames fit 192 MiB but the four colour
-ones did not, so the old default spent its time re-decoding, and 12's smaller
-colour frames only removed what was left of that. the default row was the one
-number on this page that looked worse than before (8.24 s against 7.50 s) and the
-`prefetch=0` row moved the same way (25.17 s against 24.11 s),
-which is machine drift over that pair of runs rather than the change: the serial
-path is untouched. the monochrome pages are also the one place where the decode
-is not the `image` crate's: they go through `libheif` directly, see
-[05](improvements/05-monochrome-heif.md).
-
-## heif/avif yuv hand-out
-
-[12](improvements/12-heif-avif-yuv-output.md) stopped converting a heif or avif
-page to r,g,b in the plugin. a colour page whose container states a matrix the
-VapourSynth enum can name is handed out as the file's own yuv planes, tagged with
-that matrix and range; a page whose container states code 2 or nothing at all
-keeps the rgb it had, and the `sandbox/hitokage-sample` colour pages (matrix 2)
-are the corpus's example of that. it is the only change on this page that makes
-the *graph* do different work rather than the plugin, so both halves are
-measured.
-
-frame bytes, row padding included, for one 3672x5274 colour page:
-
-| as | planes | allocated | `prefetch` window holds |
-| --- | --- | --- | --- |
-| `RGB24` before | 55.40 MiB | 58,731,264 B | 3.5 frames of 192 MiB |
-| `YUV420P8` after | 27.70 MiB | 29,365,632 B | 7 frames of 192 MiB |
-| `RGB48` before | 96.0 MB | — | — |
-| `YUV444P10` after | 48.0 MB | — | — |
-
-`p000` (3312x4717) goes 47,094,528 → 23,545,600 and the monochrome `p003` stays
-19,577,088. what that did to the two sets is in the avif and heic sections above:
-avif 4.99 → 3.19 s, heic 8.24 → 7.21 s at the default depth.
-
-same-batch interleaved A/B against the pre-12 build, three rounds, fastest of
-each (probe is clip creation, decode is the frames):
-
-| set | probe before → after | decode before → after |
-| --- | --- | --- |
-| avif 35 | 1.6 → 1.9 ms | 4621.1 → 2979.3 ms (-35.5%) |
-| heic 35 | 10.6 → 6.1 ms (-42%) | 7252.0 → 7167.5 ms (-1.2%) |
-| hitokage 5 | 0.5 → 0.6 ms | 1316.9 → 1307.7 ms (-0.7%) |
-| mixed 35 | 25.0 → 26.4 ms | 4218.5 → 4020.5 ms (-4.7%) |
-| png 35 | 4.1 → 4.6 ms | 571.4 → 578.0 ms (+1.2%) |
-| fixtures 99 | 1.6 → 1.5 ms | 7.3 → 5.2 ms |
-
-`hitokage` is the control: a set the change does not touch costs the same, and the
-`png` column is drift (its frames are byte identical). the heic set barely moves
-because libheif's decode dominates its colour pages; the avif set is where the
-conversion was.
-
-per stage, avif, both builds measured back to back in one session:
-
-| avif | files | convert before → after | total before → after |
-| --- | --- | --- | --- |
-| `prefetch=0` | 4 | 35.09 → 14.03 ms/frame | 156.46 → 108.72 ms/frame |
-| `prefetch=4` | 16 | 114.56 → 31.41 ms/frame | 125.28 → 97.63 ms/frame |
-
-the copy that stays is the plane copy into the frame, which a yuv page needs as
-much as an rgb one; the part that left is the yuv-to-rgb arithmetic and the
-interleave it had to undo. at `prefetch=4` the removed 83 ms/frame is most of the
--22% the total moved, and at the whole-set level the same set is -35.5% because a
-55 MiB frame was also what the budget could not hold.
-
-the conversion that left is not free for a graph that wants rgb back, and that is
-the trade. `target/bench/yuv-rgb-penalty.py` on four even-sized colour pages of
-`sandbox/avif` at `prefetch=4`, wall clock per delivered frame: `read` alone is
-100.7 ms, `read + resize.Point(RGB24)` 100.1–102.8, `read +
-resize.Bicubic(RGB24)` 134.2–137.8, and the crop-then-Bicubic route an odd page
-needs costs the same as Bicubic alone. so the rgb route is 35 ms of the graph's
-own time where the plugin's conversion was 114 ms of a worker's, and `Point`,
-which is free here, replicates chroma rather than interpolating it — the plugin
-made that choice before, and the graph makes it now. it is also why an odd-sized
-4:2:0 page needs the crop: zimg refuses to convert 4:2:0 to rgb at all when a
-dimension is odd, so `sandbox/avif`'s `p000` (3312x4717) only converts after a
-crop to even, which is exactly what the parity measurement below does.
-
-pixels: every frame of the corpus whose format did not change is identical to the
-pre-12 build's, plane for plane and byte for byte — 92 of the 104 rows of
-`frame-parity.py`; the 12 that differ are the moved colour pages. for those, the
-picture is checked by converting back with `resize.Point`/`resize.Bicubic` from
-the `_Matrix` and `_Range` the file states and comparing with the rgb the old
-path built: the mean difference is 0.25 and 0.46 of one code value out of 255 on
-the avif and heic sets, 0.72% and 1.22% of samples differ by more than 8, and the
-generated fixture pages come back exactly (`max 0` on every plane). the residual
-is chroma upsampling phase, not a wrong plane: the frames of a graph that does not
-resize are the file's own samples, which is what the format change means.
-
-## nominal depth
-
-[10](improvements/10-nominal-bit-depth.md) hands a file whose container states a
-depth between eight and sixteen out as the format that names it, with its samples
-right aligned at that depth. the format and the position of every sample inside a
-two byte word both move, so this is a change nothing should pay for: the same
-bytes are allocated, the same bytes are written, and `expected_bytes`, the
-lookahead budget and the number of frames that budget holds are all unchanged.
-the only files it can touch are jxl and the paths that go through `image` — a
-monochrome avif, and the r,g,b hand-outs of a page whose matrix the properties
-cannot name — and the corpus for it is `sandbox/hitokage-sample`, which is the
-one set with a ten and a twelve bit page in it. `format-summary.py --frame`, before and
-after (`target/bench/base10/hitokage-*.txt`):
-
-| file | before | after | frame bytes |
-| --- | --- | --- | --- |
-| `avif-yuv444p10le.avif` | `RGB48` max=65472 | `RGB30` max=1023 | 144,384,000 |
-| `avif-yuv444p12le.avif` | `RGB48` max=65520 | `RGB36` max=4095 | 144,384,000 |
-| `jxl-rgb48le.jxl` | `RGB48` max=65535 | `RGB48` max=65535 | 144,384,000 |
-| `png-rgb48be.png` | `RGB48` max=65535 | `RGB48` max=65535 | 144,384,000 |
-| `tiff-rgb48le.tiff` | `RGB48` max=65535 | `RGB48` max=65535 | 144,384,000 |
-| `tiff-rgb24.tiff` | `RGB24` max=255 | `RGB24` max=255 | 72,192,000 |
-| `exr-gbrpf32le.exr` | `RGBS` max=255 | `RGBS` max=255 | 288,000,000 |
-
-the other three avifs of that set are `avif-yuv420p.avif`, `avif-yuv422p.avif`
-and `avif-yuv444p.avif`, all 8 bit, and all three stay `RGB24` max=255 at
-72,192,000 bytes. the two deep files are the ones the sixteen bit word was too
-wide for — 0.4% of the scale at ten bits, 0.02% at twelve — and their first
-samples moved from 18304, 18688, 19072, 19008, 18560, 18880 to 286, 292, 298,
-297, 290, 295 (`>> 6`) and from 18320, 18720, 19248, 19120, 18576, 18688 to 1145,
-1170, 1203, 1195, 1161, 1168 (`>> 4`), which is the old value shifted by exactly
-the difference between the two depths. a ten bit frame is two bytes per sample
-like the word it replaces, so `frame bytes` is the same number on both sides of
-every row, and 144,384,000 is what the lookahead budget was already counting for
-those pages.
-
-pixels: the parity sets are the six sandbox sets, a fixed png subset and the
-alpha fixtures, and none of them holds a file whose depth changed, so the check
-here is that nothing else moved: 105 of the 106 lines of `frame-parity.py` are
-byte identical to the pre-change build's, the odd line out being the plugin name
-it prints (`base10/parity-*.txt`), and the deep pages of `hitokage-sample` sit
-outside those sets and are checked by the table above. same-batch interleaved A/B
-against `vs_imageseqs-before-10.dll`, best of five rounds:
-
-| set | probe before → after | decode before → after |
-| --- | --- | --- |
-| avif 35 | 2.0 → 1.8 ms | 3149.2 → 3097.3 ms (0.984) |
-| heic 35 | 6.2 → 6.8 ms | 7346.6 → 7258.9 ms (0.988) |
-| hitokage 5 | 0.6 → 0.6 ms | 1294.7 → 1345.4 ms (1.039) |
-| mixed 35 | 23.3 → 27.7 ms | 4077.0 → 4077.3 ms (1.000) |
-| png 35 | 4.9 → 4.8 ms | 581.0 → 590.7 ms (1.017) |
-| fixtures 99 | 1.8 → 1.6 ms | 5.3 → 6.0 ms |
-
-a second run of the same rows moved them by up to 4% in both directions, and the
-`mixed` probe, which is the widest of the differences, was re-measured over six
-paired rounds as 19.9/29.5/24.6/24.1/23.3/24.0 before against
-20.7/24.0/24.1/24.3/25.0/23.6 after: the whole table is drift around a change
-that does no work. the convert stage on its own, paired and interleaved over four
-rounds of eight frames of one 6000x4000 file (`target/bench/ab-convert.py`,
-`base10/ab-convert.txt`):
-
-| file | convert before → after |
-| --- | --- |
-| 10-bit avif (the shifted path) | 112.0 → 112.1 ms |
-| 12-bit avif (the shifted path) | 105.0 → 104.1 ms |
-| 16-bit jxl (control) | 85.8 → 85.7 ms |
-| 16-bit png (control) | 87.7 → 88.5 ms |
-
-one move per sample more per sample moved, and no measurable difference: the load
-and the store were already there, and a shift of a value the load brought into a
-register is what the loop around it does anyway.
-
-## per stage cost
-
-`debug=True` with `prefetch=0`, averaged over the first four files of each
-sandbox set, which are three of the colour pages plus the first monochrome one
-where the set has any. the avif row is pre-12 and is the cost of building r,g,b
-frames; its yuv stages are in the section above:
-
-| set | decode | copy into the frame | total |
-| --- | --- | --- | --- |
-| webp 3672x5274 | 204 ms | 14 ms | 220 ms |
-| jpeg 3672x5274 | 341 ms | 44 ms | 389 ms |
-| png 3672x5274 | 90 ms | 43 ms | 137 ms |
-| jxl 3672x5274 | 485 ms | 47 ms | 540 ms |
-| avif 3672x5274 | 165 ms | 73 ms | 244 ms |
-
-the decode figure includes the first-touch page faults of the decode buffer,
-27.7 MiB for a colour webp frame, 55.4 MiB for an rgb one and 18.5 MiB for a
-monochrome one, which is why allocating that buffer measures as ~0 ms on its
-own. with `prefetch=0` every column is the requesting thread's own work, and the
-`fetch` field the log also prints is the sum of them. with workers the decode and
-the write are measured in the worker that did them, and `fetch` is only the wait,
-which is what [02](improvements/02-frame-write-path.md) changed. the webp row is
-what [03](improvements/03-webp-yuv-output.md) and
-[04](improvements/04-webp-decoder.md) left behind: it read 520 ms of decode and
-86 ms of write with `image-webp` and an rgb frame, and its planes are now copied
-into the frame row by row instead of converted from an interleaved buffer, which
-is why its write is the smallest of the five. avif is the one row holding a
-second cost: 98 ms of its 165 ms is building the decoder, which decodes the
-picture and its alpha item before it can report a size — parsing the container is
-half a millisecond of that — and the copy then converts the yuv it holds to the
-r,g,b the frame takes. jxl is the slowest of the five, and it is the format whose
-frames the lookahead helps most.
-
-the one cost that is not in this table is the colour read
-[08](improvements/08-color-metadata.md) added at clip creation, because it
-happens once per file rather than once per frame: 0.04 ms per png file for
-walking its chunks to the `cICP` chunk, and 0.15 ms per heic file for the second
-open the colour of its handle needs. clip creation over either 35 page set is
-1.8 ms → 3.2 ms for png and 4.7 ms → 10.1 ms for heic, which is 0.3% and 0.08% of
-the time those pages then take to decode, and it is why the heic `open` row above
-would read 0.010 s rather than 0.005 s. the per-frame stages do not move: the
-same eight page run, alternating the two builds inside one batch, measures 61.50
-against 61.88 ms/frame for png and 682.75 against 683.11 ms/frame for heic at
-each build's best, which is inside the spread of the same binary run twice.
-
-the orientation read [16](improvements/16-container-orientation.md) added is the
-same shape and smaller: `irot` and `imir` are two more properties of the item
-metadata walk an avif probe already runs, and a heif needs the walk and so a
-second open of its own. best of five rounds per build, per 35-file clip:
-
-| set | before | after |
-| --- | --- | --- |
-| avif | 1.7–1.9 ms | 2.0–2.1 ms |
-| heic | 6.2–6.7 ms | 7.5–8.0 ms |
-
-so 0.006 ms per avif file and 0.037 ms per heic file, which is a quarter of what
-08's second open costs for the same reason. no file in the sandbox states a
-container transform, so nothing here decodes differently: the heic decode pass
-measured 6175.0 → 6197.4 ms (1.004) and all 120 `frame-parity.py` lines are byte
-identical.
-
-## AVIF container bounds
-
-[17](improvements/17-avif-container-robustness.md) bounds every range the item
-metadata walker hands out, which needs the length of the file the boxes came
-from: one `stat` per probed file, on the handle the walk already has. it changes
-nothing a corpus file does — no file in `sandbox/` has an item in several
-extents, a construction method other than the file, or an extent the file does
-not hold — so the decode column is the same binary run twice and only the probe
-column moves. `ab-sets.py`, 3 rounds, alternating the two builds inside one
-batch:
-
-| set | probe before → after | decode before → after |
-| --- | --- | --- |
-| avif 35 | 1.6 → 1.8 ms (1.125) | 1848.1 → 1830.3 ms (0.990) |
-| heic 35 | 6.5 → 6.6 ms (1.015) | 6305.3 → 6146.2 ms (0.975) |
-| mixed 35 | 16.8 → 17.7 ms (1.054) | 3246.9 → 3244.6 ms (0.999) |
-| png 35 | 3.9 → 4.0 ms (1.026) | 383.2 → 384.0 ms (1.002) |
-| hitokage 5 | 0.5 → 0.5 ms (1.000) | 389.9 → 392.2 ms (1.006) |
-| fixtures 99 | 1.8 → 1.8 ms (1.000) | 6.2 → 6.4 ms (1.032) |
-
-the avif row is the cost: 0.046 → 0.051 ms per file, which is the file metadata
-call the extent bound needs, and it is a fifth of the second open
-[16](improvements/16-container-orientation.md) accepted for the same container.
-every other probe row is inside the spread of the same binary run twice — `mixed`
-and `png` hold no avif at all — and the widest decode row moves 2.5% against a
-`prefetch` pool whose run to run spread on this machine is larger than that.
-eight alternating rounds of the avif set on its own separate the two: best of
-eight is 1.6 ms before against 1.8 ms after for the probe, 1994.0 ms against
-1996.5 ms for the decode, and the per-round paired decode difference swings
-±100 ms in both directions with a mean of −18 ms. the decode path does pay the
-`read_range` guard's own metadata calls — two for a colour item and three when an
-alpha item sits beside it — and they are below what this machine resolves.
-
-pixels: 120 of the 120 `frame-parity.py` lines are byte identical, because no
-file in those sets states a layout this change can move. the one file that does
-is the new `avif-split-extents.avif`, which is outside them and is checked in
-`tests/readalpha.vpy` against the file it was cut from.
-
-## work nothing asks for
-
-[18](improvements/18-demand-aware-decoding.md) stopped two kinds of work a call
-had not asked for, and both were measured before and after. neither is a decode
-setting or a format change: `Read` was decoding an avif alpha item it never hands
-out, and a probe was keeping a copy of every file's embedded ICC profile although
-export is off by default.
-
-**the alpha item.** an avif alpha plane is a coded item of its own, so a
-colour-only read that skips it skips a whole `dav1d` decoder. the corpus is
-twelve colour pages of `sandbox/avif` cropped to 1536x2304 and encoded three
-ways — the page's own grey content as alpha, a smooth ramp, and no alpha at all —
-built by `target/bench/make-alpha-corpus.py`; the third is the control, because a
-file with no alpha item has nothing to skip. best of five rounds per build, `Read`
-over all twelve files, `prefetch=0`, measured with
-`target/bench/alpha-demand.py`:
-
-| corpus | before | after | change |
-| --- | --- | --- | --- |
-| no alpha item (control) | 193.4 ms, decode 12.02 | 195.3 ms, decode 12.27 | unchanged |
-| alpha = the page's own grey | 284.1 ms, decode 19.83 | 254.1 ms, decode 17.14 | −10.6% wall, −2.69 ms |
-| alpha = a smooth ramp | 258.0 ms, decode 16.98 | 206.9 ms, decode 13.55 | −19.8% wall, −3.43 ms |
-
-the decode stage on its own is 11.95 → 9.14 ms (mask) and 11.95 → 8.51 ms (ramp),
-against 8.29 → 8.44 ms for the control, so what left is the item and not the file
-open, the buffer or the frame write. the ramp — the cheaper alpha to *code* — is
-the larger saving to skip, because a smooth gradient costs fewer bits and the same
-plane to decode and copy. in the lookahead pool the same work is contended, so
-the same twelve files at `prefetch=4`, best of three, move 177.2 → 143.1 ms
-(mask) and 149.9 → 127.3 ms (ramp), with the control at 128.0 → 114.0 ms.
-
-the heif half of the change is the packing and the allocation only: `libheif`
-decodes a page's alpha plane whether or not anything asks for it, and
-`libheif-rs` 3.0.0 exposes no way to suppress it. no heif corpus here has an alpha
-channel to measure it on.
-
-**the retained profiles.** a 35-file png sequence whose every file carries a
-1 MiB profile (`target/bench/make-icc-corpus.py`), measured with
-`target/bench/icc-retention.py`, which asks a PowerShell process for this
-process's working set because the sandbox refuses the in-process query. `Read`
-with `prefetch=0` decodes nothing, so the working set right after the call is the
-clip's own:
-
-| corpus | `icc_profile` | before | after |
-| --- | --- | --- | --- |
-| 35 files, 1 MiB profile each | 0 (default) | **+36.4 MiB** | +0.5 MiB |
-| 35 files, 1 MiB profile each | 1 | +36.2 MiB | +35.7 MiB |
-| 35 files, 588-byte profile each | 0 | +0.6 MiB | +0.5 MiB |
-| 35 files, no profile | 0 | +0.5 MiB | +0.5 MiB |
-
-so the default kept one copy of every profile for the life of the clip — 36 MiB
-against the 176 MiB those 35 pages then take as frames — and the option that
-exists to hand those bytes out changed nothing about whether they were kept. the
-bytes are still read, because whether a file carries a profile is the
-`ImgSeqHasICC` fact and that is reported whatever the option says; what is gone is
-the copy nothing would have used.
-
-pixels: 192 of the 192 `frame-parity.py` lines are byte identical, including a
-`demand` set over the whole 36-file alpha corpus, so no colour plane and no alpha
-plane moved.
-
-## frame write path
-
-[02](improvements/02-frame-write-path.md) moved the frame build out of the
-requesting thread and into the lookahead worker that decoded the file. the copy
-is memory bound, so this only pays where the pool was already faster than the
-thread asking for frames: the corpus below is that case, the small jpeg set is
-the counter example.
-
-132 manga pages of 1404x2000 (`I:/Manga/Yuri Love Story/source/v02`), wall clock
-for the whole set, `--reps 1`, two rounds, bestsource measured in the same four
-passes:
-
-| round | default before | default after | `prefetch=16` before | after | bestsource |
-| --- | --- | --- | --- | --- | --- |
-| 1 | 1.177 s | 1.172 s | 1.030 s | 0.870 s | 1.938 s, 2.104 s |
-| 2 | 1.234 s | 1.016 s | 1.522 s | 0.757 s | 2.070 s, 1.967 s |
-
-32 sandbox png pages of 3672x5274 (`Gray8`, 18.5 MiB each), two rounds, `total`
-in ms/frame from `target/bench/stage-split.py`, which takes a prefetch argument:
-
-| prefetch | before | after |
-| --- | --- | --- |
-| 4 | 21.32, 19.76 | 18.09, 18.80 |
-| 16 | 16.97, 16.12 | 12.43, 16.15 |
-
-and the case where it is worth nothing, 8 of the same jpeg pages at
-`prefetch=4`:
-
-| stage | before | after |
-| --- | --- | --- |
-| wait for the pool (`decode`, then `fetch`) | 1.93 ms | 8.87 ms |
-| copy on the requesting thread (`convert`) | 6.94 ms | gone |
-| total | 8.96 ms | 8.89 ms |
-
-the worker side of that last row moved the other way: `read` 15.13 → 18.11 ms and
-`convert` 6.94 → 15.59 ms per frame, because four workers writing planes at once
-compete for the memory bandwidth the decoder wants. the write does not scale with
-the worker count, so moving it into the pool moves the floor instead of removing
-it. that is why the same change is worth 5% to 35% on a pool that had room and
-nothing on a pool that did not, and why `prefetch=0` is unchanged: it is the same
-work on the same thread.
-
-the parity check for it is `target/bench/frame-parity.py`, which hashes every
-plane of every frame of seven sets (six from `sandbox/` plus `tests/fixtures`),
-for `Read` and for both clips of `ReadAlpha`. the 75 line dump is identical
-before and after except for the header that names the plugin.
-
-## ICC frame-property export
-
-`icc_profile=True` adds the raw `ICCProfile` property to frames that carry an
-embedded profile. the option is exposed by the benchmark helper as
-`--icc-profile`; its default remains `False`.
-
-the comparison used the 35-page png corpus after adding the same 588-byte sRGB
-profile to each file in `target/bench/png-icc/`. five-pass runs on the release
-build, with the ranges showing all five measured totals:
-
-| mode | default | `prefetch=0` | `prefetch=16` | open |
 | --- | ---: | ---: | ---: | ---: |
-| `icc_profile=False` | 0.453–0.497 s | 1.149–1.605 s | 0.374–0.412 s | 6.7–8.0 ms |
-| `icc_profile=True` | 0.458–0.496 s | 1.154–1.436 s | 0.361–0.375 s | 6.8–7.0 ms |
+| imgseqs `Read` | 6.716 s | 175.36 ms | 0.009 s | 6.725 s |
+| imgseqs `Read`, `prefetch=0` | 22.566 s | 661.55 ms | 0.010 s | 22.576 s |
+| imgseqs `Read`, `prefetch=16` | 4.524 s | 0.09 ms | 0.009 s | 4.533 s |
 
-the ranges overlap and are dominated by scheduling noise; exporting the binary
-property has no measurable throughput penalty here. the 200-file 3x2 ICC
-fixture gives the same result: 7 ms versus 7 ms at the default, 20 ms versus
-19 ms with `prefetch=0`, and 8 ms versus 8 ms with `prefetch=4`.
 
-the ordinary webp corpus also stays near its previous baseline: current
-`icc_profile=False` measured 3.51 s by default, 12.21 s at `prefetch=0`, and
-1.93 s at `prefetch=16`, against the recorded 3.39 s, 11.94 s, and 1.87 s.
-the webp files do not carry the tested ICC payload, so this is a regression
-check rather than an export-cost measurement. the historical png rows remain
-0.62 s, 1.43 s, and 0.60 s; those absolute values are not compared directly
-with the ICC-bearing copies because ImageMagick regenerated their PNG streams.
+## PNGWrite
 
-## animated sources
+write path, measured earlier and not re-run here. [38 PNGWrite](improvements/38-png-write.md)
+is the plan. `target/bench/png-write.py` and `target/bench/png-write-async.py` run
+it. 1404x2000 synthetic pages, one warm-up and five measured passes with the route
+order rotated, i5-11400h, Python 3.12, Pillow 12.3 over zlib-ng. Plugin is
+`compression=6` over `zlib-rs`. Every route's outputs were decoded and compared
+with the input frames, and all agree.
 
-[21](improvements/21-animated-images.md) made an animated input contribute its
-displayed timeline instead of one frame, and left two measurements outstanding:
-that a still image pays nothing for it, and what sequential and backward
-playback cost per decoder. Both are below. They were taken on the machine named
-at the end of this section, which is not the windows machine the rest of this
-page was measured on, so their absolute values are not comparable with the
-tables above; every comparison here is between two builds or two orders of the
-same build, measured in one batch.
+routes: the plugin asked for one frame at a time, Pillow saving serially, and
+Pillow with six worker threads and oldest-future backpressure (the shape of
+nmanga's `BoundedWritePool`; six is half the 12 logical cores). the headline is
+wall time from the first request to the last closed file, with the plugin's safe
+publication (temporary file, then rename or link) included.
 
-**a still image pays nothing.** the prefetch pool is now indexed by output frame
-instead of by file, so every still read takes the new path. two builds measured
-in one batch, alternating the order every round, three rounds per configuration,
-best of three, `mismatch=True`, which is what every sandbox set needs. each
-measurement is its own process with its own VapourSynth environment, so the two
-plugins never share a core:
-
-| set | prefetch | before | after | after/before |
-| --- | --- | ---: | ---: | ---: |
-| png 35 | default | 202.8 ms | 201.4 ms | 0.993 |
-| png 35 | 16 | 166.6 ms | 168.1 ms | 1.009 |
-| png 35 | 0 | 556.5 ms | 556.0 ms | 0.999 |
-| webp 35 | default | 2002.1 ms | 1988.0 ms | 0.993 |
-| webp 35 | 16 | 1131.2 ms | 1142.4 ms | 1.010 |
-| webp 35 | 0 | 7019.5 ms | 7002.9 ms | 0.998 |
-| jpeg 35 | default | 1314.2 ms | 1332.6 ms | 1.014 |
-| jpeg 35 | 16 | 895.5 ms | 886.9 ms | 0.990 |
-| jxl 35 | default | 4170.6 ms | 4110.5 ms | 0.986 |
-| jxl 35 | 16 | 2727.0 ms | 2789.0 ms | 1.023 |
-| avif 35 | default | 1568.6 ms | 1551.6 ms | 0.989 |
-| avif 35 | 16 | 1551.7 ms | 1521.5 ms | 0.981 |
-| heic 35 | default | 4040.6 ms | 4052.6 ms | 1.003 |
-| heic 35 | 16 | 2758.7 ms | 2762.6 ms | 1.001 |
-| jp2 35 | default | 9312.8 ms | 9312.0 ms | 1.000 |
-| jp2 35 | 16 | 6215.8 ms | 6132.6 ms | 0.987 |
-| mixed 35 | default | 2334.8 ms | 2321.6 ms | 0.994 |
-| mixed 35 | 16 | 1607.1 ms | 1624.2 ms | 1.011 |
-| mixed 35 | 0 | 7220.3 ms | 7270.1 ms | 1.007 |
-| hitokage 16 | default | 10094.1 ms | 10045.6 ms | 0.995 |
-| hitokage 16 | 16 | 8917.9 ms | 8899.0 ms | 0.998 |
-| hitokage 16 | 0 | 24006.6 ms | 24287.0 ms | 1.012 |
-
-every row is within 2.3% of unchanged, in both directions, which is this
-machine's run-to-run spread rather than a cost: the serial rows, where the
-lookahead cannot hide anything, are the tightest of the set (0.998 to 1.012).
-`hitokage` is 16 files because the set's `png-rgb48be.png` is a zero-byte
-placeholder in this checkout.
-
-the same build through the repository's own harness, `--reps 2 --extra
---prefetch 16`, which is the table the rest of this page uses:
-
-| set | imgseqs | imgseqs `p=16` | imgseqs `p=0` | bestsource | verdict |
-| --- | ---: | ---: | ---: | ---: | --- |
-| png | 0.21 s | 0.16 s | 0.52 s | 0.24 s | imgseqs 1.21x faster, 3.09x with the open |
-| webp | 2.15 s | 1.13 s | 6.98 s | 1.44 s | bestsource 1.39x faster, imgseqs 1.49x with the open |
-| jpeg | 1.31 s | 0.92 s | 4.56 s | 3.37 s | imgseqs 2.60x faster, 5.11x with the open |
-| jxl | 4.28 s | 2.79 s | 13.32 s | 2.57 s | bestsource 1.64x faster, imgseqs 1.30x with the open |
-| avif | 1.63 s | 1.59 s | 3.59 s | cannot open | 2.30x over its own serial row |
-| heic | 4.06 s | 2.76 s | 13.95 s | cannot open | 3.45x over its own serial row |
-
-the shape is the one this page records on windows — `prefetch=16` is the best
-row on every set, the lookahead is worth 2.3x to 3.5x over the serial row, and
-png and jpeg are where imgseqs wins outright. the one difference is jxl: the
-ffmpeg build on this machine has a jpeg xl decoder, so bestsource reads that set
-here instead of failing with `Video codec not found`.
-
-**sequential and backward playback.** each pass walks the whole clip in a given
-order at `prefetch=0`, so the decode path is what is timed, and the clip is
-rebuilt for every pass because VapourSynth caches the frames of a node and would
-otherwise answer the second walk from its own cache. median of eight passes over
-the committed fixtures, which hold four presentations and so fit the window
-entirely:
-
-| format | frames | forward | reverse | shuffled | reverse/forward |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| APNG | 14 | 0.146 ms | 0.149 ms | 0.152 ms | 1.02x |
-| GIF | 14 | 0.157 ms | 0.168 ms | 0.172 ms | 1.07x |
-| WebP | 14 | 0.167 ms | 0.173 ms | 0.171 ms | 1.03x |
-| JPEG XL | 14 | 0.498 ms | 0.484 ms | 0.464 ms | 0.97x |
-| AVIF | 14 | 1.354 ms | 1.349 ms | 1.369 ms | 1.00x |
-| HEIC | 14 | 1.330 ms | 1.270 ms | 1.280 ms | 0.95x |
-
-an animation shorter than the window is order-independent, which is the window
-doing its job. to see the replay path itself, a 150-presentation corpus (`long.*`
-in /tmp, four times the window; 144 output frames at 24 fps), median of four
-passes, same fresh-clip rule:
-
-| format | presentations | forward | reverse | reverse/forward |
+| cohort | plugin, 1 in flight | Pillow serial | Pillow bounded (6) | PNG MiB plugin / Pillow |
 | --- | ---: | ---: | ---: | ---: |
-| APNG | 150 | 1.57 ms | 2.05 ms | 1.31x |
-| GIF | 150 | 1.58 ms | 2.10 ms | 1.33x |
-| WebP | 150 | 1.77 ms | 2.42 ms | 1.37x |
-| JPEG XL | 150 | 364.31 ms | 531.78 ms | 1.46x |
-| AVIF | 150 | 11.76 ms | 27.94 ms | 2.38x |
+| gray8, 24 pages | 0.686 s | 0.960 s | 0.236 s | 3.61 / 3.60 |
+| rgb8, 16 pages | 0.713 s | 1.342 s | 0.365 s | 4.66 / 4.65 |
+| rgba8, 16 pages | 0.857 s | 1.799 s | 0.504 s | 5.81 / 5.81 |
 
-the replay cost is what the window buys: a walk that goes backwards past the
-window restarts from the file's beginning, and the 48 presentations the window
-still holds are answered without decoding, so the work is bounded by
-`presentations + window` rather than by their product. the AVIF row is the
-dearest because reopening the track is the expensive part of an AVIF frame,
-which is also why [15](improvements/15-avif-decoder-progress.md) matters there.
+one encoder beats serial Pillow by 1.4x (gray), 1.9x (rgb) and 2.1x (rgba) at the
+same size. six Pillow workers beat one plugin request by 1.7x to 2.9x, because
+that is six encodes in flight against one. the plugin's completion mode is
+`Parallel`, so a consumer that keeps frames in flight gets them too (gray8, 24
+pages):
 
-**one measured piece of headroom, left in place.** the JPEG XL adapter builds a
-decoder for every presentation, so its forward row above is 2.5 ms per published
-frame on a 32x24 image — the decoder's own setup, not pixels. keeping one
-decoder and walking it forward is 1.6x faster on the committed fixture, but it
-fails on a codestream whose frames are not uniform, with `Invalid channel range:
-3..6, 4 total channels`, so the per-presentation decoder is what shipped. the
-next step there is a decoder that can be continued safely, not one that is
-continued optimistically.
-
-**machine**: macOS on apple silicon, rust release build, plugins at their own
-defaults unless a row says otherwise. these rows were not taken on the windows
-machine the rest of this page describes.
-
-## avif decoder threads
-
-[19](improvements/19-avif-thread-budget.md) asked whether the avif decoder should
-be given a thread budget. one item is one frame, so
-`avif::decode_item` sets `max_frame_delay=1` and leaves dav1d's `n_threads` at
-its default, which is the machine's logical cores; the lookahead pool can run
-`prefetch` of those decoders at once, so two levels of parallelism are nested.
-the measurements below say they are not fighting, and the default stays.
-
-one process per measurement, the plugin loaded by path, best of three rounds,
-`Read` over the 35 colour pages of `sandbox/avif` (one of 3312x4717 and 34 of
-3672x5274). `threads` is what an experiment hook passed to
-`dav1d::Settings::set_n_threads`, and `auto` is dav1d's own default:
-
-| prefetch | auto | 1 | 2 | 3 | 4 | 6 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2 | 1873.1 ms | 4727.9 | 2628.9 | 2115.5 | 1874.4 | 1859.1 |
-| 4 | 1343.6 | 2561.2 | 1607.6 | 1397.1 | 1357.3 | 1351.2 |
-| 8 | 1382.3 | 1674.6 | 1447.8 | 1395.5 | 1374.8 | 1369.8 |
-| 16 | 1300.0 | 1387.3 | 1301.1 | 1350.0 | 1293.7 | 1321.2 |
-
-peak native threads of the same rows, which is where the two levels show:
-
-| prefetch | auto | 1 | 2 | 3 | 4 | 6 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2 | 35 | 15 | 19 | 21 | 23 | 27 |
-| 4 | 57 | 17 | 25 | 29 | 33 | 41 |
-| 8 | 101 | 21 | 37 | 45 | 53 | 69 |
-| 16 | 189 | 29 | 61 | 74 | 93 | 124 |
-
-the default is `prefetch=4` — half of this machine's ten cores, capped at four —
-and it is already at 8.81 of those ten cores. dividing the machine by the worker
-count would give two decoder threads there, which is 1607.6 ms against 1343.6 —
-a 20% regression, because a 3672x5274 page needs three to four threads before
-dav1d's own tile parallelism is saturated. every explicit count from four up
-lands within 2% of `auto` in both directions at every depth, so the only thing
-the budget moves is the thread count, 57 to 33 at the default and 189 to 93 at
-`prefetch=16`.
-
-cpu does not move with it. per delivered frame, `auto` against four threads:
-338.2 / 335.7 ms at `prefetch=4`, 342.2 / 343.5 at 16. the `prefetch=8` pair is
-the widest of the set, 338.9 / 353.4, and the sweep that also carried
-`prefetch=8` measured the same row at 338.9 / 336.7, so that one is a round's
-outlier rather than a cost. the pool does cost cpu over the serial path — 338 ms
-against 279 — but that is the concurrency itself, not the decoder's thread
-count.
-
-with lookahead off there is one decoder at a time, and it stops improving at
-four threads, which is where the 20% above comes from:
-
-| decoder threads | wall | cpu/frame | cores busy |
+| plugin | in flight | median s | vs Pillow bounded (6) |
 | --- | ---: | ---: | ---: |
-| auto | 3359.7 ms | 277.4 ms | 2.89 |
-| 1 | 9403.7 ms | 272.7 ms | 1.01 |
-| 2 | 5184.4 ms | 274.5 ms | 1.85 |
-| 4 | 3359.7 ms | 277.4 ms | 2.89 |
-| 8 | 3355.9 ms | 277.3 ms | 2.89 |
+| `get_frame(n)` | 1 | 0.700 | 3.00x slower |
+| `frames(prefetch=6)` | 6 | 0.171 | 1.37x faster |
+| `get_frame_async(12)` | 12 | 0.124 | 1.88x faster |
 
-one page on its own says the same thing without the pool: 48.8 ms and 1.55 cores
-at two decoder threads or more, 74.9 ms at one, 13 threads alive at `auto` for
-the same 1.55 cores.
+six in flight is 4.3x one and twelve is 5.6x; twenty four buys another 5%. the
+old `ParallelRequests` mode stayed at 1.0 s whatever the depth, because the
+encode runs in the second half of the request and that mode serializes it.
 
-two clips of the same set, each with its own pool, walked together — the case
-where a thread budget would pay if it paid anywhere: 2580.8 ms and 93 threads at
-the default against 2563.8 ms and 49 threads at four, 2661.8 ms at two. two pools
-cost 2x the cpu of one and still reach 9.25 of ten cores, so the second pool is
-not the loss either.
+**deflate backend**: `zlib-rs` (through `png`'s feature) replaced `miniz_oxide`:
+1.46x faster serially, 1.33x at twelve deep, files 7.5% smaller, which closed the
+size gap to Pillow. the png reader pays 1.6% for it, inside the spread. levels,
+sequential / twelve deep / size: 0 = 0.139 / 0.046 s / 64.52 MiB, 1 = 0.223 /
+0.061 s / 7.37 MiB, 3 = 0.347 / 0.088 s / 5.02 MiB, **6 (default) = 0.700 /
+0.124 s / 3.61 MiB**, 9 = 5.091 / 0.674 s / 3.11 MiB. level 6 matches Pillow's
+size and still beats it on time.
 
-a page with an alpha item is two decoders per file, so it doubles the nesting.
-twelve colour pages of `sandbox/avif` cropped to 1536x2304, encoded by
-`target/bench/p19/make-alpha-corpus.py` with the page's own grey content as alpha
-and with a gradient as alpha, walking both clips of one `ReadAlpha`:
+**yuv conversion**: six `sandbox/webp` pages (YUV420P8, 3672x5274), the writer
+converting by itself against `resize.Bilinear` in front of it. the vector
+kernels (AVX2 / AVX-512 on x86-64, NEON on aarch64) made the writer's own route
+2.56x faster on x86-64 (11.656 s to 4.975 s) and 1.27x on aarch64, which puts it
+level with the `resize` route (0.98x on x86-64, 1.01x on arm) and ahead of Pillow
+(7.04 s). per kernel, ns per luma sample, 3672x5274 noise, `cargo test --release
+--lib -- --ignored --nocapture the_kernels_measured`:
 
-| corpus | prefetch | auto | 1 | 2 | 4 |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| alpha = grey | 0 | 319.6 ms | 463.7 | 374.8 | 333.8 |
-| alpha = grey | 4 | 211.0 | 215.5 | 208.6 | 209.8 |
-| alpha = ramp | 0 | 189.2 ms | 308.1 | 235.0 | 200.7 |
-| alpha = ramp | 4 | 122.8 | 132.9 | 123.8 | 126.0 |
-
-the serial rows are 5.96 and 5.77 cores here against 2.89 for the 35-page set,
-which is what a second decoder buys, and these pages are also a fifth of its
-area, so the two are not comparable one for one. the shape is what matters: with
-the pool on, every setting of two threads or more is within 3% of `auto`, and
-with the pool off `auto` is the best row and two threads is 17% to 24% behind.
-the nesting is not what the pool is losing to.
-
-small pages are the case where there is nothing to budget: 64 copies of the 64x48
-`avif-yuv420p.avif` fixture read in 9.2 to 9.7 ms and 6 threads at `prefetch=4`
-whatever the thread setting, against 16.3 to 16.8 ms and 2 threads in the serial
-rows; 64 copies of the 4x4 `alpha-yuv420p.avif` through both clips are 13.8 to
-14.1 ms. dav1d sizes its own pool to the picture, so a page that small never
-becomes a many-threaded decoder and the setting cannot reach it.
-
-pixels: the thread count does not change a sample. hashing every plane of every
-frame of the 35-page set at `threads=1`, 2 and `auto`, and of the twelve
-alpha-mask pages at 1 and `auto`, gives byte-identical dumps.
-
-**machine**: macOS on apple silicon, rust release build, `prefetch` at its
-default unless a row says otherwise, one process per measurement so no two
-configurations share a core. these rows were not taken on the windows machine the
-rest of this page describes.
-
-## known headroom
-
-the numbers point at one thing: a decoder that cannot use more than one core.
-libwebp is single threaded per image — ffmpeg is ahead on webp only because it
-slice-threads one vp8 frame, 353 ms to 20 ms per frame from one thread to
-sixteen — and `image-webp` was behind it per thread as well
-([04](improvements/04-webp-decoder.md)).
-
-the copy into the frame used to be the second one. it now runs on the lookahead
-worker instead of on the requesting thread
-([02](improvements/02-frame-write-path.md)), which moves where it is paid rather
-than removing it: the write is memory bound and does not scale with workers, so
-the next step for a format that is expensive to write is a decoder that writes
-the planes itself rather than one more worker (libwebp already can, which is what
-[04](improvements/04-webp-decoder.md) used).
-
-a second one used to be here: the lookahead pool decoded frames it could not
-keep, which cost both cpu and wall time on the largest sets. that is fixed in
-[01](improvements/01-lookahead-scheduling.md), and the sandbox avif set shows
-what it was worth — 9.25 s to 4.74 s at the default, and `prefetch=16` from
-19.11 s to 5.41 s.
-
-separately from the speed work, the sandbox found one format that used not to
-work at all: the 31 monochrome heic files failed to decode, and they now read as
-`Gray8` through [05 monochrome heif](improvements/05-monochrome-heif.md).
-
-one more finding is not headroom but a wrong answer, and it came out of the same
-corpus: the two deep pages of `sandbox/hitokage-sample` state ten and twelve bits
-and used to be handed out as sixteen bit `RGB48` frames whose samples stopped
-0.4% and 0.02% short of the scale the format claimed, which is the section on
-nominal depth above. [10](improvements/10-nominal-bit-depth.md) fixed it, and it
-cost nothing to fix.
-
-## PNG writer comparison
-
-Status: **measured**. This is the acceptance comparison for
-[38 PNGWrite](improvements/38-png-write.md), not the existing PNG decode
-benchmarks above. `target/bench/png-write.py` runs it; compare the following
-three routes on identical pixels:
-
-| route | write scheduling | PNG settings |
-| --- | --- | --- |
-| plugin `PNGWrite` | initially sequential `writer.get_frame(n)` requests; record the actual completion mode and any additional parallel run separately | proposed default compression 6 and adaptive filtering |
-| Python Pillow, serial | main thread acquires a frame, creates an owned image, saves it and closes it before the next frame | `image.save(path, format="PNG")`, no compression/optimization overrides |
-| Python Pillow, bounded | main thread acquires frames in order and creates owned images; six worker threads save and close them, with oldest-future backpressure and a final drain | exactly the same Pillow save call as the serial route |
-
-### inspected nmanga reference
-
-The reference is the sibling project's
-[`write_page`](../../nao-manga-rls/nmanga/cli/autolevel.py#L639-L703), whose PNG
-saves have no compression overrides, and its
-[bounded loop](../../nao-manga-rls/nmanga/cli/autolevel.py#L885-L916). The inspected
-file has no function named `save_png`; this is the PNG-saving path intended by
-that description. Use the save/scheduling behavior, not autolevel analysis, skip
-or copy branches, JPEG output, logging or progress rendering.
-
-[`BoundedWritePool`](../../nao-manga-rls/nmanga/common.py#L1111-L1153) owns a
-`ThreadPoolExecutor(max_workers=workers)`. Each submit appends a future. Once the
-pending list reaches the worker count, it pops the oldest future and the caller
-immediately waits on its result before producing another image. At the end the
-caller waits on every remaining future. With six workers this caps outstanding
-write tasks at six. The pool alone is not a bound if its caller ignores the
-returned future. A completed image held by the producer and encoder workspace
-still contribute to peak memory.
-
-Frame fetching and conversion stay on the main thread. The reference
-[`vs_frame_to_image`](../../nao-manga-rls/nmanga/vapour.py#L558-L567) uses
-`Image.fromarray(np.asarray(frame[plane]).copy())`, so the worker owns pixels
-after the frame context closes. Do not hand out an alias of released frame data.
-The inspected helper is a one-plane 8-bit path; color cohorts need verified RGB
-or RGBA packing, included in their timings.
-
-**Fix the bounded comparison to six workers**, as requested. The reference
-[default calculation](../../nao-manga-rls/nmanga/cli/options.py#L344-L348) is half
-the logical CPUs, minimum one, and the
-[CLI thread option](../../nao-manga-rls/nmanga/cli/options.py#L568-L577) uses that
-value. It is six on the 12-logical-CPU benchmark machine, not every host. Record
-the inspected nmanga revision and source snapshot when running the benchmark.
-The benchmark may reproduce this small scheduling pattern locally; nmanga is
-not a required project or wheel dependency.
-
-### timing and fairness
-
-- The headline is **end-to-end batch wall time**, from the first frame request
-  to the last completed, closed output file. Include frame acquisition, Python
-  copies/packing, compression, disk writes and the bounded pool's final drain.
-  Do not stop at the last submission or sum overlapping worker times as wall time.
-- Use fresh equivalent upstream graphs in each route, the same ordered inputs,
-  formats, frame count, source prefetch settings and VapourSynth thread/cache
-  configuration. Do not let one route reuse decoded frames from another route.
-  Keep graph construction outside the timed batch and report it separately.
-- The plugin's initial sequential run measures the proposed public usage, while
-  six Pillow workers measure practical pipeline throughput. This is deliberately
-  not a claim of equal encoder concurrency. Record actual plugin concurrency;
-  optionally add bounded asynchronous plugin requests at six in flight as a
-  separate diagnostic, without replacing the required three rows.
-- Start with Gray8 manga pages, the directly comparable nmanga case, then add
-  verified RGB8/RGBA8 cohorts. Test Gray16/RGB16/RGBA16 plugin throughput separately
-  unless the installed Pillow path can preserve each mode exactly. Never silently
-  reduce depth to make a comparison run. Shared output pixels must decode equal.
-- Use default Pillow PNG settings in both Python rows: omit `compress_level`,
-  `optimize` and other tuning. Record Python, Pillow and zlib versions, confirm
-  the installed default (normally compression 6, optimize false), and record the
-  plugin build, `png`/flate2 backend and filter policy. A shared numeric level
-  does not imply identical encoders, filtering or compressed sizes.
-- Give each route a fresh output directory on the same filesystem/device with
-  equivalent names. Every frame must really be encoded and saved: no existing
-  destinations, copy shortcuts, prior success records or cached writer outputs.
-  Disable optional metadata identically for the pixel-focused comparison, or
-  supply equivalent compatible metadata and report its cost separately.
-- Include the plugin's normal safe-publication overhead in the headline. Pillow's
-  reference save writes directly to its destination; disclose that difference.
-  A separate Pillow temp-file/publication diagnostic can isolate it. Finishing
-  buffered saves is required; do not claim power-loss durability or mix fsync
-  policies between routes.
-- Use at least five measured passes after a separately labeled warm-up. Rotate
-  all three route orders, use matched cohorts and report median plus min/max or
-  another dispersion measure. State whether input/filesystem caches are warm,
-  available RAM, storage, CPU model and machine load. Output deletion and any
-  decode verification stay outside the timed region, with safely owned directories.
-- Report batch seconds, milliseconds/frame, frames/s, process CPU seconds, peak
-  process memory, total PNG bytes and output count. Peak memory must include the
-  six images, producer copies, source caches and all encoder workspaces, not just
-  the pending future list. Verify dimensions, mode/depth and decoded samples for
-  every output; compression is lossless, but conversion bugs are still possible.
-
-For encoder-only diagnosis, add separately labeled runs over already prepared
-equivalent input frames/images with preparation excluded. Hold the same corpus
-resident for each route, report that memory separately, and do not substitute
-these isolated timings for the end-to-end headline. Report plugin levels 0/1/6/9
-as additional speed/size rows, not replacements for the default comparison.
-
-### measured results
-`target/bench/png-write.py`, 1404x2000 synthetic pages over a soft gradient with
-ink, one warm-up pass and five measured passes per route, with the route order
-rotated per pass. Machine: 11th Gen Intel Core i5-11400H, 12 logical CPUs,
-31.8 GiB RAM, Windows; Python 3.12.12, Pillow 12.3.0 over zlib-ng 1.3.1.zlib-ng,
-plugin `compression=6` over `zlib-rs`, asked for one frame at a time. Every
-route's own outputs were decoded with Pillow and compared with the frames it was
-given, and all three cohorts agree.
-
-| cohort | route | in flight | median batch s | min–max s | ms/frame | frames/s | CPU s | peak MiB | PNG MiB | parity |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| gray8, 24 pages | plugin `PNGWrite` | 1 sequential | 0.686 | 0.670–0.711 | 28.57 | 35.00 | 0.72 | 228.7 | 3.61 | ok |
-| gray8, 24 pages | Pillow, serial | 1 | 0.960 | 0.946–0.988 | 39.99 | 25.01 | 1.09 | 228.7 | 3.60 | ok |
-| gray8, 24 pages | Pillow, bounded | 6 | 0.236 | 0.233–0.261 | 9.82 | 101.88 | 1.25 | 228.7 | 3.60 | ok |
-| rgb8, 16 pages | plugin `PNGWrite` | 1 sequential | 0.713 | 0.703–0.749 | 44.54 | 22.45 | 0.84 | 435.7 | 4.66 | ok |
-| rgb8, 16 pages | Pillow, serial | 1 | 1.342 | 1.338–1.395 | 83.85 | 11.93 | 1.48 | 435.6 | 4.65 | ok |
-| rgb8, 16 pages | Pillow, bounded | 6 | 0.365 | 0.354–0.381 | 22.80 | 43.86 | 1.80 | 435.7 | 4.65 | ok |
-| rgba8, 16 pages | plugin `PNGWrite` | 1 sequential | 0.857 | 0.840–0.861 | 53.55 | 18.67 | 1.03 | 569.6 | 5.81 | ok |
-| rgba8, 16 pages | Pillow, serial | 1 | 1.799 | 1.777–1.816 | 112.45 | 8.89 | 1.95 | 569.6 | 5.81 | ok |
-| rgba8, 16 pages | Pillow, bounded | 6 | 0.504 | 0.494–0.515 | 31.50 | 31.75 | 2.31 | 569.6 | 5.81 | ok |
-
-Plugin batch time as a fraction of each Pillow route's, from the medians above
-(below 1.0 is the plugin finishing first):
-
-| cohort | vs serial Pillow | vs six-worker Pillow | bytes vs Pillow |
-| --- | --- | --- | --- |
-| gray8 | 0.715x | 2.911x | 1.003x |
-| rgb8 | 0.531x | 1.954x | 1.002x |
-| rgba8 | 0.476x | 1.700x | 1.000x |
-
-One encoder on one thread beats serial Pillow by 1.4x on gray, 1.9x on rgb and
-2.1x on rgba, at the same compressed size: the row interleave, the streamed
-encode and the absence of an intermediate Pillow image are worth more than
-Pillow's own encoder is. Six Pillow workers still win by 1.7x to 2.9x, because
-they are six encodes in flight against one, and that is what the last section
-below answers. Peak process memory is the same for every route in a cohort, since
-the corpus and the decoded frames dominate it; the working set right after a
-batch is reported by the harness per pass and is within 3 MiB across the routes.
-
-### the deflate backend
-
-`png`'s `zlib-rs` feature selects the deflate backend for everything flate2
-touches, which in this crate is the png reader, the png writer and the tiff
-reader. Without it flate2 falls back to `miniz_oxide`, so before this feature
-the plugin compressed with a pure-Rust miniz port while Pillow compressed with
-zlib-ng — which is where the earlier 7.8% size gap and the parity-on-time result
-came from, not from the writer's own filtering.
-
-`target/bench/png-write-async.py` at `compression=6`, same gray8 corpus, five
-passes per route, one session per build:
-
-| backend | request style | in flight | median s | ms/frame | PNG MiB | vs Pillow bounded 6 |
-| --- | --- | --- | --- | --- | --- | --- |
-| `miniz_oxide` | `get_frame(n)` | 1 | 1.018 | 42.40 | 3.88 | 4.294x |
-| `miniz_oxide` | `get_frame_async` | 12 | 0.178 | 7.41 | 3.88 | 0.750x |
-| `zlib-rs` | `get_frame(n)` | 1 | 0.697 | 29.04 | 3.61 | 2.903x |
-| `zlib-rs` | `get_frame_async` | 12 | 0.134 | 5.58 | 3.61 | 0.558x |
-| `zlib-rs` | `get_frame_async` | 24 | 0.130 | 5.43 | 3.61 | 0.543x |
-
-That is 1.46x faster serially and 1.33x at twelve deep, with the files 7.5%
-smaller at the same level, which is what closes the size gap to Pillow (1.08x to
-1.003x). The reader is not asked to pay for it: on the 35 `sandbox/png` pages at
-`prefetch=0`, four interleaved rounds put `miniz_oxide` at a 343.5 ms median and
-`zlib-rs` at 349.1 ms, a 1.6% difference inside the spread, and
-`tests/readalpha.vpy`'s output is byte identical to the build before the feature,
-so every png and tiff fixture inflates to the same samples as before.
-
-The level curve changes with the backend, because `zlib-rs` is a closer port of
-zlib's own effort settings. Same corpus, three passes each, one session per level,
-with each level's own Pillow baseline (0.955 s to 0.977 s):
-
-| level | sequential s | `get_frame_async(12)` s | PNG MiB | vs serial Pillow | vs its size |
-| --- | --- | --- | --- | --- | --- |
-| 0 (`NoCompression`, no filter) | 0.139 | 0.046 | 64.52 | 0.145x | 17.90x |
-| 1 | 0.223 | 0.061 | 7.37 | 0.229x | 2.05x |
-| 3 | 0.347 | 0.088 | 5.02 | 0.357x | 1.39x |
-| 6 (default) | 0.700 | 0.124 | 3.61 | 0.733x | 1.00x |
-| 9 | 5.091 | 0.674 | 3.11 | 5.349x | 0.86x |
-
-Level 6 is the point where the plugin matches Pillow's size and still beats it
-on time, so it stays the default. Level 3 halves that time for 39% more bytes, and
-level 1 halves it again for twice Pillow's bytes. Level 9 is now a much deeper
-search than it was under `miniz_oxide` (5.09 s against 3.20 s) and buys 14% of
-level 6's size, so it is for an archive and not for a pipeline. Level 0 stores the
-raw rows at 64.52 MiB and 5.8 ms a frame, which is the setting for a file another
-step is about to read.
-
-### request style and the filter mode
-
-The completion mode decides whether a consumer that pulls ahead gets anything for
-it. `VSFilterMode::ParallelRequests` calls the filter from several threads with
-activation reason `Initial` but completes one frame at a time, so a node in that
-mode encodes serially whatever the consumer asks for. `Parallel` allows several
-completions at once, and then the request style sets the depth:
-`writer.get_frame(n)` one at a time, `writer.get_frame_async(n)` with futures held
-open, or `writer.frames(prefetch=n)`.
-
-The mode that landed, `Parallel`, with `zlib-rs`, 24 pages, five passes per route,
-and the Pillow rows of the same session:
-
-| route | in flight | median s | ms/frame | PNG MiB | vs Pillow serial | vs Pillow bounded 6 |
-| --- | --- | --- | --- | --- | --- | --- |
-| plugin, `get_frame(n)` | 1 | 0.700 | 29.17 | 3.61 | 0.733x | 3.000x |
-| plugin, `frames(prefetch=6)` | 6 | 0.171 | 7.11 | 3.61 | 0.179x | 0.732x |
-| plugin, `get_frame_async(6)` | 6 | 0.162 | 6.73 | 3.61 | 0.169x | 0.693x |
-| plugin, `get_frame_async(12)` | 12 | 0.124 | 5.15 | 3.61 | 0.129x | 0.530x |
-| Pillow, serial | 1 | 0.955 | 39.77 | 3.60 | 1.000x | 4.091x |
-| Pillow, bounded | 6 | 0.233 | 9.72 | 3.60 | 0.244x | 1.000x |
-
-Six frames in flight are worth 4.3x over one, twelve are worth 5.6x, and at
-twelve the plugin is 1.9x faster than the six-worker Pillow route — the depth
-Pillow fixes at six is the thing it cannot ask for more of. The depth sweep on
-the build before the backend change gives the shape of the curve beyond twelve:
-one 1.004 s, six 0.217 s, twelve 0.175 s, twenty four 0.166 s, so the knee is at
-twelve and twenty four buys another 5%.
-
-`ParallelRequests`, the mode the first implementation used, with the backend of
-the day (`miniz_oxide`), so that the mode is the only thing that differs:
-
-| route | in flight | median s | ms/frame | PNG MiB | vs Pillow serial | vs Pillow bounded 6 |
-| --- | --- | --- | --- | --- | --- | --- |
-| plugin, `get_frame(n)` | 1 | 1.006 | 41.90 | 3.88 | 1.035x | 4.344x |
-| plugin, `frames(prefetch=6)` | 6 | 0.996 | 41.49 | 3.88 | 1.025x | 4.301x |
-| plugin, `get_frame_async(6)` | 6 | 0.989 | 41.21 | 3.88 | 1.018x | 4.272x |
-| plugin, `get_frame_async(12)` | 12 | 0.990 | 41.27 | 3.88 | 1.020x | 4.279x |
-| Pillow, serial | 1 | 0.971 | 40.46 | 3.60 | 1.000x | 4.195x |
-| Pillow, bounded | 6 | 0.231 | 9.65 | 3.60 | 0.238x | 1.000x |
-
-Every request style lands within 2% of 1.0 s there. The reason is the two halves
-of a two-stage request: `Initial` asks the framework for the inputs and runs on
-many threads in either mode, and `AllFramesReady` is where a writer does all of
-its work — pack, deflate, publish — and only `Parallel` lets more than one thread
-be there at a time. A writer has no cursor to serialize, so the serialized mode
-was simply a lock around the whole encode, and the consumer's depth could only
-overlap the request half, which for a writer is the upstream decode it already
-gets for free.
-
-`Parallel` is safe here because VapourSynth never calls a filter for the same
-frame number concurrently, the only mutable state is the ledger behind a mutex and
-an atomic counter, the temporary name is unique per write, the publication is a
-rename or a linking create that cannot be raced, and the per-encode workspace is a
-row buffer and the compressor's own rather than a frame. The validator's
-concurrent and two-writers-racing checks run in that mode.
-
-The encoder-only diagnosis, over already prepared input frames with preparation
-excluded, is still to be run.
-
-### the yuv conversion
-
-`target/bench/png-write-yuv.py` converts and writes over a real corpus: six
-pages of `sandbox/webp`, which the reader hands out as YUV420P8 at bt.470bg and
-limited range, 3672x5274 each, 93.7 million pixels a batch. Three routes
-produce the same r,g,b picture: the writer converting the yuv planes itself,
-`core.resize.Bilinear` doing the conversion in front of the writer, and the
-resized clip pulled one frame at a time into Pillow. One warm-up pass and
-five measured passes, rotated order, both builds in one session:
-
-| x86-64 | route | conversion | median s | ms/page | CPU s | PNG MiB |
-| --- | --- | --- | --- | --- | --- | --- |
-| scalar | plugin `PNGWrite` | the writer's own | 11.656 | 1942.59 | 11.438 | 41.67 |
-| scalar | plugin `PNGWrite` | `resize.Bilinear` first | 4.648 | 774.59 | 4.578 | 41.67 |
-| scalar | Pillow | `resize.Bilinear` first | 6.552 | 1091.93 | 6.484 | 36.08 |
-| vector | plugin `PNGWrite` | the writer's own | 4.975 | 829.23 | 4.906 | 41.67 |
-| vector | plugin `PNGWrite` | `resize.Bilinear` first | 5.072 | 845.35 | 4.859 | 41.67 |
-| vector | Pillow | `resize.Bilinear` first | 7.036 | 1172.72 | 6.812 | 36.08 |
-
-The same benchmark on aarch64, the scalar library against the NEON one,
-same corpus and same passes:
-
-| aarch64 | route | conversion | median s | ms/page | CPU s | PNG MiB |
-| --- | --- | --- | --- | --- | --- | --- |
-| scalar | plugin `PNGWrite` | the writer's own | 3.557 | 592.91 | 3.514 | 41.67 |
-| scalar | plugin `PNGWrite` | `resize.Bilinear` first | 2.892 | 482.00 | 2.873 | 41.67 |
-| scalar | Pillow | `resize.Bilinear` first | 3.227 | 537.77 | 3.207 | 36.08 |
-| vector | plugin `PNGWrite` | the writer's own | 2.809 | 468.16 | 2.799 | 41.67 |
-| vector | plugin `PNGWrite` | `resize.Bilinear` first | 2.782 | 463.69 | 2.770 | 41.67 |
-| vector | Pillow | `resize.Bilinear` first | 3.091 | 515.14 | 3.083 | 36.08 |
-
-What compares is each build against the control measured in its own run,
-because this host is a laptop and its absolute numbers move by half between
-sessions: converting in the writer was **2.51x** the `resize` route with the
-scalar conversion and is **0.98x** with the vector one, a 2.56x batch, and the
-conversion the writer does is now inside the run to run spread rather than
-seconds of it. The plugin row also came in ahead of the `resize` one here,
-which a writer cannot be in general — a `resize` node is a frame pass it does
-not pay — so read those two as level rather than as a win.
-
-The arm host repeats that shape from a much lower starting point, because its
-scalar loop is far faster to begin with — 2.4x to 9x the x86 rows above,
-the writer was **1.23x** the `resize` route on the scalar library and is
-**1.01x** on the NEON one, which is the same "level, not a win" reading. The
-writer's own route went 3.557 s to 2.809 s, or 1.27x, on a host where
-`resize` did not move at all (2.892 against 2.782 s).
-
-Every route's own files were decoded and compared with the r,g,b the plugin
-hands out: the worst sample anywhere is **one level** away, and on the colour
-page 110 samples of 58.1 million differ at all, which is the two conversions
-rounding differently rather than a phase or a matrix difference. The one page
-`resize` refuses — p000 is 3312x4717, and zimg needs a subsampled picture
-that is a whole number of units — is still written by this writer, because
-VapourSynth's own chroma plane is truncated to what it holds.
-
-#### what a kernel costs
-
-`src/convert.rs`'s own ignored measurement — `cargo test --release --lib --
---ignored --nocapture the_kernels_measured` — converts one 3672x5274 frame
-of noise twice a path, in nanoseconds a luma sample. Every kernel an
-architecture has is forced by name, so one command reports every column:
-
-| x86-64 | scalar | AVX2 | AVX-512 | dispatched |
-| --- | ---: | ---: | ---: | ---: |
-| 8 bit 4:2:0, centred | 56.73 | 1.372 | 1.343 | 1.304 |
-| 8 bit 4:2:0, left | 22.27 | 1.290 | 1.026 | 1.019 |
-| 8 bit 4:4:4 | 9.79 | 0.937 | 0.766 | 0.759 |
-| 10 bit 4:2:0, left | 23.16 | 1.540 | 1.048 | 1.111 |
-
-| aarch64 | scalar | NEON | dispatched |
+| x86-64 | scalar | AVX2 | AVX-512 |
 | --- | ---: | ---: | ---: |
-| 8 bit 4:2:0, centred | 6.16 | 1.245 | 1.262 |
-| 8 bit 4:2:0, left | 6.28 | 1.258 | 1.266 |
-| 8 bit 4:4:4 | 4.02 | 0.916 | 0.921 |
-| 10 bit 4:2:0, left | 7.83 | 1.196 | 1.187 |
+| 8 bit 4:2:0, centred | 56.73 | 1.372 | 1.343 |
+| 8 bit 4:2:0, left | 22.27 | 1.290 | 1.026 |
+| 8 bit 4:4:4 | 9.79 | 0.937 | 0.766 |
+| 10 bit 4:2:0, left | 23.16 | 1.540 | 1.048 |
 
-The arm rows are the median of three runs, which agreed to within 2%; the one
-outlier seen, a first-run 1.738 in the dispatched 4:2:0 left row, is the
-warm-up of a benchmark whose first pass pays for the first touch of a 200 MB
-frame.
+| aarch64 | scalar | NEON |
+| --- | ---: | ---: |
+| 8 bit 4:2:0, centred | 6.16 | 1.245 |
+| 8 bit 4:2:0, left | 6.28 | 1.258 |
+| 8 bit 4:4:4 | 4.02 | 0.916 |
+| 10 bit 4:2:0, left | 7.83 | 1.196 |
 
-On x86-64 a kernel is 12x the loop it replaces on a 4:4:4 frame and 42x on a
-centred 4:2:0 one, and the 512 bit kernel is 5 to 30% ahead of the 256 bit
-one. The scalar 4:2:0 row is the shape that gains most, because the loop it
-replaces reads two rows of two chroma planes a column; 4:4:4 is already the
-cheapest shape and gains least.
-
-NEON is a different shape of win and the table says so. A NEON register holds
-four `f32` lanes where the 256 bit kernel holds eight and the 512 bit one
-sixteen, so a block is half as wide as AVX2's and the same loop runs half as
-many columns to an instruction. It is nevertheless **level with AVX2** on
-three of the four shapes and 1.3x ahead of it on ten bit 4:2:0, because a
-block's horizontal interpolation is one table lookup here where x86 needs an
-eight-way permute of a register the load did not fill.
-
-What does not carry over is the *ratio*, and it is worth being plain about
-why: the arm scalar loop this replaces is itself 2.4x to 9x the x86 one, so
-the same kernel is **4.4x to 6.6x** the loop here rather than 12x to 42x. The
-kernel is not slower; the loop it replaces is much faster. The batch above is
-the check that it still buys what it is for.
-
-The kernels are held to the scalar path rather than to a tolerance:
-`a_kernel_is_the_scalar_path_sample_for_sample` runs every kernel the build
-has over a frame of noise at every chroma position, every matrix, both
-ranges, four subsamplings, four depths, a precision below and one above the
-frames', and widths from one sample to 129, and compares every sample. Each
-kernel is forced by name, so the narrower x86 one is checked on a host whose
-dispatch picks the wider, and on aarch64 the single NEON kernel is forced and
-compared; the test fails if a kernel takes no block of a row wide enough to
-have one, so a kernel that quietly declined every block cannot pass by
-comparing nothing.
-
-`target/bench/ab-simd-bytes.py` then writes whole files with the two builds
-and compares those. On aarch64: **53 yuv pages — 4:2:0, 4:2:2 and 4:4:4 at
-eight, ten and twelve bits, over `sandbox/webp`, `sandbox/hitokage-sample`
-and the still fixtures — are byte for byte the same file** between the scalar
-and NEON libraries. The x86-64 run of the same comparison is the 19 pages
-recorded above.
-
-The arm fixtures are collected by `target/bench/make-ab-corpus.py`, because
-`ab-simd-bytes.py` reads its directory into one clip and one fixture the
-reader refuses ends the run: it keeps the pages that load *and* hand out a yuv
-frame, since a page that is not yuv never reaches a kernel and would be
-counted as agreement without testing anything.
-
-`resize` is still zimg's hand-written AVX2 on x86-64 and is not the slower
-conversion now: 1.7 ns a pixel against these kernels' 1.0 to 1.5, which the
-batch above cannot resolve, and a graph that converts in the writer no longer
-pays for the choice. On aarch64 the two are level to within 1%.
-
-The yuv kernels are reached by a yuv frame and nothing else, so the gray and
-rgb routes are the code they were: `tests/pngwrite.vpy` covers them as it did,
-and the byte comparison above is the path that changed.
-
-
-**No regression in the gray and rgb routes.** The same build against the one
-before this change (`target/bench/p38-pngwrite-zlibrs.dll`), alternating,
-plugin-only, 24 gray8 pages, four passes: 0.680 and 0.663 s for the older build
-against 0.682 and 0.673 s for this one, which is the noise floor. The full
-three-route run of the same benchmark gave 0.720, 0.929 and 0.225 s for plugin,
-Pillow serial and Pillow bounded in today's session against 0.686, 0.960 and
-0.236 s in the recorded one, which is the 3 to 5% a session drifts by rather
-than anything this change did: the same comparison in one session is the one
-above. An intermediate version of the row writer was 7% slower — the storage of
-a sample was decided inside the sample loop — and moving that decision to the
-row took it back.
-
-### destination names
-
-`PNGWrite`'s `output_dir` mode (plan 42) changes only how a destination is named,
-not the encode: the tables above still measure the writer. A three-pass rerun
-after the change kept the six-deep and twelve-deep plugin rows at 0.74x and
-0.55x of six-worker Pillow with the same file sizes, inside the session drift
-this page records.
+that is 12x to 42x the scalar loop on x86-64 and 4.4x to 6.6x on arm, whose
+scalar loop is already 2.4x to 9x faster. every kernel is held to the scalar path
+sample for sample, and whole files from the two builds are byte identical.
+gray and rgb routes did not move (0.680 / 0.663 s before against 0.682 / 0.673 s
+after, 24 gray8 pages). `output_dir` only changes naming and did not move the
+tables either.

@@ -1,7 +1,7 @@
 # 19 — Measure a shared thread budget for AVIF decoding
 
 Status: measured on 2026-09-29 and decided against. The defaults stay; the
-numbers are in [BENCH.md](../BENCH.md#avif-decoder-threads). Priority: closed.
+numbers are in [BENCH.md](../BENCH.md#avif). Priority: closed.
 
 ## evidence
 

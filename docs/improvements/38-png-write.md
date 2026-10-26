@@ -4,7 +4,7 @@
 
 `core.imgseqs.PNGWrite` exists, `src/writer.rs` and `src/convert.rs` implement
 it, and `tests/pngwrite.vpy` checks it (260 checks). The measurements are in
-[BENCH.md](../BENCH.md#png-writer-comparison). Everything after this section is
+[BENCH.md](../BENCH.md#pngwrite). Everything after this section is
 the research that preceded the implementation and is kept as the record of why
 the scope is what it is; where the implementation settled a question the
 research left open, the section below says so.
@@ -85,7 +85,7 @@ landed: YUV and float are converted, a depth below eight bits packs a gray
 frame, and the validator covers a clip of varying formats *and* dimensions.
 The encoder-only diagnosis is the only part of the timing protocol still to be
 run, and the yuv comparison in
-[BENCH.md](../BENCH.md#the-yuv-conversion) is the route it would measure.
+[BENCH.md](../BENCH.md#pngwrite) is the route it would measure.
 **The conversion is vectorised** where the processor has AVX2 or AVX-512, in
 `src/convert/simd.rs`, and is the loop it replaced otherwise. A block of eight
 or sixteen columns goes through the interpolation, the matrix and the
@@ -97,7 +97,7 @@ against zimg's 1.7, so the batch penalty this section records is gone: 2.51x the
 `resize` route before, 0.98x after. The kernels are held to the scalar path
 sample for sample rather than to a tolerance, and the two builds write byte
 identical files over a 19 page corpus of every chroma shape and depth;
-[BENCH.md](../BENCH.md#what-a-kernel-costs) has both tables.
+[BENCH.md](../BENCH.md#pngwrite) has both tables.
 
 **NEON landed** as [41](41-neon-convert-kernel.md): a third module beside the
 two x86 ones, entered from the same dispatch, four columns a block and a byte
@@ -521,7 +521,7 @@ default on the 12-logical-CPU machine described in the benchmark notes, not a
 universal hardcoded default.
 
 The complete timing, fairness and reporting protocol is in
-[the writer benchmark section](../BENCH.md#png-writer-comparison), which also
+[the writer benchmark section](../BENCH.md#pngwrite), which also
 holds the measured numbers. These sibling links record inspected local
 reference code, not a new dependency or a requirement to execute nmanga's full
 autolevel command. The first-party copy of that save path lives in
