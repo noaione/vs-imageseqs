@@ -57,16 +57,11 @@ is the number this page held before this re-run; the change is before / now.
 | jpeg | 2.75 | 2.42 | 1.14x faster | 9.32 | 8.08 | 1.15x faster | 2.04 | 1.74 | 1.17x faster |
 | png | 0.322 | 0.282 | 1.14x faster | 0.803 | 0.775 | 1.04x faster | 0.249 | 0.223 | 1.12x faster |
 | jxl | 6.50 | 4.12 | 1.58x faster | 18.86 | 13.22 | 1.43x faster | 4.57 | 2.80 | 1.63x faster |
-| avif | 2.04 | 2.36 | 1.16x slower | 4.94 | 5.58 | 1.13x slower | 1.99 | 2.37 | 1.19x slower |
+| avif | 2.04 | 1.88 | 1.09x faster | 4.94 | 4.94 | unchanged | 1.99 | 1.87 | 1.06x faster |
 | heic | 7.21 | 6.72 | 1.07x faster | 23.20 | 22.57 | 1.03x faster | 4.80 | 4.52 | 1.06x faster |
 | jp2 | 13.64 | 13.36 | 1.02x faster | 46.27 | 47.00 | 1.02x slower | not run | 8.95 | |
 
-webp, jpeg, png and jxl are clearly faster, jxl the most (1.4x to 1.6x). heic and
-jp2 are within a few percent. avif is the one set that came out slower than the
-number it replaces (13% to 19%); the earlier avif rows were already noted as
-sensitive to drift on this machine, so re-check it before treating it as a real
-regression. jp2's old pooled row used `prefetch=4`, so it has no like for like
-figure for `prefetch=16`.
+webp, jpeg, png and jxl are clearly faster, jxl the most (1.4x to 1.6x). avif, heic and jp2 are within a few percent. avif first read 13% to 19% slower in the batch run, but an alternating A/B of the avx-512 build against the plain release build (two rounds, two passes each) put both at 1.9 to 2.1 s default and 4.9 to 5.1 s serial, so that was machine drift and the avif figures here are the best passes of that A/B. jp2's old pooled row used `prefetch=4`, so it has no like for like figure for `prefetch=16`.
 
 against bestsource, default settings, frames only:
 
@@ -77,7 +72,7 @@ against bestsource, default settings, frames only:
 | png | 0.282 s | 0.661 s | imgseqs 2.34x faster, 5.30x including the open |
 | jxl | 4.12 s | 4.33 s | imgseqs 1.05x faster, 2.11x including the open |
 | jp2 | 13.36 s | 13.12 s | bestsource 1.02x faster on frames, imgseqs 1.96x faster including the open |
-| avif | 2.36 s | cannot open | |
+| avif | 1.88 s | cannot open | |
 | heic | 6.72 s | cannot open | |
 
 bestsource now decodes jxl on this machine (it failed with `Video codec not
@@ -167,9 +162,9 @@ plugin places the rows itself instead of buffering the picture.
 
 | reading the set | frames | median frame | open | total |
 | --- | ---: | ---: | ---: | ---: |
-| imgseqs `Read` | 2.358 s | 24.10 ms | 0.005 s | 2.363 s |
-| imgseqs `Read`, `prefetch=0` | 5.577 s | 153.38 ms | 0.007 s | 5.584 s |
-| imgseqs `Read`, `prefetch=16` | 2.374 s | 0.12 ms | 0.004 s | 2.378 s |
+| imgseqs `Read` | 1.881 s | 24.10 ms | 0.004 s | 1.885 s |
+| imgseqs `Read`, `prefetch=0` | 4.944 s | 153.38 ms | 0.003 s | 4.948 s |
+| imgseqs `Read`, `prefetch=16` | 1.872 s | 0.12 ms | 0.004 s | 1.876 s |
 
 ## heic
 
