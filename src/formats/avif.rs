@@ -147,9 +147,15 @@ pub fn image_info(
     // refuses at all. Either way it is described from libheif's own answer
     // rather than from the `image` decoder's, because the description and the
     // decode have to name the same library.
+    //
+    // So is a picture whose own subsampling cannot fill a frame of its size: a
+    // 4:2:0 one of an odd width or height has no frame to be handed out as, and
+    // libheif upsamples it to 4:4:4, which every size fits. See
+    // [`crate::pixel::PixelFormat::fits`].
     let Some(format) = cicp
         .filter(|cicp| usable_matrix(cicp.matrix))
         .and_then(|_| yuv_format(header.chroma, header.depth))
+        .filter(|format| format.fits(width, height))
     else {
         return super::heif::describe(path, apply_rotation, &mut *file);
     };
@@ -233,6 +239,12 @@ pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
     })?)
     .ok_or_else(|| image_error("read the boxes of", &info.path, "no coding record"))?;
     let (width, height) = (header.width, header.height);
+    // A picture whose own subsampling cannot fill a frame of its size is
+    // libheif's, which upsamples it to 4:4:4; the probe routed it the same way,
+    // so this is the library its description named.
+    if !yuv_format(header.chroma, header.depth).is_some_and(|format| format.fits(width, height)) {
+        return super::heif::decode(info, demand);
+    }
     if (width, height) != (info.width, info.height)
         || yuv_format(header.chroma, header.depth) != Some(info.format)
     {

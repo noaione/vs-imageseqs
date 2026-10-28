@@ -810,7 +810,9 @@ def test_yuv_containers() -> None:
         ("avif-yuv420p.avif", "YUV420P8", 64, 48, 2, 2),
         ("avif-yuv422p.avif", "YUV422P8", 64, 48, 2, 1),
         ("avif-yuv444p10.avif", "YUV444P10", 32, 24, 1, 1),
-        ("alpha-rgba8.heic", "YUV420P8", 3, 2, 2, 2),
+        # A three by two picture is not a whole number of 4:2:0 units, so it is
+        # handed over at 4:4:4, which every size fits.
+        ("alpha-rgba8.heic", "YUV444P8", 3, 2, 1, 1),
     )
     files = [fixture(name) for name, *_ in cases]
     clip = core.imgseqs.Read(files=files, mismatch=True)
@@ -1566,9 +1568,9 @@ CONTAINER_CASES = (
     # The identity matrix the frame properties cannot name keeps the rgb path.
     ("orientation-avif-rgb-irot-1.avif", 8, "RGB24", CONTAINER_STORED),
     ("orientation-avif-mono-irot-1.avif", 8, "Gray8", [[7, 8, 9], [10, 11, 12]]),
-    ("orientation-heic-rot-90.heic", 6, "YUV420P8", CONTAINER_STORED),
-    ("orientation-heic-rot-180.heic", 3, "YUV420P8", CONTAINER_STORED),
-    ("orientation-heic-rot-270.heic", 8, "YUV420P8", CONTAINER_STORED),
+    ("orientation-heic-rot-90.heic", 6, "YUV444P8", CONTAINER_STORED),
+    ("orientation-heic-rot-180.heic", 3, "YUV444P8", CONTAINER_STORED),
+    ("orientation-heic-rot-270.heic", 8, "YUV444P8", CONTAINER_STORED),
 )
 
 

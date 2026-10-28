@@ -14,7 +14,10 @@
 //! whichever colourscheme it produced -- luma and chroma for a yuv picture, red,
 //! green and blue for an r,g,b one -- so [`decode`] picks the set that matches the
 //! format the probe recorded, and the frame's own plane order is what it writes
-//! them into. See `docs/improvements/12-heif-avif-yuv-output.md`.
+//! them into. See `docs/improvements/12-heif-avif-yuv-output.md`. A yuv picture
+//! whose chroma subsampling does not divide its size has no frame of that layout
+//! to be handed out as, so it is asked of libheif at 4:4:4 instead, which every
+//! size fits and which keeps the colour family and the depth.
 //!
 //! The probe is here for the same reason, and for one more: `libheif` says what
 //! a file holds without decoding it. [`image_info`] reads the size, the color
@@ -252,7 +255,18 @@ impl HeifHeader {
             }
             ColorSpace::YCbCr(chroma) => {
                 self.cicp.filter(|cicp| usable_matrix(cicp.matrix))?;
-                yuv_format(chroma, self.depth)
+                let format = yuv_format(chroma, self.depth)?;
+                // A subsampled frame has to be a whole multiple of its
+                // subsampling, which the core checks when the frame is created
+                // and when a clip of constant size is described: a 4:2:0 picture
+                // of an odd width or height cannot exist as a frame at all. The
+                // same depth at 4:4:4 can, so that is what such a page is asked
+                // of `libheif` as rather than refusing a picture that has one.
+                if format.fits(self.width, self.height) {
+                    Some(format)
+                } else {
+                    yuv_format(Chroma::C444, self.depth)
+                }
             }
             // A colour picture can be coded as full resolution r,g,b rather
             // than as yuv, which is what this plugin hands one out as. The
@@ -784,7 +798,11 @@ mod tests {
         }
         let info = image_info_at(&path, true, None).expect("a colour heic");
         assert_eq!((info.width, info.height), (3, 2));
-        assert_eq!(info.format, PixelFormat::Yuv420P8);
+        // The fixture is three by two, and a 4:2:0 frame has to be a whole
+        // multiple of its subsampling: libheif hands the picture over at 4:4:4
+        // instead, which every size fits and which is the only chromatic
+        // layout this picture can be handed out as at all.
+        assert_eq!(info.format, PixelFormat::Yuv444P8);
         assert_eq!(info.color_type, ColorType::Rgba8);
         assert_eq!(info.original_color_type, SourceColorType::Rgba8);
         assert_eq!(info.transform, Transform::IDENTITY);
