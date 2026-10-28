@@ -400,6 +400,7 @@ fn output_format(header: &Header, path: &Path) -> Result<(ColorType, PixelFormat
             }
             if header.color == EnumeratedColor::Sycc
                 && let Some(format) = sycc_format(&header.components, depth)
+                    .filter(|format| format.fits(header.width, header.height))
             {
                 let color_type = if depth <= 8 {
                     ColorType::Rgb8
@@ -1671,6 +1672,35 @@ mod tests {
                 output_format(&yuv, Path::new("yuv.jp2")).unwrap().1,
                 expected,
                 "depth={depth}, chroma={chroma:?}"
+            );
+        }
+
+        // A picture whose size is not a whole number of chroma units cannot be
+        // a subsampled frame: the core refuses to create one, and a clip of a
+        // constant size is refused before a frame is ever asked for. The page is
+        // handed out as the r,g,b its components carry instead, which is the
+        // same layout the conversion of a page with no nameable matrix produces.
+        for (chroma, width, height) in [((2, 2), 3, 3), ((2, 1), 3, 2), ((2, 2), 2, 3)] {
+            let components = [(1, 1), chroma, chroma]
+                .into_iter()
+                .map(|(dx, dy)| ComponentHeader {
+                    precision: 8,
+                    signed: false,
+                    dx,
+                    dy,
+                })
+                .collect();
+            let yuv = Header {
+                width,
+                height,
+                color: EnumeratedColor::Sycc,
+                components,
+                ..rgb.clone()
+            };
+            assert_eq!(
+                output_format(&yuv, Path::new("odd.jp2")).unwrap().1,
+                PixelFormat::Rgb8,
+                "chroma={chroma:?} on {width}x{height}"
             );
         }
     }

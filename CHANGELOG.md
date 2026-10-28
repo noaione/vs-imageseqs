@@ -6,6 +6,7 @@
 
 - Process odd-sized chroma webp as RGB24
 - Upsample AVIF/HEIF/HEIC with odd-sized chroma to full 4:4:4 subsampling.
+- Process JPEG 2000 with odd-sized chroma as RGB
 
 ## [0.4.1] - 2026-10-25
 

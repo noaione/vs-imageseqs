@@ -41,7 +41,12 @@ a frame is not always rgb: a lossy webp is handed out as its own yuv planes, and
 so is a colour heif/heic page (libheif's planes) and a colour avif (dav1d's),
 whenever the container states a matrix VapourSynth names. a container that states
 code 2 or nothing keeps the rgb the plugin builds, and a monochrome page of any
-family is gray at its own depth.
+family is gray at its own depth. a subsampled frame has to be a whole multiple of
+its subsampling, which the core checks when it creates one, so a picture whose
+width or height is not such a multiple is handed out the other way:
+`PixelFormat::fits` is the one question every reader asks, a lossy webp and a
+jpeg 2000 page come out as rgb, and an avif or heif is asked of `libheif` at
+4:4:4, which keeps the colour family and the depth.
 
 a frame's depth is the one its container states, not the word the decoder hands
 over: a file that states nine to fifteen bits is handed out as the format that

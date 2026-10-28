@@ -85,6 +85,10 @@ Gray and RGB images keep their supported bit depth, including depths from 9 to
 15 bits. Compatible WebP, AVIF, HEIF/HEIC, and JPEG 2000 images may be returned
 as YUV planes instead of RGB. Monochrome images are returned as gray.
 
+A subsampled frame has to be a whole multiple of its subsampling, so a picture
+whose width or height is not one is handed out the other way: a lossy WebP
+comes back as RGB, and an AVIF or HEIF at 4:4:4.
+
 ### color and metadata
 
 The plugin applies image orientation by default and reports the source's color
