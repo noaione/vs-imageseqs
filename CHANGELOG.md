@@ -2,11 +2,15 @@
 
 ## unreleased
 
-### changes
+nothing yet!
 
-- Process odd-sized chroma webp as RGB24
-- Upsample AVIF/HEIF/HEIC with odd-sized chroma to full 4:4:4 subsampling.
-- Process JPEG 2000 with odd-sized chroma as RGB
+## [0.4.2] - 2026-10-28
+
+### fixed
+
+- A lossy WebP whose width or height is odd is handed out as `RGB24` instead of `YUV420P8`. A subsampled frame has to be a whole multiple of its subsampling, which VapourSynth checks when it creates one, so such a frame request failed with `Error in frame creation: dimensions (1515x2150) are not a multiple of the format's subsampling` on R81 and was refused before a frame was asked for on any core.
+- An AVIF, HEIF or HEIC picture of that size is handed out at 4:4:4, at the depth its container states, rather than as the subsampling it holds. `libheif` upsamples it, so the colour family and the depth are kept.
+- A JPEG 2000 sYCC page of that size is handed out as its r,g,b components rather than as the yuv planes it holds.
 
 ## [0.4.1] - 2026-10-25
 
