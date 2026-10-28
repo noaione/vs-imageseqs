@@ -2,7 +2,10 @@
 
 ## unreleased
 
-nothing yet!
+### changes
+
+- Process odd-sized chroma webp as RGB24
+
 
 ## [0.4.1] - 2026-10-25
 

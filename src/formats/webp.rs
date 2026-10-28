@@ -29,6 +29,12 @@
 //! path produced, because lossless webp is rgb by definition and a file with an
 //! alpha channel needs the buffer its alpha plane is read from.
 //!
+//! A lossy picture whose width or height is odd is one of the `Everything else`
+//! cases as well, and not by choice: a 4:2:0 frame has to be a whole multiple of
+//! its subsampling, so VapourSynth refuses to create one for `1515x2150` and the
+//! file would be a frame request that cannot be answered. Its planes are decoded
+//! as r,g,b instead, which is a format every size fits.
+//!
 //! # Where the four facts a probe reports live
 //!
 //! The container states all four of them, in a chunk rather than in the image
@@ -117,12 +123,25 @@ struct BitstreamHeader {
 /// a graph consuming the frames would undo again. Lossless webp is rgb by
 /// definition and keeps its color type, and so does a file with an alpha
 /// channel, which needs the interleaved buffer the alpha plane is read from.
-pub fn output_format(path: &Path, color_type: ColorType) -> Option<PixelFormat> {
+///
+/// The size is the container's own, and it is needed because a yuv 4:2:0 frame
+/// has to be a whole multiple of its subsampling: a picture of an odd width or
+/// height keeps the interleaved r,g,b layout instead, which is a format every
+/// size fits and which the decoder produces just as well. The swap a stored
+/// orientation applies does not matter here, because exchanging the two axes
+/// leaves the parity of each of them where it was.
+pub fn output_format(
+    path: &Path,
+    color_type: ColorType,
+    width: u32,
+    height: u32,
+) -> Option<PixelFormat> {
     if !has_webp_extension(path) || color_type != ColorType::Rgb8 {
         return None;
     }
     let header = bitstream_header(path)?;
-    (!header.lossless && !header.has_alpha).then_some(PixelFormat::Yuv420P8)
+    let planes = !header.lossless && !header.has_alpha;
+    (planes && PixelFormat::Yuv420P8.fits(width, height)).then_some(PixelFormat::Yuv420P8)
 }
 
 /// The byte a webp container's chunk walk ends at, from its `RIFF` header.
@@ -382,7 +401,7 @@ pub fn image_info(
         } else {
             Transform::IDENTITY
         },
-        format: output_format(path, color_type)
+        format: output_format(path, color_type, header.width, header.height)
             .or_else(|| PixelFormat::from_color_type(color_type))
             .ok_or_else(|| {
                 ImgSeqError::new(format!(
@@ -1456,29 +1475,39 @@ mod tests {
         let lossy = riff(&[(b"VP8 ", vec![0; 8])]);
         let path = write_temp("format-lossy.webp", &lossy);
         assert_eq!(
-            output_format(&path, ColorType::Rgb8),
+            output_format(&path, ColorType::Rgb8, 16, 16),
             Some(PixelFormat::Yuv420P8)
         );
         // The probe reports `Rgba8` for a file with an alpha channel, and an
         // alpha plane needs the interleaved buffer this module writes for rgb.
-        assert_eq!(output_format(&path, ColorType::Rgba8), None);
+        assert_eq!(output_format(&path, ColorType::Rgba8, 16, 16), None);
+        // A 4:2:0 frame has to be a whole multiple of its subsampling, so an
+        // odd size keeps the interleaved layout rather than a frame that cannot
+        // be created.
+        assert_eq!(output_format(&path, ColorType::Rgb8, 15, 16), None);
+        assert_eq!(output_format(&path, ColorType::Rgb8, 16, 15), None);
+        assert_eq!(
+            output_format(&path, ColorType::Rgb8, 1515, 2150),
+            None,
+            "the size that started this: an odd width cannot be 4:2:0"
+        );
         let _ = std::fs::remove_file(&path);
 
         // The extension decides which module decodes the file, so a copy under
         // another name keeps the color type the probe reported.
         let path = write_temp("format-lossy.png", &lossy);
-        assert_eq!(output_format(&path, ColorType::Rgb8), None);
+        assert_eq!(output_format(&path, ColorType::Rgb8, 16, 16), None);
         let _ = std::fs::remove_file(&path);
 
         let path = write_temp("format-lossless.webp", &riff(&[(b"VP8L", vec![0; 8])]));
-        assert_eq!(output_format(&path, ColorType::Rgb8), None);
+        assert_eq!(output_format(&path, ColorType::Rgb8, 16, 16), None);
         let _ = std::fs::remove_file(&path);
 
         let path = write_temp(
             "format-alpha.webp",
             &riff(&[(b"VP8X", vp8x(0x10)), (b"VP8 ", vec![0; 8])]),
         );
-        assert_eq!(output_format(&path, ColorType::Rgb8), None);
+        assert_eq!(output_format(&path, ColorType::Rgb8, 16, 16), None);
         let _ = std::fs::remove_file(&path);
     }
 

@@ -266,6 +266,18 @@ impl PixelFormat {
         }
     }
 
+    /// Whether VapourSynth can create a frame of `width` x `height` in this
+    /// format.
+    ///
+    /// A subsampled frame has to be a whole multiple of its subsampling, which
+    /// the core checks when the frame is created, so a picture with an odd
+    /// width or height cannot be handed out as the planes it holds. A format
+    /// that subsamples nothing fits every size.
+    pub const fn fits(self, width: u32, height: u32) -> bool {
+        let (across, down) = self.sub_sampling();
+        width.is_multiple_of(1u32 << across) && height.is_multiple_of(1u32 << down)
+    }
+
     /// Bytes one plane of a `width` x `height` frame occupies when it is
     /// tightly packed, which is how the decoder buffers are laid out.
     pub fn plane_bytes(self, plane: usize, width: usize, height: usize) -> usize {
@@ -1579,6 +1591,24 @@ mod tests {
             seen.sort_unstable();
             assert_eq!(seen, [1, 2, 3, 4, 5, 6], "{orientation:?}");
         }
+    }
+
+    #[test]
+    fn only_a_whole_multiple_of_the_subsampling_fits() {
+        // The rule the core enforces when it creates a frame, which is why a
+        // decoder has to pick a format the picture's size can actually hold.
+        assert!(PixelFormat::Yuv420P8.fits(1514, 2150));
+        assert!(!PixelFormat::Yuv420P8.fits(1515, 2150));
+        assert!(!PixelFormat::Yuv420P8.fits(1514, 2149));
+        assert!(PixelFormat::Yuv422P8.fits(1514, 2151));
+        assert!(
+            !PixelFormat::Yuv422P8.fits(1515, 2150),
+            "an odd height is fine, a width is not"
+        );
+        // A format that subsamples nothing fits every size, and that is what a
+        // picture of an odd size is handed out as instead.
+        assert!(PixelFormat::Rgb8.fits(1515, 2150));
+        assert!(PixelFormat::Yuv444P8.fits(2999, 4264));
     }
 
     #[test]

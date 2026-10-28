@@ -1261,23 +1261,28 @@ def test_orientation_yuv() -> None:
 
 
 def test_tiny_lossy_webp() -> None:
-    """A lossy webp narrower than the chroma step is handed out as yuv.
+    """A lossy webp of a size no yuv frame can hold is handed out as r,g,b.
 
     ``lossy-1x1.webp`` is a one pixel picture, written by
     ``make-tiny-webp-fixture.py``. A 4:2:0 frame of that size has no chroma
-    plane at all: VapourSynth hands the plane over as no bytes with no stride,
-    and the row writer divided by that stride, which aborted the process on a
-    frame request. The luma is what is checked, because there is no chroma to
-    read.
+    plane at all, and VapourSynth refuses to create one: a subsampled frame has
+    to be a whole multiple of its subsampling, so a picture of an odd width or
+    height keeps the interleaved r,g,b layout the decoder also produces. That is
+    also what keeps the row writer away from a plane with no stride, which used
+    to abort the process on a frame request. VP8 states black as 16 in its
+    limited range, which the decoder's own conversion turns into r=g=b=0.
     """
     clip, alpha = read_alpha(files=[fixture("lossy-1x1.webp")])
     check(
-        clip.format.name == "YUV420P8",
-        f"tiny lossy webp: the colour clip is YUV420P8 (got {clip.format.name})",
+        clip.format.name == "RGB24",
+        f"tiny lossy webp: the colour clip is RGB24 (got {clip.format.name})",
     )
     check((clip.width, clip.height) == (1, 1), "tiny lossy webp: it is one pixel")
-    # VP8 states black as 16 in its limited range, which is what the sample is.
-    check(samples(clip.get_frame(0)) == [16], "tiny lossy webp: the luma of the one pixel")
+    frame = clip.get_frame(0)
+    check(
+        [samples(frame, plane) for plane in range(3)] == [[0], [0], [0]],
+        "tiny lossy webp: the one pixel is black in every plane",
+    )
     check(alpha.format.name == "Gray8", "tiny lossy webp: the alpha clip is Gray8")
     check(
         samples(alpha.get_frame(0)) == [255],
@@ -2899,11 +2904,11 @@ def test_tiff_webp() -> None:
     plain_frame = plain_clip.get_frame(0)
     check(
         compressed_clip.format.name == plain_clip.format.name == "RGB24",
-        f"tiff webp alpha: both colour clips are RGB24 (got {compressed_clip.format.name} and {plain_clip.format.name})",
+        f"tiff webp alpha: both colour clips are RGB24 (got {compressed_clip.format.name} and {plain_clip.format.name})",  # ruff: ignore[line-too-long]
     )
     check(
         compressed_alpha.format.name == plain_alpha.format.name == "Gray8",
-        f"tiff webp alpha: both alpha clips are Gray8 (got {compressed_alpha.format.name} and {plain_alpha.format.name})",
+        f"tiff webp alpha: both alpha clips are Gray8 (got {compressed_alpha.format.name} and {plain_alpha.format.name})",  # ruff: ignore[line-too-long]
     )
     check(
         (compressed_frame.width, compressed_frame.height) == (plain_frame.width, plain_frame.height) == (3, 2),
