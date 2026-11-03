@@ -144,6 +144,15 @@ open plus frames to 4.99 s.
 
 ## plans
 
+### hayro jpeg 2000 0.5.0 — 2026-11-03
+
+[44 hayro jpeg 2000 0.5.0](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/44-hayro-jpeg-2000-050.md)
+updates the pure-Rust decoder from 0.4.1 to 0.5.0 with its `std` and `simd`
+features unchanged. The 35-page release-build comparison found no meaningful
+load-time improvement: 7.884 → 7.815 s at default `prefetch=4`, and 29.492 →
+29.385 s serially. The existing `ReadAlpha` validator and all 365 unit tests
+pass.
+
 ### hayro jpeg 2000 backend — 2026-10-25
 
 [43 hayro jpeg 2000 backend](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/43-hayro-jpeg-2000.md)

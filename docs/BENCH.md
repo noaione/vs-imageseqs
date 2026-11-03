@@ -129,6 +129,20 @@ arm64 machine and is in that plan, not here.
 | bestsource `VideoSource` | 13.120 s | 26.05 ms | 13.081 s | 26.202 s |
 | bestsource `VideoSource`, `threads=1` | 78.985 s | 2226.41 ms | 76.966 s | 155.951 s |
 
+**`hayro-jpeg2000` 0.4.1 → 0.5.0**, measured 2026-11-03 on macOS arm64.
+Both release builds read the same 35 files from `sandbox/jp2`; each pass ran in
+a fresh VapourSynth process, and the build order alternated. These are medians
+of three passes. Node creation is excluded from the frame times below.
+
+| `prefetch` | 0.4.1 | 0.5.0 | change |
+| ---: | ---: | ---: | ---: |
+| 4 (default) | 7.884 s | 7.815 s | 0.9% faster |
+| 0 (serial) | 29.492 s | 29.385 s | 0.4% faster |
+
+Both differences are below 1%, so 0.5.0 shows no meaningful load-time
+improvement on this corpus. The alternating measurements are in
+`target/bench/ab-hayro-jp2.py`.
+
 ## png
 
 35 files: 31 `Gray8` and four `RGB24`.

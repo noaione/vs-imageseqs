@@ -2,7 +2,13 @@
 
 ## unreleased
 
-nothing yet!
+### changed
+
+- Upgrade JPEG 2000 decoding to `hayro-jpeg2000` 0.5.0.
+
+### performance
+
+- On the 35-page JPEG 2000 corpus, read time is effectively unchanged: 0.9% faster with the default four workers and 0.4% faster with `prefetch=0` than 0.4.1.
 
 ## [0.4.2] - 2026-10-28
 
