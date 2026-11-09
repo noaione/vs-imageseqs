@@ -144,6 +144,23 @@ open plus frames to 4.99 s.
 
 ## plans
 
+### several frames in flight — 2026-11-09
+
+[45 the second clip of a call](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/45-async-request-cache.md),
+[46 who decodes a requested frame](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/46-request-thread-decode.md)
+and [47 what the byte budget counts](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/47-claim-budget-accounting.md)
+come out of the read path's async behaviour, which no table covered before
+them. Measured on `sandbox/webp` with `target/bench/read-async.py`: four pool
+workers and none are the same frame rate once a consumer keeps eight frames in
+flight (1.528 s against 1.525 s), so `prefetch` is a serial-consumer argument
+and an async consumer's parallelism is its own threads — which also means the
+decode runs on VapourSynth's pool. The same measurement shows `ReadAlpha`
+decoding every file twice when its two clips are walked as separate branches
+(533 against 307 cpu per delivered frame) and costing nothing extra when they
+are asked for together. None of the three is implemented: the first thing each
+needs is the measurement its `## acceptance` names, and the tables they were
+written from are in [BENCH.md](../BENCH.md).
+
 ### hayro jpeg 2000 0.5.0 — 2026-11-03
 
 [44 hayro jpeg 2000 0.5.0](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/44-hayro-jpeg-2000-050.md)
@@ -522,6 +539,19 @@ before implementation; correctness work needs a reproducible case or a clear
 code-path defect. Each bullet names the page that keeps the full argument. the
 rest of that `defer:` list — gpu output, manual simd, filesystem globbing and
 format-based clip grouping — is in `not planned` below, with its reasons.
+
+**the auto worker count is not what an async consumer uses**
+
+`AUTO_MAX_WORKERS` is 4, and `automatic_workers` halves the logical cores before
+clamping to it, so a 12 thread machine gets 4 rather than 6. For a serial
+consumer that is a real 1.83x: 1.454 s at `prefetch=16` against 2.666 s at the
+default on `sandbox/webp` (see [BENCH.md](../BENCH.md)). It is deliberately not
+promoted to a plan yet, for two reasons the async tables make plain. Under async
+the clamp is inert, because the consumer's own threads are the ones decoding
+([46](46-request-thread-decode.md)), so raising it would not help the case this
+work came from. And half the cores minus a clamp is a headroom decision taken
+for the rest of the graph, which should be retaken with [46](46-request-thread-decode.md)'s
+answer about whose threads decode rather than ahead of it.
 
 **one format is slower than the reader it replaced**
 
