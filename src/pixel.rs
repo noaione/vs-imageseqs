@@ -4,7 +4,7 @@ use std::{
     slice,
     time::{Duration, Instant},
 };
-use vapoursynth4_rs::frame::VideoFrame;
+use vapoursynth4_rs::frame::{VideoFrame, VideoFrameMut};
 use vapoursynth4_rs::{ColorFamily, SampleType};
 
 use crate::{
@@ -639,7 +639,7 @@ struct FrameDepth {
 ///
 /// The two word sizes are checked to agree first, because every write moves
 /// whole samples of the decoder's width into the frame's.
-fn frame_depth(frame: &VideoFrame, source: PixelFormat) -> Result<FrameDepth> {
+fn frame_depth<S>(frame: &VideoFrame<S>, source: PixelFormat) -> Result<FrameDepth> {
     let word_bytes = source.bytes_per_sample();
     let format = frame.get_video_format();
     let frame_bytes = usize::try_from(format.bytes_per_sample)
@@ -812,7 +812,7 @@ impl PlaneTarget {
 /// only way either can fail once the decoder buffer is known to be the right
 /// size.
 fn plane_target(
-    frame: &mut VideoFrame,
+    frame: &mut VideoFrameMut,
     index: usize,
     row_bytes: usize,
     rows: usize,
@@ -984,7 +984,7 @@ fn write_channel<T: Sample, const CHANNELS: usize, const CHANNEL: usize>(
 /// and writes every channel of it, which is the same destination traffic for a
 /// third of the reads and a third of the loop.
 fn write_transposed_planes<T: Sample, const CHANNELS: usize>(
-    frame: &mut VideoFrame,
+    frame: &mut VideoFrameMut,
     layout: &ImageLayout,
     planes: usize,
     plane_row_bytes: usize,
@@ -1033,7 +1033,7 @@ fn write_transposed_planes<T: Sample, const CHANNELS: usize>(
 }
 
 fn write_planes<T: Sample, const CHANNELS: usize>(
-    frame: &mut VideoFrame,
+    frame: &mut VideoFrameMut,
     layout: &ImageLayout,
     planes: usize,
     pixels: &[u8],
@@ -1096,7 +1096,7 @@ fn planes_to_write(frame_planes: i32, channels: usize) -> Result<usize> {
 /// decoded or moved down out of the word they were scaled into; see
 /// [`frame_depth`].
 pub fn write_planar(
-    frame: &mut VideoFrame,
+    frame: &mut VideoFrameMut,
     color_type: ColorType,
     width: u32,
     height: u32,
@@ -1147,7 +1147,7 @@ pub fn write_planar(
 /// shape the frame asks for, which means the decoder's strides and its header
 /// disagree.
 pub fn write_decoded_planes(
-    frame: &mut VideoFrame,
+    frame: &mut VideoFrameMut,
     format: PixelFormat,
     width: u32,
     height: u32,
@@ -1204,7 +1204,7 @@ impl PlaneSource<'_> {
 }
 
 fn write_sample_planes<T: Sample>(
-    frame: &mut VideoFrame,
+    frame: &mut VideoFrameMut,
     format: PixelFormat,
     width: u32,
     height: u32,
@@ -1393,7 +1393,7 @@ fn fill_plane<T: Sample>(target: PlaneTarget, value: T) {
 /// alpha clip is opaque everywhere. `width` and `height` are the size of the
 /// frame, which a rotation may have swapped relative to the file.
 pub fn write_opaque_alpha(
-    frame: &mut VideoFrame,
+    frame: &mut VideoFrameMut,
     format: PixelFormat,
     width: u32,
     height: u32,
@@ -1431,7 +1431,7 @@ pub fn write_opaque_alpha(
 /// written at the frame's own depth: a ten bit alpha clip holds the sample
 /// itself, and its opaque fill is 1023.
 pub fn write_alpha(
-    frame: &mut VideoFrame,
+    frame: &mut VideoFrameMut,
     color_type: ColorType,
     width: u32,
     height: u32,
@@ -1485,7 +1485,7 @@ fn alpha_plane_row_bytes<T: Sample>(layout: &ImageLayout, transform: Transform) 
 
 /// Write the alpha channel into the single plane of a gray frame.
 fn write_alpha_plane<T: Sample, const CHANNELS: usize, const CHANNEL: usize>(
-    frame: &mut VideoFrame,
+    frame: &mut VideoFrameMut,
     layout: &ImageLayout,
     pixels: &[u8],
     transform: Transform,
@@ -1500,7 +1500,7 @@ fn write_alpha_plane<T: Sample, const CHANNELS: usize, const CHANNEL: usize>(
 
 /// Fill the single plane of a gray frame with one value.
 fn fill_alpha_plane<T: Sample>(
-    frame: &mut VideoFrame,
+    frame: &mut VideoFrameMut,
     layout: &ImageLayout,
     transform: Transform,
     value: T,

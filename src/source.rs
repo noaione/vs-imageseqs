@@ -12,7 +12,7 @@ use vapoursynth4_rs::{
     ffi,
     frame::{FrameContext, VideoFrame},
     key,
-    map::{AppendMode, MapPropertyError, MapRef},
+    map::{AppendMode, MapMut, MapPropertyError, MapRef},
     node::{Dependencies, Filter},
 };
 
@@ -86,7 +86,7 @@ impl SequenceArgs {
     ///
     /// `clips` are the clips the call hands out, which are also the frames its
     /// lookahead workers build.
-    fn read(input: &MapRef, clips: &[Clip], core: CoreRef) -> Result<Self> {
+    fn read(input: &MapRef, clips: &[Clip], core: &CoreRef<'_>) -> Result<Self> {
         let setup_started = Instant::now();
         let files = read_files(input)?;
         let fps_num = read_optional_int(input, key!(c"fpsnum"), "fpsnum")?.unwrap_or(24);
@@ -217,16 +217,16 @@ impl Filter for Read {
 
     fn create(
         input: MapRef,
-        output: MapRef,
-        _data: Option<Box<Self::FilterData>>,
+        mut output: MapMut<'_>,
+        _data: Option<&Self::FilterData>,
         mut core: CoreRef,
     ) -> Result<()> {
-        let args = SequenceArgs::read(&input, READ_CLIPS, core)?;
+        let args = SequenceArgs::read(&input, READ_CLIPS, &core)?;
         log_create(&mut core, &args, READ_CLIPS);
         let info = args.video_info(&core, Clip::Color);
         add_filter(
             &mut core,
-            output,
+            &mut output,
             Self::NAME,
             &info,
             Read {
@@ -259,11 +259,11 @@ impl Filter for ReadAlpha {
 
     fn create(
         input: MapRef,
-        mut output: MapRef,
-        _data: Option<Box<Self::FilterData>>,
+        mut output: MapMut<'_>,
+        _data: Option<&Self::FilterData>,
         mut core: CoreRef,
     ) -> Result<()> {
-        let args = SequenceArgs::read(&input, READ_ALPHA_CLIPS, core)?;
+        let args = SequenceArgs::read(&input, READ_ALPHA_CLIPS, &core)?;
         log_create(&mut core, &args, READ_ALPHA_CLIPS);
         let color_info = args.video_info(&core, Clip::Color);
         let alpha_info = args.video_info(&core, Clip::Alpha);
@@ -274,7 +274,7 @@ impl Filter for ReadAlpha {
         // the color clip owns the primary key.
         add_filter(
             &mut core,
-            output,
+            &mut output,
             Self::NAME,
             &alpha_info,
             ReadAlpha {
@@ -287,7 +287,7 @@ impl Filter for ReadAlpha {
         output.delete_key(key!(c"clip"));
         add_filter(
             &mut core,
-            output,
+            &mut output,
             Self::NAME,
             &color_info,
             Read { sequence },
@@ -313,7 +313,7 @@ impl Filter for ReadAlpha {
 /// Adds the node that produces one clip of a sequence to the output map.
 fn add_filter<F: Filter>(
     core: &mut CoreRef<'_>,
-    output: MapRef,
+    output: &mut MapMut<'_>,
     name: &CStr,
     info: &VideoInfo,
     filter: F,

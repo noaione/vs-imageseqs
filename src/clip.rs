@@ -13,8 +13,8 @@ use std::{
 };
 
 use vapoursynth4_rs::{
-    core::{Core, CoreRef},
-    frame::VideoFrame,
+    core::{CoreHandle, CoreRef},
+    frame::{VideoFrame, VideoFrameMut},
 };
 
 use crate::{
@@ -89,7 +89,7 @@ pub fn demand_of(clips: &[Clip]) -> Demand {
 
 /// Output format of one clip of a sequence of `format` images.
 #[must_use]
-pub fn query_format(core: &Core, format: PixelFormat) -> vapoursynth4_rs::frame::VideoFormat {
+pub fn query_format(core: &CoreHandle, format: PixelFormat) -> vapoursynth4_rs::frame::VideoFormat {
     let (sub_sampling_w, sub_sampling_h) = format.sub_sampling();
     core.query_video_format(
         format.color_family(),
@@ -98,6 +98,7 @@ pub fn query_format(core: &Core, format: PixelFormat) -> vapoursynth4_rs::frame:
         sub_sampling_w,
         sub_sampling_h,
     )
+    .expect("VapourSynth does not know every pixel format this plugin hands out")
 }
 
 /// Frame bytes one image of `clips` is expected to need.
@@ -188,7 +189,7 @@ impl ClipFrames {
     /// of them in one pass; see [`crate::decoder::RowStream`]. A buffered
     /// decode is written one clip at a time, as it always was.
     fn build(
-        core: &Core,
+        core: &CoreHandle,
         clips: &Arc<[Clip]>,
         image: &ImageInfo,
         indices: SourceIndices,
@@ -270,7 +271,7 @@ impl ClipFrames {
 
         Ok(Self {
             clips: Arc::clone(clips),
-            frames: frames.into_boxed_slice(),
+            frames: frames.into_iter().map(VideoFrameMut::freeze).collect(),
             timings: timings.into_boxed_slice(),
             decode,
             bytes,
@@ -287,10 +288,11 @@ impl Payload for ClipFrames {
 /// The core of the graph, kept so that lookahead workers can create frames.
 ///
 /// [`Filter::create`](vapoursynth4_rs::node::Filter) is handed a core borrowed
-/// for that call, which is extended to `'static` in [`FrameBuilder::new`]. A
-/// filter is freed before the core it was built with, and a pool lives inside
-/// the filter that owns it, so a handle kept by a pool cannot dangle.
-struct SharedCore(CoreRef<'static>);
+/// for that call, so [`FrameBuilder::new`] copies the handle out of the borrow
+/// and keeps that copy. A filter is freed before the core it was built with,
+/// and a pool lives inside the filter that owns it, so a handle kept by a pool
+/// cannot dangle.
+struct SharedCore(CoreHandle);
 
 // SAFETY: the handle is only used from the pool's workers to create a frame and
 // to look up a video format, both of which VapourSynth allows from any thread:
@@ -301,8 +303,8 @@ unsafe impl Sync for SharedCore {}
 
 impl SharedCore {
     /// The core handle, borrowed from the handle the pool holds.
-    fn core(&self) -> &Core {
-        self.0.as_ref()
+    fn core(&self) -> &CoreHandle {
+        &self.0
     }
 }
 
@@ -328,16 +330,17 @@ impl FrameBuilder {
     /// outlive what it points at.
     #[must_use]
     pub fn new(
-        core: CoreRef<'_>,
+        core: &CoreRef<'_>,
         clips: &[Clip],
         segments: Arc<SegmentTable>,
         export_icc_profile: bool,
     ) -> Self {
-        // SAFETY: the filter built from this core owns the builder, so the
-        // handle cannot outlive the core. `SharedCore` records why the workers
-        // that use it may do so.
-        let core =
-            SharedCore(unsafe { std::mem::transmute::<CoreRef<'_>, CoreRef<'static>>(core) });
+        // SAFETY: a `CoreHandle` is the core pointer and a copied function
+        // table, so what is read out of the borrow names the same core without
+        // pointing at the caller's `CoreRef`. The filter built from this core
+        // owns the builder, so the handle cannot outlive the core; `SharedCore`
+        // records why the workers that use it may do so.
+        let core = SharedCore(unsafe { std::ptr::read(core.as_ref()) });
         Self {
             core,
             clips: Arc::from(clips),
@@ -409,7 +412,12 @@ fn decode_frame(
 }
 
 /// Creates one frame of `format`.
-fn new_frame(core: &Core, format: PixelFormat, width: u32, height: u32) -> Result<VideoFrame> {
+fn new_frame(
+    core: &CoreHandle,
+    format: PixelFormat,
+    width: u32,
+    height: u32,
+) -> Result<VideoFrameMut> {
     let width = i32::try_from(width)
         .map_err(|_| ImgSeqError::new("image width does not fit VapourSynth"))?;
     let height = i32::try_from(height)
@@ -423,7 +431,7 @@ fn new_frame(core: &Core, format: PixelFormat, width: u32, height: u32) -> Resul
 /// would have to copy afterwards, which is the whole point of a stream: see
 /// [`crate::decoder::RowStream`].
 fn row_sink<'a>(
-    frames: &'a mut [VideoFrame],
+    frames: &'a mut [VideoFrameMut],
     clips: &[Clip],
     format: PixelFormat,
     width: usize,
@@ -447,7 +455,7 @@ fn row_sink<'a>(
 /// rows are `row_bytes` of each of them, which is the same pair
 /// [`crate::pixel`] checks before it writes a plane itself.
 fn plane_rows(
-    frame: &mut VideoFrame,
+    frame: &mut VideoFrameMut,
     format: PixelFormat,
     width: usize,
     height: usize,
@@ -493,7 +501,7 @@ fn plane_rows(
 /// image are written with the same transform, so the alpha plane lands where the
 /// colour planes do rather than the two agreeing by construction.
 fn write_frame(
-    frame: &mut VideoFrame,
+    frame: &mut VideoFrameMut,
     clip: Clip,
     format: PixelFormat,
     decoded: &DecodedImage,
@@ -612,7 +620,7 @@ fn write_frame(
 }
 
 /// Bytes one frame holds, row padding included.
-fn frame_bytes(frame: &VideoFrame) -> usize {
+fn frame_bytes<S>(frame: &VideoFrame<S>) -> usize {
     let planes = frame.get_video_format().num_planes;
     (0..planes)
         .map(|plane| {

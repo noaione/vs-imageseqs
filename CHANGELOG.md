@@ -5,6 +5,8 @@
 ### changed
 
 - Upgrade JPEG 2000 decoding to `hayro-jpeg2000` 0.5.0.
+- Bump `exr` to `1.74.3` and `wpd` to `6fa9de20df3eacc5259751573c220ea6a7b03e5b`.
+- Bump `vapoursynth4-rs` to `0.6.0`, which needs Rust 1.95 or newer.
 
 ### performance
 

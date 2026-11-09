@@ -170,7 +170,7 @@ source precision; `depth=8` reduces it by rounding.
 
 ## build from source
 
-Build a wheel with Python 3.12 or newer, Rust 1.94 or newer, CMake, Ninja, and
+Build a wheel with Python 3.12 or newer, Rust 1.95 or newer, CMake, Ninja, and
 pkg-config. Native codec dependencies vary by platform; the Linux release build
 setup is documented in the
 [Linux build guide](https://github.com/noaione/vs-imageseqs/blob/master/docs/LINUX-BUILD.md).

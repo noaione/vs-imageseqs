@@ -52,9 +52,9 @@ use vapoursynth4_rs::{
     ColorFamily, SampleType, VideoInfo,
     core::CoreRef,
     ffi,
-    frame::{Frame, FrameContext, VideoFrame},
+    frame::{FrameContext, VideoFrame, VideoFrameMut},
     key,
-    map::{AppendMode, KeyStr, MapPropertyError, MapRef, Value},
+    map::{AppendMode, KeyStr, MapMut, MapPropertyError, MapRef, Value},
     node::{Dependencies, Filter, FilterMode, Node, VideoNode},
 };
 
@@ -1173,7 +1173,7 @@ impl PNGWrite {
                     ),
                 );
             }
-            return Ok(output);
+            return Ok(output.freeze());
         }
 
         let icc = self
@@ -1219,7 +1219,7 @@ impl PNGWrite {
                 ),
             );
         }
-        Ok(output)
+        Ok(output.freeze())
     }
 
     /// Encodes one frame to `destination` through a temporary file.
@@ -1303,8 +1303,8 @@ impl Filter for PNGWrite {
 
     fn create(
         input: MapRef,
-        output: MapRef,
-        _data: Option<Box<Self::FilterData>>,
+        mut output: MapMut<'_>,
+        _data: Option<&Self::FilterData>,
         mut core: CoreRef,
     ) -> Result<()> {
         let args = WriteArgs::read(&input)?;
@@ -1334,7 +1334,7 @@ impl Filter for PNGWrite {
             );
         }
         core.create_video_filter(
-            output,
+            &mut output,
             Self::NAME,
             &info,
             Box::new(args.into_writer()),
@@ -1782,7 +1782,7 @@ fn publish(temporary: &Path, destination: &Path, overwrite: bool) -> io::Result<
 
 /// Reports what one evaluation did with the frame it produced.
 fn set_receipts(
-    frame: &mut VideoFrame,
+    frame: &mut VideoFrameMut,
     destination: &Path,
     saved: bool,
     performed: bool,

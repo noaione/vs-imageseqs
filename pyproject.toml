@@ -42,7 +42,7 @@ dev = [
     "hatchling>=1.27",
     "packaging>=26.3",
     "delocate>=0.13.0",
-    "VapourSynth>=79",
+    "VapourSynth>=82",
     "vsrepo>=2.0"
 ]
 dev-bench = [

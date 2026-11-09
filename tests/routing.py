@@ -66,9 +66,10 @@ SOURCES = []
 # signature at all, and the icon family shares its first four bytes with a Targa
 # type 1 or 2 header, and a bare DIB has no `BM` file header to be named by, so
 # none of the three can be identified without the name; `.icc` is not an image
-# at all, and `.y4m` is an encoder's input rather than something this plugin
-# reads, so both are skipped for that reason.
-SKIP = {".tga", ".targa", ".icb", ".vda", ".vst", ".ico", ".cur", ".dib", ".icc", ".y4m"}
+# at all, `.y4m` is an encoder's input rather than something this plugin reads,
+# and `.bin` holds the raw plane dumps `src/formats/webp.rs` checks its lossy
+# decode against, so all three are skipped for that reason.
+SKIP = {".bin", ".tga", ".targa", ".icb", ".vda", ".vst", ".ico", ".cur", ".dib", ".icc", ".y4m"}
 _seen: set[str] = set()
 for _entry in sorted(FIXTURES.iterdir()):
     if not _entry.is_file() or _entry.suffix.lower() in _seen:

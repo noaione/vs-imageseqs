@@ -1,4 +1,4 @@
-use vapoursynth4_rs::frame::{Frame, VideoFrame};
+use vapoursynth4_rs::frame::VideoFrameMut;
 use vapoursynth4_rs::map::{AppendMode, Value};
 use vapoursynth4_rs::{ColorFamily, ffi, key};
 
@@ -147,7 +147,7 @@ pub struct SourceIndices {
 /// report, and `alpha_marker` is only set when the frame belongs to an alpha
 /// clip.
 pub fn set_frame_properties(
-    frame: &mut VideoFrame,
+    frame: &mut VideoFrameMut,
     image: &ImageInfo,
     indices: SourceIndices,
     format: PixelFormat,
