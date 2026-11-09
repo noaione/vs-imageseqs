@@ -6,7 +6,7 @@
   the consumer walks them with a lag, instead of one decode per clip
 - outcome: the lag a call's clips may drift apart before costing a second
   decode moved from 1 frame to 10, and that second decode costs 1.5x rather
-  than 4.2x. `ReadAlpha` read as two branches with `prefetch=16` is 2.07x
+  than 4.2x. `ReadAlpha` read as two branches with `prefetch=16` is 1.6x
   faster, and every one-clip row is unchanged
 - risk: low for a one-clip call, which holds nothing longer than it did before
 
@@ -71,6 +71,15 @@ the same set with both clips walked as branches rather than interleaved:
 | serial, wall / cpu | 7.697 s / 575 | 7.927 s / 449 |
 | async 8, wall / cpu | 4.005 s / 636 | 3.192 s / 578 |
 | async 8 `prefetch=16`, wall / cpu | 3.297 s / 703 | 1.594 s / 378 |
+
+the last row re-measured as separate processes, five per build, because one long
+run heats this machine and moves both builds by about 20%: 1.962 to 2.141 s and
+470 to 485 cpu per delivered frame before, 1.175 to 1.368 s and 355 to 365 after.
+about 1.6x on the wall, and the cpu is the duplicate decode itself rather than
+the wait it caused. the table above is one run and sits 15 to 20% above those
+floors. `Read` at the same settings does not move -- 1.398 to 1.441 s before
+against 1.425 to 1.428 s after -- and that is the control, since `Read` has one
+consumer.
 
 ## change
 

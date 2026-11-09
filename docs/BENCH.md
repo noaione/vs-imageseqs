@@ -294,9 +294,11 @@ four background workers and none are close to the same row at eight frames in
 flight: 1.689 s against 1.747 s, which is the spread of the machine rather than
 a gain. the default serial read is 1.59x slower than the same pool driven by a
 consumer that keeps eight frames in flight, and the parallelism that does it is
-the consumer's own threads. `prefetch` above four only pays for a serial
-consumer, and [46](improvements/46-request-thread-decode.md) is the attempt to
-move that work onto the pool, measured and rejected.
+the consumer's own threads. a deep pool pays in both regimes, but more to the
+serial one: 2.693 s to 1.513 s is 1.78x, against 1.626 s to 1.324 s, which is
+1.23x, for a consumer with eight frames in flight.
+[46](improvements/46-request-thread-decode.md) is the attempt to move that work
+onto the pool itself, measured and rejected.
 
 `ReadAlpha`, both clips of every frame, same set:
 
@@ -311,6 +313,46 @@ move that work onto the pool, measured and rejected.
 asking both clips for the same frame is free. walking one clip to the end and
 then the other decodes every file twice, because the distance between the two
 requests is the sequence length and no bounded cache holds 35 payloads.
+
+`prefetch` is the other half of it. the pool's window is `workers + 2`, so the
+default four covers six frames; a consumer that keeps more than that in flight
+outruns it and decodes on its own threads instead. `Read`, async 8, best of
+five, one run:
+
+| `prefetch` | wall | ms/frame | cpu/frame |
+| ---: | ---: | ---: | ---: |
+| 0 | 1.659 s | 47.40 | 310 |
+| 2 | 1.713 s | 48.95 | 326 |
+| 4 (default) | 1.626 s | 46.45 | 305 |
+| 6 | 1.493 s | 42.65 | 311 |
+| 8 | 1.463 s | 41.81 | 310 |
+| 10 | 1.372 s | 39.20 | 333 |
+| 12 | 1.324 s | 37.84 | 338 |
+| 14 | 1.522 s | 43.47 | 364 |
+| 16 | 1.492 s | 42.62 | 353 |
+| 20 | 1.452 s | 41.50 | 361 |
+
+the last three rows are this machine's drift and not a cost: a paired A/B of 12
+against 16, alternating inside one process, puts both at 1.444 s. so the curve
+is about 1.2x from the default to `prefetch=12` and flat after it, and 20 is 16
+because `MAX_WORKERS` and the window both stop at 16. peak working set is
+1065 MiB at the default against about 1130 MiB at 12.
+
+a two-clip call wants the same depth. `ReadAlpha`, async 8, `prefetch` 4, 8, 12,
+16: interleaved 1.757 / 1.423 / 1.254 / 1.200 s and branches 2.855 / 1.905 /
+1.327 / 1.297 s.
+
+an alternating A/B of the two builds, before 45 and 47 against after, five
+separate processes each, because one long run heats this machine and moves both
+builds by about 20%: the `prefetch=16` row above re-measures at 1.962 to 2.141 s
+and 470 to 485 cpu per delivered frame before, against 1.175 to 1.368 s and 355
+to 365 after. about 1.6x on the wall, and the cpu is the duplicate decode
+itself rather than the wait it caused. the `ReadAlpha` table is one long run
+and sits 15 to 20% above those floors.
+
+`Read` at the same settings does not move: 1.398 to 1.441 s before against 1.425
+to 1.428 s after, six alternating runs of five each, because `Read` has one
+consumer and 45 is about the second.
 
 `--lag` sweeps the distance between the two clips, and it is the row
 [45](improvements/45-async-request-cache.md) was judged on: colour frame `n`
