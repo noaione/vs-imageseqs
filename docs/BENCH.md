@@ -264,3 +264,63 @@ sample for sample, and whole files from the two builds are byte identical.
 gray and rgb routes did not move (0.680 / 0.663 s before against 0.682 / 0.673 s
 after, 24 gray8 pages). `output_dir` only changes naming and did not move the
 tables either.
+
+## read path, several frames in flight
+
+the tables above are a serial consumer: one `get_frame` at a time, with
+`prefetch` frames decoded ahead of it. an async consumer is a different regime,
+because `get_frame_async(n)` keeps N requests open and each of them may claim
+and decode its own frame on the calling thread (`Prefetcher::fetch`) instead of
+waiting for the pool to arrive at it.
+
+`target/bench/read-async.py` is the measurement. `sandbox/webp`, all 35 pages,
+3672x5274 `YUV420P8` and 27.7 MiB decoded per frame, best pass of a run:
+
+| request style | wall | ms/frame | cpu/frame |
+| --- | ---: | ---: | ---: |
+| `prefetch=0`, serial | 8.720 s | 249.15 | 248 |
+| default (4), serial | 2.669 s | 76.27 | 297 |
+| default (4), async 4 | 2.603 s | 74.38 | 284 |
+| default (4), async 8 | 1.528 s | 43.64 | 297 |
+| default (4), async 12 | 1.417 s | 40.48 | 337 |
+| `prefetch=0`, async 8 | 1.525 s | 43.56 | 301 |
+| `prefetch=16`, serial | 1.354 s | 38.69 | 363 |
+| `prefetch=16`, async 8 | 1.253 s | 35.81 | 342 |
+
+four background workers and none are the same row at eight in flight, which
+is the entry [46](improvements/46-request-thread-decode.md) is written from: the
+default serial read is 1.75x slower than the same pool driven by a consumer that
+keeps eight frames in flight, and the parallelism that does it is the consumer's
+own threads. `prefetch` above four only pays for a serial consumer.
+
+`ReadAlpha`, both clips of every frame, same set:
+
+| two clips of one call | wall | ms per delivered frame | cpu per delivered frame |
+| --- | ---: | ---: | ---: |
+| interleaved, default | 2.733 s | 78.08 | 307 |
+| branches, default | 7.037 s | 201.04 | 533 |
+| interleaved, async 8 | 2.007 s | 57.34 | 319 |
+| branches, async 8 | 3.317 s | 94.78 | 638 |
+| branches, async 8, `prefetch=16` | 2.460 s | 70.29 | 502 |
+
+asking both clips for the same frame is free. walking one clip to the end and
+then the other decodes every file twice, which is what the cpu column says, and
+[45](improvements/45-async-request-cache.md) is why the cache cannot hold the
+sequence.
+
+peak working set of the whole process, one configuration per process, with
+`--memory`:
+
+| request style | peak |
+| --- | ---: |
+| `prefetch=0`, serial | 697 MiB |
+| default (4), serial | 911 MiB |
+| default (4), async 8 | 1043 MiB |
+| default (4), async 12 | 1110 MiB |
+| `prefetch=16`, async 8 | 1165 MiB |
+
+the run-to-run spread at fixed settings is up to 20% on this machine, so the
+absolute numbers are one run and only the same-run comparisons are safe to read
+as ratios. a second run reproduced the pairing that matters — 1.740 s at
+`prefetch=4` against 1.711 s at `prefetch=0`, both at eight in flight — while
+moving every absolute number.
