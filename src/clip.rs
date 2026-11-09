@@ -357,6 +357,12 @@ impl Prepare for FrameBuilder {
         self.segments.len()
     }
 
+    fn consumers(&self) -> usize {
+        // `Read` hands out one clip and `ReadAlpha` two, and both ask this pool
+        // for the same index, so one payload serves every clip of the call.
+        self.clips.len()
+    }
+
     fn demand(&self) -> Demand {
         demand_of(&self.clips)
     }

@@ -49,11 +49,17 @@ pub fn automatic_workers() -> usize {
 /// three of the 55 MiB sandbox webp frames, so a window of 16 queued frames it
 /// had to evict again and decoded them a second time instead of reading ahead.
 /// The budget therefore follows the requested window, and the floor keeps
-/// small frames at the previous value.
+/// small frames at the previous value. `consumers` is how many clips of one
+/// call take each payload, which is what makes a second request for one index
+/// free: a call that hands out two clips asks for every frame twice, so the
+/// window it needs is twice as wide in bytes.
 #[must_use]
-pub fn automatic_budget(sizes: &[usize], window: usize) -> usize {
+pub fn automatic_budget(sizes: &[usize], window: usize, consumers: usize) -> usize {
     let largest = sizes.iter().copied().max().unwrap_or(0);
-    window.saturating_mul(largest).max(DEFAULT_BYTE_BUDGET)
+    window
+        .saturating_mul(largest)
+        .saturating_mul(consumers.max(1))
+        .max(DEFAULT_BYTE_BUDGET)
 }
 
 /// What one finished decode hands to the clips that ask for an index.
@@ -84,6 +90,15 @@ pub trait Prepare: Send + Sync + 'static {
 
     /// Number of output frames the sequence has.
     fn frames(&self) -> usize;
+
+    /// How many clips of one call take the payload of one index.
+    ///
+    /// `Read` hands out one clip and `ReadAlpha` two, and both are served by the
+    /// same decode, so a payload a second clip still wants has to be held
+    /// differently from one every clip has already taken. This is also the
+    /// multiplier the lookahead budget is sized by, because a call of two clips
+    /// asks for every frame twice.
+    fn consumers(&self) -> usize;
 
     /// What the decode that feeds this payload has to produce.
     ///
@@ -125,6 +140,13 @@ struct State<P: Prepare> {
     /// Finished payloads waiting for a `fetch` call.
     ready: BTreeMap<i32, std::result::Result<P::Payload, String>>,
     ready_bytes: usize,
+    /// Clips that take the payload of one index, from [`Prepare::consumers`].
+    consumers: usize,
+    /// Hand-outs each cached payload still owes the clips of its call.
+    ///
+    /// A payload at zero has been taken by every clip of the call, which is the
+    /// one eviction drops first.
+    holds: BTreeMap<i32, usize>,
     /// Bumped whenever requests stop being sequential so that results from
     /// the previous access pattern can be discarded.
     generation: u64,
@@ -148,7 +170,10 @@ struct State<P: Prepare> {
 /// Everything a request needs is finished before it is cached, so the thread
 /// that answers a frame request never decodes or writes pixels. Successful
 /// decodes stay cached until they are evicted, so a filter that returns several
-/// clips shares one decode per frame.
+/// clips shares one decode per frame. A payload a second clip still wants is
+/// the last thing eviction drops, and the budget is sized for the number of
+/// clips the call hands out, so that share survives as long as the frames fit
+/// it.
 pub struct Prefetcher<P: Prepare> {
     /// Payload bytes of every output frame, in frame order.
     sizes: Arc<[usize]>,
@@ -175,7 +200,8 @@ impl<P: Prepare> Prefetcher<P> {
             .map(|index| prepare.estimate(index))
             .collect::<Vec<_>>()
             .into();
-        let budget = budget.unwrap_or_else(|| automatic_budget(&sizes, window));
+        let consumers = prepare.consumers().max(1);
+        let budget = budget.unwrap_or_else(|| automatic_budget(&sizes, window, consumers));
 
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
@@ -183,10 +209,12 @@ impl<P: Prepare> Prefetcher<P> {
                 in_flight: HashSet::new(),
                 ready: BTreeMap::new(),
                 ready_bytes: 0,
+                consumers,
+                holds: BTreeMap::new(),
                 generation: 0,
                 last_index: None,
                 window,
-                entry_cap: window + READY_ENTRY_MARGIN,
+                entry_cap: window.saturating_mul(consumers) + READY_ENTRY_MARGIN,
                 budget,
             }),
             signal: Condvar::new(),
@@ -240,8 +268,13 @@ impl<P: Prepare> Prefetcher<P> {
                         return Err(ImgSeqError::new(message));
                     }
                 }
-                if let Some(Ok(payload)) = state.ready.get(&index) {
-                    return Ok(payload.clone());
+                let cached = match state.ready.get(&index) {
+                    Some(Ok(payload)) => Some(payload.clone()),
+                    _ => None,
+                };
+                if let Some(payload) = cached {
+                    note_handout(&mut state, index);
+                    return Ok(payload);
                 }
                 if claim(&mut state, index) {
                     drop(state);
@@ -251,6 +284,7 @@ impl<P: Prepare> Prefetcher<P> {
                     let result = match built {
                         Ok(payload) => {
                             store(&mut state, index, Ok(payload.clone()));
+                            note_handout(&mut state, index);
                             Ok(payload)
                         }
                         Err(error) => {
@@ -297,15 +331,26 @@ impl<P: Prepare> Prefetcher<P> {
     fn plan(&self, index: i32) {
         let mut state = self.lock();
         // A filter that returns several clips asks for the same frame once per
-        // clip, so a repeated request still counts as sequential access.
+        // clip, so a repeated request still counts as sequential access. A
+        // request that moves forward by one step is the same walk. A request
+        // behind the newest position is a second clip of the call asking for a
+        // frame the first one has already passed, or a small replay: it is
+        // served from the cache or claimed by the caller, and it cannot
+        // invalidate a lookahead that is ahead of it. So only a jump forward is
+        // a new access pattern. Discarding the queue for every lagging request
+        // cost 4.19x the cpu of one decode per delivered frame on `ReadAlpha`
+        // with its two clips a few frames apart, against 1.28x with no pool.
         let sequential = state
             .last_index
-            .is_some_and(|last| index == last || index == last.saturating_add(1));
+            .is_some_and(|last| i64::from(index) <= i64::from(last) + 1);
         if !sequential {
             state.generation = state.generation.wrapping_add(1);
             state.queue.clear();
         }
-        state.last_index = Some(index);
+        // The newest position is a high-water mark. Lowering it to a request
+        // behind it would make the next forward step look like a seek even
+        // though only one walk moved.
+        state.last_index = Some(state.last_index.map_or(index, |last| last.max(index)));
         plan_window(&mut state, &self.sizes, index);
 
         drop(state);
@@ -407,12 +452,32 @@ fn plan_window<P: Prepare>(state: &mut State<P>, sizes: &[usize], index: i32) {
 fn make_room<P: Prepare>(state: &mut State<P>, sizes: &[usize], index: i32, wanted: usize) {
     let mut freed = 0;
     while freed < wanted {
-        let Some(victim) = state.ready.keys().find(|&&key| key < index).copied() else {
+        let Some(victim) = behind(state, index) else {
             break;
         };
         freed = freed.saturating_add(frame_size(sizes, victim));
         release(state, victim);
     }
+}
+
+/// Oldest cached payload behind `index`, preferring one every clip has taken.
+///
+/// The lookahead needs room for a frame the consumer is about to ask for, so
+/// what it may release is what is already behind it. A payload a second clip
+/// still wants is the last thing to go, because releasing it is what makes that
+/// clip decode the file again.
+fn behind<P: Prepare>(state: &State<P>, index: i32) -> Option<i32> {
+    let mut oldest = None;
+    for &key in state.ready.keys() {
+        if key >= index {
+            break;
+        }
+        oldest.get_or_insert(key);
+        if state.holds.get(&key).copied().unwrap_or(0) == 0 {
+            return Some(key);
+        }
+    }
+    oldest
 }
 
 /// Decoded size of one frame, zero when the index is out of range.
@@ -503,9 +568,21 @@ fn store<P: Prepare>(
     }
     if let Ok(payload) = &result {
         state.ready_bytes = state.ready_bytes.saturating_add(payload.bytes());
+        state.holds.insert(index, state.consumers);
     }
     state.ready.insert(index, result);
     evict(state);
+}
+
+/// Records that one clip has taken the payload of `index`.
+///
+/// A payload at zero has been taken by every clip of the call, which is the one
+/// eviction prefers to drop: it is kept only so that a later request can share
+/// it.
+fn note_handout<P: Prepare>(state: &mut State<P>, index: i32) {
+    if let Some(holds) = state.holds.get_mut(&index) {
+        *holds = holds.saturating_sub(1);
+    }
 }
 
 /// Releases one cached payload, keeping the byte accounting in sync.
@@ -513,6 +590,7 @@ fn release<P: Prepare>(state: &mut State<P>, index: i32) {
     if let Some(Ok(payload)) = state.ready.remove(&index) {
         state.ready_bytes = state.ready_bytes.saturating_sub(payload.bytes());
     }
+    state.holds.remove(&index);
 }
 
 /// Everything the pool holds or has committed to produce: the payloads cached
@@ -551,17 +629,38 @@ fn evict<P: Prepare>(state: &mut State<P>) {
         if state.ready.len() <= 1 {
             break;
         }
-        let (Some(&oldest), Some(&newest)) =
-            (state.ready.keys().next(), state.ready.keys().next_back())
-        else {
+        let Some(victim) = pick_victim(state) else {
             break;
-        };
-        let victim = match state.last_index {
-            Some(last) if oldest < last => oldest,
-            _ => newest,
         };
         release(state, victim);
     }
+}
+
+/// Chooses the payload eviction drops next.
+///
+/// A payload every clip of the call has already taken goes before one a second
+/// clip still wants: the first is only kept so that a later request can share
+/// it, and the second is the share [`Prepare::consumers`] exists for. Inside
+/// each group the rule is unchanged -- the oldest payload behind the newest
+/// request first, because consumers only move forward, and otherwise the
+/// furthest one ahead, because it is the cheapest to decode again later.
+fn pick_victim<P: Prepare>(state: &State<P>) -> Option<i32> {
+    let oldest = *state.ready.keys().next()?;
+    let newest = *state.ready.keys().next_back()?;
+    let holds = |key: i32| state.holds.get(&key).copied().unwrap_or(0);
+    let preferred = match state.last_index {
+        Some(last) if oldest < last => oldest,
+        _ => newest,
+    };
+    if holds(preferred) == 0 {
+        return Some(preferred);
+    }
+    state
+        .ready
+        .keys()
+        .copied()
+        .find(|&key| holds(key) == 0)
+        .or(Some(preferred))
 }
 
 #[cfg(test)]
@@ -575,7 +674,7 @@ mod tests {
 
     use super::{
         DEFAULT_BYTE_BUDGET, Payload, Prefetcher, Prepare, READY_ENTRY_MARGIN, State,
-        automatic_budget, committed_bytes, plan_window,
+        automatic_budget, committed_bytes, note_handout, plan_window, store,
     };
     use crate::decoder::{self, DecodeTimings, DecodedImage, Demand, ImageInfo, Pixels};
     use crate::error::Result;
@@ -625,6 +724,8 @@ mod tests {
             queue: VecDeque::new(),
             in_flight: HashSet::new(),
             ready: BTreeMap::new(),
+            consumers: 1,
+            holds: BTreeMap::new(),
             ready_bytes: 0,
             generation: 0,
             last_index: None,
@@ -642,15 +743,25 @@ mod tests {
     /// what a sequence of stills is.
     struct Decode {
         images: Arc<[ImageInfo]>,
+        /// How many clips of one call take each payload; one file is one frame.
+        consumers: usize,
     }
 
     impl Decode {
         fn of(images: Arc<[ImageInfo]>) -> Self {
-            Self { images }
+            Self {
+                images,
+                consumers: 1,
+            }
         }
 
         fn named(names: &[&str]) -> Self {
             Self::of(images(names))
+        }
+
+        fn sharing(mut self, consumers: usize) -> Self {
+            self.consumers = consumers;
+            self
         }
     }
 
@@ -681,6 +792,10 @@ mod tests {
 
         fn frames(&self) -> usize {
             self.images.len()
+        }
+
+        fn consumers(&self) -> usize {
+            self.consumers
         }
 
         fn demand(&self) -> Demand {
@@ -770,7 +885,7 @@ mod tests {
     fn automatic_budget_keeps_the_floor_and_follows_the_window() {
         let small = synthetic(1404, 2000, ColorType::Rgb8);
         assert_eq!(
-            automatic_budget(&[bytes(&small)], 6),
+            automatic_budget(&[bytes(&small)], 6, 1),
             DEFAULT_BYTE_BUDGET,
             "payloads that fit the floor do not move it"
         );
@@ -779,12 +894,12 @@ mod tests {
         assert_eq!(bytes(&large), 3672 * 5274 * 3);
         let sizes = [bytes(&large)];
         assert_eq!(
-            automatic_budget(&sizes, 6),
+            automatic_budget(&sizes, 6, 1),
             bytes(&large) * 6,
             "a deep window on large payloads raises the budget"
         );
         assert_eq!(
-            automatic_budget(&sizes, 0),
+            automatic_budget(&sizes, 0, 1),
             DEFAULT_BYTE_BUDGET,
             "without lookahead only the floor is needed"
         );
@@ -873,6 +988,8 @@ mod tests {
             queue: VecDeque::from([(0, 1)]),
             in_flight: HashSet::from([2]),
             ready: BTreeMap::new(),
+            consumers: 1,
+            holds: BTreeMap::new(),
             ready_bytes: 40,
             generation: 0,
             last_index: None,
@@ -884,5 +1001,90 @@ mod tests {
         // A failed decode is cached without holding a frame of data.
         state.ready.insert(0, Err(String::from("boom")));
         assert_eq!(committed_bytes(&state, &sizes), 90);
+    }
+
+    #[test]
+    fn a_budget_follows_the_consumers_of_a_call() {
+        let sizes = [64 * 1024 * 1024];
+        assert_eq!(automatic_budget(&sizes, 4, 1), 4 * 64 * 1024 * 1024);
+        assert_eq!(
+            automatic_budget(&sizes, 4, 2),
+            8 * 64 * 1024 * 1024,
+            "a call of two clips asks for every frame twice"
+        );
+        assert_eq!(
+            automatic_budget(&sizes, 0, 2),
+            DEFAULT_BYTE_BUDGET,
+            "without lookahead only the floor is needed, whatever the clip count"
+        );
+    }
+
+    #[test]
+    fn a_two_clip_call_caches_two_clips_worth() {
+        let one = Prefetcher::new(Decode::named(&["gray.pgm"]), 2, None);
+        let two = Prefetcher::new(Decode::named(&["gray.pgm"]).sharing(2), 2, None);
+        let window = 2 + 2;
+        assert_eq!(
+            two.lock().entry_cap - one.lock().entry_cap,
+            window,
+            "a call of two clips keeps twice the window worth of payloads"
+        );
+    }
+
+    #[test]
+    fn a_payload_a_second_clip_still_wants_is_the_last_one_dropped() {
+        // Two clips take every payload. Frame 1 has been taken by both, frame 0
+        // has only been taken by the first, so eviction must drop frame 1 even
+        // though frame 0 is the older one.
+        let mut state = state_with(4, usize::MAX);
+        state.consumers = 2;
+        state.entry_cap = 2;
+        store(&mut state, 0, Ok(Arc::new(decoded(10))));
+        store(&mut state, 1, Ok(Arc::new(decoded(10))));
+        note_handout(&mut state, 1);
+        note_handout(&mut state, 1);
+        state.last_index = Some(2);
+
+        store(&mut state, 2, Ok(Arc::new(decoded(10))));
+
+        assert!(
+            !state.ready.contains_key(&1),
+            "a payload every clip has taken goes first"
+        );
+        assert!(
+            state.ready.contains_key(&0),
+            "a payload a second clip still wants stays"
+        );
+    }
+
+    #[test]
+    fn a_clip_that_lags_behind_is_not_a_new_access_pattern() {
+        // `ReadAlpha` hands out two clips, and a graph that consumes them as
+        // separate branches asks for one frame from each, a few frames apart.
+        // That is one walk, so it must not reset the lookahead, and it must
+        // not move the newest position backwards.
+        let prefetcher = Prefetcher::new(Decode::named(&["gray.pgm", "rgb.ppm"]), 4, None);
+        prefetcher.plan(10);
+        let generation = prefetcher.lock().generation;
+
+        prefetcher.plan(2);
+        assert_eq!(
+            prefetcher.lock().last_index,
+            Some(10),
+            "the lagging clip does not lower the mark"
+        );
+        prefetcher.plan(11);
+        assert_eq!(
+            prefetcher.lock().generation,
+            generation,
+            "a lagging clip then one step forward are the same walk"
+        );
+
+        prefetcher.plan(20);
+        assert_ne!(
+            prefetcher.lock().generation,
+            generation,
+            "a jump forward is a new access pattern"
+        );
     }
 }
