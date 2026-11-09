@@ -11,6 +11,7 @@
 ### performance
 
 - On the 35-page JPEG 2000 corpus, read time is effectively unchanged: 0.9% faster with the default four workers and 0.4% faster with `prefetch=0` than 0.4.1.
+- Improve `ReadAlpha` performance when doing async frame requests.
 
 ## [0.4.2] - 2026-10-28
 
