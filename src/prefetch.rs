@@ -137,6 +137,11 @@ struct State<P: Prepare> {
     queue: VecDeque<(u64, i32)>,
     /// Frames currently being decoded by a worker or by a consumer.
     in_flight: HashSet<i32>,
+    /// The subset of `in_flight` a consumer thread is decoding.
+    ///
+    /// The pool can neither evict nor refuse those bytes, so they are not the
+    /// pool's to budget while the claim is open; see [`committed_bytes`].
+    claimed: HashSet<i32>,
     /// Finished payloads waiting for a `fetch` call.
     ready: BTreeMap<i32, std::result::Result<P::Payload, String>>,
     ready_bytes: usize,
@@ -207,6 +212,7 @@ impl<P: Prepare> Prefetcher<P> {
             state: Mutex::new(State {
                 queue: VecDeque::new(),
                 in_flight: HashSet::new(),
+                claimed: HashSet::new(),
                 ready: BTreeMap::new(),
                 ready_bytes: 0,
                 consumers,
@@ -496,6 +502,7 @@ fn claim<P: Prepare>(state: &mut State<P>, index: i32) -> bool {
         return false;
     }
     state.in_flight.insert(index);
+    state.claimed.insert(index);
     true
 }
 
@@ -571,6 +578,9 @@ fn store<P: Prepare>(
         state.holds.insert(index, state.consumers);
     }
     state.ready.insert(index, result);
+    // A stored payload ends whatever claim was open on its index, so the term
+    // `committed_bytes` leaves out is only ever a decode still in progress.
+    state.claimed.remove(&index);
     evict(state);
 }
 
@@ -596,6 +606,14 @@ fn release<P: Prepare>(state: &mut State<P>, index: i32) {
 /// Everything the pool holds or has committed to produce: the payloads cached
 /// for a consumer, the payloads a worker is building, and the ones still queued.
 ///
+/// A frame a consumer claimed is not one of them. The pool can neither evict it
+/// nor refuse it, so counting it only turns the consumer's pipelining into the
+/// pool's starvation: with more frames in flight than the budget holds,
+/// `plan_window` would see a full budget and queue nothing, which is the state
+/// [45](45-async-request-cache.md) measured four pool workers contributing 0.2%
+/// in. A claim is open from `claim` until the payload is stored, so the term
+/// left out here is only ever a decode still in progress.
+///
 /// Derived from the maps rather than kept as a counter, so it cannot drift when
 /// a decode fails, is claimed by a consumer, or is dropped with a generation.
 fn committed_bytes<P: Prepare>(state: &State<P>, sizes: &[usize]) -> usize {
@@ -615,6 +633,7 @@ fn committed_bytes<P: Prepare>(state: &State<P>, sizes: &[usize]) -> usize {
         + state
             .in_flight
             .iter()
+            .filter(|&&index| !state.claimed.contains(&index))
             .map(|&index| size(index))
             .sum::<usize>()
 }
@@ -723,6 +742,7 @@ mod tests {
         State {
             queue: VecDeque::new(),
             in_flight: HashSet::new(),
+            claimed: HashSet::new(),
             ready: BTreeMap::new(),
             consumers: 1,
             holds: BTreeMap::new(),
@@ -987,6 +1007,7 @@ mod tests {
         let mut state = State::<Decode> {
             queue: VecDeque::from([(0, 1)]),
             in_flight: HashSet::from([2]),
+            claimed: HashSet::new(),
             ready: BTreeMap::new(),
             consumers: 1,
             holds: BTreeMap::new(),
@@ -1001,6 +1022,46 @@ mod tests {
         // A failed decode is cached without holding a frame of data.
         state.ready.insert(0, Err(String::from("boom")));
         assert_eq!(committed_bytes(&state, &sizes), 90);
+    }
+
+    #[test]
+    fn a_claimed_frame_is_not_the_pools_to_account_for() {
+        // A consumer that claimed a frame holds it until it stores the payload,
+        // so those bytes are the graph's and must not stop the pool from
+        // planning ahead of them.
+        let sizes = [10, 20, 30];
+        let mut state = state_with(2, 30);
+        state.in_flight = HashSet::from([1]);
+        state.claimed = HashSet::from([1]);
+        assert_eq!(
+            committed_bytes(&state, &sizes),
+            0,
+            "a claimed frame is the caller's to hold"
+        );
+
+        state.claimed.clear();
+        assert_eq!(
+            committed_bytes(&state, &sizes),
+            20,
+            "a frame a worker is decoding is the pool's"
+        );
+    }
+
+    #[test]
+    fn a_claimed_frame_does_not_stop_the_lookahead() {
+        // The budget `plan_window` walks is the one `committed_bytes` reports, so
+        // a frame a consumer is decoding must not count as the pool's own.
+        let sizes = [10, 10, 10, 10];
+        let mut state = state_with(2, 15);
+        state.in_flight = HashSet::from([0]);
+        state.claimed = HashSet::from([0]);
+
+        plan_window(&mut state, &sizes, 0);
+
+        assert!(
+            state.queue.iter().any(|&(_, index)| index == 1),
+            "the lookahead plans past a frame the consumer is decoding"
+        );
     }
 
     #[test]
