@@ -1,11 +1,15 @@
 # 46 — who decodes a requested frame
 
-- status: proposed
+- status: rejected by its own acceptance, after being implemented and measured
 - touches: `src/prefetch.rs`
 - expected: a frame the pool can produce is produced by the pool, so a graph
   with work downstream does not pay for this filter with its own threads
-- risk: medium — it changes the `prefetch=0` path if done carelessly, and it
-  adds a wake-up per frame that a bare sink does not need
+- outcome: implemented, measured, and reverted. Queuing the request instead of
+  claiming it caps the frames in flight at the worker count, which costs 1.57x
+  on a bare async consumer at eight frames in flight, and nothing measured
+  gained enough to pay for it
+- risk: high, as the measurement shows. The thread-ownership half of the change
+  is not wrong; the mechanism it was built on is
 
 ## problem
 
@@ -30,75 +34,85 @@ finds the threads busy decoding.
 
 ## evidence
 
-same set and machine as [45](45-async-request-cache.md). `prefetch=0` is the
-control: with no workers there is nothing to claim from, so every frame is
-decoded by whoever asked for it.
+same set and machine as [45](45-async-request-cache.md): `sandbox/webp`, 35
+pages of 3672x5274 `YUV420P8`, 27.7 MiB decoded per frame, i5-11400H (6 cores,
+12 threads), release build, best of three. `prefetch=0` is the control: with no
+workers there is nothing to claim from and nothing to queue for, so it is
+untouched by this change and moved by nothing.
 
-| request style | wall | ms/frame | cpu/frame |
+| request style | before | after | change |
 | --- | ---: | ---: | ---: |
-| default (4), serial | 2.669 s | 76.3 | 297 |
-| default (4), async 8 | 1.528 s | 43.6 | 297 |
-| `prefetch=0`, async 8 | 1.525 s | 43.6 | 301 |
-| `prefetch=16`, serial | 1.354 s | 38.7 | 363 |
-| `prefetch=16`, async 8 | 1.253 s | 35.8 | 342 |
+| default (4), serial | 2.683 s | 2.687 s | unchanged |
+| default (4), async 4 | 2.637 s | 2.732 s | 3.6% slower |
+| default (4), async 8 | 1.724 s | 2.704 s | **1.57x slower** |
+| default (4), async 12 | 1.544 s | 1.819 s | 18% slower |
+| `prefetch=0`, async 8 | 1.768 s | 1.724 s | unchanged, as designed |
+| `prefetch=16`, async 8 | 1.453 s | 1.521 s | 4.7% slower |
 
-four workers against none, at the same eight frames in flight, is 1.528 s
-against 1.525 s. the pool contributes 0.2%, which is to say the four background
-workers are not what delivers the 1.75x that async buys over the default serial
-read. the async consumer's own threads are.
+`ReadAlpha`, both clips of every frame:
 
-a second run agreed on the pairing rather than on the absolute numbers (1.740 s
-against 1.711 s), and the spread between runs is up to 20% at fixed settings, so
-only the same-run comparison is trustworthy.
+| two clips | before | after | change |
+| --- | ---: | ---: | ---: |
+| interleaved, serial | 2.761 s | 2.786 s | unchanged |
+| interleaved, async 8 | 2.038 s | 2.755 s | 35% slower |
+| branches, async 8 | 3.192 s | 3.812 s | 19% slower |
+| branches, async 8, `prefetch=16` | 1.594 s | 2.164 s | 36% slower |
 
-so `prefetch` is a serial-consumer argument, and an async consumer that sets it
-is setting something that is not on its path. that is a problem of expectation
-as much as of speed: the argument's documentation says it selects background
-decode workers, and under async it does not select what does the decoding.
+## what the change was
 
-## change
+1. `State` records `workers`, and `fetch` no longer claims a frame the pool has
+   not planned: it offers that index to the front of the queue, so the next
+   worker pop takes it, and waits for it on the condvar that already carried the
+   wait-for-another-decoder case.
+2. `reserve` refuses when the pool has no free worker
+   (`in_flight.len() >= workers`), when it has no workers at all, or when the
+   index does not fit the byte budget, which is the same rule `plan_window`
+   applies to the frames it plans. What it refuses, the caller decodes as
+   before.
+3. The wait predicate gained "or still queued", and the `WAIT_TIMEOUT` takeover
+   removes the index from the queue as well as from `in_flight`, so a worker
+   that stalls cannot hang the graph.
 
-1. make the wait policy a decision rather than a fallback. in `fetch`, when the
-   payload is absent:
-   - `workers == 0` keeps claiming. there is nothing else that can decode, and
-     queueing into an empty queue would serialise the clip.
-   - otherwise queue exactly this index at the front of the queue and wait on
-     the same condvar the "another thread is already decoding this" branch
-     already waits on. the existing `WAIT_TIMEOUT` stays as the escape hatch and
-     falls back to a claim, so a worker that stalls cannot hang the graph.
-2. the new "plan this index" is `plan_window`'s first candidate without the rest
-   of the window, so it goes through the same byte accounting and the same
-   generation check. an index the consumer asks for is not allowed to bypass the
-   budget that a planned one respects.
-3. `prefetch`'s documentation stops claiming what it does not do under async: it
-   selects background decoders, and a consumer that keeps frames in flight gets
-   that concurrency from the graph whether the argument is set or not.
+## decision — reject
 
-## decision
+**why it fails.** reserving a frame is only cheap when a worker is genuinely
+idle, and `in_flight.len() >= workers` is a poor test of that: a consumer that
+opens eight futures does not open them one at a time. All eight requests check
+the same counter before any worker has started, all eight see room, all eight
+queue, and the concurrency of the read collapses from eight to the four workers.
+At depth 4, where the burst cannot overshoot the worker count, the change is
+within noise; the regression appears exactly at depth 8 and above, which is the
+shape the diagnosis predicts.
 
-**why this is not obviously a win, and is measured first.** claiming is the
-right answer for a bare sink and the wrong one for a pipeline, and the two
-cannot be told apart from inside the filter. so the change is worth landing only
-if the pipeline case gains more than the bare-sink case loses.
+**why it is not worth refining.** the honest version of this change counts the
+frames a consumer has queued and stops offering once `in_flight + reserved`
+reaches the worker count, which would keep concurrency at eight while moving
+what it can onto the workers. That is more machinery for a benefit this plan
+never measured: the only case it is for — a pipeline that has real work
+downstream, `PNGWrite` in its `Parallel` mode over the same pages — does not
+exist as a row anywhere, and a bare sink gains nothing by construction because
+its wall time is bounded by the machine, not by which thread did the work. The
+plan's own `## acceptance` asks for the pipeline row to improve by more than the
+bare-sink regression, and a 57% regression is not a bar any unmeasured gain
+should be allowed to clear.
 
-**why the loss should be small.** queueing costs one condvar wake-up and one
-mutex hand-off, tens of microseconds, against a decode of 250 ms on this set and
-1.3 s on the jpeg 2000 set. it cannot be a wall-time cost; it can only be a
-latency cost, and only for a frame that arrives before any worker is ready.
+**what is kept instead.** the observation that stands is a documentation one:
+under an async consumer the decode runs on VapourSynth's threads, and `prefetch`
+is therefore a serial-consumer argument. That belongs in `prefetch`'s own
+documentation and in [BENCH.md](../BENCH.md), not in a scheduler change, and it
+is recorded in [47](47-claim-budget-accounting.md), which is the plan that takes
+the accounting half of this problem without touching who decodes.
 
-**why it might still be rejected.** if the pipeline measurement shows the gain
-is inside run-to-run noise, then the honest outcome is to leave `fetch` alone
-and document the thread ownership instead, which is the cheaper half of the
-change and the half that fixes the wrong expectation.
+## acceptance — not met
 
-## acceptance
+- bare-sink rows within 3% of the previous build at every depth. **failed at
+  depth 8 and above**: 1.57x slower at eight frames in flight, 18% at twelve.
+- a pipeline row that does not exist yet. **not built**, and a 57% bare-sink
+  loss is not recoverable by a case nobody has measured.
+- no deadlock. **met**: the timeout takeover dropped the stale queue entry and
+  every test passed, including `retries_failed_decodes`, so the mechanism was
+  sound and only the policy was wrong.
 
-- bare-sink rows in `read-async.py` within 3% of today at every depth, with the
-  `prefetch=0` row identical to the millisecond, because that path is untouched.
-- a pipeline row that does not exist yet: `PNGWrite` in `Parallel` mode over the
-  same 35 pages, in the shape `target/bench/png-write-async.py` already measures
-  the writer in on its own. the whole-pipeline wall time must improve, and the
-  improvement must be larger than the bare-sink regression.
-- no deadlock: `WAIT_TIMEOUT` must still fall back to a claim, and the
-  `retries_failed_decodes` test in `src/prefetch.rs` must keep passing, since it
-  exercises the path where a worker produces an error rather than a payload.
+The code was reverted to the state [45](45-async-request-cache.md) left it in.
+`cargo test --locked` is 370 tests and the release build's async rows are back
+to 1.728 s at eight frames in flight against 1.724 s before the experiment.
