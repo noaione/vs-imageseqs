@@ -484,6 +484,8 @@ fn resolve_prefetch_workers(requested: Option<i64>) -> Result<usize> {
 ///
 /// `None` lets the pool size it from the worker count and the largest frame of
 /// the sequence, which is what `prefetch_memory` exists to override.
+/// It bounds the pool's cache and queue, not the graph: a frame a consumer has
+/// claimed is the graph's to hold, and the pool does not count it.
 fn resolve_prefetch_memory(requested: Option<i64>) -> Result<Option<usize>> {
     match requested {
         None => Ok(None),

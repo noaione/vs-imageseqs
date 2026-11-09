@@ -157,13 +157,15 @@ and an async consumer's parallelism is its own threads — which also means the
 decode runs on VapourSynth's pool. The same measurement shows `ReadAlpha`
 decoding every file twice when its two clips are walked as separate branches
 (533 against 307 cpu per delivered frame) and costing nothing extra when they
- are asked for together. [45](45-async-request-cache.md) is implemented: the lag
- two clips may drift apart before costing a second decode moved from 1 frame to
- 10, and what the measurement found was not a cache that was too small but the
- access-pattern reset that threw a worker's finished decodes away. [46](46-request-thread-decode.md)
- and [47](47-claim-budget-accounting.md) are not implemented; the first thing
- each needs is the measurement its `## acceptance` names, and the tables they
- were written from are in [BENCH.md](../BENCH.md).
+ are asked for together. [45](45-async-request-cache.md) and
+ [47](47-claim-budget-accounting.md) are implemented: the lag two clips may
+ drift apart before costing a second decode moved from 1 frame to 10, and what
+ the measurement found was not a cache that was too small but the
+ access-pattern reset that threw a worker's finished decodes away.
+ [46](46-request-thread-decode.md) was implemented and then rejected: queuing a
+ request instead of claiming it caps the frames in flight at the worker count,
+ and that cost 1.57x on a bare async consumer. Each page carries its own before
+ and after; the tables are in [BENCH.md](../BENCH.md).
 
 ### hayro jpeg 2000 0.5.0 — 2026-11-03
 

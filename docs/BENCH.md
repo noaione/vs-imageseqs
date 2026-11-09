@@ -273,40 +273,58 @@ because `get_frame_async(n)` keeps N requests open and each of them may claim
 and decode its own frame on the calling thread (`Prefetcher::fetch`) instead of
 waiting for the pool to arrive at it.
 
-`target/bench/read-async.py` is the measurement. `sandbox/webp`, all 35 pages,
-3672x5274 `YUV420P8` and 27.7 MiB decoded per frame, best pass of a run:
+`target/bench/read-async.py` is the measurement, re-recorded on the build
+[45](improvements/45-async-request-cache.md) and
+[47](improvements/47-claim-budget-accounting.md) leave behind. `sandbox/webp`,
+all 35 pages, 3672x5274 `YUV420P8` and 27.7 MiB decoded per frame, best pass of
+three:
 
 | request style | wall | ms/frame | cpu/frame |
 | --- | ---: | ---: | ---: |
-| `prefetch=0`, serial | 8.720 s | 249.15 | 248 |
-| default (4), serial | 2.669 s | 76.27 | 297 |
-| default (4), async 4 | 2.603 s | 74.38 | 284 |
-| default (4), async 8 | 1.528 s | 43.64 | 297 |
-| default (4), async 12 | 1.417 s | 40.48 | 337 |
-| `prefetch=0`, async 8 | 1.525 s | 43.56 | 301 |
-| `prefetch=16`, serial | 1.354 s | 38.69 | 363 |
-| `prefetch=16`, async 8 | 1.253 s | 35.81 | 342 |
+| `prefetch=0`, serial | 9.310 s | 265.99 | 263 |
+| default (4), serial | 2.693 s | 76.94 | 303 |
+| default (4), async 4 | 2.634 s | 75.25 | 294 |
+| default (4), async 8 | 1.689 s | 48.24 | 325 |
+| default (4), async 12 | 1.601 s | 45.74 | 342 |
+| `prefetch=0`, async 8 | 1.747 s | 49.91 | 334 |
+| `prefetch=16`, serial | 1.513 s | 43.23 | 360 |
+| `prefetch=16`, async 8 | 1.425 s | 40.71 | 348 |
 
-four background workers and none are the same row at eight in flight, which
-is the entry [46](improvements/46-request-thread-decode.md) is written from: the
-default serial read is 1.75x slower than the same pool driven by a consumer that
-keeps eight frames in flight, and the parallelism that does it is the consumer's
-own threads. `prefetch` above four only pays for a serial consumer.
+four background workers and none are close to the same row at eight frames in
+flight: 1.689 s against 1.747 s, which is the spread of the machine rather than
+a gain. the default serial read is 1.59x slower than the same pool driven by a
+consumer that keeps eight frames in flight, and the parallelism that does it is
+the consumer's own threads. `prefetch` above four only pays for a serial
+consumer, and [46](improvements/46-request-thread-decode.md) is the attempt to
+move that work onto the pool, measured and rejected.
 
 `ReadAlpha`, both clips of every frame, same set:
 
 | two clips of one call | wall | ms per delivered frame | cpu per delivered frame |
 | --- | ---: | ---: | ---: |
-| interleaved, default | 2.733 s | 78.08 | 307 |
-| branches, default | 7.037 s | 201.04 | 533 |
-| interleaved, async 8 | 2.007 s | 57.34 | 319 |
-| branches, async 8 | 3.317 s | 94.78 | 638 |
-| branches, async 8, `prefetch=16` | 2.460 s | 70.29 | 502 |
+| interleaved, default | 2.736 s | 78.17 | 301 |
+| branches, default | 7.956 s | 227.31 | 448 |
+| interleaved, async 8 | 2.067 s | 59.04 | 317 |
+| branches, async 8 | 3.128 s | 89.37 | 565 |
+| branches, async 8, `prefetch=16` | 1.566 s | 44.75 | 363 |
 
 asking both clips for the same frame is free. walking one clip to the end and
-then the other decodes every file twice, which is what the cpu column says, and
-[45](improvements/45-async-request-cache.md) is why the cache cannot hold the
-sequence.
+then the other decodes every file twice, because the distance between the two
+requests is the sequence length and no bounded cache holds 35 payloads.
+
+`--lag` sweeps the distance between the two clips, and it is the row
+[45](improvements/45-async-request-cache.md) was judged on: colour frame `n`
+asked for together with alpha frame `n - lag`.
+
+| lag | wall | cpu/frame | x one shared decode |
+| ---: | ---: | ---: | ---: |
+| 0 | 2.798 s | 304 | 1.00 |
+| 4 | 2.761 s | 304 | 1.00 |
+| 8 | 2.741 s | 305 | 1.00 |
+| 10 | 6.332 s | 460 | 1.52 |
+| 16 | 6.749 s | 455 | 1.50 |
+
+before 45 the crossing was lag 1 and the cost beyond it was 4.2x.
 
 peak working set of the whole process, one configuration per process, with
 `--memory`:
@@ -314,13 +332,15 @@ peak working set of the whole process, one configuration per process, with
 | request style | peak |
 | --- | ---: |
 | `prefetch=0`, serial | 697 MiB |
-| default (4), serial | 911 MiB |
-| default (4), async 8 | 1043 MiB |
-| default (4), async 12 | 1110 MiB |
-| `prefetch=16`, async 8 | 1165 MiB |
+| default (4), serial | 909 MiB |
+| default (4), async 8 | 1065 MiB |
+| default (4), async 12 | 1104 MiB |
+| `prefetch=16`, async 8 | 1123 MiB |
+
+the async rows sit above the 192 MiB the pool budgets, because a frame a
+consumer claimed is the graph's to hold: `prefetch_memory` bounds the pool's
+cache and queue, not the graph.
 
 the run-to-run spread at fixed settings is up to 20% on this machine, so the
-absolute numbers are one run and only the same-run comparisons are safe to read
-as ratios. a second run reproduced the pairing that matters — 1.740 s at
-`prefetch=4` against 1.711 s at `prefetch=0`, both at eight in flight — while
-moving every absolute number.
+absolute numbers are one set of runs and only the same-run comparisons are safe
+to read as ratios.
