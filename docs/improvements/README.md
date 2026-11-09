@@ -144,6 +144,23 @@ open plus frames to 4.99 s.
 
 ## plans
 
+### decoder vectorisation — 2026-11-10
+
+[48 a faster decode path](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/48-decoder-vectorisation.md)
+is the first plan here that is about the decoders rather than about the
+scheduling around them. Its evidence is a per-format stage table measured on
+both x86-64 builds, and it finds three things: the `.avx512` library the wheel
+ships is 22% *slower* than the baseline library on a DirectDraw surface; the
+interleave that every row stream and every buffered reader performs in
+`src/decoder.rs` and `src/pixel.rs` is the same loop written five times, worth
+4.0x in a prototype kernel at 3 channels and 3.5x at 4; and a DXT5 surface's
+current shape costs about 1.8x the same arithmetic written plainly, before any
+kernel at all. It proposes one shared kernel in a new `src/planar.rs` plus five
+algorithmic changes, no new dependency, and no byte of output changed. The
+crate question is answered in the page and ruled out: every decoder already
+runs the widest SIMD path its crate offers, and the extractions that are legal
+are not faster, which is why `qoi` is left as a crate.
+
 ### several frames in flight — 2026-11-09
 
 [45 the second clip of a call](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/45-async-request-cache.md),
