@@ -24,14 +24,14 @@ tiff = { version = "0.11.3", default-features = false, features = [
     "jpeg",
     "lzw",
 ] }
-vapoursynth4-rs = { version = "0.5.1", default-features = false, features = [
+vapoursynth4-rs = { version = "0.6.0", default-features = false, features = [
     "vs-42", # >=R74
     "vsscript-43" # >=R79
 ] }
 
 # openexr is read here, whose adapter decodes into an f32 image of its own and
 # then copies its bytes to the generic buffer; see `src/formats/exr.rs`
-exr = "1.74.2"
+exr = "1.74.3"
 libheif-rs = { version = "3.0.0", default-features = false, features = [
     "v1_23", # expose the 1.23 API; CI pins the native library to 1.23.5
 ] }
@@ -74,7 +74,7 @@ qoi = { version = "0.4.1", default-features = false, features = ["std"] }
 # revision is pinned here because the crate is not published on crates.io. see
 # `src/formats/webp.rs`, `src/animation/webp.rs` and
 # `docs/improvements/35-wpd-webp-decoder.md`.
-wpd = { git = "https://github.com/halidecx/wpd", rev = "2e1400f00089a68c7939eb9593d5b49b1144b8e0" }
+wpd = { git = "https://github.com/halidecx/wpd", rev = "6fa9de20df3eacc5259751573c220ea6a7b03e5b" }
 
 [profile.release]
 opt-level = 3
