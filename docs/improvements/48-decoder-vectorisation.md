@@ -13,8 +13,9 @@
   a radiance frame, 0.96x on an exr frame, 1.64x to 1.89x on a one-picture gif,
   and an apng blend whose divisor is now free (that one did not move a frame).
   All byte identical and both validators passing. `tiff` was investigated and
-  left alone; the compose kernels are gif's arm blend, and the apng and webp
-  vector halves are not written yet. The buffered write landed last: one pass
+  left alone; the `tga` half landed with a corpus of its own; the compose kernels
+  are gif's arm blend, and the apng and webp vector halves are not written yet.
+  The buffered write landed last: one pass
   over the decoder's buffer instead of one a plane, 0.62x to 0.82x on the
   `convert` stage. The shared buffer landed too: `Pixels::Interleaved` holds its
   canvas in an `Arc<[u8]>`, which is 2% to 4% on an animation's `fetch` (the
@@ -337,10 +338,23 @@ is byte identical. The bitfield table is not on that corpus (it has no bitfield
 page), so its share is untested; it is kept because it removes a `u32` division
 per channel per pixel and cannot change a byte.
 
-The `tga` half is not written: the pages this tree's corpora hold are top-down
-24-bit, which the row sink already takes in one pass, so the swap pass and the
-5-5-5 tables only run on the buffered paths and there is nothing there to
-measure against.
+**Landed, the targa half, and the corpus was the problem.** The pages this
+tree held were top-down 24-bit, which the row sink takes, so the buffered
+paths were never measured. `target/bench/make-tga-corpus.py` writes the four
+shapes that keep the buffered path — raw bottom-up, RLE, sixteen bit 5-5-5 and
+an eight bit palette — 32 pages of 1200x900, and the four are very different:
+the two paths that build a sample at a time (`expand`'s 5-5-5 arm and the
+colour map) now write r,g,b themselves instead of leaving blue first for a
+second pass, which is **2.24x** the read on the 16-bit pages and **1.80x** on
+the palette ones, while the plain memcpy paths are unchanged (0.542 → 0.542 ms
+bottom-up, 3.779 → 3.805 RLE, inside noise) because a fused byte copy of that
+shape measured 20% slower than memcpy plus the vectorised swap. The whole
+buffered corpus went 1.852 → 1.496 ms (**1.24x**), every page byte identical
+under both builds, and the fifteen fixtures and the eight row-sink pages too.
+The 32-entry widening table this page proposed is not written: the `5` in
+`bmp::expand(value & 0b1_1111, 5)` is a literal, so the divisor is already a
+constant and LLVM already emits the multiply-high. The win was the pass, not
+the table.
 
 ### 4. hdr, exr, tiff: the algorithmic three
 

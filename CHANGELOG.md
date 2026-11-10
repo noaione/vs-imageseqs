@@ -38,6 +38,9 @@
 - An animated file's decoded pictures are shared rather than copied for every
   output frame that displays one: GIF, WebP and APNG animations read 2% to 4%
   faster, with identical pixels.
+- A buffered targa writes each sample in the frame's own order while it widens
+  it: a sixteen bit page reads 2.2x faster and a palette page 1.8x, with
+  identical pixels.
 
 ## [0.4.2] - 2026-10-28
 

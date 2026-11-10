@@ -226,6 +226,26 @@ this machine's noise (bmp 0.99x, dds 1.00x, ppm 0.99x, qoi 0.99x, tiff
 1.00x, exr 0.98x, hdr 1.00x, ico 1.03x at 0.12 ms a frame). The x86-64
 libraries were not measured in this round.
 
+### the buffered targa
+
+`tga.rs`'s buffered path is the one the old corpus could not measure: its
+eight pages were top-down 24-bit, which the row sink takes. 32 pages of the
+four buffered shapes, 1200x900, `target/bench/tga-corpus`
+(`target/bench/make-tga-corpus.py`), three alternating rounds:
+
+| shape | read before | read after | change |
+| --- | ---: | ---: | ---: |
+| raw 24-bit, bottom-up | 0.542 | 0.542 | unchanged |
+| 24-bit RLE | 3.779 | 3.805 | unchanged (noise) |
+| 16-bit, five bits a channel | 0.575 | 0.257 | 2.24x faster |
+| 8-bit palette into a 24-bit map | 2.538 | 1.412 | 1.80x faster |
+| all four shapes | 1.852 | 1.496 | 1.24x faster |
+
+the two fast shapes now write each sample in the frame's order while they
+widen it, so the pass that exchanged blue and red is gone; the plain memcpy
+shapes keep it, because fusing the byte copy in beside the memcpy measured
+20% slower. Every page is byte identical, and so are the fifteen fixtures.
+
 the buffered write is the same pass. `src/pixel.rs`'s `write_planes` gathered
 one plane at a time from a decoder that buffers its picture; it now fills
 every plane a non-transposed frame asks for from one read, with the row

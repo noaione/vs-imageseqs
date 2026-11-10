@@ -182,6 +182,10 @@ blend and of the apng one are still open.
 The shared canvas landed too: an animated file's interleaved picture is held
 in an `Arc<[u8]>`, so the presentation cache hands a pointer out rather than
 copying a canvas per output frame (2% to 4% on an animation's `fetch`).
+The targa half landed with a corpus of its own
+(`target/bench/make-tga-corpus.py`): the buffered 16-bit and palette pages
+now write r,g,b while they widen, which is 2.24x and 1.80x the read, and the
+plain-copy shapes are unchanged.
 
 ### several frames in flight — 2026-11-09
 

@@ -168,7 +168,8 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   its payload to `bmp.rs` or to the `png` crate,
   `tga.rs` for Truevision Targa, whose eleven image types, three run-length forms
   and two descriptor directions are a port of the `image` reader, and whose
-  thirty-two bit rule is the opposite of the bitmap one's, `dds.rs` for
+  thirty-two bit rule is the opposite of the bitmap one's, whose buffered path
+  writes each sample in the frame's order while it widens it, `dds.rs` for
   DirectDraw surfaces, whose DXT1, DXT3 and DXT5 blocks and their DX10
   equivalents are a port, and whose five and six bit channels widen by
   truncating division where the bitmap and targa readers round to nearest,
