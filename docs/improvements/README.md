@@ -189,6 +189,11 @@ plain-copy shapes are unchanged.
 The sixteen bit apng blend is a NEON multiply-high now, 3% on a
 `target/bench/apng16-corpus` page; the eight bit one was already vector, and the
 webp reciprocal has no vector form at all (a 41 bit product and a table gather).
+What is left is an x86-64 host: the gif compose's AVX2 and AVX-512 row blocks,
+the one-pass `write_planes` and the targa fold measured on the `.avx2` and
+`.avx512` libraries, and one `pshufb` question about the sixteen bit big-endian
+interleave. The plan's *what needs an x86-64 host* section is the list and
+`docs/HANDOFF.md` has the commands.
 
 ### several frames in flight — 2026-11-09
 

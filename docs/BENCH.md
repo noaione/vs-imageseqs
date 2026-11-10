@@ -224,7 +224,9 @@ frame; farbfeld has nothing to inflate, so the same kernel is 29% of its
 frame. The untouched formats were swept the same way and none moved beyond
 this machine's noise (bmp 0.99x, dds 1.00x, ppm 0.99x, qoi 0.99x, tiff
 1.00x, exr 0.98x, hdr 1.00x, ico 1.03x at 0.12 ms a frame). The x86-64
-libraries were not measured in this round.
+libraries were not measured in this round; every row under this heading is the
+arm64 machine, and the plan's *what needs an x86-64 host* section is the list of
+measurements the Windows host owes.
 
 ### the buffered targa
 
@@ -296,7 +298,9 @@ measured 2026-11-10 on macOS 27, rustc 1.99.1, `prefetch=0`, the `debug=1`
 stage log, two builds of the same commit alternated (`target/bench/plan48/
 measure.py`, best of three alternating runs, five reps each). Milliseconds a
 frame; the animation cost is the `fetch` stage and the total includes the
-frame the worker builds.
+frame the worker builds. Every row under this heading is that arm64 machine:
+the AVX2 and AVX-512 halves of the compose row are not written, which is item 1
+of the plan's *what needs an x86-64 host* section.
 
 | set | fetch before | fetch after | total before | total after | change |
 | --- | ---: | ---: | ---: | ---: | ---: |

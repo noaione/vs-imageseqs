@@ -616,6 +616,81 @@ cargo run --release --manifest-path target/bench/plan48/proto/Cargo.toml
 a kernel's own throughput is measured the way the conversion's is:
 `cargo test --release --lib -- --ignored --nocapture the_kernels_measured`.
 
+## what needs an x86-64 host
+
+Every row this page records was measured on one arm64 Mac, and the two x86-64
+libraries the wheel ships (`.avx2` for `x86-64-v3`, `.avx512` for `x86-64-v4`)
+have not been re-measured since the round that reverted step 0's kernel. Four
+things want that host, in the order they are worth the time.
+
+### 1. the gif compose's AVX2 and AVX-512 row blocks
+
+The one piece of this plan that is still only a plan. The row walk shipped and
+is what both x86 libraries run, which is already 2.1x the per-pixel loop it
+replaced; the arm kernel is another 1.8x on top of that (a full-canvas compose
+went 0.897 → 0.424 → 0.237 ms for `Keep` and 0.912 → 0.425 → 0.188 ms for
+`Background`). The shape is `blend_row`'s and needs no gather: eight pixels a
+vector on AVX2 (`_mm256_blendv_epi8` with each pixel's alpha byte repeated
+across its four bytes) and sixteen on AVX-512 (`_mm512_mask_blend_epi8`), with
+`Background` disposing to a zero operand so one kernel serves both arms. Dispatch
+it the way `src/convert/simd.rs` dispatches -- a runtime `is_x86_feature_detected!`
+plus `#[target_feature]` kernels -- and hold it to `blend_row_scalar` sample for
+sample with a test that forces it, which is what the arm kernel has.
+
+Two cautions. Step 0's negative result says the wide builds already vectorise a
+contiguous loop, so the AVX2 form may only tie inside the `.avx512` library
+even though it wins inside the `.avx2` one: measure **both** libraries and land
+the block only where it wins. And the measurement is the compose row on
+`target/bench/plan48/anim-corpus` first, which isolates the loop, then the gif
+animation's `fetch` (2.00 → 1.57 ms on arm) end to end.
+
+### 2. the one-pass `write_planes`, and the targa fold, on both libraries
+
+`write_planes` fills every plane of a non-transposed frame from one read of the
+buffer, which is 0.62x to 0.82x the `convert` stage on arm. Its kernel is a
+`#[cfg]`, so both x86-64 libraries run the scalar walk and nothing changed
+there; the open question is whether that walk beats the per-plane gather on a
+build without `ld3`/`ld4`. A/B it on `png-depth`, `step5-corpus`'s qoi and tiff
+pages and a buffered rgba8 apng, per library, alternating builds the way
+`target/bench/plan48/ab.py` does. If it reads worse, hand it to
+`planar::place8`/`place16` and let the wide build vectorise, or decline the
+one pass on that library and keep the walk -- the rule is the same one the
+interleave step already states.
+
+The targa fold is code both architectures run: `expand` now writes r,g,b for
+the sixteen bit and palette arms and keeps the memcpy plus the vectorised swap
+for the plain-copy arms, because fusing that copy measured 20% slower **on
+arm**. Confirm that the two plain arms are unchanged on Windows and that the
+two folded arms still gain (2.24x and 1.80x on arm) with
+`target/bench/tga-corpus`.
+
+### 3. `place16be`'s x86-64 half
+
+The sixteen bit big-endian kernel is `#[cfg(target_arch = "aarch64")]`, so x86
+runs `scalar16be` and leans on the compiler for the swap. One `cargo asm` on
+Windows answers whether the wide builds already fold the swap into a `pshufb`
+load. If they do, record that and close the step the way the eight bit arm
+kernel was closed; if they do not, a `pshufb` kernel is a candidate, and the arm
+numbers are its ceiling: 3% to 7% of a sixteen bit png frame and 29% of a
+farbfeld.
+
+### 4. the rows the arm rounds moved, re-measured
+
+So that each table has a host on both sides: the animation corpora (`fetch`
+1.50 → 1.47 ms gif, 1.58 → 1.55 webp, 1.59 → 1.53 apng), the targa corpus
+(1.852 → 1.496 ms), the sixteen bit apng corpus (6.26 → 6.08 ms -- on x86 that
+blend is still the scalar loop, so expect no change there), and the
+no-regression sweep of the untouched formats on both libraries (bmp 0.99x, dds
+1.00x, tga 0.92x, ico 0.94x, hdr 0.99x, exr 1.01x, qoi 0.99x, tiff 0.99x around
+1.0 on arm). The eight bit apng blend is worth one look there too: it is
+whatever LLVM emits for x86-64, so its share of a frame may be larger than on
+arm, and the same `cargo asm` check decides it.
+
+The gates are the ones this page already lists, on that host: `cargo test
+--locked`, clippy with `-D warnings`, `cargo fmt --all -- --check`,
+`tests/readalpha.vpy` (1034 checks) and `tests/pngwrite.vpy` (311), and the
+frame parity the corpora were built for. `docs/HANDOFF.md` has the commands.
+
 ## what is left over
 
 the jxl decode path is 381 ms a frame serially and has never been profiled, and
