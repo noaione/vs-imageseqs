@@ -333,44 +333,68 @@ impl RowSink<'_> {
     /// Answers `None` when the sink does not hold three colour planes, which a
     /// caller reports its own way.
     pub fn place_rgba16(&mut self, source: &[u8], row: usize) -> Option<()> {
-        let (red, rest) = self.colour.split_first_mut()?;
-        let (green, rest) = rest.split_first_mut()?;
-        let (blue, _) = rest.split_first_mut()?;
-        let alpha = self.alpha.as_mut().and_then(|planes| planes.first_mut());
-        // One source row, read once. A pixel is four big-endian samples and each
-        // target takes one of them in the byte order the frame holds, which is what
-        // makes this the only pass over the row.
-        let sample = |pixel: &[u8], channel: usize| -> [u8; 2] {
-            u16::from_be_bytes([pixel[channel], pixel[channel + 1]]).to_ne_bytes()
-        };
-        let red_row = red.row(row);
-        let green_row = green.row(row);
-        let blue_row = blue.row(row);
-        let alpha_row = alpha.map(|plane| plane.row(row));
-        // A frame's row is a whole number of sixteen bit samples, so each plane
-        // splits into samples and the leftovers are the frame's own padding.
-        let (red_words, _) = red_row.as_chunks_mut::<2>();
-        let (green_words, _) = green_row.as_chunks_mut::<2>();
-        let (blue_words, _) = blue_row.as_chunks_mut::<2>();
-        let colour = red_words.iter_mut().zip(green_words).zip(blue_words);
-        let pixels = source.as_chunks::<8>().0.iter();
-        match alpha_row {
-            Some(alpha_row) => {
-                let (alpha_words, _) = alpha_row.as_chunks_mut::<2>();
-                for ((((r, g), b), a), pixel) in colour.zip(alpha_words.iter_mut()).zip(pixels) {
-                    r.copy_from_slice(&sample(pixel, 0));
-                    g.copy_from_slice(&sample(pixel, 2));
-                    b.copy_from_slice(&sample(pixel, 4));
-                    a.copy_from_slice(&sample(pixel, 6));
-                }
+        self.place_interleaved(source, row, 4, 2)
+    }
+
+    /// Writes one interleaved row into the planes a call hands out, reading
+    /// the row once.
+    ///
+    /// `channels` is samples a pixel and `sample_bytes` is one or two; a two
+    /// byte sample is read big endian, which is the order a png and a
+    /// farbfeld store it in. Channels go to the colour planes first and then
+    /// to the alpha planes, which is the order a container states them in; a
+    /// channel the call hands out no plane for is read and dropped.
+    ///
+    /// Answers `None` when the sink holds no colour plane, or for a shape no
+    /// reader asks for, which a caller reports its own way.
+    pub fn place_interleaved(
+        &mut self,
+        source: &[u8],
+        row: usize,
+        channels: usize,
+        sample_bytes: usize,
+    ) -> Option<()> {
+        if self.colour.is_empty() || !(1..=4).contains(&channels) {
+            return None;
+        }
+        match sample_bytes {
+            1 | 2 => {}
+            _ => return None,
+        }
+        // The planes a call hands out, in the order the row stores them.
+        let mut targets: [Option<&mut [u8]>; 4] = [None, None, None, None];
+        let mut count = 0usize;
+        for plane in self.colour.iter_mut() {
+            if count == channels {
+                break;
             }
-            None => {
-                for (((r, g), b), pixel) in colour.zip(pixels) {
-                    r.copy_from_slice(&sample(pixel, 0));
-                    g.copy_from_slice(&sample(pixel, 2));
-                    b.copy_from_slice(&sample(pixel, 4));
-                }
+            targets[count] = Some(plane.row(row));
+            count += 1;
+        }
+        for plane in self.alpha.iter_mut().flatten() {
+            if count == channels {
+                break;
             }
+            targets[count] = Some(plane.row(row));
+            count += 1;
+        }
+        let mut planes: [&mut [u8]; 4] = [&mut [], &mut [], &mut [], &mut []];
+        for (slot, target) in targets.into_iter().enumerate() {
+            if let Some(target) = target {
+                planes[slot] = target;
+            }
+        }
+        let planes = &mut planes[..count];
+        match (channels, sample_bytes) {
+            (1, 1) => crate::planar::place8::<1>(source, planes),
+            (2, 1) => crate::planar::place8::<2>(source, planes),
+            (3, 1) => crate::planar::place8::<3>(source, planes),
+            (4, 1) => crate::planar::place8::<4>(source, planes),
+            (1, 2) => crate::planar::place16be::<1>(source, planes),
+            (2, 2) => crate::planar::place16be::<2>(source, planes),
+            (3, 2) => crate::planar::place16be::<3>(source, planes),
+            (4, 2) => crate::planar::place16be::<4>(source, planes),
+            _ => return None,
         }
         Some(())
     }

@@ -9,6 +9,7 @@ mod format;
 mod formats;
 mod layout;
 mod pixel;
+mod planar;
 mod prefetch;
 mod source;
 mod writer;
