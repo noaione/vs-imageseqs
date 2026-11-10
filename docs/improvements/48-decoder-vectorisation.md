@@ -4,9 +4,10 @@
   slower than the code it replaced and reverted, and the record is below. The
   `bmp`, `dds`, `hdr`, gif-still and apng-blend steps landed: 1.33x to 1.40x on
   the bitmap corpus, 15% off the surface corpus's decode stage, 0.82x to 0.85x on
-  a radiance frame, 1.64x to 1.89x on a one-picture gif, and an apng blend whose
-  divisor is now free (that one did not move a frame). All byte identical, both
-  validators passing. The compose kernels and `exr` are not written yet
+  a radiance frame, 0.96x on an exr frame, 1.64x to 1.89x on a one-picture gif,
+  and an apng blend whose divisor is now free (that one did not move a frame).
+  All byte identical and both validators passing. `tiff` was investigated and
+  left alone; the compose kernels are not written yet
 - touches: `src/formats/{dds,bmp,tga,ico,pnm,farbfeld,hdr,png,exr,tiff}.rs`,
   `src/decoder.rs` (`RowSink`) and one module a step below it,
   `tests/readalpha.vpy`, `tests/pngwrite.vpy`, `docs/BENCH.md`
