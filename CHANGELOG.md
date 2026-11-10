@@ -27,6 +27,9 @@
   to 7% faster and a farbfeld 29% faster, with identical pixels. A png's
   gray+alpha and rgba rows are placed the same way, in one pass rather than one
   per channel, which takes 7% to 9% off those pages.
+- A buffered decoder's picture is taken apart into the frame's planes in one
+  pass rather than one a plane: an APNG's write is 1.6x faster, and a qoi's or
+  a tiff's 1.2x to 1.3x, with identical pixels.
 - A GIF animation composes only the rectangle each frame states and blends it a
   row at a time, with a NEON select on arm: a 1024x1024 animation reads 1.27x
   faster and a still GIF 1.14x faster, with identical pixels.

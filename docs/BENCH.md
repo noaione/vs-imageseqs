@@ -226,6 +226,25 @@ this machine's noise (bmp 0.99x, dds 1.00x, ppm 0.99x, qoi 0.99x, tiff
 1.00x, exr 0.98x, hdr 1.00x, ico 1.03x at 0.12 ms a frame). The x86-64
 libraries were not measured in this round.
 
+the buffered write is the same pass. `src/pixel.rs`'s `write_planes` gathered
+one plane at a time from a decoder that buffers its picture; it now fills
+every plane a non-transposed frame asks for from one read, with the row
+mirrors and the alpha drop folded in, and stops at a transpose or a depth
+that needs a shift. Same method and build pairs as the table above:
+
+| set | convert before | convert after | total before | total after | change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| apng 1024x1024 rgba8, 8 frames | 0.264 | 0.164 | 1.782 | 1.688 | 0.62x on the write |
+| qoi 1200x900 rgb8, 8 pages | 0.240 | 0.197 | 3.831 | 3.809 | 0.82x on the write |
+| tiff 1200x900, 8 pages | 0.274 | 0.214 | 6.905 | 6.898 | 0.78x on the write |
+| pnm 1200x900, 8 pages | 0.000 | 0.000 | 0.600 | 0.593 | unchanged |
+
+the corpora are `target/bench/apng-corpus` and `target/bench/step5-corpus`
+(`target/bench/plan48/ab.py`, four alternating rounds). The read stage does
+not move, so a frame's total moves less than its write does; every plane of
+every frame of both clips, and of every format under `tests/fixtures`, is byte
+identical under the two builds, and both validators pass.
+
 ## animation
 
 the gif compositor is the `src/animation/gif.rs` section of

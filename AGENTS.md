@@ -231,10 +231,13 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   the same way, so the two cannot disagree about which library owns a file; a
   probe must never promise a frame a decode would refuse to produce.
 - `src/pixel.rs`: supported pixel formats, the format a nominal depth names, and
-  planar frame writes, which move a wider word down to the frame's own depth.
+  planar frame writes, which move a wider word down to the frame's own depth,
+  and the one pass that fills every plane of a non-transposed frame from one
+  read of an interleaved decoder buffer.
 - `src/planar.rs`: the one pass that takes an interleaved row apart into the
-  planes it belongs in, shared by `src/formats/png.rs`'s channel walk and
-  `src/decoder.rs`'s `RowSink::place_interleaved`. the scalar walk is a zip a
+  planes it belongs in, shared by `src/formats/png.rs`'s channel walk,
+  `src/decoder.rs`'s `RowSink::place_interleaved` and `src/pixel.rs`'s
+  `write_planes`. the scalar walk is a zip a
   plane count at a time, which is the shape LLVM turns into `ld3`/`ld4` on its
   own; an aarch64 kernel carries the two shapes a hand block wins: sixteen bit
   big-endian samples, where `ldN` + `rev16` folds the swap into the store, and

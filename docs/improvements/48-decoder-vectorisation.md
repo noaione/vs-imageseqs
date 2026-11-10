@@ -13,8 +13,12 @@
   a radiance frame, 0.96x on an exr frame, 1.64x to 1.89x on a one-picture gif,
   and an apng blend whose divisor is now free (that one did not move a frame).
   All byte identical and both validators passing. `tiff` was investigated and
-  left alone; the compose kernels are not written yet
+  left alone; the compose kernels are gif's arm blend, and the apng and webp
+  vector halves are not written yet. The buffered write landed last: one pass
+  over the decoder's buffer instead of one a plane, 0.62x to 0.82x on the
+  `convert` stage
 - touches: `src/planar.rs` (new), `src/formats/{dds,bmp,tga,ico,pnm,farbfeld,hdr,png,exr,tiff}.rs`,
+  `src/pixel.rs` (`write_planes`),
   `src/decoder.rs` (`RowSink`), `tests/readalpha.vpy`, `tests/pngwrite.vpy`,
   `docs/BENCH.md`, and the two prototype crates under `target/bench/plan48/`
 - expected: the decode stage of the formats this tree reads itself faster, from
@@ -556,10 +560,13 @@ planes,animation,crates}.md` are the four read-only audits this page is written
 from, and they hold the per-loop inventory (anchors, costs, and the parity
 fixtures) that each step's implementation should start from.
 
-the arm round leaves three things behind. `src/pixel.rs`'s `write_planes`
-still gathers one plane at a time for a buffered decoder; the arm prototype
-priced the same one pass at 6x that loop for sixteen bits and 13x at eight, so
-it is the next step, and it needs the shift and the transform folded in first.
+the `write_planes` half landed too. `src/pixel.rs`'s one pass fills every plane
+a non-transposed frame asks for from one read of the buffer, with the mirrors
+and the alpha drop folded in, so a buffered decoder's `convert` stage is 0.62x
+on a 1024x1024 rgba8 apng, 0.78x on a tiff and 0.82x on a qoi at 1200x900,
+and every plane of every frame of every fixture is byte identical. It stops
+where the transform transposes or the frame's depth needs a shift, so a 10 or
+12 bit jxl still takes the per-plane walk.
 The eight bit three and four channel kernel is written and held to the scalar
 path by the test but is not dispatched, because it is 1.2x to 1.7x slower
 than the compiler's loop. The gif compose's x86-64 blocks are not written

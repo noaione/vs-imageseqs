@@ -173,6 +173,9 @@ and the page says so.
 The gif compose and its arm blend landed in the same round: the rectangle walk
 and a NEON select took 1.27x off a 1024x1024 animation and 1.14x off a still
 gif, and the apng and webp vector halves are still open.
+The buffered write landed last: `src/pixel.rs`'s `write_planes` fills every
+plane a non-transposed frame asks for from one read of the decoder's picture,
+which is 0.62x to 0.82x on the `convert` stage and identical pixels.
 
 ### several frames in flight — 2026-11-09
 
