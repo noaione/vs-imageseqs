@@ -245,8 +245,10 @@ fn over(source: [u8; 4], under: [u8; 4]) -> [u8; 4] {
         return [0, 0, 0, 0];
     }
     // Renormalises each channel back onto the blended alpha. The shift is 24
-    // because the scale is a 24-bit reciprocal.
-    let scale = (1u32 << 24) / blended_alpha;
+    // because the scale is a 24-bit reciprocal, and the reciprocal is a table
+    // because the divisor is one of 255 values and a division a pixel is the
+    // most expensive thing this walk does.
+    let scale = SCALE[blended_alpha as usize];
     let mut out = [0u8; 4];
     for channel in 0..3 {
         let blended =
@@ -264,6 +266,21 @@ fn over(source: [u8; 4], under: [u8; 4]) -> [u8; 4] {
 const fn div_by_255(value: u32) -> u32 {
     (((value + 0x80) >> 8) + value + 0x80) >> 8
 }
+
+/// `(1 << 24) / alpha` for every eight bit alpha, computed at compile time.
+///
+/// The table is the division it replaces, entry for entry; a blend only ever
+/// indexes `1..=255` because a zero blended alpha returns before it reads the
+/// scale. `0` is filled with `0` rather than divided by zero.
+static SCALE: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut alpha = 1;
+    while alpha < 256 {
+        table[alpha] = (1u32 << 24) / alpha as u32;
+        alpha += 1;
+    }
+    table
+};
 
 /// Whether one frame's payload carries an alpha channel of its own.
 ///
@@ -994,6 +1011,16 @@ mod tests {
 
     /// A frame drawn onto a transparent canvas is the frame, and a rectangle
     /// that is smaller than the canvas leaves the rest of it alone.
+    /// The reciprocal table is the division it replaces, for every alpha, and
+    /// no blend can index the one entry a division cannot produce.
+    #[test]
+    fn the_blend_reciprocal_is_the_division_it_replaces() {
+        for alpha in 0..=255u32 {
+            let expected = (1u32 << 24).checked_div(alpha).unwrap_or(0);
+            assert_eq!(SCALE[alpha as usize], expected, "{alpha}");
+        }
+    }
+
     #[test]
     fn a_rectangle_is_drawn_where_it_says_on_the_canvas() {
         let mut canvas = Canvas::new(3, 3);
