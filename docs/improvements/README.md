@@ -179,6 +179,9 @@ which is 0.62x to 0.82x on the `convert` stage and identical pixels.
 The animated webp's blend looks its reciprocal up in a table rather than dividing
 a pixel, which is 1.18x on a 1024x1024 animation; the vector halves of that
 blend and of the apng one are still open.
+The shared canvas landed too: an animated file's interleaved picture is held
+in an `Arc<[u8]>`, so the presentation cache hands a pointer out rather than
+copying a canvas per output frame (2% to 4% on an animation's `fetch`).
 
 ### several frames in flight — 2026-11-09
 

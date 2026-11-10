@@ -146,6 +146,9 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   [`Pixels`] is what a buffered decode produced, and `RowStream` is the decode
   that has not read its picture yet because it can write each row into the frame;
   a format answers with one only when it can fill every frame of the call.
+  an interleaved picture's canvas is an `Arc<[u8]>`, because an animated file's
+  window hands the same picture to every output frame that displays it and the
+  clone that answers a held request must not copy it.
 - `src/formats/`: one module per container, chosen by `identify.rs` rather than
   by the file's name (`heif.rs`
   for monochrome heif/heic and for the colour pages of both containers, which are

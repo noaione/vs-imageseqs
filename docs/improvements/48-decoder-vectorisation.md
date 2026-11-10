@@ -16,7 +16,10 @@
   left alone; the compose kernels are gif's arm blend, and the apng and webp
   vector halves are not written yet. The buffered write landed last: one pass
   over the decoder's buffer instead of one a plane, 0.62x to 0.82x on the
-  `convert` stage
+  `convert` stage. The shared buffer landed too: `Pixels::Interleaved` holds its
+  canvas in an `Arc<[u8]>`, which is 2% to 4% on an animation's `fetch` (the
+  copy it removes was real but small) and is what lets a cached presentation be
+  handed out without a copy at all.
 - touches: `src/planar.rs` (new), `src/formats/{dds,bmp,tga,ico,pnm,farbfeld,hdr,png,exr,tiff}.rs`,
   `src/pixel.rs` (`write_planes`),
   `src/decoder.rs` (`RowSink`), `tests/readalpha.vpy`, `tests/pngwrite.vpy`,
@@ -440,6 +443,17 @@ is the composition around them, and there the win is algorithmic.
   change in this step and the one that has to come last, because until the buffer
   is shared by pointer, reusing it breaks the rule that a cached presentation is
   never mutated.
+  **Landed**: the buffer is an `Arc<[u8]>`, so `presentation`'s cache hit copies a
+  pointer rather than the canvas. Measured on `target/bench/plan48/anim-corpus`
+  and `target/bench/apng-corpus` against a build of the previous commit: the
+  gif's `fetch` went 1.50 → 1.47 ms, the webp's 1.58 → 1.55 and the apng's
+  1.59 → 1.53, which is **2% to 4%** and less than this page expected. The copy
+  it removes is about 2 MB an output frame at these sizes, and memory
+  bandwidth makes that about 0.05 ms: the duplication was real but never the
+  frame's cost. Every frame is byte identical, and the type is what lets a
+  cached presentation be shared at all, which is why it had to come last.
+  `Pixels::Planar` still owns its planes, so a heif sequence's frames keep their
+  copies; that path is rare enough that the same treatment is not written.
 
 Expected **1.3x to 2.5x on a gif animation** of a large canvas, 1.15x to 1.5x on
 apng, and 1.05x to 1.25x on the animated webp, all of it small on the 16x12

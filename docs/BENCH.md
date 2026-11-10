@@ -270,6 +270,23 @@ The gif rows compare this commit with the one before it; the webp row compares
 a build of the same tree with the reciprocal table and without it, because the
 write it sits beside had already moved.
 
+### the shared canvas
+
+`Pixels::Interleaved`'s buffer is an `Arc<[u8]>` now, so the presentation cache
+hands out a pointer rather than a canvas. Measured against a build of the
+previous commit, same corpus and method, three alternating rounds:
+
+| set | fetch before | fetch after | change |
+| --- | ---: | ---: | ---: |
+| gif animation, 1024x1024 | 1.50 | 1.47 | 2% faster |
+| webp animation, 1024x1024 | 1.58 | 1.55 | 2% faster |
+| apng, 1024x1024 | 1.59 | 1.53 | 4% faster |
+
+the copy removed is about 2 MB an output frame at these sizes, which memory
+bandwidth prices at about 0.05 ms. It is kept because it is a copy less and
+because sharing the canvas is what a later step builds on, not because it was
+the frame's cost. Every frame is byte identical.
+
 the corpus is `target/bench/plan48/anim-corpus`. Every plane of every frame
 of both clips is byte identical under the two builds, and `tests/readalpha.vpy`
 passes its 1034 checks. The compose loop itself went 0.897 to 0.424 to 0.237 ms

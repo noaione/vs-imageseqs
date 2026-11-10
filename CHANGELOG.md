@@ -35,6 +35,9 @@
   faster and a still GIF 1.14x faster, with identical pixels.
 - An animated WebP's alpha blend looks its reciprocal up rather than dividing a
   pixel: a 1024x1024 animation reads 1.18x faster, with identical pixels.
+- An animated file's decoded pictures are shared rather than copied for every
+  output frame that displays one: GIF, WebP and APNG animations read 2% to 4%
+  faster, with identical pixels.
 
 ## [0.4.2] - 2026-10-28
 
