@@ -376,7 +376,13 @@ fn scanline(data: &[u8], cursor: &mut usize, width: usize, out: &mut [[u8; 4]]) 
 }
 
 /// Reads the raster, and lays it out the way the resolution line asks.
-fn raster(header: &Header, data: &[u8]) -> Result<Vec<u8>> {
+///
+/// The picture is written as one buffer per plane rather than as one interleaved
+/// buffer, because that is the shape the frame wants: an interleaved picture is
+/// taken apart again on the way out, which reads every byte of it once per plane
+/// and costs the `convert` stage of a 1200x900 page 3 to 4 ms. The only
+/// allocation is the three planes themselves, and a scanline is reused.
+fn raster(header: &Header, data: &[u8]) -> Result<Vec<Vec<u8>>> {
     let layout = &header.layout;
     let stored_width = layout.stored_width as usize;
     let stored_height = layout.stored_height as usize;
@@ -384,46 +390,74 @@ fn raster(header: &Header, data: &[u8]) -> Result<Vec<u8>> {
     let (out_width, out_height) = (out_width as usize, out_height as usize);
     let mut cursor = header.data_offset;
 
-    // **One** allocation, the frame itself, and one reusable row. This used to
-    // build three -- a scanline buffer, a float buffer and a byte buffer -- each
-    // zeroed and each a whole picture. On a 1200x900 file that is 4, 13 and
-    // 13 MB of memory traffic to produce 13 MB of output, and it measured 1.16x
-    // slower than the reader it replaced. See `docs/improvements/26`.
-    let mut out = vec![0u8; out_width * out_height * 12];
+    let mut planes = vec![vec![0u8; out_width * out_height * 4]; 3];
     let mut line = vec![[0u8; 4]; stored_width];
     for stored_row in 0..stored_height {
         scanline(data, &mut cursor, stored_width, &mut line)?;
-        for (stored_column, value) in line.iter().enumerate() {
-            // The signs move the pixels and the transpose turns the axes round,
-            // so the picture handed out is the one the resolution describes.
-            let row = if layout.flip_rows {
-                stored_height - 1 - stored_row
-            } else {
-                stored_row
-            };
-            let column = if layout.flip_columns {
-                stored_width - 1 - stored_column
-            } else {
-                stored_column
-            };
-            let (x, y) = if layout.transposed {
-                (row, column)
-            } else {
-                (column, row)
-            };
-            let at = (y * out_width + x) * 12;
-            let samples = radiance([value[0], value[1], value[2]], value[3]);
-            for (slot, sample) in out[at..at + 12]
-                .as_chunks_mut::<4>()
-                .0
+        let row = if layout.flip_rows {
+            stored_height - 1 - stored_row
+        } else {
+            stored_row
+        };
+        if layout.transposed {
+            // A transposed picture writes a column, so the destination is one
+            // sample at a stride rather than a run, and the column has to be
+            // chosen per pixel.
+            for (stored_column, value) in line.iter().enumerate() {
+                let column = if layout.flip_columns {
+                    stored_width - 1 - stored_column
+                } else {
+                    stored_column
+                };
+                let at = (column * out_width + row) * 4;
+                let samples = radiance([value[0], value[1], value[2]], value[3]);
+                for (plane, sample) in planes.iter_mut().zip(samples) {
+                    plane[at..at + 4].copy_from_slice(&sample.to_ne_bytes());
+                }
+            }
+            continue;
+        }
+        // A stored row is an output row, so every plane row it fills is one
+        // contiguous run and the whole row moves without an index, a bounds
+        // check or a branch a sample: three walks of the scanline that the
+        // compiler unrolls into stores.
+        let start = row * out_width * 4;
+        let [red, green, blue] = planes.as_mut_slice() else {
+            unreachable!("a radiance picture has three planes")
+        };
+        let (red_row, green_row, blue_row) = (
+            &mut red[start..start + out_width * 4],
+            &mut green[start..start + out_width * 4],
+            &mut blue[start..start + out_width * 4],
+        );
+        // `as_chunks_mut` rather than `chunks_exact_mut`, so a pixel is an array
+        // the store takes whole rather than a slice it checks.
+        let reds = red_row.as_chunks_mut::<4>().0;
+        let greens = green_row.as_chunks_mut::<4>().0;
+        let blues = blue_row.as_chunks_mut::<4>().0;
+        if layout.flip_columns {
+            let mut pixels = reds
                 .iter_mut()
-                .zip(samples)
-            {
-                slot.copy_from_slice(&sample.to_ne_bytes());
+                .rev()
+                .zip(greens.iter_mut().rev())
+                .zip(blues.iter_mut().rev());
+            for (value, ((r, g), b)) in line.iter().zip(&mut pixels) {
+                let samples = radiance([value[0], value[1], value[2]], value[3]);
+                *r = samples[0].to_ne_bytes();
+                *g = samples[1].to_ne_bytes();
+                *b = samples[2].to_ne_bytes();
+            }
+        } else {
+            let mut pixels = reds.iter_mut().zip(greens.iter_mut()).zip(blues.iter_mut());
+            for (value, ((r, g), b)) in line.iter().zip(&mut pixels) {
+                let samples = radiance([value[0], value[1], value[2]], value[3]);
+                *r = samples[0].to_ne_bytes();
+                *g = samples[1].to_ne_bytes();
+                *b = samples[2].to_ne_bytes();
             }
         }
     }
-    Ok(out)
+    Ok(planes)
 }
 
 /// What a picture states, when this module reads the file.
@@ -517,7 +551,7 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     }
 
     let read_started = std::time::Instant::now();
-    let buffer =
+    let planes =
         raster(&header, &data).map_err(|error| image_error("decode", &info.path, error))?;
     let read = read_started.elapsed();
 
@@ -526,9 +560,9 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
         height: header.height,
         format: info.format,
         transform: info.transform,
-        pixels: Pixels::Interleaved {
-            color_type: header.color_type(),
-            buffer,
+        pixels: Pixels::Planar {
+            planes,
+            alpha: None,
         },
         timings: DecodeTimings {
             open,
@@ -625,10 +659,13 @@ mod tests {
             assert_eq!(info.format, PixelFormat::Rgb32F, "{name}");
             let decoded = decode(&info).unwrap_or_else(|error| panic!("{name}: {error}"));
             match decoded.pixels {
-                Pixels::Interleaved { buffer, .. } => {
-                    assert_eq!(buffer.len(), (width * height * 3 * 4) as usize, "{name}");
+                Pixels::Planar { planes, .. } => {
+                    assert_eq!(planes.len(), 3, "{name}");
+                    for plane in planes {
+                        assert_eq!(plane.len(), (width * height * 4) as usize, "{name}");
+                    }
                 }
-                _ => panic!("{name} hands out one interleaved buffer"),
+                _ => panic!("{name} hands out one buffer per plane"),
             }
         }
     }
@@ -643,8 +680,20 @@ mod tests {
                 .expect("read")
                 .expect("taken over");
             match decode(&info).expect("decodes").pixels {
-                Pixels::Interleaved { buffer, .. } => buffer,
-                _ => panic!("interleaved"),
+                Pixels::Planar { mut planes, .. } => {
+                    // The comparison below is one interleaved order, and these are
+                    // three planes, so they are put back together here.
+                    let pixel_bytes = planes[0].len() / (info.width * info.height) as usize;
+                    let mut buffer = vec![0u8; planes[0].len() * 3];
+                    for (index, chunk) in buffer.chunks_mut(pixel_bytes * 3).enumerate() {
+                        for (plane, part) in planes.iter().zip(chunk.chunks_mut(pixel_bytes)) {
+                            part.copy_from_slice(&plane[index * pixel_bytes..][..pixel_bytes]);
+                        }
+                    }
+                    planes.clear();
+                    buffer
+                }
+                _ => panic!("one buffer per plane"),
             }
         };
         // `hdr-rle.hdr` is the common `-Y +X` spelling and holds the picture as
