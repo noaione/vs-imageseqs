@@ -219,7 +219,7 @@ pub fn still(
         transform: source.transform,
         pixels: Pixels::Interleaved {
             color_type: ColorType::Rgba8,
-            buffer,
+            buffer: buffer.into(),
         },
         timings: DecodeTimings::default(),
     })
@@ -558,7 +558,7 @@ impl Source {
                     transform: self.transform,
                     pixels: Pixels::Interleaved {
                         color_type: ColorType::Rgba8,
-                        buffer: composed,
+                        buffer: composed.into(),
                     },
                     timings: DecodeTimings::default(),
                 });

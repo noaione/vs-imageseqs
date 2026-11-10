@@ -589,7 +589,10 @@ pub fn decode(info: &ImageInfo) -> Result<Option<DecodedImage>> {
         height: info.height,
         format: info.format,
         transform: info.transform,
-        pixels: Pixels::Interleaved { color_type, buffer },
+        pixels: Pixels::Interleaved {
+            color_type,
+            buffer: buffer.into(),
+        },
         timings: DecodeTimings {
             open,
             metadata: Duration::ZERO,

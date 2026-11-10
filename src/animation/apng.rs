@@ -558,7 +558,10 @@ impl PngSource {
             height: self.height,
             format: self.format,
             transform: self.transform,
-            pixels: Pixels::Interleaved { color_type, buffer },
+            pixels: Pixels::Interleaved {
+                color_type,
+                buffer: buffer.into(),
+            },
             timings: DecodeTimings {
                 open: std::time::Duration::ZERO,
                 metadata: std::time::Duration::ZERO,

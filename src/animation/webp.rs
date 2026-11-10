@@ -434,7 +434,7 @@ impl Source {
                     transform: self.transform,
                     pixels: Pixels::Interleaved {
                         color_type: ColorType::Rgba8,
-                        buffer: composed,
+                        buffer: composed.into(),
                     },
                     timings: DecodeTimings::default(),
                 });

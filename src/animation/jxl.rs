@@ -279,7 +279,7 @@ impl JxlSource {
             transform: crate::pixel::Transform::IDENTITY,
             pixels: Pixels::Interleaved {
                 color_type: header.color_type,
-                buffer: pixels,
+                buffer: pixels.into(),
             },
             timings: DecodeTimings {
                 open: std::time::Duration::ZERO,

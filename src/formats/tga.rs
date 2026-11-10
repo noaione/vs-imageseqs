@@ -789,7 +789,7 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
         transform: info.transform,
         pixels: Pixels::Interleaved {
             color_type: header.color_type(),
-            buffer,
+            buffer: buffer.into(),
         },
         timings: DecodeTimings {
             open,
@@ -976,7 +976,7 @@ mod tests {
         let Pixels::Interleaved { buffer, .. } = decoded.pixels else {
             panic!("a targa hands out one interleaved buffer");
         };
-        buffer
+        buffer.to_vec()
     }
 
     /// The two byte colour map entries, which are five bits a channel widened by

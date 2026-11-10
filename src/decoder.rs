@@ -439,7 +439,11 @@ pub enum Pixels {
     /// One buffer holding every channel of `color_type`, interleaved.
     Interleaved {
         color_type: ColorType,
-        buffer: Vec<u8>,
+        /// Shared, because an animated file's window hands the same picture to
+        /// every output frame that displays it, and a held picture can be
+        /// requested more than once: a clone of this buffer is a reference
+        /// count, not a copy of the canvas.
+        buffer: Arc<[u8]>,
     },
     /// One tightly packed buffer per plane of the frame format.
     ///

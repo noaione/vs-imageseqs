@@ -1012,7 +1012,7 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
             transform: info.transform,
             pixels: Pixels::Interleaved {
                 color_type: ColorType::Rgb8,
-                buffer,
+                buffer: buffer.into(),
             },
             timings: DecodeTimings {
                 open,
@@ -1141,7 +1141,7 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
         transform: info.transform,
         pixels: Pixels::Interleaved {
             color_type: layout.color_type,
-            buffer,
+            buffer: buffer.into(),
         },
         timings: DecodeTimings {
             open,
@@ -2113,7 +2113,7 @@ mod tests {
         let sample_bytes = info.format.bytes_per_sample();
         let decoded = decode(&info).unwrap_or_else(|error| panic!("{name}: {error}"));
         match decoded.pixels {
-            Pixels::Interleaved { buffer, .. } => buffer,
+            Pixels::Interleaved { buffer, .. } => buffer.to_vec(),
             _ => {
                 let (info, planes) = planes(name);
                 let channels = planes.len();

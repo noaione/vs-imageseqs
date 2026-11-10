@@ -844,7 +844,7 @@ mod tests {
             transform: crate::pixel::Transform::IDENTITY,
             pixels: Pixels::Interleaved {
                 color_type: ColorType::L8,
-                buffer: vec![0; bytes],
+                buffer: vec![0; bytes].into(),
             },
             timings: DecodeTimings {
                 open: Duration::ZERO,

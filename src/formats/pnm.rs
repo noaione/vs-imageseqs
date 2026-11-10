@@ -921,7 +921,7 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
         transform: info.transform,
         pixels: Pixels::Interleaved {
             color_type: header.color_type(),
-            buffer,
+            buffer: buffer.into(),
         },
         timings: DecodeTimings {
             open,
@@ -1000,7 +1000,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("{name}: {error}"))
             .pixels
         {
-            Pixels::Interleaved { buffer, .. } => buffer,
+            Pixels::Interleaved { buffer, .. } => buffer.to_vec(),
             _ => panic!("a netpbm hands out one interleaved buffer"),
         }
     }

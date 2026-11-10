@@ -734,7 +734,10 @@ fn palette_buffer(
         (4, false) => ColorType::Rgba8,
         _ => ColorType::Rgba16,
     };
-    Ok(Pixels::Interleaved { color_type, buffer })
+    Ok(Pixels::Interleaved {
+        color_type,
+        buffer: buffer.into(),
+    })
 }
 
 /// The channels one pixel of a layout holds.
@@ -831,7 +834,10 @@ fn decode_interleaved(
     if !wide {
         let buffer = decoded.data_u8();
         if buffer.len() == samples.saturating_mul(channels) {
-            return Ok(Pixels::Interleaved { color_type, buffer });
+            return Ok(Pixels::Interleaved {
+                color_type,
+                buffer: buffer.into(),
+            });
         }
     }
     let mut buffer = Vec::with_capacity(samples.saturating_mul(channels).saturating_mul(if wide {
@@ -845,7 +851,10 @@ fn decode_interleaved(
             push_word(&mut buffer, word, wide);
         }
     }
-    Ok(Pixels::Interleaved { color_type, buffer })
+    Ok(Pixels::Interleaved {
+        color_type,
+        buffer: buffer.into(),
+    })
 }
 
 /// Convert an sYCC page to RGB when its SIZ sampling or depth is not one this
@@ -902,7 +911,10 @@ fn decode_sycc_rgb(
             push_word(&mut buffer, word, wide);
         }
     }
-    Ok(Pixels::Interleaved { color_type, buffer })
+    Ok(Pixels::Interleaved {
+        color_type,
+        buffer: buffer.into(),
+    })
 }
 
 /// One component's sample at `index`, normalized to `[0, 1]`.
@@ -1884,7 +1896,7 @@ mod tests {
         };
         // Black, red, green and blue, in the order the index raster names them.
         assert_eq!(
-            buffer,
+            &buffer[..],
             [
                 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 0, 0, 0
             ]

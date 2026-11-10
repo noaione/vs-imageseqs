@@ -1203,7 +1203,7 @@ pub(crate) fn decode_dib(
         transform: info.transform,
         pixels: Pixels::Interleaved {
             color_type: header.color_type(),
-            buffer,
+            buffer: buffer.into(),
         },
         timings: DecodeTimings {
             open,
