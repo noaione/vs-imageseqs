@@ -513,7 +513,11 @@ impl PngSource {
                         continue;
                     }
                     if alpha < maximum {
-                        blend(target, source_pixel, alpha, maximum, sixteen_bit);
+                        if sixteen_bit {
+                            blend16(target, source_pixel, alpha);
+                        } else {
+                            blend8(target, source_pixel, alpha);
+                        }
                         continue;
                     }
                 }
@@ -639,23 +643,31 @@ const fn color_of(color_type: png::ColorType) -> Option<ColorType> {
 /// its coverage plus the destination scaled by what is left, rounded down. A
 /// channel order that differs between the two buffers is not possible here,
 /// because both are the file's own colour type.
-fn blend(target: &mut [u8], source: &[u8], alpha: u32, maximum: u32, sixteen_bit: bool) {
-    let inverse = maximum - alpha;
-    if sixteen_bit {
-        let (targets, _) = target.as_chunks_mut::<2>();
-        let (sources, _) = source.as_chunks::<2>();
-        for (target, source) in targets.iter_mut().zip(sources) {
-            let destination = u32::from(u16::from_be_bytes([target[0], target[1]]));
-            let value = u32::from(u16::from_be_bytes([source[0], source[1]]));
-            let mixed = (value * alpha + destination * inverse) / maximum;
-            let bytes = (mixed as u16).to_be_bytes();
-            target.copy_from_slice(&bytes);
-        }
-    } else {
-        for (target, &source) in target.iter_mut().zip(source) {
-            let mixed = (u32::from(source) * alpha + u32::from(*target) * inverse) / maximum;
-            *target = mixed as u8;
-        }
+///
+/// The divisor is the depth's own instead of a value handed in, which is what
+/// makes it a multiply-high rather than a division: this runs once per pixel of
+/// every blended frame, and a `u32` division a channel is the one thing an
+/// animation of a large canvas could not afford.
+fn blend8(target: &mut [u8], source: &[u8], alpha: u32) {
+    let inverse = 255 - alpha;
+    for (target, &source) in target.iter_mut().zip(source) {
+        let mixed = (u32::from(source) * alpha + u32::from(*target) * inverse) / 255;
+        *target = mixed as u8;
+    }
+}
+
+/// The same for a sixteen bit page, whose samples are the file's big-endian
+/// ones on both sides.
+fn blend16(target: &mut [u8], source: &[u8], alpha: u32) {
+    let inverse = 65535 - alpha;
+    let (targets, _) = target.as_chunks_mut::<2>();
+    let (sources, _) = source.as_chunks::<2>();
+    for (target, source) in targets.iter_mut().zip(sources) {
+        let destination = u32::from(u16::from_be_bytes([target[0], target[1]]));
+        let value = u32::from(u16::from_be_bytes([source[0], source[1]]));
+        let mixed = (value * alpha + destination * inverse) / 65535;
+        let bytes = (mixed as u16).to_be_bytes();
+        target.copy_from_slice(&bytes);
     }
 }
 
