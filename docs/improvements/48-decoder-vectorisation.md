@@ -2,10 +2,11 @@
 
 - status: partially implemented. The kernel step was implemented, measured
   slower than the code it replaced and reverted, and the record is below. The
-  `bmp`, `dds` and `hdr` steps landed: 1.33x to 1.40x on the bitmap corpus, 15%
-  off the surface corpus's decode stage, and 0.82x to 0.85x on a radiance frame,
-  all byte identical and with both validators passing. The `exr`/`tiff` and
-  animation steps are not written yet
+  `bmp`, `dds`, `hdr` and gif-still steps landed: 1.33x to 1.40x on the bitmap
+  corpus, 15% off the surface corpus's decode stage, 0.82x to 0.85x on a radiance
+  frame and 1.64x to 1.89x on a one-picture gif, all byte identical and with
+  both validators passing. `exr`/`tiff` and the compose kernels are not written
+  yet
 - touches: `src/formats/{dds,bmp,tga,ico,pnm,farbfeld,hdr,png,exr,tiff}.rs`,
   `src/decoder.rs` (`RowSink`) and one module a step below it,
   `tests/readalpha.vpy`, `tests/pngwrite.vpy`, `docs/BENCH.md`
@@ -304,10 +305,13 @@ is the composition around them, and there the win is algorithmic.
   `maximum` four times a pixel, which monomorphising into an 8-bit and a 16-bit
   body turns into a literal, and therefore into the multiply-high LLVM already
   uses for a constant divisor.
-- `src/animation/gif.rs:192`–`:203` decodes a single picture **three times** to
-  answer a probe and then a frame. The picture the second peek decoded is the
-  picture, so one LZW pass replaces three. That is the cheapest real win in the
-  whole group and it is on the still path, not the exotic one.
+- `src/animation/gif.rs:192`–`:203` decoded a single picture **three times** to
+  answer a probe and then a frame. The picture the peek decoded is the picture,
+  so one LZW pass replaced three. **Landed**: a one-picture 1024x1024 gif went
+  20.912 → 11.084 ms a frame at `x86-64-v4` and 19.632 → 11.939 ms on the
+  baseline build, which is **1.64x to 1.89x**, and every frame of the still gif,
+  of `tests/fixtures/animation.gif` and of the 55 gif frames in that directory is
+  byte identical. The compose and blend kernels below it are not written yet.
 - `Pixels::Interleaved`'s buffer becoming an `Arc<[u8]>` (`decoder.rs:414`)
   removes a full canvas copy from every cached presentation, every held output
   frame and every skipped intermediate: the fixtures show 15 output frames from

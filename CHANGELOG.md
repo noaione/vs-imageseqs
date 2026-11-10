@@ -20,6 +20,8 @@
   pixel at a time, which took 15% off the decode stage of the DXT5 corpus.
 - A Radiance picture is read as three planes rather than as one interleaved
   picture, which takes 15% to 18% off a `.hdr` frame. Its pixels are unchanged.
+- A one-picture GIF is decoded once instead of three times: 1.64x to 1.89x on a
+  1024x1024 page, with identical pixels.
 
 ## [0.4.2] - 2026-10-28
 
