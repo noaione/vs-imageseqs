@@ -281,24 +281,28 @@ impl Canvas {
         } else {
             self.undisposed.clone()
         };
-        for y in 0..self.height {
-            for x in 0..self.width {
-                let frame_x = x.wrapping_sub(frame.left as usize);
-                let frame_y = y.wrapping_sub(frame.top as usize);
-                if frame_x >= frame.width as usize || frame_y >= frame.height as usize {
-                    // Outside the rectangle: the undisposed sample stands,
-                    // which `composed` already holds.
-                    continue;
-                }
-                let canvas = (y * self.width + x) * 4;
-                let source = (frame_y * frame.width as usize + frame_x) * 4;
-                composed[canvas..canvas + 4].copy_from_slice(&frame.pixels[source..source + 4]);
-                blend(
-                    frame.dispose,
-                    &mut self.undisposed[canvas..canvas + 4],
-                    &mut composed[canvas..canvas + 4],
-                );
+        let area = clipped(frame, self.width, self.height);
+        if area.across == 0 {
+            return composed;
+        }
+        let frame_width = frame.width as usize;
+        for y in area.top..area.bottom {
+            let target = (y * self.width + area.left) * 4;
+            let length = area.across * 4;
+            if !full {
+                // The rectangle's own row, copied whole. Only the rows and
+                // columns the rectangle covers are walked, which is what makes
+                // a small patch on a big canvas one memcpy a row rather than a
+                // branch a pixel.
+                let source = (y - frame.top as usize) * frame_width * 4;
+                composed[target..target + length]
+                    .copy_from_slice(&frame.pixels[source..source + length]);
             }
+            blend_row(
+                frame.dispose,
+                &mut composed[target..target + length],
+                &mut self.undisposed[target..target + length],
+            );
         }
         composed
     }
@@ -317,39 +321,155 @@ impl Canvas {
     /// plane; see the `gif-still-alpha` fixture.
     fn place(&self, frame: &Subframe) -> Vec<u8> {
         let mut placed = vec![0u8; self.width.saturating_mul(self.height).saturating_mul(4)];
-        for y in 0..self.height {
-            for x in 0..self.width {
-                let frame_x = x.wrapping_sub(frame.left as usize);
-                let frame_y = y.wrapping_sub(frame.top as usize);
-                if frame_x >= frame.width as usize || frame_y >= frame.height as usize {
-                    continue;
-                }
-                let to = (y * self.width + x) * 4;
-                let from = (frame_y * frame.width as usize + frame_x) * 4;
-                placed[to..to + 4].copy_from_slice(&frame.pixels[from..from + 4]);
-            }
+        let area = clipped(frame, self.width, self.height);
+        if area.across == 0 {
+            return placed;
+        }
+        let frame_width = frame.width as usize;
+        for y in area.top..area.bottom {
+            let target = (y * self.width + area.left) * 4;
+            let length = area.across * 4;
+            let source = (y - frame.top as usize) * frame_width * 4;
+            placed[target..target + length].copy_from_slice(&frame.pixels[source..source + length]);
         }
         placed
     }
 }
 
-/// Blends one sample and records what disposal must restore.
+/// The part of a frame's rectangle that lands on the canvas.
+///
+/// A gif states its rectangle in absolute screen coordinates and a file can
+/// state one that pokes past the screen, so a walk is over the intersection:
+/// a rectangle that starts past the canvas covers nothing.
+struct Clipped {
+    top: usize,
+    bottom: usize,
+    left: usize,
+    across: usize,
+}
+
+fn clipped(frame: &Subframe, width: usize, height: usize) -> Clipped {
+    let left = (frame.left as usize).min(width);
+    let top = (frame.top as usize).min(height);
+    let right = (frame.left as usize)
+        .saturating_add(frame.width as usize)
+        .min(width);
+    let bottom = (frame.top as usize)
+        .saturating_add(frame.height as usize)
+        .min(height);
+    Clipped {
+        top,
+        bottom: bottom.max(top),
+        left,
+        across: right.saturating_sub(left),
+    }
+}
+
+/// Blends one row of the composed picture and records what disposal must
+/// restore.
 ///
 /// This is the port of `image`'s `blend_and_dispose_pixel`, and its two
-/// oddities are documented on the module. `current` is the sample about to be
-/// displayed and `undisposed` is what a `Previous` disposal restores.
-fn blend(dispose: DisposalMethod, undisposed: &mut [u8], current: &mut [u8]) {
-    // A transparent sample shows whatever was under it.
-    if current[3] == 0 {
-        current.copy_from_slice(undisposed);
+/// oddities are documented on the module; the per-sample walk it replaces ran
+/// the disposal branch a pixel, and a frame's disposal is one value for its
+/// whole rectangle. Hoisting it makes the row a select between two four-byte
+/// values, which on aarch64 is four pixels a block: `vbslq_u32` with the alpha
+/// byte of every pixel as its mask.
+fn blend_row(dispose: DisposalMethod, composed: &mut [u8], undisposed: &mut [u8]) {
+    #[cfg(target_arch = "aarch64")]
+    let done = unsafe { neon::blend_row(dispose, composed, undisposed) };
+    #[cfg(not(target_arch = "aarch64"))]
+    let done = 0usize;
+    blend_row_scalar(
+        dispose,
+        &mut composed[done * 4..],
+        &mut undisposed[done * 4..],
+    );
+}
+
+/// The scalar walk the kernel's tail and a machine without one run.
+fn blend_row_scalar(dispose: DisposalMethod, composed: &mut [u8], undisposed: &mut [u8]) {
+    let (current, _) = composed.as_chunks_mut::<4>();
+    let (under, _) = undisposed.as_chunks_mut::<4>();
+    for (current, under) in current.iter_mut().zip(under.iter_mut()) {
+        // A transparent sample shows whatever was under it.
+        if current[3] == 0 {
+            current.copy_from_slice(under);
+        }
+        match dispose {
+            DisposalMethod::Any | DisposalMethod::Keep => under.copy_from_slice(current),
+            // Not the background colour; see the module note.
+            DisposalMethod::Background => under.copy_from_slice(&[0, 0, 0, 0]),
+            // `Previous` leaves the undisposed canvas alone, which is its point.
+            DisposalMethod::Previous => {}
+        }
     }
-    match dispose {
-        DisposalMethod::Any | DisposalMethod::Keep => undisposed.copy_from_slice(current),
-        // Not the background colour; see the module note.
-        DisposalMethod::Background => undisposed.copy_from_slice(&[0, 0, 0, 0]),
-        // `Previous` leaves the undisposed canvas alone, which is its point.
-        DisposalMethod::Previous => {}
+}
+
+#[cfg(target_arch = "aarch64")]
+mod neon {
+    // Fully qualified: this module is itself named `gif`.
+    use ::gif::DisposalMethod;
+    use std::arch::aarch64::*;
+
+    /// Four pixels a block, a select between the frame and the canvas.
+    ///
+    /// A pixel is one little-endian `u32`, so the alpha byte is the word's
+    /// high byte and one masked compare a lane is the transparency test. The
+    /// disposal branch is outside the loop because it is one value a frame.
+    ///
+    /// # Safety
+    ///
+    /// `composed` and `undisposed` must be the same length and a whole number
+    /// of four-byte pixels, which every caller builds from a row.
+    pub(super) unsafe fn blend_row(
+        dispose: DisposalMethod,
+        composed: &mut [u8],
+        undisposed: &mut [u8],
+    ) -> usize {
+        let pixels = composed.len() / 4;
+        let mut index = 0usize;
+        let alpha = unsafe { vdupq_n_u32(0xFF00_0000) };
+        let zero = unsafe { vdupq_n_u32(0) };
+        while index + 4 <= pixels {
+            // SAFETY: the block reads and writes sixteen bytes at `index` of
+            // both rows, which the caller sized to `pixels` four-byte samples.
+            unsafe {
+                let current = vreinterpretq_u32_u8(vld1q_u8(composed.as_ptr().add(index * 4)));
+                let under = vreinterpretq_u32_u8(vld1q_u8(undisposed.as_ptr().add(index * 4)));
+                let transparent = vceqq_u32(vandq_u32(current, alpha), zero);
+                let blended = vbslq_u32(transparent, under, current);
+                vst1q_u8(
+                    composed.as_mut_ptr().add(index * 4),
+                    vreinterpretq_u8_u32(blended),
+                );
+                match dispose {
+                    DisposalMethod::Any | DisposalMethod::Keep => vst1q_u8(
+                        undisposed.as_mut_ptr().add(index * 4),
+                        vreinterpretq_u8_u32(blended),
+                    ),
+                    DisposalMethod::Background => vst1q_u8(
+                        undisposed.as_mut_ptr().add(index * 4),
+                        vreinterpretq_u8_u32(zero),
+                    ),
+                    DisposalMethod::Previous => {}
+                }
+            }
+            index += 4;
+        }
+        index
     }
+}
+
+/// Runs the kernel and the scalar tail directly, for the test that holds the
+/// two to each other.
+#[cfg(all(test, target_arch = "aarch64"))]
+fn blend_row_forced(dispose: DisposalMethod, composed: &mut [u8], undisposed: &mut [u8]) {
+    let done = unsafe { neon::blend_row(dispose, composed, undisposed) };
+    blend_row_scalar(
+        dispose,
+        &mut composed[done * 4..],
+        &mut undisposed[done * 4..],
+    );
 }
 
 /// One pass over the file, which is what a source keeps per request.
@@ -595,5 +715,71 @@ mod tests {
         let _ = canvas.compose(&subframe(0, 0, 2, 2, painted, DisposalMethod::Keep));
         let composed = canvas.compose(&subframe(0, 0, 1, 1, [99, 99, 99, 0], DisposalMethod::Keep));
         assert_eq!(at(&canvas, &composed, 0, 0), painted);
+    }
+
+    /// The blend row and its NEON kernel against the per-pixel walk the row
+    /// replaces, for every disposal mode and every tail.
+    #[test]
+    fn a_blend_row_is_the_per_pixel_blend_sample_for_sample() {
+        for dispose in [
+            DisposalMethod::Any,
+            DisposalMethod::Keep,
+            DisposalMethod::Background,
+            DisposalMethod::Previous,
+        ] {
+            for pixels in 0..=33usize {
+                let under: Vec<u8> = (0..pixels * 4).map(|i| (i * 3 % 251) as u8).collect();
+                let composed: Vec<u8> = (0..pixels * 4)
+                    .map(|i| match i % 4 {
+                        3 if (i / 4) % 3 == 0 => 0u8,
+                        3 => 255u8,
+                        _ => (i * 7 % 253) as u8,
+                    })
+                    .collect();
+                let mut expected_under = under.clone();
+                let mut expected_composed = composed.clone();
+                blend_per_sample(dispose, &mut expected_under, &mut expected_composed);
+
+                let mut walked_under = under.clone();
+                let mut walked_composed = composed.clone();
+                blend_row(dispose, &mut walked_composed, &mut walked_under);
+                assert_eq!(
+                    (walked_under, walked_composed),
+                    (expected_under.clone(), expected_composed.clone()),
+                    "{dispose:?}, {pixels} pixels"
+                );
+
+                #[cfg(target_arch = "aarch64")]
+                {
+                    let mut kernel_under = under;
+                    let mut kernel_composed = composed;
+                    blend_row_forced(dispose, &mut kernel_composed, &mut kernel_under);
+                    assert_eq!(
+                        (kernel_under, kernel_composed),
+                        (expected_under, expected_composed),
+                        "kernel: {dispose:?}, {pixels} pixels"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The per-pixel walk the row replaced, kept here as the oracle.
+    fn blend_per_sample(dispose: DisposalMethod, under: &mut [u8], composed: &mut [u8]) {
+        for index in 0..under.len() / 4 {
+            let at = index * 4;
+            if composed[at + 3] == 0 {
+                let below: [u8; 4] = under[at..at + 4].try_into().expect("four samples");
+                composed[at..at + 4].copy_from_slice(&below);
+            }
+            match dispose {
+                DisposalMethod::Any | DisposalMethod::Keep => {
+                    let now: [u8; 4] = composed[at..at + 4].try_into().expect("four samples");
+                    under[at..at + 4].copy_from_slice(&now);
+                }
+                DisposalMethod::Background => under[at..at + 4].copy_from_slice(&[0, 0, 0, 0]),
+                DisposalMethod::Previous => {}
+            }
+        }
     }
 }
