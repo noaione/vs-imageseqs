@@ -2,12 +2,13 @@
 
 - status: proposed, not implemented
 - touches: `src/formats/{dds,bmp,tga,ico,pnm,farbfeld,hdr,png,exr,tiff}.rs`,
-  `src/decoder.rs` (`RowSink`), `src/pixel.rs`, a new `src/planar.rs`,
-  `src/animation/{gif,apng,webp}.rs`, `src/animation.rs`,
+  `src/decoder.rs` (`RowSink`) and one module a step below it,
   `tests/readalpha.vpy`, `tests/pngwrite.vpy`, `docs/BENCH.md`
-- expected: the decode stage of every format this tree reads itself 2x to 4x
-  faster, from one shared interleave kernel and four algorithmic changes, with
-  no new dependency and no change to a single output byte
+- expected: the decode stage of the formats this tree reads itself faster, from
+  four algorithmic changes that need no intrinsic and no new dependency, with no
+  change to a single output byte. The first kernel this page proposed was
+  implemented, measured slower than the code it replaced, and reverted; that
+  measurement is below
 - risk: medium. It moves where every sample of those formats is written, so it
   ships with the parity gates that already exist and a kernel-versus-scalar
   unit test per kernel, the way `src/convert/simd.rs` does
@@ -120,30 +121,63 @@ vectoriser sometimes takes, so it is measured before it is written.
 
 ## the work
 
-Six steps, in the order they should land. The first is the one that pays for the
-most formats, and the last three are each independent of the others.
+Four steps, in the order they should land, plus one that the first round of
+implementation refuted and this page keeps as the record. The three middle ones
+are independent of each other.
 
-### 1. one interleave kernel, four call sites
+### 0. the interleave kernel — measured, not worth it
 
-`src/decoder.rs:227` (`RowSink::place_rgb8`), `:255` (`RowSink::place_rgba8`),
-`:301` (`place_bgr8`), `:335` (`place_rgba16`) and `src/pixel.rs:752`
-(`extract_channel`) are the same loop written five times. The kernel is a byte
-shuffle a channel: a block is as many pixels as one register of source bytes
-holds, which the prototype measured as 8 pixels for three channels (24 bytes)
-and 8 for four (32 bytes) on AVX2, twice that on AVX-512 and half on NEON, and
-the pixels a block cannot cover are the scalar loop's. `place_bgr8` is the same
-kernel with the shuffle's first and third control bytes swapped, and
-`place_rgba16` is the same kernel with a byte swap folded into the mask, so it
-is one kernel with a channel count and a swap, not five to keep in step. The
-new module is `src/planar.rs`, a sibling of `src/convert/simd.rs` and dispatching
-the same way.
+**This was the plan's first step, and it was implemented, measured and
+reverted.** It is recorded here because the numbers matter to whoever reads
+this next.
 
-Reached by every row-stream reader (`bmp`, `tga`, `png`, `pnm`, `farbfeld`) and
-by `extract_channel`, which every buffered reader goes through (`jpeg`, `jxl`,
-`webp`, `qoi`, `hdr`, `dds`, `tiff`, `exr`, `apng`). From the prototype table:
-**4.0x on the loop, 1.3x to 2.5x on the frame** of the formats whose decode is
-mostly this loop, and 0.3 to 0.5 ms off the `convert` stage of every format that
-buffers.
+`src/decoder.rs:227` (`RowSink::place_rgb8`), `:255` (`place_rgba8`), `:301`
+(`place_bgr8`) and `src/pixel.rs:752` (`extract_channel`) are one loop written
+several times, and the prototype priced a vector version of it at 4.0x over a
+*scalar* gather. A `src/planar.rs` was written with three kernels (AVX-512BW for
+the word-aligned strides, AVX2 for the rest, NEON for aarch64), a runtime probe
+per `src/convert/simd.rs`, and the scalar loop as the tail and the oracle. Both
+row-sink and `extract_channel` were rewired to it, and the parity was exact: the
+unit test holds every stride, channel and length byte for byte.
+
+It was slower than what the tree already does, so it is gone. Measured by
+alternating two builds inside one session (`target/bench/plan48/ab.py`, best of
+five rounds, the only way on a machine whose run-to-run spread on these stages
+is 40%):
+
+| stage | `v4` build | baseline build |
+| --- | ---: | ---: |
+| `dds` convert, 4 channels | 1.07x **slower** | 0.66x, i.e. 1.5x faster |
+| `qoi` convert, 4 channels | 0.95x | 0.66x |
+| `qoi` convert, 3 channels | 0.95x | 1.55x **slower** |
+| `tiff` convert, 3 channels | 0.99x | — |
+| `bmp` read (row sink) | 1.00x | 1.01x |
+
+Four things came out of it, and they are why the rest of this page is
+algorithmic work rather than kernel work:
+
+1. **the wide builds already vectorise this loop.** A hand kernel has to beat
+   the compiler's own 512-bit loop in the library a user with AVX-512 loads, and
+   it did not: the shuffle-and-store a byte gather needs is what LLVM emits
+   from the stride-4 loop already. The prototype's 4.0x was against a scalar
+   loop this tree does not run in those builds.
+2. **a kernel is not portable between the builds that ship.** The choice is
+   made at run time, so a host with AVX-512 runs the 512-bit kernel even when it
+   loaded the baseline library, and a host without it runs the 256-bit kernel
+   inside a build whose own loops may be wider. That is a tax on every host
+   that is not the one the kernel was tuned on.
+3. **the row sinks were already one pass.** `place_rgb8` splits a row into three
+   planes in one walk, and the compiler vectorises that walk: replacing it with
+   three kernel calls was `1.00x` at best.
+4. **a stride of three is the case no kernel wins.** Three bytes a pixel puts a
+   channel's byte at a different offset in every lane, so the gather needs four
+   shuffles and a combine where the compiler's loop is one wide shuffle. It is
+   also the stride `qoi`, `jpeg`, `jxl`, `hdr` and most `tiff` pages use, which
+   is most of the traffic.
+
+What that leaves is the arithmetic around the loop: the tiles that are read
+with a division per sample, the pictures that are built and then walked a second
+time, and the composites that walk a canvas to blend a patch.
 
 ### 2. dds: the block, as a block
 
@@ -331,11 +365,12 @@ kernel that only wins in the baseline library is not a win.
   the seven dds, fifteen bmp, fifteen tga and four ico fixtures whose module
   tests are each format's oracle).
 - `target/bench/plan48/measure.py` re-run per build: every set in the evidence
-  table has a faster decode stage, `convert` is faster wherever step 1 matters,
-  and **no set is slower**. The dds, bmp, tga, pnm, farbfeld and hdr rows are the
-  ones this plan is claiming; the animation corpus is where step 5 shows.
+  table has a faster decode stage, and **no set is slower**. The dds, bmp, tga,
+  pnm, farbfeld and hdr rows are the ones this plan is claiming; the animation
+  corpus is where step 4 shows.
 - `docs/BENCH.md` gains a `decoder` section with the before and after of that
-  table, and `AGENTS.md`'s `src/formats/` paragraph names `src/planar.rs`.
+  table. `AGENTS.md` gains the `src/planar.rs` sentence only if a later round
+  lands one; the kernel this page proposed did not.
 
 ## how to measure
 
