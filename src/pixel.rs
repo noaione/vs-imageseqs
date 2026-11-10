@@ -1058,6 +1058,22 @@ fn write_planes<T: Sample, const CHANNELS: usize>(
             shift,
         );
     }
+    // A row that is not transposed is written along the row it reads, and a
+    // sample the decoder already holds in the frame's own word needs no move:
+    // one pass fills every plane the frame asks for, reading the buffer once
+    // instead of once a plane. The mirrors only pick the source row and
+    // reverse the destination row, which the same walk does.
+    if !transform.transposes() && shift == 0 && planes > 0 && matches!(T::SIZE, 1 | 2) {
+        return write_interleaved::<T, CHANNELS>(
+            frame,
+            layout,
+            planes,
+            pixels,
+            transform,
+            plane_row_bytes,
+            output_height,
+        );
+    }
     for plane in 0..planes {
         let target = plane_target(frame, plane, plane_row_bytes, output_height)?;
         match plane {
@@ -1067,6 +1083,56 @@ fn write_planes<T: Sample, const CHANNELS: usize>(
         }
     }
 
+    Ok(())
+}
+
+/// Fills every plane of a non-transposed frame from one walk over the buffer.
+///
+/// This is [`crate::planar`]'s pass with the frame's own planes as its
+/// destination, so the decoder's buffer is read once rather than once per
+/// plane. A plane count below the channel count is the leading channels only,
+/// which is how a call that hands out no alpha drops the fourth channel
+/// without a second read.
+fn write_interleaved<T: Sample, const CHANNELS: usize>(
+    frame: &mut VideoFrameMut,
+    layout: &ImageLayout,
+    planes: usize,
+    pixels: &[u8],
+    transform: Transform,
+    plane_row_bytes: usize,
+    output_height: usize,
+) -> Result<()> {
+    let mut targets = [None; 4];
+    for (index, slot) in targets.iter_mut().take(planes).enumerate() {
+        *slot = Some(plane_target(frame, index, plane_row_bytes, output_height)?);
+    }
+    for row in 0..output_height {
+        let source_row = if transform.flip_y {
+            output_height - 1 - row
+        } else {
+            row
+        };
+        let start = source_row * layout.row_bytes;
+        let source = &pixels[start..start + layout.row_bytes];
+        let mut rows: [&mut [u8]; 4] = [&mut [], &mut [], &mut [], &mut []];
+        for (slot, target) in rows.iter_mut().zip(targets.iter()).take(planes) {
+            let target = target.expect("every plane was given a target");
+            // Safety: `plane_target` checked this plane's stride against the
+            // row size, so every row of it fits, and no two targets are the
+            // same plane.
+            *slot = unsafe { slice::from_raw_parts_mut(target.row_start(row), plane_row_bytes) };
+        }
+        match T::SIZE {
+            1 => crate::planar::place8::<CHANNELS>(source, &mut rows[..planes]),
+            2 => crate::planar::place16::<CHANNELS>(source, &mut rows[..planes]),
+            _ => unreachable!("the caller takes this path for one and two byte samples"),
+        }
+        if transform.flip_x {
+            for destination in rows[..planes].iter_mut() {
+                reverse_samples(destination, T::SIZE);
+            }
+        }
+    }
     Ok(())
 }
 

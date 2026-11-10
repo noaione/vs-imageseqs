@@ -124,6 +124,84 @@ fn scalar8<const C: usize>(source: &[u8], planes: &mut [&mut [u8]]) {
     }
 }
 
+/// Writes `C` interleaved sixteen bit native-order channels into the leading
+/// planes.
+///
+/// The samples are already in the machine's byte order, which is what a
+/// buffered decoder hands over, so this is the eight bit walk with two byte
+/// samples and no swap to fold in. A hand block does not win here: the swap is
+/// what made the big-endian kernel worthwhile, and the one pass is 1.5x to 1.6x
+/// the per channel gather it replaces.
+pub fn place16<const C: usize>(source: &[u8], planes: &mut [&mut [u8]]) {
+    debug_assert!((1..=4).contains(&C), "a pixel has at most four channels");
+    debug_assert!(planes.len() <= C, "more planes than the row has channels");
+    scalar16::<C>(source, planes);
+}
+
+/// The sixteen bit walk, a zip per plane count the way the eight bit one is.
+fn scalar16<const C: usize>(source: &[u8], planes: &mut [&mut [u8]]) {
+    let pixels = source.chunks_exact(C * 2);
+    match planes.len() {
+        0 => {}
+        1 => {
+            let (first, _) = planes.split_first_mut().unwrap();
+            let targets = first.as_chunks_mut::<2>().0.iter_mut();
+            for (pixel, a) in pixels.zip(targets) {
+                a.copy_from_slice(&pixel[..2]);
+            }
+        }
+        2 => {
+            let (first, rest) = planes.split_first_mut().unwrap();
+            let (second, _) = rest.split_first_mut().unwrap();
+            let targets = first
+                .as_chunks_mut::<2>()
+                .0
+                .iter_mut()
+                .zip(second.as_chunks_mut::<2>().0.iter_mut());
+            for (pixel, (a, b)) in pixels.zip(targets) {
+                a.copy_from_slice(&pixel[..2]);
+                b.copy_from_slice(&pixel[2..4]);
+            }
+        }
+        3 => {
+            let (first, rest) = planes.split_first_mut().unwrap();
+            let (second, rest) = rest.split_first_mut().unwrap();
+            let (third, _) = rest.split_first_mut().unwrap();
+            let targets = first
+                .as_chunks_mut::<2>()
+                .0
+                .iter_mut()
+                .zip(second.as_chunks_mut::<2>().0.iter_mut())
+                .zip(third.as_chunks_mut::<2>().0.iter_mut());
+            for (pixel, ((a, b), c)) in pixels.zip(targets) {
+                a.copy_from_slice(&pixel[..2]);
+                b.copy_from_slice(&pixel[2..4]);
+                c.copy_from_slice(&pixel[4..6]);
+            }
+        }
+        4 => {
+            let (first, rest) = planes.split_first_mut().unwrap();
+            let (second, rest) = rest.split_first_mut().unwrap();
+            let (third, rest) = rest.split_first_mut().unwrap();
+            let (fourth, _) = rest.split_first_mut().unwrap();
+            let targets = first
+                .as_chunks_mut::<2>()
+                .0
+                .iter_mut()
+                .zip(second.as_chunks_mut::<2>().0.iter_mut())
+                .zip(third.as_chunks_mut::<2>().0.iter_mut())
+                .zip(fourth.as_chunks_mut::<2>().0.iter_mut());
+            for (pixel, (((a, b), c), d)) in pixels.zip(targets) {
+                a.copy_from_slice(&pixel[..2]);
+                b.copy_from_slice(&pixel[2..4]);
+                c.copy_from_slice(&pixel[4..6]);
+                d.copy_from_slice(&pixel[6..8]);
+            }
+        }
+        _ => unreachable!("a pixel has at most four channels"),
+    }
+}
+
 /// Writes `C` interleaved sixteen bit big-endian channels into the leading
 /// planes, swapping each sample into the machine's byte order as it goes.
 ///
@@ -380,18 +458,57 @@ mod tests {
 
     /// The naive shape both walks replace: one plane at a time, one sample at
     /// a time. Independent of either, so a shared mistake cannot hide.
-    fn reference<const C: usize>(source: &[u8], planes: &mut [&mut [u8]], big_endian: bool) {
-        let sample_bytes = if big_endian { 2 } else { 1 };
+    fn reference<const C: usize>(source: &[u8], planes: &mut [&mut [u8]], kind: Kind) {
+        let sample_bytes = kind.sample_bytes();
         let pixels = planes.first().map_or(0, |plane| plane.len() / sample_bytes);
         for (channel, plane) in planes.iter_mut().enumerate() {
             for index in 0..pixels {
                 let at = (index * C + channel) * sample_bytes;
-                if sample_bytes == 1 {
-                    plane[index] = source[at];
-                } else {
-                    plane[index * 2] = source[at + 1];
-                    plane[index * 2 + 1] = source[at];
+                match kind {
+                    Kind::Eight => plane[index] = source[at],
+                    Kind::SixteenBe => {
+                        plane[index * 2] = source[at + 1];
+                        plane[index * 2 + 1] = source[at];
+                    }
+                    Kind::Sixteen => {
+                        plane[index * 2] = source[at];
+                        plane[index * 2 + 1] = source[at + 1];
+                    }
                 }
+            }
+        }
+    }
+
+    /// The three walks a row can take: eight bit, sixteen bit big endian and
+    /// sixteen bit native.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Kind {
+        Eight,
+        SixteenBe,
+        Sixteen,
+    }
+
+    impl Kind {
+        fn sample_bytes(self) -> usize {
+            match self {
+                Self::Eight => 1,
+                Self::SixteenBe | Self::Sixteen => 2,
+            }
+        }
+
+        fn label(self) -> &'static str {
+            match self {
+                Self::Eight => "eight bit",
+                Self::SixteenBe => "sixteen bit big endian",
+                Self::Sixteen => "sixteen bit native",
+            }
+        }
+
+        fn place<const C: usize>(self, source: &[u8], planes: &mut [&mut [u8]]) {
+            match self {
+                Self::Eight => place8::<C>(source, planes),
+                Self::SixteenBe => place16be::<C>(source, planes),
+                Self::Sixteen => place16::<C>(source, planes),
             }
         }
     }
@@ -403,8 +520,8 @@ mod tests {
 
     /// Runs every walk and every named kernel for one shape and compares them
     /// with the reference.
-    fn check<const C: usize>(big_endian: bool, pixels: usize) {
-        let sample_bytes = if big_endian { 2 } else { 1 };
+    fn check<const C: usize>(kind: Kind, pixels: usize) {
+        let sample_bytes = kind.sample_bytes();
         let source: Vec<u8> = (0..pixels * C * sample_bytes)
             .map(|index| (index % 251) as u8)
             .collect();
@@ -416,40 +533,40 @@ mod tests {
                     .iter_mut()
                     .map(|plane| plane.as_mut_slice())
                     .collect();
-                reference::<C>(&source, &mut planes, big_endian);
+                reference::<C>(&source, &mut planes, kind);
             }
             let mut actual = vec![vec![0u8; row]; count];
-            let path =
-                format!("{C} channels, {pixels} pixels, {count} planes, big endian {big_endian}");
+            let path = format!(
+                "{C} channels, {pixels} pixels, {count} planes, {}",
+                kind.label()
+            );
             {
                 let mut planes: Vec<&mut [u8]> = actual
                     .iter_mut()
                     .map(|plane| plane.as_mut_slice())
                     .collect();
-                if big_endian {
-                    place16be::<C>(&source, &mut planes);
-                } else {
-                    place8::<C>(&source, &mut planes);
-                }
+                kind.place::<C>(&source, &mut planes);
             }
             assert!(actual[..count] == expected[..count], "public path: {path}");
 
             #[cfg(target_arch = "aarch64")]
-            for (name, kernel) in KERNELS {
-                let mut forced = vec![vec![0u8; row]; count];
-                let mut planes: Vec<&mut [u8]> = forced
-                    .iter_mut()
-                    .map(|plane| plane.as_mut_slice())
-                    .collect();
-                if big_endian {
-                    place16be_forced::<C>(&source, &mut planes, *kernel);
-                } else {
-                    place8_forced::<C>(&source, &mut planes, *kernel);
+            if matches!(kind, Kind::Eight | Kind::SixteenBe) {
+                for (name, kernel) in KERNELS {
+                    let mut forced = vec![vec![0u8; row]; count];
+                    let mut planes: Vec<&mut [u8]> = forced
+                        .iter_mut()
+                        .map(|plane| plane.as_mut_slice())
+                        .collect();
+                    match kind {
+                        Kind::Eight => place8_forced::<C>(&source, &mut planes, *kernel),
+                        Kind::SixteenBe => place16be_forced::<C>(&source, &mut planes, *kernel),
+                        Kind::Sixteen => unreachable!("no named kernel for native samples"),
+                    }
+                    assert!(
+                        forced[..count] == expected[..count],
+                        "{name} kernel: {path}"
+                    );
                 }
-                assert!(
-                    forced[..count] == expected[..count],
-                    "{name} kernel: {path}"
-                );
             }
         }
     }
@@ -459,14 +576,12 @@ mod tests {
     #[test]
     fn a_walk_is_the_naive_gather_sample_for_sample() {
         for pixels in lengths() {
-            check::<1>(false, pixels);
-            check::<2>(false, pixels);
-            check::<3>(false, pixels);
-            check::<4>(false, pixels);
-            check::<1>(true, pixels);
-            check::<2>(true, pixels);
-            check::<3>(true, pixels);
-            check::<4>(true, pixels);
+            for kind in [Kind::Eight, Kind::SixteenBe, Kind::Sixteen] {
+                check::<1>(kind, pixels);
+                check::<2>(kind, pixels);
+                check::<3>(kind, pixels);
+                check::<4>(kind, pixels);
+            }
         }
     }
 
