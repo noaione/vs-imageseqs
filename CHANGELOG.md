@@ -12,6 +12,12 @@
 
 - On the 35-page JPEG 2000 corpus, read time is effectively unchanged: 0.9% faster with the default four workers and 0.4% faster with `prefetch=0` than 0.4.1.
 - Improve `ReadAlpha` performance when doing async frame requests.
+- A 24-bit or 32-bit bitmap is read straight into the frame's planes instead of
+  through a scratch row first, and a bitfield bitmap widens its channels through
+  a table rather than a division each. A 1200x900 page reads 1.33x to 1.40x
+  faster, with identical pixels.
+- A block compressed surface writes a block's row in one store rather than a
+  pixel at a time, which took 15% off the decode stage of the DXT5 corpus.
 
 ## [0.4.2] - 2026-10-28
 

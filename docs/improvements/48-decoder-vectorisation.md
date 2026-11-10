@@ -1,6 +1,10 @@
 # 48 — a faster decode path for the formats this tree decodes itself
 
-- status: proposed, not implemented
+- status: partially implemented. The kernel step was implemented, measured
+  slower than the code it replaced and reverted, and the record is below. The
+  `bmp` and `dds` steps landed: 1.35x to 1.40x on the bitmap corpus and 0.85x on
+  the surface corpus's decode stage, both byte identical. The `hdr`/`exr`/`tiff`
+  and animation steps are not written yet
 - touches: `src/formats/{dds,bmp,tga,ico,pnm,farbfeld,hdr,png,exr,tiff}.rs`,
   `src/decoder.rs` (`RowSink`) and one module a step below it,
   `tests/readalpha.vpy`, `tests/pngwrite.vpy`, `docs/BENCH.md`
@@ -205,6 +209,15 @@ Expected **2.5x to 3.5x on the dds decode stage**, which is 3.6 ms to about
 1.2 ms a frame at 1.08 Mpx. DXT1 and the colour half of DXT3/DXT5 share the
 kernel; DXT3's four-bit alpha is a `pmullw` widening of a nibble.
 
+**landed, first half.** The row store is in: a block's four pixels are
+contiguous, so a row is one 12 or 16 byte store rather than four of 3 or 4. On
+`target/bench/step5-corpus`'s DXT5 pages the decode stage went 3.629 → 3.084 ms
+at `x86-64-v4` (0.85x) and 3.103 → 3.010 ms on the baseline build, and the
+picture is byte identical on the corpus and on the six odd surfaces of
+`target/bench/dds-odd`. The colour kernel above is not written: the palettes and
+the index gather are already multiply-highs, and the measurement to justify it
+is the one this page's step 0 says has to beat the compiler's own loop.
+
 ### 3. bmp and tga: two passes become one
 
 - `bmp.rs:143`'s `expand` becomes a table on the `Bitfield`, filled while the
@@ -220,8 +233,21 @@ kernel; DXT3's four-bit alpha is a `pmullw` widening of a nibble.
 - a palette page widens its entries once, at parse, instead of a `palette.get`
   with an `Option`, a branch and a `x * channels` multiply per pixel.
 
-Expected **1.6x to 1.9x on a 24-bit bitmap** (2.76 → ~1.5 ms), and 2.5x to 4x on
-a bitfield page, which the step-5 corpus does not have but the fixtures do.
+
+**landed, the bitmap half.** `Rows::fill` hands a 24-bit or a 32-bit row to
+`place_bgr8`/`place_rgba8` directly, and `Bitfield` carries a widening table
+built once per width. Measured on `target/bench/step5-corpus`'s 1200x900
+24-bit pages, best of four alternating rounds: the decode stage went 4.721 →
+3.551 ms on the baseline build and 3.911 → 2.796 ms at `x86-64-v4`, which is
+**1.33x to 1.40x on the frame**, and every plane of every frame of both clips
+is byte identical. The bitfield table is not on that corpus (it has no bitfield
+page), so its share is untested; it is kept because it removes a `u32` division
+per channel per pixel and cannot change a byte.
+
+The `tga` half is not written: the pages this tree's corpora hold are top-down
+24-bit, which the row sink already takes in one pass, so the swap pass and the
+5-5-5 tables only run on the buffered paths and there is nothing there to
+measure against.
 
 ### 4. hdr, exr, tiff: the algorithmic three
 
