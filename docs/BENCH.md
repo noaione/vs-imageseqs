@@ -264,6 +264,11 @@ frame the worker builds.
 | --- | ---: | ---: | ---: | ---: | ---: |
 | gif animation, 1024x1024, 16 frames | 2.00 | 1.57 | 2.05 | 1.60 | 0.78x faster |
 | gif still, 1024x1024 | 4.45 | 3.89 | 4.45 | 3.90 | 0.88x faster |
+| webp animation, 1024x1024, 16 frames | 1.92 | 1.64 | 1.92 | 1.64 | 0.85x faster |
+
+The gif rows compare this commit with the one before it; the webp row compares
+a build of the same tree with the reciprocal table and without it, because the
+write it sits beside had already moved.
 
 the corpus is `target/bench/plan48/anim-corpus`. Every plane of every frame
 of both clips is byte identical under the two builds, and `tests/readalpha.vpy`

@@ -399,7 +399,16 @@ is the composition around them, and there the win is algorithmic.
   a blend is not what a frame of that corpus spends its time in: it is mostly
   deflate and full-canvas disposal copies. It is kept because the divisor is
   now free and no byte changes, not because it was measured to pay.
-  The webp half is not written yet.
+  **Landed, the webp half**: the reciprocal is a 256-entry table, which is the
+  division entry for entry, and a blend cannot index the one entry a division
+  cannot produce. On `target/bench/plan48/anim-corpus`'s 1024x1024 webp the
+  frame went 1.92 → 1.64 ms (**0.85x**, 1.18x faster) on a build of the same
+  tree with and without the table, and every frame of that file and of
+  `tests/fixtures/animation.webp` is byte identical. The vector half of
+  `over` is not written: the table already removed the division, which was the
+  expensive step, and the rest is three multiplies, a rounding shift and a
+  per-lane divisor table lookup that a vector would have to gather -- a small
+  slice of the loop at a real risk of moving a byte.
 - `src/animation/gif.rs:192`–`:203` decoded a single picture **three times** to
   answer a probe and then a frame. The picture the peek decoded is the picture,
   so one LZW pass replaced three. **Landed**: a one-picture 1024x1024 gif went

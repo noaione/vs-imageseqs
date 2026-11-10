@@ -176,6 +176,9 @@ gif, and the apng and webp vector halves are still open.
 The buffered write landed last: `src/pixel.rs`'s `write_planes` fills every
 plane a non-transposed frame asks for from one read of the decoder's picture,
 which is 0.62x to 0.82x on the `convert` stage and identical pixels.
+The animated webp's blend looks its reciprocal up in a table rather than dividing
+a pixel, which is 1.18x on a 1024x1024 animation; the vector halves of that
+blend and of the apng one are still open.
 
 ### several frames in flight — 2026-11-09
 

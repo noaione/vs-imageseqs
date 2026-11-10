@@ -33,6 +33,8 @@
 - A GIF animation composes only the rectangle each frame states and blends it a
   row at a time, with a NEON select on arm: a 1024x1024 animation reads 1.27x
   faster and a still GIF 1.14x faster, with identical pixels.
+- An animated WebP's alpha blend looks its reciprocal up rather than dividing a
+  pixel: a 1024x1024 animation reads 1.18x faster, with identical pixels.
 
 ## [0.4.2] - 2026-10-28
 
