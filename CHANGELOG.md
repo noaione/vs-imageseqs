@@ -18,6 +18,8 @@
   faster, with identical pixels.
 - A block compressed surface writes a block's row in one store rather than a
   pixel at a time, which took 15% off the decode stage of the DXT5 corpus.
+- A Radiance picture is read as three planes rather than as one interleaved
+  picture, which takes 15% to 18% off a `.hdr` frame. Its pixels are unchanged.
 
 ## [0.4.2] - 2026-10-28
 

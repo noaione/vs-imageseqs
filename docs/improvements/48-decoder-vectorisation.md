@@ -2,9 +2,10 @@
 
 - status: partially implemented. The kernel step was implemented, measured
   slower than the code it replaced and reverted, and the record is below. The
-  `bmp` and `dds` steps landed: 1.35x to 1.40x on the bitmap corpus and 0.85x on
-  the surface corpus's decode stage, both byte identical. The `hdr`/`exr`/`tiff`
-  and animation steps are not written yet
+  `bmp`, `dds` and `hdr` steps landed: 1.33x to 1.40x on the bitmap corpus, 15%
+  off the surface corpus's decode stage, and 0.82x to 0.85x on a radiance frame,
+  all byte identical and with both validators passing. The `exr`/`tiff` and
+  animation steps are not written yet
 - touches: `src/formats/{dds,bmp,tga,ico,pnm,farbfeld,hdr,png,exr,tiff}.rs`,
   `src/decoder.rs` (`RowSink`) and one module a step below it,
   `tests/readalpha.vpy`, `tests/pngwrite.vpy`, `docs/BENCH.md`
@@ -265,11 +266,22 @@ These are not kernel work and they are the largest single row in the table.
   hand over untouched, and `tiff.rs:1179` (`expand_narrow`) does two divides per
   sample for a divisor the pixel width makes a constant.
 
-Expected **1.15x to 1.30x on hdr** and 1.05x to 1.15x on exr and tiff. The
-`hdr` float conversion (`hdr.rs:257`) stays exactly three operations in the
-same order, one multiply a component, because folding `/256` elsewhere or
-letting it fuse into an FMA changes the last bit of some values.
 
+**landed, the hdr third.** `raster` now writes three `f32` planes instead of a
+12 byte a pixel picture, and a stored row that is not transposed moves into its
+output row as three contiguous runs of the scanline rather than an index and a
+bounds check a pixel. Measured on `target/bench/step5-corpus`'s pages, best of
+four alternating rounds: the `convert` stage went 6.488 → 4.068 ms at
+`x86-64-v4` and 6.083 → 4.088 ms on the baseline build, and the frame
+17.679 → 14.447 ms (**0.82x**) and 18.521 → 15.737 ms (**0.85x**). Every plane of
+every frame of the corpus and of the nine `tests/fixtures/hdr-*.hdr` pages is
+byte identical, which includes the four orientation fixtures whose scanlines are
+stored turned round.
+
+The `exr` and `tiff` thirds are not written yet. The `hdr` float conversion
+(`hdr.rs:257`) still does exactly three operations in the same order, one
+multiply a component, because folding `/256` elsewhere or letting it fuse into
+an FMA changes the last bit of some values.
 ### 5. animation: compose the rectangle, not the canvas
 
 The gif LZW walk and the palette expansion are the `gif` crate's, and the png
