@@ -190,6 +190,42 @@ plugin places the rows itself instead of buffering the picture.
 | imgseqs `Read`, `prefetch=0` | 22.566 s | 661.55 ms | 0.010 s | 22.576 s |
 | imgseqs `Read`, `prefetch=16` | 4.524 s | 0.09 ms | 0.009 s | 4.533 s |
 
+## decoder
+
+[48](improvements/48-decoder-vectorisation.md) is the plan about the loops this
+tree owns in its own decoders rather than the scheduling around them. This is
+the aarch64 round of its interleave step: the pass that takes an interleaved
+row apart into planes, and the sixteen bit big-endian one a sixteen bit png and
+a farbfeld hand over.
+
+measured 2026-11-10 on macOS 27, rustc 1.99.1, one `Read` and one `ReadAlpha`
+clip, `prefetch=0`, the `debug=1` stage log, two builds of the same commit
+alternated inside one batch (`target/bench/plan48/ab.py`, best of five
+rounds). `before` is the commit without the change, so the table is the change
+and not the branch. Milliseconds a frame.
+
+| set | read before | read after | total before | total after | change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| png rgba16 | 16.56 | 15.38 | 16.65 | 15.47 | 0.93x faster |
+| png rgb16 | 15.48 | 14.50 | 15.57 | 14.59 | 0.94x faster |
+| png la16 | 8.84 | 8.56 | 8.90 | 8.62 | 0.97x faster |
+| png gray16 | 5.87 | 5.57 | 5.92 | 5.62 | 0.95x faster |
+| png rgba8 | 8.53 | 7.77 | 8.59 | 7.83 | 0.91x faster |
+| png la8 | 3.44 | 3.19 | 3.48 | 3.23 | 0.93x faster |
+| png rgb8 | 4.89 | 4.88 | 4.94 | 4.94 | unchanged |
+| png gray8 | 2.21 | 2.20 | 2.24 | 2.23 | unchanged |
+| farbfeld | 1.77 | 1.25 | 1.81 | 1.28 | 0.71x faster |
+
+the png set is `target/bench/png-depth`, eight 1200x900 pages of each colour
+type from `target/bench/make-png-depth-corpus.py`, because `step5-corpus` has
+no png page; farbfeld is `step5-corpus`'s eight `.ff` pages. A sixteen bit png
+spends most of its frame in inflate, so a loop 4x faster is 3% to 7% of the
+frame; farbfeld has nothing to inflate, so the same kernel is 29% of its
+frame. The untouched formats were swept the same way and none moved beyond
+this machine's noise (bmp 0.99x, dds 1.00x, ppm 0.99x, qoi 0.99x, tiff
+1.00x, exr 0.98x, hdr 1.00x, ico 1.03x at 0.12 ms a frame). The x86-64
+libraries were not measured in this round.
+
 
 ## PNGWrite
 

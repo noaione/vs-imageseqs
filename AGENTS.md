@@ -232,6 +232,16 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   probe must never promise a frame a decode would refuse to produce.
 - `src/pixel.rs`: supported pixel formats, the format a nominal depth names, and
   planar frame writes, which move a wider word down to the frame's own depth.
+- `src/planar.rs`: the one pass that takes an interleaved row apart into the
+  planes it belongs in, shared by `src/formats/png.rs`'s channel walk and
+  `src/decoder.rs`'s `RowSink::place_interleaved`. the scalar walk is a zip a
+  plane count at a time, which is the shape LLVM turns into `ld3`/`ld4` on its
+  own; an aarch64 kernel carries the two shapes a hand block wins: sixteen bit
+  big-endian samples, where `ldN` + `rev16` folds the swap into the store, and
+  two eight bit channels. NEON is in the aarch64 baseline, so the dispatch is a
+  `#[cfg]` and every other target runs the walk. both are held to a naive
+  per-channel gather sample for sample by the test beside them, which forces
+  the kernel by name where the dispatch would not pick it.
 - `src/color.rs`: frame properties, the optional raw `ICCProfile`, and the
   container's color metadata mapped onto `_Primaries`, `_Transfer`, `_Matrix`
   and `_Range`.

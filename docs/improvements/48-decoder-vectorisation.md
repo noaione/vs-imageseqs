@@ -1,16 +1,20 @@
 # 48 — a faster decode path for the formats this tree decodes itself
 
-- status: partially implemented. The kernel step was implemented, measured
-  slower than the code it replaced and reverted, and the record is below. The
-  `bmp`, `dds`, `hdr`, gif-still and apng-blend steps landed: 1.33x to 1.40x on
-  the bitmap corpus, 15% off the surface corpus's decode stage, 0.82x to 0.85x on
+- status: partially implemented. The kernel step was implemented on x86-64,
+  measured slower than the code it replaced and reverted, and the record is
+  below; it was then asked again on aarch64, where the eight bit kernel still
+  loses to the compiler's own `ld3`/`ld4` but the sixteen bit big-endian one
+  wins, and that round landed `src/planar.rs`: 3% to 7% off a sixteen bit
+  png, 9% off an eight bit rgba page and 29% off a farbfeld. The `bmp`,
+  `dds`, `hdr`, gif-still and apng-blend steps landed: 1.33x to 1.40x on the
+  bitmap corpus, 15% off the surface corpus's decode stage, 0.82x to 0.85x on
   a radiance frame, 0.96x on an exr frame, 1.64x to 1.89x on a one-picture gif,
   and an apng blend whose divisor is now free (that one did not move a frame).
   All byte identical and both validators passing. `tiff` was investigated and
   left alone; the compose kernels are not written yet
-- touches: `src/formats/{dds,bmp,tga,ico,pnm,farbfeld,hdr,png,exr,tiff}.rs`,
-  `src/decoder.rs` (`RowSink`) and one module a step below it,
-  `tests/readalpha.vpy`, `tests/pngwrite.vpy`, `docs/BENCH.md`
+- touches: `src/planar.rs` (new), `src/formats/{dds,bmp,tga,ico,pnm,farbfeld,hdr,png,exr,tiff}.rs`,
+  `src/decoder.rs` (`RowSink`), `tests/readalpha.vpy`, `tests/pngwrite.vpy`,
+  `docs/BENCH.md`, and the two prototype crates under `target/bench/plan48/`
 - expected: the decode stage of the formats this tree reads itself faster, from
   four algorithmic changes that need no intrinsic and no new dependency, with no
   change to a single output byte. The first kernel this page proposed was
@@ -185,6 +189,83 @@ algorithmic work rather than kernel work:
 What that leaves is the arithmetic around the loop: the tiles that are read
 with a division per sample, the pictures that are built and then walked a second
 time, and the composites that walk a canvas to blend a patch.
+
+### 0b. the interleave on arm — the swap is what pays
+
+The arm round re-asked step 0's question on the one library an arm host loads.
+`target/bench/plan48/proto-arm/` prices the three shapes the tree runs at
+1200x900, best of seven rounds of 32 passes, ns a pixel:
+
+| shape | per-channel gather (today) | one pass scalar | NEON block |
+| --- | ---: | ---: | ---: |
+| gray+alpha 8 bit | 0.523 | 0.042 | **0.028** |
+| rgb 8 bit | 0.792 | **0.060** | 0.101 |
+| rgba 8 bit | 1.057 | **0.080** | 0.086 |
+| gray+alpha 16 bit big endian | 0.609 | 0.100 | **0.078** |
+| rgb 16 bit big endian | 0.943 | 0.609 | **0.210** |
+| rgba 16 bit big endian | 1.279 | 0.821 | **0.190** |
+
+Three things follow, and they are the three the x86 round found in a different
+order:
+
+1. **the per-channel walk is the bug, wherever it is.** png's general path
+   read the row once a channel with a runtime stride and, for sixteen bits,
+   built and copied a two byte array a sample. The one pass is 12x to 13x
+   that loop for an eight bit page and 6x for sixteen bit gray+alpha; for
+   sixteen bit rgb and rgba the one pass alone is only 1.5x, because the
+   scalar swap is slow as well.
+2. **the eight bit vector is not worth it for three and four channels.** LLVM
+   already turns the one-pass zip into `ld3`/`ld4` and three or four stores,
+   in a tighter loop than a hand block: 0.060 and 0.080 against 0.101 and
+   0.086. Only two channels gain, 0.028 against 0.042, and only because a
+   `ld2` pair is cheaper than the walk's two streams.
+3. **the sixteen bit big-endian vector is worth it.** The swap defeats the
+   compiler's vectoriser, so the scalar one pass is still 0.61 to 0.82 ns a
+   pixel and `ldN` + `rev16` is 1.3x to 4.3x that.
+
+`src/planar.rs` is the result: one pass, a plane count at a time, with the
+aarch64 kernel for the two shapes that measured a win (`ld2` at eight bits and
+`ldN` + `rev16` at sixteen) and the scalar zip everywhere else. `png.rs`'s
+channel walk and `RowSink::place_rgba16` (farbfeld) both call it;
+`src/decoder.rs` gained `place_interleaved` for the shape a png row has, which
+writes only the planes a call hands out, because a colour-only read drops the
+alpha channel.
+
+Measured end to end against a build of the same commit without the change,
+alternating two plugins inside one batch (`target/bench/plan48/ab.py`, best of
+five rounds, `prefetch=0`, `debug=1`):
+
+| set | read before | read after | total before | total after | change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| png rgba16 | 16.56 | 15.38 | 16.65 | 15.47 | **0.93x** |
+| png rgb16 | 15.48 | 14.50 | 15.57 | 14.59 | **0.94x** |
+| png la16 | 8.84 | 8.56 | 8.90 | 8.62 | 0.97x |
+| png gray16 | 5.87 | 5.57 | 5.92 | 5.62 | 0.95x |
+| png rgba8 | 8.53 | 7.77 | 8.59 | 7.83 | **0.91x** |
+| png la8 | 3.44 | 3.19 | 3.48 | 3.23 | 0.93x |
+| png rgb8 | 4.89 | 4.88 | 4.94 | 4.94 | 1.00x |
+| png gray8 | 2.21 | 2.20 | 2.24 | 2.23 | 1.00x |
+| farbfeld | 1.77 | 1.25 | 1.81 | 1.28 | **0.71x** |
+
+The png corpus is `target/bench/png-depth`, eight 1200x900 pages of each
+colour type from `target/bench/make-png-depth-corpus.py`; step5's corpus has
+no png page. The sixteen bit rows are inflate bound, which is why a 4x loop is
+3% to 7% of a frame; farbfeld has nothing to inflate, so the same kernel is
+29% of its frame.
+
+Gates: every plane of every frame identical on `png-depth`, `step5-corpus`,
+the 40 png fixtures and the farbfeld fixture, both clips, under both builds;
+`tests/readalpha.vpy` 1034 checks and `tests/pngwrite.vpy` 311, no warnings;
+373 unit tests, clippy and fmt clean. The untouched formats were swept the
+same way and none moved beyond noise (bmp 0.99x, dds 1.00x, ppm 0.99x, qoi
+0.99x, tiff 1.00x, exr 0.98x, hdr 1.00x, ico 1.03x at 0.12 ms a frame).
+
+**the x86 build is not measured here.** The one-pass scalar replaced a
+per-channel gather that is worse on every architecture, but the shipping
+`.avx2` and `.avx512` libraries should be A/B'd on a Windows host the way
+step 0's table was before that can be claimed as a win there. The arm
+kernel's own dispatch is a `#[cfg]`, so both x86 libraries keep the scalar
+walk unchanged.
 
 ### 2. dds: the block, as a block
 
@@ -378,6 +459,13 @@ scalar deinterleave is slower than the strided gather it would replace, and both
 are beaten by the vector. So each step here either adds a kernel or removes a
 pass *and* adds a kernel, and no step is justified by pass counting alone.
 
+**on arm the pass count is what pays, and the vector is the swap.** the arm
+round found the one-pass walk 12x to 13x the per-channel gather at eight bits
+with no intrinsic at all, and the hand block slower than the compiler's own
+`ld3`/`ld4` for three and four channels. The kernel is kept for the shapes
+where it beats the walk: two eight bit channels and every sixteen bit
+big-endian one, where the swap is what stops the compiler vectorising.
+
 **`dds` is written before it is vectorised.** its current shape costs about 1.8x
 the same arithmetic written plainly, before any kernel, so the row stores and the
 tables come first. A kernel on top of the current shape would hide the defect
@@ -447,4 +535,13 @@ qoi has no `docs/BENCH.md` row at all. Both are measurements to take, not
 features to flip, and neither is in this plan. `target/bench/plan48/{blocks,
 planes,animation,crates}.md` are the four read-only audits this page is written
 from, and they hold the per-loop inventory (anchors, costs, and the parity
+
+the arm round leaves three things behind. `src/pixel.rs`'s `write_planes`
+still gathers one plane at a time for a buffered decoder; the arm prototype
+priced the same one pass at 6x that loop for sixteen bits and 13x at eight, so
+it is the next step, and it needs the shift and the transform folded in first.
+The eight bit three and four channel kernel is written and held to the scalar
+path by the test but is not dispatched, because it is 1.2x to 1.7x slower
+than the compiler's loop. And the shipping x86-64 libraries have not been
+measured with the one pass; only the arm host has.
 fixtures) that each step's implementation should start from.

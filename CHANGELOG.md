@@ -22,6 +22,11 @@
   picture, which takes 15% to 18% off a `.hdr` frame. Its pixels are unchanged.
 - A one-picture GIF is decoded once instead of three times: 1.64x to 1.89x on a
   1024x1024 page, with identical pixels.
+- A sixteen bit png or a farbfeld is taken apart into the frame's planes in one
+  pass that swaps each sample as it goes: a 1200x900 sixteen bit png reads 3%
+  to 7% faster and a farbfeld 29% faster, with identical pixels. A png's
+  gray+alpha and rgba rows are placed the same way, in one pass rather than one
+  per channel, which takes 7% to 9% off those pages.
 
 ## [0.4.2] - 2026-10-28
 

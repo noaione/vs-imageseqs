@@ -161,6 +161,15 @@ crate question is answered in the page and ruled out: every decoder already
 runs the widest SIMD path its crate offers, and the extractions that are legal
 are not faster, which is why `qoi` is left as a crate.
 
+The question was asked again on aarch64, and the answer narrowed: the eight
+bit vector loses to the compiler's own `ld3`/`ld4` for three and four
+channels, but the sixteen bit big-endian one wins 1.3x to 4.3x on the loop
+and the two channel eight bit one 1.5x. `src/planar.rs` now carries that
+interleave for `png`'s channel walk and farbfeld's rows, which is 3% to 7%
+off a sixteen bit png, 7% to 9% off a png's gray+alpha and rgba pages, and
+29% off a farbfeld. The x86-64 libraries were not re-measured in that round,
+and the page says so.
+
 ### several frames in flight — 2026-11-09
 
 [45 the second clip of a call](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/45-async-request-cache.md),
