@@ -451,10 +451,11 @@ fn blocks(header: &Header, data: &[u8]) -> Result<Vec<u8>> {
 /// Writes one decoded block into the surface.
 ///
 /// A block that is wholly inside the surface -- which is every block of one
-/// that is a whole number of blocks -- is written sixteen pixels at a time, in
-/// the shape the compiler unrolls into stores. Only a block at the right or
-/// bottom edge of a surface that ends inside it takes the other path, where the
-/// pixels that hang over that edge are not part of the picture.
+/// that is a whole number of blocks -- is written a row at a time: its four
+/// pixels are contiguous in the surface and in the block, so a row is one 12 or
+/// 16 byte store rather than four of 3 or 4. Only a block at the right or bottom
+/// edge of a surface that ends inside it takes the other path, where the pixels
+/// that hang over that edge are not part of the picture.
 fn write_block<const N: usize>(
     out: &mut [u8],
     pixels: &[[u8; N]; 16],
@@ -465,10 +466,13 @@ fn write_block<const N: usize>(
 ) {
     let (x0, y0) = (block_x * 4, block_y * 4);
     if x0 + 4 <= width && y0 + 4 <= height {
-        for (index, pixel) in pixels.iter().enumerate() {
-            let (row, column) = (index / 4, index % 4);
-            let target = ((y0 + row) * width + x0 + column) * N;
-            out[target..target + N].copy_from_slice(pixel);
+        // The sixteen pixels of a block are sixteen rows of four bytes; a row of
+        // four pixels is one store, so this is four stores a block.
+        let flattened = pixels.as_flattened();
+        for row in 0..4 {
+            let target = ((y0 + row) * width + x0) * N;
+            let source = row * 4 * N;
+            out[target..target + 4 * N].copy_from_slice(&flattened[source..source + 4 * N]);
         }
         return;
     }
