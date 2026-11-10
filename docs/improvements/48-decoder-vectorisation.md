@@ -2,11 +2,11 @@
 
 - status: partially implemented. The kernel step was implemented, measured
   slower than the code it replaced and reverted, and the record is below. The
-  `bmp`, `dds`, `hdr` and gif-still steps landed: 1.33x to 1.40x on the bitmap
-  corpus, 15% off the surface corpus's decode stage, 0.82x to 0.85x on a radiance
-  frame and 1.64x to 1.89x on a one-picture gif, all byte identical and with
-  both validators passing. `exr`/`tiff` and the compose kernels are not written
-  yet
+  `bmp`, `dds`, `hdr`, gif-still and apng-blend steps landed: 1.33x to 1.40x on
+  the bitmap corpus, 15% off the surface corpus's decode stage, 0.82x to 0.85x on
+  a radiance frame, 1.64x to 1.89x on a one-picture gif, and an apng blend whose
+  divisor is now free (that one did not move a frame). All byte identical, both
+  validators passing. The compose kernels and `exr` are not written yet
 - touches: `src/formats/{dds,bmp,tga,ico,pnm,farbfeld,hdr,png,exr,tiff}.rs`,
   `src/decoder.rs` (`RowSink`) and one module a step below it,
   `tests/readalpha.vpy`, `tests/pngwrite.vpy`, `docs/BENCH.md`
@@ -301,10 +301,17 @@ is the composition around them, and there the win is algorithmic.
   is never used, and `Any` disposes as `Keep`.
 - `src/animation/webp.rs:249` divides by the blended alpha once per pixel
   (`(1 << 24) / blended_alpha`). A 256-entry constant table holds those exact
-  quotients, and `src/animation/apng.rs:642`'s `blend` divides by a runtime
-  `maximum` four times a pixel, which monomorphising into an 8-bit and a 16-bit
-  body turns into a literal, and therefore into the multiply-high LLVM already
-  uses for a constant divisor.
+  quotients, and `src/animation/apng.rs:642`'s `blend` divided by a runtime
+  `maximum` four times a pixel. **Landed, the apng half**: `blend` is now
+  `blend8` and `blend16`, each with its own depth's maximum as a literal, so the
+  division is the multiply-high LLVM already emits for a constant divisor. The
+  arithmetic and its rounding are untouched, and the picture is byte identical
+  over the 240 frames of `target/bench/apng-corpus` and the 16-bit page. The
+  **frame did not move** (0.99x on `fetch`, within this machine's noise) because
+  a blend is not what a frame of that corpus spends its time in: it is mostly
+  deflate and full-canvas disposal copies. It is kept because the divisor is
+  now free and no byte changes, not because it was measured to pay.
+  The webp half is not written yet.
 - `src/animation/gif.rs:192`–`:203` decoded a single picture **three times** to
   answer a probe and then a frame. The picture the peek decoded is the picture,
   so one LZW pass replaced three. **Landed**: a one-picture 1024x1024 gif went
