@@ -5,7 +5,9 @@
   below; it was then asked again on aarch64, where the eight bit kernel still
   loses to the compiler's own `ld3`/`ld4` but the sixteen bit big-endian one
   wins, and that round landed `src/planar.rs`: 3% to 7% off a sixteen bit
-  png, 9% off an eight bit rgba page and 29% off a farbfeld. The `bmp`,
+  png, 9% off an eight bit rgba page and 29% off a farbfeld. The gif compose
+  and its NEON blend landed too: 1.27x on a 1024x1024 animation and 1.14x on a
+  still gif. The `bmp`,
   `dds`, `hdr`, gif-still and apng-blend steps landed: 1.33x to 1.40x on the
   bitmap corpus, 15% off the surface corpus's decode stage, 0.82x to 0.85x on
   a radiance frame, 0.96x on an exr frame, 1.64x to 1.89x on a one-picture gif,
@@ -400,7 +402,24 @@ is the composition around them, and there the win is algorithmic.
   20.912 → 11.084 ms a frame at `x86-64-v4` and 19.632 → 11.939 ms on the
   baseline build, which is **1.64x to 1.89x**, and every frame of the still gif,
   of `tests/fixtures/animation.gif` and of the 55 gif frames in that directory is
-  byte identical. The compose and blend kernels below it are not written yet.
+  byte identical.
+  **Landed, the compose and its arm blend.** `Canvas::compose` walks only the
+  rectangle's rows and columns now, one `copy_from_slice` a row, and the
+  per-sample `blend` became `blend_row`: the disposal branch hoisted out of the
+  pixel loop, then on aarch64 a `vbslq_u32` select four pixels a block with
+  the alpha byte of every pixel as its mask, and `Background` disposing to a
+  zero operand so one kernel serves both arms. `place`, the still path, got
+  the same row walk. On a 1024x1024 canvas the compose loop went 0.897 →
+  0.424 → 0.237 ms for a full-canvas `Keep` frame and 0.912 → 0.425 → 0.188 ms
+  for a `Background` one, which is 3.8x to 4.9x; a 32x32 patch is clone-bound
+  at 0.068 → 0.057 ms, so the corpus frames being full-canvas is why the
+  kernel matters more than the rectangle there. End to end on
+  `target/bench/plan48/anim-corpus`: the gif animation's `fetch` went 2.00 →
+  1.57 ms a frame (**0.78x**, 1.27x faster) and the still gif 4.45 → 3.89 ms
+  (**0.88x**), with every plane of every frame of both clips byte identical
+  under the two builds and `tests/readalpha.vpy` at 1034 checks. The x86-64
+  libraries keep the scalar row, which is itself 2.1x the old per-pixel walk;
+  the AVX2 and AVX-512 blocks the section above proposes are not written.
 - `Pixels::Interleaved`'s buffer becoming an `Arc<[u8]>` (`decoder.rs:414`)
   removes a full canvas copy from every cached presentation, every held output
   frame and every skipped intermediate: the fixtures show 15 output frames from
@@ -535,6 +554,7 @@ qoi has no `docs/BENCH.md` row at all. Both are measurements to take, not
 features to flip, and neither is in this plan. `target/bench/plan48/{blocks,
 planes,animation,crates}.md` are the four read-only audits this page is written
 from, and they hold the per-loop inventory (anchors, costs, and the parity
+fixtures) that each step's implementation should start from.
 
 the arm round leaves three things behind. `src/pixel.rs`'s `write_planes`
 still gathers one plane at a time for a buffered decoder; the arm prototype
@@ -542,6 +562,7 @@ priced the same one pass at 6x that loop for sixteen bits and 13x at eight, so
 it is the next step, and it needs the shift and the transform folded in first.
 The eight bit three and four channel kernel is written and held to the scalar
 path by the test but is not dispatched, because it is 1.2x to 1.7x slower
-than the compiler's loop. And the shipping x86-64 libraries have not been
-measured with the one pass; only the arm host has.
-fixtures) that each step's implementation should start from.
+than the compiler's loop. The gif compose's x86-64 blocks are not written
+either: the scalar row it keeps is 2.1x the walk it replaced, and the AVX2 and
+AVX-512 halves wait for a Windows host. And the shipping x86-64 libraries
+have not been measured with the one pass; only the arm host has.

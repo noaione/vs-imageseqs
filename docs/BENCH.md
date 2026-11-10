@@ -226,6 +226,33 @@ this machine's noise (bmp 0.99x, dds 1.00x, ppm 0.99x, qoi 0.99x, tiff
 1.00x, exr 0.98x, hdr 1.00x, ico 1.03x at 0.12 ms a frame). The x86-64
 libraries were not measured in this round.
 
+## animation
+
+the gif compositor is the `src/animation/gif.rs` section of
+[48](improvements/48-decoder-vectorisation.md). `Canvas::compose` walks the
+rectangle a frame states now, one `copy_from_slice` a row, and the per-sample
+`blend` became a row walk whose disposal branch is hoisted; on aarch64 the row
+is a `vbslq_u32` select four pixels a block. `place`, the still gif path, got
+the same rectangle row walk.
+
+measured 2026-11-10 on macOS 27, rustc 1.99.1, `prefetch=0`, the `debug=1`
+stage log, two builds of the same commit alternated (`target/bench/plan48/
+measure.py`, best of three alternating runs, five reps each). Milliseconds a
+frame; the animation cost is the `fetch` stage and the total includes the
+frame the worker builds.
+
+| set | fetch before | fetch after | total before | total after | change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| gif animation, 1024x1024, 16 frames | 2.00 | 1.57 | 2.05 | 1.60 | 0.78x faster |
+| gif still, 1024x1024 | 4.45 | 3.89 | 4.45 | 3.90 | 0.88x faster |
+
+the corpus is `target/bench/plan48/anim-corpus`. Every plane of every frame
+of both clips is byte identical under the two builds, and `tests/readalpha.vpy`
+passes its 1034 checks. The compose loop itself went 0.897 to 0.424 to 0.237 ms
+for a full-canvas `Keep` frame and 0.912 to 0.425 to 0.188 ms for a `Background`
+one: the first step is the rectangle walk, the second the NEON select, and the
+x86-64 libraries keep the first and not the second.
+
 
 ## PNGWrite
 

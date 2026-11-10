@@ -170,6 +170,10 @@ off a sixteen bit png, 7% to 9% off a png's gray+alpha and rgba pages, and
 29% off a farbfeld. The x86-64 libraries were not re-measured in that round,
 and the page says so.
 
+The gif compose and its arm blend landed in the same round: the rectangle walk
+and a NEON select took 1.27x off a 1024x1024 animation and 1.14x off a still
+gif, and the apng and webp vector halves are still open.
+
 ### several frames in flight — 2026-11-09
 
 [45 the second clip of a call](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/45-async-request-cache.md),
