@@ -189,12 +189,23 @@ pub fn still(
     // Which read is right is the file's to decide and not the caller's: the
     // header that answers it is the one already open, so this peeks rather than
     // paying a second pass over the metadata.
-    let animated = source.next_subframe()?.is_some() && source.next_subframe()?.is_some();
-    source.restart()?;
+    // One read decides it and, for a single picture, is the whole decode: the
+    // first sub-frame the peek decoded is that picture, so a file with no second
+    // one is placed from it rather than decoded again. That used to take three
+    // passes over the LZW stream -- two to answer this question and one to read
+    // the picture -- and a one-picture gif is most of the gifs there are.
+    let first = source.next_subframe()?;
+    let animated = if first.is_some() {
+        source.next_subframe()?.is_some()
+    } else {
+        false
+    };
     if animated {
+        // The animation path decodes its own presentations from the front.
+        source.restart()?;
         return source.presentation(0);
     }
-    let Some(frame) = source.next_subframe()? else {
+    let Some(frame) = first else {
         return Err(ImgSeqError::new(format!(
             "image '{}' holds no picture",
             path.display()
