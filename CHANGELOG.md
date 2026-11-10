@@ -41,6 +41,8 @@
 - A buffered targa writes each sample in the frame's own order while it widens
   it: a sixteen bit page reads 2.2x faster and a palette page 1.8x, with
   identical pixels.
+- A sixteen bit APNG animation blends its frames with a NEON multiply-high on
+  arm, 3% faster on a 1024x900 page, with identical pixels.
 
 ## [0.4.2] - 2026-10-28
 

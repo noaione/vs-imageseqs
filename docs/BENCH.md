@@ -246,6 +246,24 @@ widen it, so the pass that exchanged blue and red is gone; the plain memcpy
 shapes keep it, because fusing the byte copy in beside the memcpy measured
 20% slower. Every page is byte identical, and so are the fifteen fixtures.
 
+### the sixteen bit apng blend
+
+`apng.rs`'s `blend16` was the one blend loop LLVM left a sample at a time.
+`target/bench/apng16-corpus` is two 1024x900 sixteen bit RGBA pages of four
+frames, three `over` at a quarter, a half and three quarters coverage, written
+by `target/bench/make-apng16-corpus.py`; the row is `fetch`, three rounds:
+
+| build | fetch | change |
+| --- | ---: | ---: |
+| scalar sample at a time | 6.26 | |
+| `vmull_u16` block of four, multiply-high for `/ 65535` | 6.08 | 1.03x |
+
+the loop alone is 1.92 ms a page against a scalar 1.92 ms measured outside the
+plugin, which is why the frame moves only 3%: the blend is called a pixel at a
+time with that pixel's own alpha, so the setup is half of a block, and the
+whole blend is 9% of a presentation. Both pages, the 80 frame eight bit corpus
+and the 121 animation fixture frames are byte identical.
+
 the buffered write is the same pass. `src/pixel.rs`'s `write_planes` gathered
 one plane at a time from a decoder that buffers its picture; it now fills
 every plane a non-transposed frame asks for from one read, with the row

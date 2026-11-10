@@ -186,6 +186,9 @@ The targa half landed with a corpus of its own
 (`target/bench/make-tga-corpus.py`): the buffered 16-bit and palette pages
 now write r,g,b while they widen, which is 2.24x and 1.80x the read, and the
 plain-copy shapes are unchanged.
+The sixteen bit apng blend is a NEON multiply-high now, 3% on a
+`target/bench/apng16-corpus` page; the eight bit one was already vector, and the
+webp reciprocal has no vector form at all (a 41 bit product and a table gather).
 
 ### several frames in flight — 2026-11-09
 

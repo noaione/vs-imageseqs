@@ -14,7 +14,9 @@
   and an apng blend whose divisor is now free (that one did not move a frame).
   All byte identical and both validators passing. `tiff` was investigated and
   left alone; the `tga` half landed with a corpus of its own; the compose kernels
-  are gif's arm blend, and the apng and webp vector halves are not written yet.
+  are gif's arm blend and the sixteen bit apng blend, and the eight bit apng
+  blend was already vector, so the only vector half that stays unwritten is the
+  webp reciprocal, which has no vector form at 41 bits a product.
   The buffered write landed last: one pass
   over the decoder's buffer instead of one a plane, 0.62x to 0.82x on the
   `convert` stage. The shared buffer landed too: `Pixels::Interleaved` holds its
@@ -426,6 +428,32 @@ is the composition around them, and there the win is algorithmic.
   expensive step, and the rest is three multiplies, a rounding shift and a
   per-lane divisor table lookup that a vector would have to gather -- a small
   slice of the loop at a real risk of moving a byte.
+- **Measured, the two vector halves that are not written.** The eight bit
+  blend is already the compiler's own NEON: `blend8` disassembles to `dup.4s`,
+  `umull.2d`, `ushll`, `xtn` and `st1.s` -- four samples a vector -- so a hand
+  kernel would be that loop with more code around it, and it is not written.
+  The sixteen bit one was scalar and now has a kernel: a four sample block
+  held as `u32` lanes, `vmull_u16` for each side of the mixture, and the
+  division by `65535` as the multiply-high its own shape allows
+  (`x + 1 + (x >> 16)` shifted down sixteen, exact for every numerator the
+  blend can produce because the largest is `65535 * 65535`). The corpus is
+  `target/bench/apng16-corpus`, which `target/bench/make-apng16-corpus.py`
+  writes by hand because neither Pillow nor ImageMagick writes an APNG: two
+  1024x900 sixteen bit RGBA pages of four frames, three of them `over` with a
+  quarter, a half and three quarters coverage. `fetch` went 6.26 → 6.08 ms
+  (**2.9%**) and every frame of both pages, of the 80 frame eight bit corpus and
+  of the 121 animation fixture frames is byte identical. Only 2.9% because
+  `blend16` is called a pixel at a time with that pixel's own alpha, so a
+  block is four samples and half the work is the setup; one blend is 1.92 ms
+  of the 15.6 ms a presentation costs and three of four frames blend, so the
+  whole blend is 9% of a file's `fetch` and a row kernel that took the source
+  alpha channel as the multiplier could have most of it. That is not written:
+  sixteen bit APNG is the rarest shape this tree reads, and 9% of it is under
+  what a restructure of the compose loop costs to review. The vectors of
+  `webp.rs`'s `over` are the same story with a hard floor: the product
+  `blended * scale` is up to 41 bits, so a lane holds one sample at 64 bits and
+  two samples a vector, and the divisor is a table gather that NEON has no
+  instruction for.
 - `src/animation/gif.rs:192`–`:203` decoded a single picture **three times** to
   answer a probe and then a frame. The picture the peek decoded is the picture,
   so one LZW pass replaced three. **Landed**: a one-picture 1024x1024 gif went
@@ -610,3 +638,10 @@ than the compiler's loop. The gif compose's x86-64 blocks are not written
 either: the scalar row it keeps is 2.1x the walk it replaced, and the AVX2 and
 AVX-512 halves wait for a Windows host. And the shipping x86-64 libraries
 have not been measured with the one pass; only the arm host has.
+
+the sixteen bit apng blend is the one kernel whose arm half is a block smaller
+than it would like: a pixel is four samples, so the setup is half of it, and the
+9% a presentation spends blending bounds a row kernel at 9% of a file's `fetch`
+on the rarest shape this tree reads. The webp reciprocal is declined outright:
+its product is 41 bits and its divisor is a table gather. Both decisions are in
+the animation section above, with their numbers.

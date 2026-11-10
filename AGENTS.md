@@ -108,7 +108,9 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   lookahead worker that has moved ahead of a consumer from making that
   consumer's next request replay the wrong picture.
 - `src/animation/`: one module per animated format. `apng.rs` composes APNG
-  frames at the file's own depth rather than at a fixed one. `gif.rs` reads the
+  frames at the file's own depth rather than at a fixed one, and blends a
+  sixteen bit frame with an arm multiply-high held to its own scalar loop, sample
+  for sample, by the test beside it. `gif.rs` reads the
   timeline with the frame decoding skipped and composes the canvas itself,
   keeping two deliberate departures from the specification: the background
   colour is never used, and `Any` disposal means `Keep`. `webp.rs`
