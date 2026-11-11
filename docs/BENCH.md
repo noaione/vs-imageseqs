@@ -247,6 +247,30 @@ widen it, so the pass that exchanged blue and red is gone; the plain memcpy
 shapes keep it, because fusing the byte copy in beside the memcpy measured
 20% slower. Every page is byte identical, and so are the fifteen fixtures.
 
+measured again on the Windows host, `prefetch=0`, both x86-64 libraries
+alternating against a build of the same tree with the fold reverted (the
+`src/formats/tga.rs` of the commit before it), best of four rounds. The
+baseline library first, then the `.avx512` one:
+
+| shape | library | read before | read after | change |
+| --- | --- | ---: | ---: | ---: |
+| raw 24-bit, bottom-up | baseline | 2.528 | 2.632 | unchanged |
+| 24-bit RLE | baseline | 5.003 | 5.368 | unchanged |
+| 16-bit, five bits a channel | baseline | 1.979 | 1.243 | 1.59x faster |
+| 8-bit palette into a 24-bit map | baseline | 4.000 | 2.435 | 1.64x faster |
+| raw 24-bit, bottom-up | `x86-64-v4` | 2.626 | 2.524 | unchanged |
+| 24-bit RLE | `x86-64-v4` | 5.185 | 5.239 | unchanged |
+| 16-bit, five bits a channel | `x86-64-v4` | 1.526 | 0.931 | 1.64x faster |
+| 8-bit palette into a 24-bit map | `x86-64-v4` | 3.822 | 2.149 | 1.78x faster |
+
+the two plain-copy shapes are unchanged on both libraries: a second look at
+eight rounds read 1.02x on the RLE pages and 0.85x on the bottom-up ones,
+which is this machine's noise around an unchanged code path, and it is that
+second look the `unchanged` cells report. The two folded shapes still gain
+1.6x to 1.8x, less than the arm64 machine's 2.24x and 1.80x but the same
+direction. Every plane of every frame of the 32 pages is byte identical
+between the two builds.
+
 ### the sixteen bit apng blend
 
 `apng.rs`'s `blend16` was the one blend loop LLVM left a sample at a time.

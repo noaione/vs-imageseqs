@@ -634,8 +634,9 @@ cargo test --release --lib -- --ignored --nocapture the_compose_measured
 Every row this page recorded before this round was measured on one arm64 Mac.
 The two x86-64 libraries the wheel ships (`.avx2` for `x86-64-v3`, `.avx512`
 for `x86-64-v4`) were re-asked on a Windows host, an i5-11400H under Windows 11
-with rustc 1.99. Two of the four questions are now answered by measurement, one
-by the generated code, and the fourth was not taken; each item says which.
+with rustc 1.99. Three of the four questions are now answered, two by
+measurement and one by the generated code; the fourth, re-measuring the arm
+rows, was not taken. Each item below says which.
 
 ### 1. the gif compose's AVX2 and AVX-512 row blocks: declined
 
@@ -676,8 +677,15 @@ round's 1.2x to 1.6x and never nothing, so the pass stays, and the wide
 builds' own `place8`/`place16` vectorise it: a `write_planes::<u16, 4>`
 monomorphisation carries 48 `pshufb`.
 
-The targa half is not re-measured. It needs `target/bench/tga-corpus`, which
-`make-tga-corpus.py` writes on the arm64 checkout, and neither is in this one.
+The targa fold holds too. `target/bench/make-tga-corpus.py` now writes the
+four buffered shapes this host was missing (32 pages of 1200x900), and against
+a build of the same tree with the fold reverted the two folded shapes read
+1.59x and 1.64x faster in the baseline library and 1.64x and 1.78x in
+`.avx512`, while the two plain-copy shapes do not move (a second look at eight
+rounds put them at 1.02x and 0.85x, which is this machine's noise around an
+unchanged path). Every plane of every one of the 32 pages is byte identical.
+The numbers are in [BENCH.md, the buffered
+targa](../BENCH.md#the-buffered-targa).
 
 ### 3. `place16be`'s x86-64 half: a candidate, not written
 
@@ -730,8 +738,7 @@ path by the test but is not dispatched, because it is 1.2x to 1.7x slower
 than the compiler's loop. The gif compose's x86-64 blocks were written and
 declined, and the shipping libraries have now been measured with the one pass;
 both are [above](#what-the-x86-64-host-found). What that host leaves is
-`place16be`'s `pshufb` half, the targa fold's confirmation, and the arm rows'
-re-measurement, in that order.
+`place16be`'s `pshufb` half and the arm rows' re-measurement, in that order.
 
 the sixteen bit apng blend is the one kernel whose arm half is a block smaller
 than it would like: a pixel is four samples, so the setup is half of it, and the
