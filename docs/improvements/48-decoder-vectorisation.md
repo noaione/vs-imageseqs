@@ -712,14 +712,27 @@ Every plane of every page of the png depth corpus, of the png fixtures and of
 the eight farbfeld pages is byte identical. [BENCH.md, the sixteen bit
 big-endian walk](../BENCH.md#the-sixteen-bit-big-endian-walk) has the table.
 
-### 4. the rows the arm rounds moved: not re-measured
+### 4. the rows the arm rounds moved: recorded, not compared
 
-Those tables still have one host each. Re-measuring them wants the arm rounds'
-own before builds and the targa, png depth and sixteen bit apng corpora, none
-of which are in this checkout. The animation corpora are, and the gif
-animation row is now measured on both hosts; item 2's three sets and the
-formats around them are the no-regression sweep this host can vouch for, and
-none of them moved.
+The per-format stage table is now on this host for both libraries
+([BENCH.md](../BENCH.md#the-per-format-stages-on-this-host)), and three of the
+corpora the arm rounds measured on exist here: `target/bench/png-depth` and
+`target/bench/tga-corpus` are written by scripts added with this round, and
+the animation corpora were here already.
+
+It is a starting point rather than a comparison. The same sets measured hours
+apart on this machine differ by up to 40%, most of all where the whole file is
+read (`exr` carries its time in `open`), so a row measured today and a row in
+the evidence table differ by more than any landed step could account for. On
+top of that, the arm rounds' own before builds were not reconstructed: the
+changes they measure are landed, and re-deriving each before state is a
+rebuild of an old commit per step. Every number this round claims is two
+builds alternated inside one batch, which is the method the tables use.
+
+Two gaps remain: the sixteen bit apng corpus (`make-apng16-corpus.py`, which
+neither Pillow nor ImageMagick can write), and the animation rows themselves
+on x86, where only the compose row and the gif animation's `fetch` were
+measured.
 
 The gates on that host are the ones this page already lists: `cargo test
 --locked`, clippy with `-D warnings`, `cargo fmt --all -- --check`,
@@ -746,9 +759,9 @@ The eight bit three and four channel kernel is written and held to the scalar
 path by the test but is not dispatched, because it is 1.2x to 1.7x slower
 than the compiler's loop. The gif compose's x86-64 blocks were written and
 declined, and the shipping libraries have now been measured with the one pass;
-both are [above](#what-the-x86-64-host-found). What that host leaves is item 4,
-re-measuring the arm rounds' rows on this one, which needs their corpora and
-their before builds and is the only thing on the page still unmeasured.
+both are [above](#what-the-x86-64-host-found), as is the sixteen bit big-endian
+block. What that host leaves is the animation rows on x86 and the sixteen bit
+apng corpus, and neither is blocked on anything but time.
 
 the sixteen bit apng blend is the one kernel whose arm half is a block smaller
 than it would like: a pixel is four samples, so the setup is half of it, and the

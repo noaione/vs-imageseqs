@@ -370,6 +370,33 @@ page. Three channel pages are the control: the block declines them and they
 read unchanged. Every plane of every page of those sets, of `tests/fixtures`'
 png pages and of the eight farbfeld pages is byte identical.
 
+### the per-format stages on this host
+
+The plan's evidence table was measured on an x86-64 host before any of its
+steps landed. Re-running it on this one, with the tree as it stands and the
+same method (`target/bench/plan48/measure.py`, 1200x900 pages of
+`target/bench/step5-corpus`, `prefetch=0`, three reps):
+
+| set | decode base | decode `v4` | convert base | convert `v4` | total `v4` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| bmp 24-bit | 3.045 | 2.168 | — | — | 2.349 |
+| dds DXT5 | 3.114 | 3.385 | 1.597 | 1.040 | 7.029 |
+| tga 24-bit | 2.515 | 2.163 | — | — | 2.344 |
+| pnm `P6` | 2.908 | 1.872 | — | — | 2.030 |
+| qoi | 5.986 | 6.007 | 1.421 | 0.924 | 9.201 |
+| hdr | 9.827 | 7.602 | 3.444 | 3.610 | 13.804 |
+| farbfeld | 5.310 | 5.287 | — | — | 5.505 |
+| tiff | 6.617 | 6.177 | 1.426 | 0.888 | 9.123 |
+| exr | 21.543 | 19.207 | 4.187 | 3.852 | 24.253 |
+| ico | 0.182 | 0.183 | 0.076 | 0.044 | 0.535 |
+
+**this is a starting point, not a comparison.** the same sets measured hours
+apart on this machine differ by up to 40%, and the formats that read the whole
+file worst of all (`exr` carries its time in `open`), so a row here and a row
+in the evidence table differ by more than anything a landed step could have
+done. every claim this round makes is two builds alternated inside one batch,
+which is the method the tables above use.
+
 ## animation
 
 the gif compositor is the `src/animation/gif.rs` section of

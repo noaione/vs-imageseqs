@@ -199,10 +199,12 @@ walk was found unvectorised there, so it gained an AVX2 block of its own: a
 farbfeld reads 1.34x faster and a gray16 page 1.16x, with identical pixels.
 The targa half was then re-measured with a corpus written for it: the two
 folded shapes read 1.59x to 1.78x faster on both libraries and the two
-plain-copy shapes do not move, every page byte identical. What is left is
-re-measuring the arm rounds' rows on this host, which needs their corpora and
-their before builds. The page's *what the x86-64 host found* section has the
-measurements and `docs/HANDOFF.md` has the commands.
+plain-copy shapes do not move, every page byte identical. The per-format stage
+table is now measured on this host too, for both libraries, as a starting
+point rather than a comparison, because the same sets drift by up to 40%
+between sessions here. What is left is the animation rows on x86 and the
+sixteen bit apng corpus. The page's *what the x86-64 host found* section has
+the measurements and `docs/HANDOFF.md` has the commands.
 
 ### several frames in flight — 2026-11-09
 
