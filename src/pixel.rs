@@ -28,6 +28,16 @@ pub enum PixelFormat {
     Yuv444P8,
     Yuv444P10,
     Yuv444P12,
+    /// Planar 4:2:0, 4:2:2 and 4:4:4 at fourteen and sixteen bits, which no
+    /// libheif build here can be asked for but a container can state: x265 is
+    /// built for eight, ten and twelve bits only, so the fixtures in
+    /// `tests/fixtures` stop at twelve. A page that states one of these keeps
+    /// its own planes rather than being converted to r,g,b.
+    Yuv420P14,
+    Yuv422P14,
+    Yuv444P14,
+    Yuv420P16,
+    Yuv422P16,
     Yuv444P16,
     /// Gray or r,g,b at the depth a container states, for the four depths
     /// between the eight bits and the sixteen bits a decoder's colour type
@@ -119,9 +129,13 @@ impl PixelFormat {
                 Self::Gray12
             }
             Self::Gray13 | Self::Rgb13 => Self::Gray13,
-            Self::Gray14 | Self::Rgb14 => Self::Gray14,
+            Self::Gray14 | Self::Rgb14 | Self::Yuv420P14 | Self::Yuv422P14 | Self::Yuv444P14 => {
+                Self::Gray14
+            }
             Self::Gray15 | Self::Rgb15 => Self::Gray15,
-            Self::Gray16 | Self::Rgb16 | Self::Yuv444P16 => Self::Gray16,
+            Self::Gray16 | Self::Rgb16 | Self::Yuv420P16 | Self::Yuv422P16 | Self::Yuv444P16 => {
+                Self::Gray16
+            }
             Self::Gray32F | Self::Rgb32F => Self::Gray32F,
         }
     }
@@ -157,6 +171,11 @@ impl PixelFormat {
             | Self::Yuv444P8
             | Self::Yuv444P10
             | Self::Yuv444P12
+            | Self::Yuv420P14
+            | Self::Yuv422P14
+            | Self::Yuv444P14
+            | Self::Yuv420P16
+            | Self::Yuv422P16
             | Self::Yuv444P16 => ColorFamily::YUV,
         }
     }
@@ -176,9 +195,9 @@ impl PixelFormat {
             Self::Gray11 | Self::Rgb11 => 11,
             Self::Gray12 | Self::Rgb12 | Self::Yuv444P12 | Self::Yuv420P12 | Self::Yuv422P12 => 12,
             Self::Gray13 | Self::Rgb13 => 13,
-            Self::Gray14 | Self::Rgb14 => 14,
+            Self::Gray14 | Self::Rgb14 | Self::Yuv420P14 | Self::Yuv422P14 | Self::Yuv444P14 => 14,
             Self::Gray15 | Self::Rgb15 => 15,
-            Self::Gray16 | Self::Rgb16 | Self::Yuv444P16 => 16,
+            Self::Gray16 | Self::Rgb16 | Self::Yuv420P16 | Self::Yuv422P16 | Self::Yuv444P16 => 16,
             Self::Gray32F | Self::Rgb32F => 32,
         }
     }
@@ -227,8 +246,16 @@ impl PixelFormat {
     /// Chroma subsampling of this format, as VapourSynth reports it.
     pub const fn sub_sampling(self) -> (i32, i32) {
         match self {
-            Self::Yuv420P8 | Self::Yuv420P10 | Self::Yuv420P12 => (1, 1),
-            Self::Yuv422P8 | Self::Yuv422P10 | Self::Yuv422P12 => (1, 0),
+            Self::Yuv420P8
+            | Self::Yuv420P10
+            | Self::Yuv420P12
+            | Self::Yuv420P14
+            | Self::Yuv420P16 => (1, 1),
+            Self::Yuv422P8
+            | Self::Yuv422P10
+            | Self::Yuv422P12
+            | Self::Yuv422P14
+            | Self::Yuv422P16 => (1, 0),
             _ => (0, 0),
         }
     }
@@ -328,6 +355,11 @@ impl PixelFormat {
             Self::Yuv444P8 => "YUV444P8",
             Self::Yuv444P10 => "YUV444P10",
             Self::Yuv444P12 => "YUV444P12",
+            Self::Yuv420P14 => "YUV420P14",
+            Self::Yuv422P14 => "YUV422P14",
+            Self::Yuv444P14 => "YUV444P14",
+            Self::Yuv420P16 => "YUV420P16",
+            Self::Yuv422P16 => "YUV422P16",
             Self::Yuv444P16 => "YUV444P16",
         }
     }
@@ -2102,6 +2134,52 @@ mod tests {
             sorted.sort_unstable();
             assert_eq!(*rows, sorted, "column block {block} goes back over rows");
             assert_eq!(rows.len(), 70, "column block {block}");
+        }
+    }
+
+    /// A planar yuv format says the depth its samples carry and the
+    /// subsampling its chroma planes hold, at every depth VapourSynth names.
+    ///
+    /// The fourteen and sixteen bit arms have no fixture: x265 is built for
+    /// eight, ten and twelve bits, so `heif-enc` refuses to write one. What
+    /// this holds is the table itself, which is what a page from a
+    /// multi-depth encoder is read through.
+    #[test]
+    fn the_yuv_formats_name_their_depth_and_subsampling() {
+        for (format, depth, subsampling) in [
+            (PixelFormat::Yuv420P8, 8, (1, 1)),
+            (PixelFormat::Yuv420P10, 10, (1, 1)),
+            (PixelFormat::Yuv420P12, 12, (1, 1)),
+            (PixelFormat::Yuv420P14, 14, (1, 1)),
+            (PixelFormat::Yuv420P16, 16, (1, 1)),
+            (PixelFormat::Yuv422P8, 8, (1, 0)),
+            (PixelFormat::Yuv422P14, 14, (1, 0)),
+            (PixelFormat::Yuv422P16, 16, (1, 0)),
+            (PixelFormat::Yuv444P8, 8, (0, 0)),
+            (PixelFormat::Yuv444P14, 14, (0, 0)),
+            (PixelFormat::Yuv444P16, 16, (0, 0)),
+        ] {
+            let name = format.name();
+            assert_eq!(format.bits_per_sample(), depth, "{name}");
+            assert_eq!(format.sub_sampling(), subsampling, "{name}");
+            assert_eq!(format.color_family(), ColorFamily::YUV, "{name}");
+            assert_eq!(format.plane_count(), 3, "{name}");
+            // Only the eight bit formats are stored in a byte.
+            let word = if depth == 8 { 1 } else { 2 };
+            assert_eq!(format.bytes_per_sample(), word, "{name}");
+            assert_eq!(format.integer_max(), ((1u32 << depth) - 1) as u16, "{name}");
+            assert_eq!(format.alpha_format().bits_per_sample(), depth, "{name}");
+            assert_eq!(
+                format.alpha_format().color_family(),
+                ColorFamily::Gray,
+                "{name}"
+            );
+            let family = match subsampling {
+                (1, 1) => "420",
+                (1, 0) => "422",
+                _ => "444",
+            };
+            assert_eq!(format.name(), format!("YUV{family}P{depth}"), "{name}");
         }
     }
 }

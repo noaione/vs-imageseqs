@@ -5,6 +5,10 @@
 ### changed
 
 - Upgrade JPEG 2000 decoding to `hayro-jpeg2000` 0.5.0.
+- A colour heif page that states fourteen or sixteen bits per sample at 4:2:0,
+  4:2:2 or 4:4:4 is handed out as its own yuv planes (`YUV420P14` and its
+  siblings) instead of being converted to r,g,b. No encoder on this machine
+  writes such a file, so the mapping is held by tests rather than a fixture.
 - Bump `exr` to `1.74.3` and `wpd` to `6fa9de20df3eacc5259751573c220ea6a7b03e5b`.
 - Bump `vapoursynth4-rs` to `0.6.0`, which needs Rust 1.95 or newer.
 

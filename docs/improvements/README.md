@@ -172,6 +172,18 @@ rule `ppm`'s 21% win established from the other side. The `dds` row is closed;
 the DXT colour kernel in [34](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/34-input-routing-and-planar-decode.md)
 is the separate proposal that is still open.
 
+### yuv depth arms — 2026-11-11
+
+[51 a colour page at fourteen or sixteen bits keeps its planes](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/51-yuv-depth-arms.md)
+fills the one hole left in the yuv mapping: `heif.rs`'s `yuv_format` armed
+8/10/12 at every chroma and 16 only at 4:4:4, so a colour page stating
+fourteen or sixteen bits was converted to r,g,b. VapourSynth names
+`YUV420P14`, `YUV422P14`, `YUV444P14`, `YUV420P16` and `YUV422P16`, so the
+plugin only had to name the right one. There is no fixture and the page says
+why: `heif-enc --bit-depth 14` answers "Bit depth not supported by x265", and
+AV1 stops at twelve, so the arms are held by two table tests until an encoder
+built for sixteen bits writes a file.
+
 ### decoder vectorisation — 2026-11-10
 
 [48 a faster decode path](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/48-decoder-vectorisation.md)
@@ -728,10 +740,12 @@ decodes to a buffer by construction.
 - **a sixteen bit file whose decoder does not fill the range**, which the format
   claims anyway, as every other reader here does
   ([10](10-nominal-bit-depth.md)).
-- **`YUV420P14` and its siblings.** libheif can report fourteen bits for a page
-  whose samples it decodes itself and `yuv_format` has no arm for it, so such a
-  page falls back to rgb ([10](10-nominal-bit-depth.md),
-  [12](12-heif-avif-yuv-output.md)).
+- **`YUV420P14` and its siblings are landed** ([51](51-yuv-depth-arms.md)): a
+  colour page that states fourteen or sixteen bits at 4:2:0, 4:2:2 or 4:4:4
+  keeps its own planes instead of falling back to rgb. There is no fixture --
+  this machine's x265 stops at twelve bits -- so two table tests are what hold
+  it, and a `-b 14` pass on any encoder built for sixteen bits would close
+  that.
 - **twelve bit heic, tiled (grid) avif, gain maps, ten bit PQ/HDR avif**: read
   nowhere and absent from the sandbox ([12](12-heif-avif-yuv-output.md)).
 - **the ten bit monochrome heic is checked now, not deferred.**

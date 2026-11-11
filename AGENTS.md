@@ -46,7 +46,11 @@ its subsampling, which the core checks when it creates one, so a picture whose
 width or height is not such a multiple is handed out the other way:
 `PixelFormat::fits` is the one question every reader asks, a lossy webp and a
 jpeg 2000 page come out as rgb, and an avif or heif is asked of `libheif` at
-4:4:4, which keeps the colour family and the depth.
+4:4:4, which keeps the colour family and the depth. the depths a yuv frame can
+be handed out at are eight, ten, twelve, fourteen and sixteen, at 4:2:0, 4:2:2
+and 4:4:4, because VapourSynth names every one of them; fourteen and sixteen
+have no fixture here, since this machine's x265 stops at twelve
+(`docs/improvements/51-yuv-depth-arms.md`).
 
 a frame's depth is the one its container states, not the word the decoder hands
 over: a file that states nine to fifteen bits is handed out as the format that

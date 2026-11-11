@@ -306,6 +306,19 @@ const fn yuv_format(chroma: Chroma, depth: u8) -> Option<PixelFormat> {
         (Chroma::C444, 12) => Some(PixelFormat::Yuv444P12),
         (Chroma::C420, 12) => Some(PixelFormat::Yuv420P12),
         (Chroma::C422, 12) => Some(PixelFormat::Yuv422P12),
+        // Fourteen and sixteen bits are depths a container can state and no
+        // encoder here can write: x265 is built for eight, ten and twelve
+        // bits, so `heif-enc --bit-depth 14` answers "Bit depth not supported
+        // by x265" and there is no fixture for either. The arms are still what
+        // a page from a multi-depth encoder is handed out as, and the
+        // alternative is a colour page converted to r,g,b for no reason the
+        // file states.
+        (Chroma::C420, 14) => Some(PixelFormat::Yuv420P14),
+        (Chroma::C422, 14) => Some(PixelFormat::Yuv422P14),
+        (Chroma::C444, 14) => Some(PixelFormat::Yuv444P14),
+        (Chroma::C420, 16) => Some(PixelFormat::Yuv420P16),
+        (Chroma::C422, 16) => Some(PixelFormat::Yuv422P16),
+        (Chroma::C444, 16) => Some(PixelFormat::Yuv444P16),
         _ => None,
     }
 }
@@ -332,15 +345,21 @@ pub fn color_space_of(format: PixelFormat) -> Option<ColorSpace> {
         | PixelFormat::Gray14
         | PixelFormat::Gray15
         | PixelFormat::Gray16 => Some(ColorSpace::Monochrome),
-        PixelFormat::Yuv420P8 | PixelFormat::Yuv420P10 | PixelFormat::Yuv420P12 => {
-            Some(ColorSpace::YCbCr(Chroma::C420))
-        }
-        PixelFormat::Yuv422P8 | PixelFormat::Yuv422P10 | PixelFormat::Yuv422P12 => {
-            Some(ColorSpace::YCbCr(Chroma::C422))
-        }
-        PixelFormat::Yuv444P8 | PixelFormat::Yuv444P10 | PixelFormat::Yuv444P12 => {
-            Some(ColorSpace::YCbCr(Chroma::C444))
-        }
+        PixelFormat::Yuv420P8
+        | PixelFormat::Yuv420P10
+        | PixelFormat::Yuv420P12
+        | PixelFormat::Yuv420P14
+        | PixelFormat::Yuv420P16 => Some(ColorSpace::YCbCr(Chroma::C420)),
+        PixelFormat::Yuv422P8
+        | PixelFormat::Yuv422P10
+        | PixelFormat::Yuv422P12
+        | PixelFormat::Yuv422P14
+        | PixelFormat::Yuv422P16 => Some(ColorSpace::YCbCr(Chroma::C422)),
+        PixelFormat::Yuv444P8
+        | PixelFormat::Yuv444P10
+        | PixelFormat::Yuv444P12
+        | PixelFormat::Yuv444P14
+        | PixelFormat::Yuv444P16 => Some(ColorSpace::YCbCr(Chroma::C444)),
         // A colour picture can be coded as full resolution rgb rather than as
         // yuv, which is what this plugin hands out for one: the still path
         // reaches it through the `image` decoder, and a sequence track asks
@@ -748,8 +767,15 @@ mod tests {
         assert_eq!(yuv_format(Chroma::C444, 12), Some(PixelFormat::Yuv444P12));
         assert_eq!(yuv_format(Chroma::C420, 12), Some(PixelFormat::Yuv420P12));
         assert_eq!(yuv_format(Chroma::C422, 12), Some(PixelFormat::Yuv422P12));
+        assert_eq!(yuv_format(Chroma::C420, 14), Some(PixelFormat::Yuv420P14));
+        assert_eq!(yuv_format(Chroma::C422, 14), Some(PixelFormat::Yuv422P14));
+        assert_eq!(yuv_format(Chroma::C444, 14), Some(PixelFormat::Yuv444P14));
+        assert_eq!(yuv_format(Chroma::C420, 16), Some(PixelFormat::Yuv420P16));
+        assert_eq!(yuv_format(Chroma::C422, 16), Some(PixelFormat::Yuv422P16));
+        assert_eq!(yuv_format(Chroma::C444, 16), Some(PixelFormat::Yuv444P16));
         // A depth with no format of its own keeps the decoder that has one.
-        assert_eq!(yuv_format(Chroma::C420, 16), None);
+        assert_eq!(yuv_format(Chroma::C420, 9), None);
+        assert_eq!(yuv_format(Chroma::C422, 15), None);
     }
 
     #[test]
