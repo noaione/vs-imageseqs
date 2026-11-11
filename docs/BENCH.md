@@ -223,10 +223,9 @@ spends most of its frame in inflate, so a loop 4x faster is 3% to 7% of the
 frame; farbfeld has nothing to inflate, so the same kernel is 29% of its
 frame. The untouched formats were swept the same way and none moved beyond
 this machine's noise (bmp 0.99x, dds 1.00x, ppm 0.99x, qoi 0.99x, tiff
-1.00x, exr 0.98x, hdr 1.00x, ico 1.03x at 0.12 ms a frame). The x86-64
-libraries were not measured in this round; every row under this heading is the
-arm64 machine, and the plan's *what needs an x86-64 host* section is the list of
-measurements the Windows host owes.
+1.00x, exr 0.98x, hdr 1.00x, ico 1.03x at 0.12 ms a frame). Those rows are
+the arm64 machine's. The x86-64 libraries were measured afterwards, on the
+buffered write and on the loops that were still open, below.
 
 ### the buffered targa
 
@@ -285,6 +284,49 @@ not move, so a frame's total moves less than its write does; every plane of
 every frame of both clips, and of every format under `tests/fixtures`, is byte
 identical under the two builds, and both validators pass.
 
+### the buffered write on x86-64
+
+The one-pass `write_planes` was A/B'd on the Windows host against a build of
+the same tree that declines it (the walk then takes `write_channel` a plane at
+a time), alternating the two builds inside one batch with
+`target/bench/plan48/ab.py`, best of five rounds, `prefetch=0`. Milliseconds a
+frame; the `convert` stage is the whole of the difference, because the read
+stage is not touched.
+
+measured 2026-11-11 on Windows 11, i5-11400H, `x86-64-v4` is the `.avx512`
+library. The apng pages are 1024x1024 and the others are 1200x900.
+
+| set | build | convert, one pass | convert, per plane | change |
+| --- | --- | ---: | ---: | ---: |
+| qoi rgb8, 8 pages | baseline | 1.558 | 1.704 | 1.09x |
+| qoi rgb8, 8 pages | `x86-64-v4` | 0.893 | 1.251 | 1.40x |
+| tiff, 8 pages | baseline | 1.586 | 1.634 | 1.03x |
+| tiff, 8 pages | `x86-64-v4` | 0.913 | 1.114 | 1.22x |
+| apng rgba8, 8 frames | baseline | 1.398 | 1.526 | 1.09x |
+| apng rgba8, 8 frames | `x86-64-v4` | 0.849 | 1.030 | 1.21x |
+
+the one pass wins on both x86-64 libraries, by less than the arm64 round's
+1.2x to 1.6x and never by nothing, so it stays. A frame's total moves 1% to
+9% because the read is the larger stage.
+
+### the sixteen bit big-endian walk
+
+`place16be`'s swap is `#[cfg(target_arch = "aarch64")]`, so both x86-64
+libraries run `scalar16be`, and one look at the generated code says the
+compiler does not vectorise it there. In the `x86-64-v4` build,
+`formats::png::Rows::<RowStream>::fill`, which is where a sixteen bit page's
+row walk is inlined, contains no `pshufb` at all, while `planar::place8::<3>`
+and `<4>` carry 21 and 6 of them. The runtime plane count is what stops it: the
+walk iterates `planes`, and a slice whose length is only checked to be at most
+`C` is not unrolled.
+
+so a `pshufb` half is a candidate rather than a closed question, and the arm64
+numbers are its ceiling: 3% to 7% of a sixteen bit png frame and 29% of a
+farbfeld. It is not written. One `cargo rustc --release --locked --target
+x86_64-pc-windows-msvc -- --emit asm -C target-cpu=x86-64-v4` writes the
+assembly beside the artifacts; `cargo asm` itself will not read this crate,
+because the artifact it looks for is an rlib and this one is a cdylib.
+
 ## animation
 
 the gif compositor is the `src/animation/gif.rs` section of
@@ -298,9 +340,9 @@ measured 2026-11-10 on macOS 27, rustc 1.99.1, `prefetch=0`, the `debug=1`
 stage log, two builds of the same commit alternated (`target/bench/plan48/
 measure.py`, best of three alternating runs, five reps each). Milliseconds a
 frame; the animation cost is the `fetch` stage and the total includes the
-frame the worker builds. Every row under this heading is that arm64 machine:
-the AVX2 and AVX-512 halves of the compose row are not written, which is item 1
-of the plan's *what needs an x86-64 host* section.
+frame the worker builds. The gif and webp rows under this heading are the
+arm64 machine's; the x86-64 halves of the compose row were written, measured
+and declined afterwards, and that measurement is the subsection below.
 
 | set | fetch before | fetch after | total before | total after | change |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -335,6 +377,61 @@ passes its 1034 checks. The compose loop itself went 0.897 to 0.424 to 0.237 ms
 for a full-canvas `Keep` frame and 0.912 to 0.425 to 0.188 ms for a `Background`
 one: the first step is the rectangle walk, the second the NEON select, and the
 x86-64 libraries keep the first and not the second.
+
+### the compose row on x86-64
+
+`blend_row`'s AVX2 and AVX-512 blocks were written for the Windows host and are
+**not landed**: on this machine the row already runs at the memory system's
+ceiling, so a block that makes its arithmetic cheaper moves nothing. This is
+the measurement that decided it, and `src/animation/gif.rs`'s ignored
+`the_compose_measured` test is how to ask again.
+
+The row alone, over a canvas `w` columns by `h` rows, best of 20 passes, one
+canvas a pass, one run each, `prefetch=0`. `scalar` is the walk both x86
+libraries run today, and the two blocks are named as the dispatch names them.
+This host's run-to-run spread on this loop is wide, up to 40% at the largest
+canvas, which is why the test alternates the paths round by round now and why
+the decision rests on the end-to-end table below rather than on any one cell.
+
+| canvas | build | scalar | avx2 | avx512 | scalar -> avx512 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 256x256 | baseline | 0.371 | 0.150 | 0.142 | 2.6x |
+| 256x256 | `x86-64-v3` | 0.195 | 0.145 | 0.116 | 1.7x |
+| 256x256 | `x86-64-v4` | 0.125 | 0.124 | 0.102 | 1.2x |
+| 1024x1024 | baseline | 1.291 | 0.749 | 0.647 | 2.0x |
+| 1024x1024 | `x86-64-v3` | 0.607 | 0.593 | 0.605 | 1.0x |
+| 1024x1024 | `x86-64-v4` | 0.709 | 0.629 | 0.795 | 0.9x |
+| 4096x4096 | baseline | 0.736 | 0.695 | 0.728 | 1.0x |
+| 4096x4096 | `x86-64-v3` | 0.721 | 0.707 | 0.723 | 1.0x |
+| 4096x4096 | `x86-64-v4` | 1.010 | 0.981 | 0.884 | 1.1x |
+
+nanoseconds a pixel. The two wide builds already vectorise this loop: at
+1024x1024 the baseline library's walk is 1.29 ns a pixel and theirs are 0.61
+and 0.71, which is what the best block costs there (0.59 to 0.63). So the only
+library where a hand block wins is the baseline one, which is step 0's result
+again, and the only canvas where it wins is one small enough to sit in a cache.
+
+The reason is the traffic rather than the arithmetic: a canvas is two four
+megabyte buffers read and written, twelve bytes a pixel, and 0.65 ms of that is
+19 GB/s, this host's single-core memory ceiling. A block removes work the
+memory system is already waiting on. It is the opposite of the arm64 machine,
+whose bandwidth per core left the scalar walk arithmetic bound and a NEON block
+worth 1.8x.
+
+End to end on the gif animation (31 output frames of 16 pictures, ten
+alternating rounds, the best round each, `target/bench/plan48/ab-fetch.py`):
+
+| library | fetch before | fetch after | change |
+| --- | ---: | ---: | ---: |
+| baseline | 4.922 | 4.930 | unchanged |
+| `x86-64-v3` | 4.367 | 4.396 | unchanged |
+| `x86-64-v4` | 4.365 | 4.338 | unchanged |
+
+and a control build whose `blend_row` returns at once, so the whole blend is
+skipped rather than its arithmetic, moves the same row from 4.716 to 4.400
+(0.93x): every read and write the blend does is 0.32 ms of a 4.7 ms frame. A
+block can only take the part of that which is arithmetic, and on this host that
+part is small enough that ten alternating rounds cannot see it.
 
 
 ## PNGWrite

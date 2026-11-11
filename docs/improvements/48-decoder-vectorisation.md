@@ -22,7 +22,13 @@
   `convert` stage. The shared buffer landed too: `Pixels::Interleaved` holds its
   canvas in an `Arc<[u8]>`, which is 2% to 4% on an animation's `fetch` (the
   copy it removes was real but small) and is what lets a cached presentation be
-  handed out without a copy at all.
+  handed out without a copy at all. The Windows host round then answered the
+  four questions this page left to it: the compose row's AVX2 and AVX-512
+  blocks were written, measured at the memory system's ceiling and **declined**,
+  the one-pass write was confirmed a win on both x86-64 libraries (1.03x to
+  1.40x of the per-plane gather), the sixteen bit big-endian walk was found to
+  be unvectorised there, and the arm rows were not re-measured. See [what the
+  x86-64 host found](#what-the-x86-64-host-found).
 - touches: `src/planar.rs` (new), `src/formats/{dds,bmp,tga,ico,pnm,farbfeld,hdr,png,exr,tiff}.rs`,
   `src/pixel.rs` (`write_planes`),
   `src/decoder.rs` (`RowSink`), `tests/readalpha.vpy`, `tests/pngwrite.vpy`,
@@ -616,80 +622,92 @@ cargo run --release --manifest-path target/bench/plan48/proto/Cargo.toml
 a kernel's own throughput is measured the way the conversion's is:
 `cargo test --release --lib -- --ignored --nocapture the_kernels_measured`.
 
-## what needs an x86-64 host
+the compose row is priced the same way, and its canvas sizes are what separate a
+block's cost from a frame's:
 
-Every row this page records was measured on one arm64 Mac, and the two x86-64
-libraries the wheel ships (`.avx2` for `x86-64-v3`, `.avx512` for `x86-64-v4`)
-have not been re-measured since the round that reverted step 0's kernel. Four
-things want that host, in the order they are worth the time.
+```powershell
+cargo test --release --lib -- --ignored --nocapture the_compose_measured
+```
 
-### 1. the gif compose's AVX2 and AVX-512 row blocks
+## what the x86-64 host found
 
-The one piece of this plan that is still only a plan. The row walk shipped and
-is what both x86 libraries run, which is already 2.1x the per-pixel loop it
-replaced; the arm kernel is another 1.8x on top of that (a full-canvas compose
-went 0.897 → 0.424 → 0.237 ms for `Keep` and 0.912 → 0.425 → 0.188 ms for
-`Background`). The shape is `blend_row`'s and needs no gather: eight pixels a
-vector on AVX2 (`_mm256_blendv_epi8` with each pixel's alpha byte repeated
-across its four bytes) and sixteen on AVX-512 (`_mm512_mask_blend_epi8`), with
-`Background` disposing to a zero operand so one kernel serves both arms. Dispatch
-it the way `src/convert/simd.rs` dispatches -- a runtime `is_x86_feature_detected!`
-plus `#[target_feature]` kernels -- and hold it to `blend_row_scalar` sample for
-sample with a test that forces it, which is what the arm kernel has.
+Every row this page recorded before this round was measured on one arm64 Mac.
+The two x86-64 libraries the wheel ships (`.avx2` for `x86-64-v3`, `.avx512`
+for `x86-64-v4`) were re-asked on a Windows host, an i5-11400H under Windows 11
+with rustc 1.99. Two of the four questions are now answered by measurement, one
+by the generated code, and the fourth was not taken; each item says which.
 
-Two cautions. Step 0's negative result says the wide builds already vectorise a
-contiguous loop, so the AVX2 form may only tie inside the `.avx512` library
-even though it wins inside the `.avx2` one: measure **both** libraries and land
-the block only where it wins. And the measurement is the compose row on
-`target/bench/plan48/anim-corpus` first, which isolates the loop, then the gif
-animation's `fetch` (2.00 → 1.57 ms on arm) end to end.
+### 1. the gif compose's AVX2 and AVX-512 row blocks: declined
 
-### 2. the one-pass `write_planes`, and the targa fold, on both libraries
+The blocks were written, held to `blend_row_scalar` sample for sample by a
+forced test, dispatched the way `src/convert/simd.rs` dispatches, and measured
+at three canvas sizes in all three libraries. [BENCH.md's compose row
+section](../BENCH.md#the-compose-row-on-x86-64) has the tables. The short of
+it:
 
-`write_planes` fills every plane of a non-transposed frame from one read of the
-buffer, which is 0.62x to 0.82x the `convert` stage on arm. Its kernel is a
-`#[cfg]`, so both x86-64 libraries run the scalar walk and nothing changed
-there; the open question is whether that walk beats the per-plane gather on a
-build without `ld3`/`ld4`. A/B it on `png-depth`, `step5-corpus`'s qoi and tiff
-pages and a buffered rgba8 apng, per library, alternating builds the way
-`target/bench/plan48/ab.py` does. If it reads worse, hand it to
-`planar::place8`/`place16` and let the wide build vectorise, or decline the
-one pass on that library and keep the walk -- the rule is the same one the
-interleave step already states.
+- the wide builds already vectorise the row. At 1024x1024 the compiler's own
+  loop costs 0.61 ns a pixel in the `.avx2` library and 0.71 in the `.avx512`
+  one, and the best block costs 0.59 to 0.63 there; the only library where a
+  block wins is the baseline one (2.0x), which is step 0's result asked again.
+- at 256x256, where a canvas sits in cache, both blocks win 1.2x to 2.6x. At
+  4096x4096 everything is 1.0x to 1.1x. A canvas is twelve bytes a pixel of
+  traffic and this host's single-core ceiling is 19 GB/s, which the scalar walk
+  already reaches: on x86 the arithmetic is not what a row costs.
+- end to end the gif animation does not move (4.922 to 4.930 ms a frame on the
+  baseline library across ten alternating rounds), while a control build that
+  skips the blend altogether saves 0.32 ms. The blend is 12 MB of traffic a
+  presentation, and a block cannot remove that.
 
-The targa fold is code both architectures run: `expand` now writes r,g,b for
-the sixteen bit and palette arms and keeps the memcpy plus the vectorised swap
-for the plain-copy arms, because fusing that copy measured 20% slower **on
-arm**. Confirm that the two plain arms are unchanged on Windows and that the
-two folded arms still gain (2.24x and 1.80x on arm) with
-`target/bench/tga-corpus`.
+This host's spread on that row between runs is up to 40%, so each cell above is
+one run and the ratio to trust is the end-to-end one. So the blocks are reverted.
+`src/animation/gif.rs` keeps the arm kernel and
+gains the ignored `the_compose_measured` test that prices this question, and
+this page's own rule, *land the block only where it wins*, is what declined
+them.
 
-### 3. `place16be`'s x86-64 half
+### 2. the one-pass `write_planes`, and the targa fold
 
-The sixteen bit big-endian kernel is `#[cfg(target_arch = "aarch64")]`, so x86
-runs `scalar16be` and leans on the compiler for the swap. One `cargo asm` on
-Windows answers whether the wide builds already fold the swap into a `pshufb`
-load. If they do, record that and close the step the way the eight bit arm
-kernel was closed; if they do not, a `pshufb` kernel is a candidate, and the arm
-numbers are its ceiling: 3% to 7% of a sixteen bit png frame and 29% of a
-farbfeld.
+The one pass wins on both x86-64 libraries: 1.09x and 1.40x on a qoi's
+`convert` stage, 1.03x and 1.22x on a tiff's, 1.09x and 1.21x on an rgba8
+apng, at the baseline and `x86-64-v4` respectively, best of five alternating
+rounds ([BENCH.md, the buffered write on
+x86-64](../BENCH.md#the-buffered-write-on-x86-64)). That is less than the arm64
+round's 1.2x to 1.6x and never nothing, so the pass stays, and the wide
+builds' own `place8`/`place16` vectorise it: a `write_planes::<u16, 4>`
+monomorphisation carries 48 `pshufb`.
 
-### 4. the rows the arm rounds moved, re-measured
+The targa half is not re-measured. It needs `target/bench/tga-corpus`, which
+`make-tga-corpus.py` writes on the arm64 checkout, and neither is in this one.
 
-So that each table has a host on both sides: the animation corpora (`fetch`
-1.50 → 1.47 ms gif, 1.58 → 1.55 webp, 1.59 → 1.53 apng), the targa corpus
-(1.852 → 1.496 ms), the sixteen bit apng corpus (6.26 → 6.08 ms -- on x86 that
-blend is still the scalar loop, so expect no change there), and the
-no-regression sweep of the untouched formats on both libraries (bmp 0.99x, dds
-1.00x, tga 0.92x, ico 0.94x, hdr 0.99x, exr 1.01x, qoi 0.99x, tiff 0.99x around
-1.0 on arm). The eight bit apng blend is worth one look there too: it is
-whatever LLVM emits for x86-64, so its share of a frame may be larger than on
-arm, and the same `cargo asm` check decides it.
+### 3. `place16be`'s x86-64 half: a candidate, not written
 
-The gates are the ones this page already lists, on that host: `cargo test
+The wide builds do not vectorise the swap. In the `x86-64-v4` build
+`formats::png::Rows::<RowStream>::fill`, which is where a sixteen bit page's
+row walk is inlined, has no `pshufb` at all; `planar::place8::<3>` and `<4>`
+have 21 and 6. The runtime plane count is what stops it, which is exactly what
+a kernel would remove.
+
+It is not written, so the arm64 numbers stay its ceiling: 3% to 7% of a
+sixteen bit png frame and 29% of a farbfeld. It is the first thing a next round
+on this host should take, and the question is one command:
+`cargo rustc --release --locked --target x86_64-pc-windows-msvc -- --emit asm
+-C target-cpu=x86-64-v4` writes the assembly beside the artifacts. `cargo asm
+` itself will not read this crate, because it looks for an rlib and this one
+is a cdylib.
+
+### 4. the rows the arm rounds moved: not re-measured
+
+Those tables still have one host each. Re-measuring them wants the arm rounds'
+own before builds and the targa, png depth and sixteen bit apng corpora, none
+of which are in this checkout. The animation corpora are, and the gif
+animation row is now measured on both hosts; item 2's three sets and the
+formats around them are the no-regression sweep this host can vouch for, and
+none of them moved.
+
+The gates on that host are the ones this page already lists: `cargo test
 --locked`, clippy with `-D warnings`, `cargo fmt --all -- --check`,
-`tests/readalpha.vpy` (1034 checks) and `tests/pngwrite.vpy` (311), and the
-frame parity the corpora were built for. `docs/HANDOFF.md` has the commands.
+`tests/readalpha.vpy` and `tests/pngwrite.vpy`, and the frame parity the
+corpora were built for. `docs/HANDOFF.md` has the commands.
 
 ## what is left over
 
@@ -709,10 +727,11 @@ where the transform transposes or the frame's depth needs a shift, so a 10 or
 12 bit jxl still takes the per-plane walk.
 The eight bit three and four channel kernel is written and held to the scalar
 path by the test but is not dispatched, because it is 1.2x to 1.7x slower
-than the compiler's loop. The gif compose's x86-64 blocks are not written
-either: the scalar row it keeps is 2.1x the walk it replaced, and the AVX2 and
-AVX-512 halves wait for a Windows host. And the shipping x86-64 libraries
-have not been measured with the one pass; only the arm host has.
+than the compiler's loop. The gif compose's x86-64 blocks were written and
+declined, and the shipping libraries have now been measured with the one pass;
+both are [above](#what-the-x86-64-host-found). What that host leaves is
+`place16be`'s `pshufb` half, the targa fold's confirmation, and the arm rows'
+re-measurement, in that order.
 
 the sixteen bit apng blend is the one kernel whose arm half is a block smaller
 than it would like: a pixel is four samples, so the setup is half of it, and the

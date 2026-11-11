@@ -189,11 +189,19 @@ plain-copy shapes are unchanged.
 The sixteen bit apng blend is a NEON multiply-high now, 3% on a
 `target/bench/apng16-corpus` page; the eight bit one was already vector, and the
 webp reciprocal has no vector form at all (a 41 bit product and a table gather).
-What is left is an x86-64 host: the gif compose's AVX2 and AVX-512 row blocks,
-the one-pass `write_planes` and the targa fold measured on the `.avx2` and
-`.avx512` libraries, and one `pshufb` question about the sixteen bit big-endian
-interleave. The plan's *what needs an x86-64 host* section is the list and
-`docs/HANDOFF.md` has the commands.
+The Windows host then answered the four questions the page left it. The compose
+row's AVX2 and AVX-512 blocks were written and declined: the row is twelve
+bytes a pixel of traffic and the scalar walk already runs at that host's 19
+GB/s ceiling, so the wide builds' own loops match the blocks and the gif
+animation does not move. The one-pass write was confirmed on both x86-64
+libraries, 1.03x to 1.40x of the per-plane gather. The sixteen bit big-endian
+walk was found unvectorised there, so a `pshufb` half is the next thing to
+write, and the arm rows were not re-measured because their corpora and before
+builds are not in that checkout.
+What is left is `place16be`'s `pshufb` half, the targa fold's confirmation on
+Windows, and the arm rows' re-measurement, in that order. The page's *what the
+x86-64 host found* section has the measurements and `docs/HANDOFF.md` has the
+commands.
 
 ### several frames in flight — 2026-11-09
 

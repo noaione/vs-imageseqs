@@ -764,6 +764,103 @@ mod tests {
         }
     }
 
+    /// What the compose row costs, which is a measurement rather than a check.
+    ///
+    /// It is ignored because a wall clock in a test suite is a flaky test, and
+    /// it lives here rather than under `target/bench/` because it calls the
+    /// row directly.
+    ///
+    /// Three canvas sizes, which answer three questions. 256x256 is a quarter
+    /// of a megabyte a buffer, so the row is its own arithmetic; 1024x1024 is
+    /// the shape `target/bench/plan48/anim-corpus` animates, which is what a
+    /// frame really walks; 4096x4096 is large enough that the row is bound by
+    /// memory instead. A block's worth and a frame's worth are different
+    /// numbers, and the second is the one that decides whether to land one.
+    /// This is the measurement that declined the x86-64 halves of the block
+    /// on a host whose scalar walk already runs at the memory system's
+    /// ceiling; `docs/improvements/48-decoder-vectorisation.md` has the
+    /// numbers.
+    ///
+    /// ```text
+    /// cargo test --release --lib -- --ignored --nocapture the_compose_measured
+    /// ```
+    #[test]
+    #[ignore = "a measurement"]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn the_compose_measured() {
+        use std::time::Instant;
+
+        const CANVASES: [(usize, usize); 3] = [(256, 256), (1024, 1024), (4096, 4096)];
+        const REPEATS: u32 = 20;
+
+        let dispose = DisposalMethod::Keep;
+
+        /// One loop this test times, by the name it is reported under.
+        type Row = (&'static str, Box<dyn Fn(&mut [u8], &mut [u8])>);
+
+        /// Times every path over one canvas, alternating them round by round so
+        /// that a machine that drifts cannot flatter one, and reports each
+        /// path's best round. This is `target/bench/plan48/ab.py`'s method
+        /// with the two plugins replaced by the two loops.
+        fn measure(canvas: (usize, usize), paths: &[Row], composed: &[u8], under: &[u8]) {
+            let (width, height) = canvas;
+            let row = width * 4;
+            let mut best = vec![f64::MAX; paths.len()];
+            for _ in 0..REPEATS {
+                for (index, (_, run)) in paths.iter().enumerate() {
+                    let mut composed = composed.to_vec();
+                    let mut under = under.to_vec();
+                    let start = Instant::now();
+                    for y in 0..height {
+                        let at = y * row;
+                        run(&mut composed[at..at + row], &mut under[at..at + row]);
+                    }
+                    let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+                    // A row's writes are never read afterwards, so without this
+                    // the optimiser is free to delete the loop and time an empty
+                    // one.
+                    std::hint::black_box((&composed, &under));
+                    best[index] = best[index].min(elapsed);
+                }
+            }
+            for ((name, _), best) in paths.iter().zip(best) {
+                let pixel = best * 1e6 / (width * height) as f64;
+                println!("{width:<5} {name:<12} {best:8.3} ms a canvas {pixel:6.3} ns a pixel");
+            }
+        }
+
+        for (width, height) in CANVASES {
+            // Every third pixel transparent, like a rectangle that covers
+            // part of the canvas it is drawn over.
+            let under: Vec<u8> = (0..width * height * 4)
+                .map(|i| (i * 3 % 251) as u8)
+                .collect();
+            let composed: Vec<u8> = (0..width * height * 4)
+                .map(|i| match i % 4 {
+                    3 if (i / 4) % 3 == 0 => 0u8,
+                    3 => 255u8,
+                    _ => (i * 7 % 253) as u8,
+                })
+                .collect();
+            let canvas = (width, height);
+
+            let mut paths: Vec<Row> = vec![(
+                "scalar",
+                Box::new(move |composed, under| blend_row_scalar(dispose, composed, under)),
+            )];
+            #[cfg(target_arch = "aarch64")]
+            paths.push((
+                "neon",
+                Box::new(move |composed, under| blend_row_forced(dispose, composed, under)),
+            ));
+            paths.push((
+                "dispatched",
+                Box::new(move |composed, under| blend_row(dispose, composed, under)),
+            ));
+            measure(canvas, &paths, &composed, &under);
+        }
+    }
+
     /// The per-pixel walk the row replaced, kept here as the oracle.
     fn blend_per_sample(dispose: DisposalMethod, under: &mut [u8], composed: &mut [u8]) {
         for index in 0..under.len() / 4 {
