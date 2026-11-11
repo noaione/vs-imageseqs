@@ -4,6 +4,11 @@
 
 ### changed
 
+- A colour heif or heic whose container states no colour matrix, states
+  `unspecified` or states the identity is handed out as its r,g,b samples
+  instead of being refused, and so is a page whose depth has no yuv format.
+  Such files previously failed to identify; a page whose matrix the frame
+  properties can name is still the yuv it holds.
 - Upgrade JPEG 2000 decoding to `hayro-jpeg2000` 0.5.0.
 - A colour heif page that states fourteen or sixteen bits per sample at 4:2:0,
   4:2:2 or 4:4:4 is handed out as its own yuv planes (`YUV420P14` and its

@@ -2838,6 +2838,83 @@ def test_twelve_bit_pages() -> None:
     check(samples(frame, 2) == [2048] * 12, "heic-yuv420p12: the second chroma plane")
 
 
+def test_heic_depth_arms() -> None:
+    """The fourteen and fifteen bit colour pages a high depth x265 can write.
+
+    ``heic-yuv{400,420,422,444}p{14,16}.heic`` exist for the depth arms the
+    heif reader gained: every one is an eight by six ramp, states bt.709
+    primaries and transfer with full range, and carries no ICC profile. The
+    names say sixteen, but the encoder writes fifteen bits -- that is the depth
+    the container states, and VapourSynth names no fifteen bit yuv format, so
+    those three are handed out as the r,g,b the plugin builds. The samples are
+    the encoder's own conversion rather than a formula, so what is checked here
+    is the format, the geometry and the properties; the twelve bit sibling
+    above pins the decoder's values.
+
+    ``heic-yuv400p16.heic`` reaches 34976, past the 32767 a fifteen bit frame
+    holds, and that is libheif rather than the file: HEVC can carry sixteen bits
+    but the `hvcC` box cannot signal them, so libheif caps a page at fifteen and
+    says so in its README. The pages are checked as the declarations they are,
+    and no sample is pinned, because pinning one would pin that cap.
+    """
+    pages = [
+        ("heic-yuv400p14.heic", "Gray14", [8]),
+        ("heic-yuv400p16.heic", "Gray15", [8]),
+        ("heic-yuv420p14.heic", "YUV420P14", [8, 4, 4]),
+        ("heic-yuv422p14.heic", "YUV422P14", [8, 4, 4]),
+        ("heic-yuv444p14.heic", "YUV444P14", [8, 8, 8]),
+        ("heic-yuv420p16.heic", "RGB45", [8, 8, 8]),
+        ("heic-yuv422p16.heic", "RGB45", [8, 8, 8]),
+        ("heic-yuv444p16.heic", "RGB45", [8, 8, 8]),
+    ]
+    for name, format_name, row_lengths in pages:
+        clip, alpha_clip = read_alpha(files=[fixture(name)])
+        check(
+            clip.format.name == format_name,
+            f"{name}: the clip is {format_name} (got {clip.format.name})",
+        )
+        check(
+            (clip.width, clip.height) == (8, 6),
+            f"{name}: the clip is 8x6 (got {clip.width}x{clip.height})",
+        )
+        frame = clip.get_frame(0)
+        depth = clip.format.bits_per_sample
+        maximum = (1 << depth) - 1
+        for plane, row in enumerate(row_lengths):
+            values = samples(frame, plane)
+            down = (clip.format.subsampling_h or 0) if plane else 0
+            check(
+                len(values) == row * (6 >> down),
+                f"{name}: plane {plane} holds {row} samples a row (got {len(values)})",
+            )
+        check(
+            len(set(samples(frame))) > 1,
+            f"{name}: the page is the ramp rather than one value",
+        )
+        check(frame.props.get("_Primaries") == 1, f"{name}: bt.709 primaries")
+        check(frame.props.get("_Transfer") == 1, f"{name}: bt.709 transfer")
+        check(frame.props.get("_Range") == vs.RANGE_FULL, f"{name}: full range")
+        # A yuv page keeps the matrix its container states; an r,g,b one is
+        # written with zero, which is the property's own invariant for r,g,b.
+        matrix = 0 if format_name.startswith("RGB") else (
+            None if clip.format.num_planes == 1 else 1
+        )
+        check(
+            frame.props.get("_Matrix") == matrix,
+            f"{name}: _Matrix is {matrix} (got {frame.props.get('_Matrix')})",
+        )
+        check(frame.props["ImgSeqHasICC"] == 0, f"{name}: the page carries no profile")
+        alpha = alpha_clip.get_frame(0)
+        check(
+            alpha_clip.format.name == f"Gray{depth}",
+            f"{name}: the alpha clip is Gray{depth} (got {alpha_clip.format.name})",
+        )
+        check(
+            set(samples(alpha)) == {maximum},
+            f"{name}: the alpha plane is opaque at {maximum}",
+        )
+
+
 def test_heic_storing_av1() -> None:
     """A heic whose primary item is av1 is read, which was a path with no file.
 
@@ -2960,6 +3037,7 @@ def main() -> None:
         test_read_is_unchanged,
         test_monochrome_containers,
         test_jxl_depths,
+        test_heic_depth_arms,
         test_color_containers,
         test_yuv_containers,
         test_color_metadata,

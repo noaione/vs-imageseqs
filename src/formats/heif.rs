@@ -244,43 +244,58 @@ impl HeifHeader {
     /// A monochrome image is the gray format its color type maps to, at the
     /// depth libheif reports for it - which is the depth of the planes it hands
     /// over, so a ten bit page is a `Gray10` frame holding the samples as they
-    /// are - and a 4:2:0 one is handed out as the yuv planes it holds. Anything
-    /// else keeps the `image` decoder: r,g,b samples have no yuv format to be
-    /// handed out as, and a file whose matrix the frame properties cannot name
-    /// would have to be labelled with a guess.
+    /// are - and a 4:2:0 one is handed out as the yuv planes it holds.
+    ///
+    /// A colour image is yuv only when its matrix is one the frame properties
+    /// can name. A file that states none, states "unspecified", states the
+    /// identity, or states a depth VapourSynth has no yuv name for is asked of
+    /// `libheif` for the r,g,b planes it builds instead, at the depth the
+    /// container states: those samples need no matrix to be read, so this is a
+    /// description rather than a refusal.
     fn format(&self) -> Option<PixelFormat> {
         match self.color_space {
-            ColorSpace::Monochrome => {
-                Some(PixelFormat::from_color_type(self.color_type)?.at_depth(self.depth.into()))
-            }
+            ColorSpace::Monochrome => Some(self.rgb_format()?),
             ColorSpace::YCbCr(chroma) => {
-                self.cicp.filter(|cicp| usable_matrix(cicp.matrix))?;
-                let format = yuv_format(chroma, self.depth)?;
+                // A yuv frame is tagged with the matrix its container states, and
+                // a file that states none, states "unspecified" or states the
+                // identity has none to be tagged with: those samples are the r,g,b
+                // `libheif` builds instead.
+                if self
+                    .cicp
+                    .filter(|cicp| usable_matrix(cicp.matrix))
+                    .is_none()
+                {
+                    return self.rgb_format();
+                }
+                let named = yuv_format(chroma, self.depth);
                 // A subsampled frame has to be a whole multiple of its
                 // subsampling, which the core checks when the frame is created
                 // and when a clip of constant size is described: a 4:2:0 picture
                 // of an odd width or height cannot exist as a frame at all. The
                 // same depth at 4:4:4 can, so that is what such a page is asked
                 // of `libheif` as rather than refusing a picture that has one.
-                if format.fits(self.width, self.height) {
-                    Some(format)
-                } else {
-                    yuv_format(Chroma::C444, self.depth)
+                match named {
+                    Some(format) if format.fits(self.width, self.height) => Some(format),
+                    _ => yuv_format(Chroma::C444, self.depth).or(self.rgb_format()),
                 }
             }
             // A colour picture can be coded as full resolution r,g,b rather
             // than as yuv, which is what this plugin hands one out as. The
-            // planar `C444` spelling is the one [`color_space_of`] asks for, so
-            // the planes libheif hands over are already one per channel and
-            // nothing has to be split. The interleaved and hdr variants are not
-            // what this module requests, so a file that reports one keeps the
-            // `image` decoder rather than being asked for in a spelling this
-            // module would then have to take apart.
-            ColorSpace::Rgb(RgbChroma::C444) => {
-                Some(PixelFormat::from_color_type(self.color_type)?.at_depth(self.depth.into()))
-            }
-            _ => None,
+            // interleaved and hdr spellings are what libheif reports for a file
+            // before it is asked, and [`color_space_of`] asks for the planar
+            // `C444` one either way, so every arm here is the same picture.
+            _ => Some(self.rgb_format()?),
         }
+    }
+
+    /// The r,g,b format this file's samples are handed out as, at the depth its
+    /// container states.
+    ///
+    /// Every colour page has one, and a monochrome one maps through it too: a
+    /// frame that is not the yuv a file describes is still the samples the
+    /// decoder produced.
+    fn rgb_format(&self) -> Option<PixelFormat> {
+        Some(PixelFormat::from_color_type(self.color_type)?.at_depth(self.depth.into()))
     }
 }
 
@@ -1167,12 +1182,27 @@ mod tests {
             header(ColorSpace::Rgb(RgbChroma::C444), 16, ColorType::Rgb16).format(),
             Some(PixelFormat::Rgb16)
         );
-        // A spelling this module never asks for is left to the `image`
-        // decoder rather than described as something it would have to take
-        // apart: the interleaved variant is not the layout it requests.
+        // A spelling libheif reports before it is asked is the same r,g,b once
+        // it has been asked: `color_space_of` requests the planar `C444` one
+        // whatever the record says, so there is nothing to take apart.
         assert_eq!(
             header(ColorSpace::Rgb(RgbChroma::Rgb), 8, ColorType::Rgb8).format(),
-            None
+            Some(PixelFormat::Rgb8)
+        );
+        assert_eq!(
+            header(ColorSpace::Rgb(RgbChroma::HdrRgbLe), 16, ColorType::Rgb16).format(),
+            Some(PixelFormat::Rgb16)
+        );
+        // A colour page whose matrix the frame properties cannot name is the
+        // samples `libheif` builds as r,g,b rather than a refusal, at the depth
+        // the container states.
+        assert_eq!(
+            header(ColorSpace::YCbCr(Chroma::C420), 14, ColorType::Rgb16).format(),
+            Some(PixelFormat::Rgb14)
+        );
+        assert_eq!(
+            header(ColorSpace::YCbCr(Chroma::C420), 15, ColorType::Rgb16).format(),
+            Some(PixelFormat::Rgb15)
         );
         // And the arrangements that were already handled still are.
         assert_eq!(

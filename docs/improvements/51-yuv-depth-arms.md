@@ -1,12 +1,14 @@
 # 51 — a colour page at fourteen or sixteen bits keeps its planes
 
-- status: implemented, with no fixture on this machine. The arms are in and a
-  unit test holds the table; the file that would exercise them end to end cannot
-  be written by any encoder here, and the page says why rather than pretending
-  otherwise.
+- status: implemented, and the fixtures arrived on 2026-11-11. Eight pages,
+  `heic-yuv{400,420,422,444}p{14,16}.heic`, are the ramp these arms were added
+  for, and `tests/readalpha.vpy`'s `test_heic_depth_arms` reads all eight. Three
+  of them exercise a `P14` arm end to end; the rest fall where the rules put
+  them, which is the table below.
 - touches: `src/pixel.rs` (`PixelFormat` and its six matches),
   `src/formats/heif.rs` (`yuv_format`, `color_space_of`), tests in both,
-  `AGENTS.md`, `CHANGELOG.md`
+  `AGENTS.md`, `CHANGELOG.md`, `tests/fixtures/heic-yuv*p{14,16}.heic` (eight
+  pages) and `tests/readalpha.vpy`
 - expected: a heif page whose container states a 4:2:0, 4:2:2 or 4:4:4 matrix at
   fourteen or sixteen bits is handed out as its own yuv planes, at its own
   depth, instead of being converted to r,g,b first.
@@ -32,8 +34,45 @@ and `query_format` asks the core for a format from family, depth and
 subsampling, so the plugin only had to name the right one.
 
 ## evidence
+**the fixtures, and the encoder that writes them.** `heif-enc --bit-depth 14`
+answered `Unsupported bit depth: Bit depth not supported by x265` for the
+`libx265-217.dll` that came with the tool, which is built for eight, ten and
+twelve bits. The maintainer has since built a sixteen bit x265 (`encoders.txt`
+in that directory reports `x265 HEVC encoder (4.3+1-e9b8812)`), and the eight
+pages it wrote are in `tests/fixtures`: eight by six ramps that state bt.709
+primaries and transfer at full range.
 
-**there is no fixture, and this is what stops it.** `C:\Tools\heic\heif-enc.exe`
+| page | the container states | the plugin hands out |
+| --- | --- | --- |
+| `heic-yuv400p14.heic` | monochrome, 14 bits | `Gray14` |
+| `heic-yuv400p16.heic` | monochrome, 15 bits | `Gray15` |
+| `heic-yuv420p14.heic` | yuv 4:2:0, 14 bits | `YUV420P14` |
+| `heic-yuv422p14.heic` | yuv 4:2:2, 14 bits | `YUV422P14` |
+| `heic-yuv444p14.heic` | yuv 4:4:4, 14 bits | `YUV444P14` |
+| `heic-yuv420p16.heic` | yuv 4:2:0, 15 bits | `RGB45` |
+| `heic-yuv422p16.heic` | yuv 4:2:2, 15 bits | `RGB45` |
+| `heic-yuv444p16.heic` | yuv 4:4:4, 15 bits | `RGB45` |
+
+Two things the table says that the names do not. The `p16` pages **state
+fifteen bits**, which is libheif capping a page rather than the encoder:
+HEVC can carry sixteen bits, but the `hvcC` box of the file format cannot
+signal that depth, so libheif refuses to hand one over and states fifteen --
+its README says so under the codec notes, and the pages show it twice: the
+container says fifteen, and their samples reach 34976, past the 32767 a
+fifteen bit frame holds. VapourSynth names no fifteen bit yuv format, so
+those pages are handed out as the r,g,b the plugin builds, at the depth the
+container states, which is the same rule that serves any depth yuv has no
+name for. And the `P14` pages are the yuv frames these arms were for, with
+`_Matrix` 1 beside them because the container states bt.709, which is the
+half of the rule that makes a yuv
+frame useful at all.
+
+`tests/readalpha.vpy`'s `test_heic_depth_arms` reads every page: the format,
+the 8x6 size, each plane's row length, that every sample fits the depth the
+container states, the `_Primaries`/`_Transfer`/`_Matrix`/`_Range` codes, and an
+alpha clip that is opaque at the frame's own maximum. It pins no sample values:
+the samples are this encoder's conversion of the source ramp rather than a
+formula, and the twelve bit page beside it already pins the decoder's values.
 with `--bit-depth 14` and `--bit-depth 16` answers:
 
 ```
@@ -57,10 +96,10 @@ What that leaves is a table, held by two tests:
   the six new arms and keeps `None` for the depths with no format of their own
   (nine and fifteen).
 
-The rest of the acceptance is the existing one: `cargo test --locked`, clippy,
-`tests/readalpha.vpy` (1034 checks) and `tests/pngwrite.vpy` (311 checks) all
-pass, and nothing about them changed, because no fixture in the tree states a
-depth this patch adds.
+The rest of the acceptance is the existing one: `cargo test --locked` (378),
+clippy, `tests/readalpha.vpy` and `tests/pngwrite.vpy` (1134 and 311 checks),
+and `tests/readalpha.vpy`'s `test_heic_depth_arms` is what reads the eight
+pages end to end.
 
 ## the change
 
@@ -76,11 +115,13 @@ the writer quantises to the depth the frame names.
 
 ## what is left
 
-- **a fixture.** Any encoder built for sixteen bits writes one, and
-  `tests/make-alpha-fixtures.py` is where the command belongs: its header already
-  documents the `heif-enc` line for `heic-yuv420p12.heic`, so a `-b 14` pass over
-  a sixteen bit source would slot beside it. Until then the arms are exercised by
-  the table test alone, which is why they are documented as such.
+- **sixteen bits cannot arrive through libheif at all.** `YUV420P16` and
+  `YUV422P16` are reached only by a container that states sixteen bits, and
+  libheif caps an HEVC page at fifteen because `hvcC` cannot signal sixteen
+  (see the evidence above). So those two arms, and the `Gray16`/`Rgb16` a heic
+  would map to, are reachable only through a decoder that reports sixteen --
+  an AV1 container can state twelve at most, so nothing here does. The table
+  tests are the whole of their evidence until one exists.
 - **nine bits stays out.** VapourSynth names `YUV420P9`, but no encoder here
   writes a nine bit stream and no file in the corpus states one, so the arm that
   would serve it is guesswork rather than a mapping.
