@@ -14,6 +14,10 @@
 
 ### performance
 
+- Creating a clip over JPEG XL files reads each codestream header once instead
+  of twice: the header states whether the file holds a timeline, and the
+  animation adapter asked that by parsing it again. Clip creation over a
+  35-page set is 1.36x faster (2.56 ms to 1.88 ms), with identical frames.
 - A JPEG XL page is decoded on more than one thread. The `jxl` crate takes a
   parallel runner and this plugin gave it none, so every page decoded a tile
   after another: a 35-page corpus now reads 2.5x faster with the lookahead

@@ -48,12 +48,19 @@ pub fn segment_info(
     info: crate::decoder::ImageInfo,
     fps: Rate,
     file: &mut BufReader<File>,
+    animated: Option<bool>,
 ) -> Result<Option<SegmentInfo>> {
     // A still is the common case and the scan below reads the whole file to find
-    // that out. The codestream states it in the header, so a file with no
-    // animation header never reaches the scan; a header this cannot read is the
-    // scan's to report, with the words it already had.
-    if matches!(crate::formats::jxl::states_animation(file, path), Ok(false)) {
+    // that out. The codestream states it in the header, which the probe read when
+    // it described the file, so the answer arrives beside the description and no
+    // header is read twice for a still; a caller that did not come through a
+    // probe has it read here instead, and a header this cannot read is the scan's
+    // to report, with the words it already had.
+    let animated = match animated {
+        Some(animated) => animated,
+        None => !matches!(crate::formats::jxl::states_animation(file, path), Ok(false)),
+    };
+    if !animated {
         return Ok(None);
     }
     let bytes =

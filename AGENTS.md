@@ -167,6 +167,9 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   `available_parallelism().min(4)` scoped threads, which is 2.5x a serial page
   and 1.6x one beside the reader's own workers
   (`docs/improvements/49-jxl-decode-threads.md`) --
+  -- and whose probe reads a codestream header once: that header states whether
+  the file holds a timeline, so `animation/jxl.rs` is handed the answer beside
+  the description rather than parsing the header again --
   `jp2.rs` for JPEG 2000 header probing and `hayro-jpeg2000`
   decoding, `png.rs` for the `cICP` chunk and for the png files whose rows it
   walks straight into the frame instead of buffering the picture whole — which

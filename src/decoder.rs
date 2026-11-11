@@ -845,7 +845,7 @@ pub fn probe_segment(
     // of them reads the file is still each one's own choice, but it is opened here
     // once, and the adapters that used to open it again read this instead.
     let mut input = Input::open(path)?;
-    let mut info = describe(path, apply_rotation, &mut input)?;
+    let Described { mut info, timeline } = describe(path, apply_rotation, &mut input)?;
     keep_profile(&mut info, export_icc_profile);
     // An animated file is described by its own container: the delay of every
     // picture and how to replay it. Whether a file is one is the container's
@@ -863,10 +863,10 @@ pub fn probe_segment(
         Some(Format::Avif | Format::Heif) => {
             crate::animation::heif::segment_info(path, info.clone(), fps, input.reader()?)?
         }
-        // A jpeg xl's scan still opens for itself; the plan lists it with the rest
-        // of the modules that do.
+        // A jpeg xl's scan still reads the whole file when it holds a timeline,
+        // and the header the probe read already said whether it does.
         Some(Format::Jxl) => {
-            crate::animation::jxl::segment_info(path, info.clone(), fps, input.reader()?)?
+            crate::animation::jxl::segment_info(path, info.clone(), fps, input.reader()?, timeline)?
         }
         // A webp whose bitstream is a still image stays on the still path,
         // which is what hands a lossy file out as its own yuv planes. Only an
@@ -891,7 +891,7 @@ pub fn probe_segment(
 #[cfg(test)]
 pub fn probe(path: &Path, apply_rotation: bool, export_icc_profile: bool) -> Result<ImageInfo> {
     let mut input = Input::open(path)?;
-    let mut info = describe(path, apply_rotation, &mut input)?;
+    let mut info = describe(path, apply_rotation, &mut input)?.info;
     keep_profile(&mut info, export_icc_profile);
     Ok(info)
 }
@@ -906,12 +906,24 @@ fn keep_profile(info: &mut ImageInfo, export_icc_profile: bool) {
     }
 }
 
+/// A description, and the timeline answer the header it was read from gave.
+///
+/// A format whose own header states whether the file holds a timeline answers
+/// that too while describing the file, and the answer travels here rather than
+/// being read again: `jxl` is the one that does, because its header is the front
+/// of a codestream and the adapter that scans a timeline would otherwise parse
+/// it a second time. `None` means the container's adapter asks for itself.
+struct Described {
+    info: ImageInfo,
+    timeline: Option<bool>,
+}
+
 /// Describes one file through the open the caller holds.
 ///
 /// The route and the module that describes the file read one window out of it,
 /// and a caller that also wants a timeline reads that from the same open; see
 /// [`probe_segment`].
-fn describe(path: &Path, apply_rotation: bool, input: &mut Input) -> Result<ImageInfo> {
+fn describe(path: &Path, apply_rotation: bool, input: &mut Input) -> Result<Described> {
     // One read of the head answers which module can describe this file, and it
     // is the same call the decode makes: see [`identify::route`]. A module that
     // declines a file its own bytes name -- an openexr whose every layer is deep
@@ -922,6 +934,7 @@ fn describe(path: &Path, apply_rotation: bool, input: &mut Input) -> Result<Imag
     // the module below reads the window from the same input rather than opening the
     // file a second time. A module that reads past the window still opens for itself,
     // and those are listed in the plan as what is left.
+    let mut timeline = None;
     let route = {
         let head = input.head(crate::formats::identify::HEAD_BYTES)?;
         identify::route_from(head, path)
@@ -942,11 +955,11 @@ fn describe(path: &Path, apply_rotation: bool, input: &mut Input) -> Result<Imag
         // decoder for one, which it cannot: it has no jpeg xl format of its own.
         // These two answer with a description rather than with an option: the
         // route above is the check that used to come before the call.
-        Some(Format::Jxl) => Some(formats::jxl::image_info(
-            path,
-            apply_rotation,
-            input.reader()?,
-        )?),
+        Some(Format::Jxl) => {
+            let (info, animated) = formats::jxl::image_info(path, apply_rotation, input.reader()?)?;
+            timeline = Some(animated);
+            Some(info)
+        }
         Some(Format::Jp2) => Some(formats::jp2::image_info(
             path,
             apply_rotation,
@@ -1045,7 +1058,7 @@ fn describe(path: &Path, apply_rotation: bool, input: &mut Input) -> Result<Imag
     // The route is saved on the description so that the timeline decision and
     // the decode do not read the head again to reach the same answer.
     info.route = route;
-    Ok(info)
+    Ok(Described { info, timeline })
 }
 
 /// Decodes `info`.
@@ -1341,6 +1354,7 @@ mod tests {
 
         let jxl = fixture("alpha-rgba8.jxl");
         let info = crate::formats::jxl::image_info(&jxl, true, &mut moved(&jxl))
+            .map(|(info, _)| info)
             .expect("the codestream is described");
         assert!(
             info.width > 0 && info.height > 0,
@@ -1625,6 +1639,37 @@ mod tests {
                 .expect("the fixture probes");
             assert!(!segment.animated, "{name}");
             assert_eq!(segment.frame_count(), 1, "{name}");
+        }
+    }
+
+    /// A jxl probe reads the codestream header once.
+    ///
+    /// The header a probe reads states whether the file holds a timeline, so
+    /// the adapter that would otherwise ask that for itself is given the
+    /// answer. An animated file is read once more by the scan that collects its
+    /// delays, which is a read of its own.
+    #[test]
+    fn a_jpeg_xl_probe_reads_its_header_once() {
+        for (name, rotation, expected) in [
+            ("alpha-rgba8.jxl", true, 1),
+            ("alpha-rgba8.jxl", false, 1),
+            ("jxl-gray10.jxl", true, 1),
+            ("animation.jxl", true, 2),
+        ] {
+            crate::formats::jxl::reset_header_parses();
+            let segment = probe_segment(&fixture(name), Rate::from_fps(24, 1), rotation, false)
+                .expect("the fixture probes");
+            assert_eq!(
+                segment.info.route,
+                Some(crate::formats::identify::Format::Jxl),
+                "{name}"
+            );
+            assert_eq!(
+                crate::formats::jxl::header_parses(),
+                expected,
+                "{name}: rotation={rotation}, animated={}",
+                segment.animated
+            );
         }
     }
 

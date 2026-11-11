@@ -24,6 +24,15 @@ says otherwise.
 `p001` and `p002` hold colour (plus `p018`, which is grey content stored in a
 colour format). every set needs `mismatch=True`.
 
+`target/bench/qoi-corpus` is the same 35 pages in an eighth container, and it is
+not under `sandbox/` because qoi holds no grey: ImageMagick writes each page
+from the png set (`magick "snek - p000.png" "snek - p000.qoi"`, a page at a
+time), so a `Gray8` page becomes three channels of the same sample and the
+plugin hands the set out as `RGB24`. Every page was checked against its source
+before it was measured, twice: `magick compare -metric AE` finds 0 differing
+pixels on all 35, and `target/bench/qoi-parity.py` reads both sets through this
+plugin and finds 0 of 35 pages differing.
+
 | set | files | what imgseqs returns | decoded |
 | --- | --- | --- | --- |
 | webp | 35 | 35 `YUV420P8` | 964 MiB |
@@ -31,6 +40,7 @@ colour format). every set needs `mismatch=True`.
 | heic | 35 | 31 `Gray8` and 4 `YUV420P8` | 685 MiB |
 | jp2 | 35 | 32 `Gray8` and 3 `RGB24` | 748 MiB |
 | jpeg, png, jxl | 35 | 31 `Gray8` and 4 `RGB24` | 784 MiB |
+| qoi | 35 | 35 `RGB24` | 1929 MiB |
 
 ## fair comparison
 
@@ -74,6 +84,7 @@ against bestsource, default settings, frames only:
 | jp2 | 13.36 s | 13.12 s | bestsource 1.02x faster on frames, imgseqs 1.96x faster including the open |
 | avif | 1.88 s | cannot open | |
 | heic | 6.72 s | cannot open | |
+| qoi | 1.178 s | 1.381 s | imgseqs 1.17x faster, 1.78x including the open |
 
 bestsource now decodes jxl on this machine (it failed with `Video codec not
 found` before), so jxl has a real comparison for the first time.
@@ -216,6 +227,35 @@ threads.
 | imgseqs `Read` | 6.716 s | 175.36 ms | 0.009 s | 6.725 s |
 | imgseqs `Read`, `prefetch=0` | 22.566 s | 661.55 ms | 0.010 s | 22.576 s |
 | imgseqs `Read`, `prefetch=16` | 4.524 s | 0.09 ms | 0.009 s | 4.533 s |
+
+## qoi
+
+35 files: 35 `RGB24` of 44.7 MiB (`p000`) and 55.4 MiB.
+
+| reading the set | frames | median frame | open | total |
+| --- | ---: | ---: | ---: | ---: |
+| imgseqs `Read` | 1.178 s | 30.39 ms | 0.003 s | 1.180 s |
+| imgseqs `Read`, `prefetch=0` | 2.645 s | 73.53 ms | 0.003 s | 2.648 s |
+| imgseqs `Read`, `prefetch=16` | 1.009 s | 0.10 ms | 0.003 s | 1.011 s |
+| bestsource `VideoSource` | 1.381 s | 36.14 ms | 0.714 s | 2.095 s |
+| bestsource `VideoSource`, `threads=1` | 3.266 s | 90.21 ms | 2.575 s | 5.841 s |
+
+qoi is the one set where the plugin adds nothing to the decode: the `qoi` crate
+unpacks a byte stream of runs and deltas into one buffer, so there is no row to
+walk into a frame and no transform to fuse. What this reader does pay for is the
+split of that buffer into three planes: a serial frame is 77.1 ms, of which the
+decode (`read`) is 35.0 ms and the split (`convert`) 21.2 ms, with `open` 3.8 ms
+(`target/bench/plan48/measure.py`, `prefetch=0`, three reps). The lookahead is
+what the set turns on: 2.645 s serial against 1.178 s at the default window, and
+`prefetch=16` adds a further 14%, because a page is 58 MB to decode and the four
+default workers leave the memory system room.
+
+bestsource reads the set too -- ffmpeg has a qoi decoder -- and loses by 1.17x
+on frames and 1.78x including the open, because it indexes all 35 files while
+creating the clip (714 ms) where the probe here reads fourteen bytes a file.
+Both plugins report `0x0` for the clip, which is what a variable size sequence
+does in this build; the alignment check the script runs confirms the 35 frames
+are the same pictures.
 
 ## decoder
 

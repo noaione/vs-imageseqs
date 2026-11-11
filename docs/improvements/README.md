@@ -806,9 +806,6 @@ decodes to a buffer by construction.
 - the heif and heic hook probe's 5 ms for all 35 pages, and libheif parsing a
   monochrome page a second time when it decodes it
   ([05](05-monochrome-heif.md)).
-- the jxl probe parsing the header twice when `apply_rotation=False`, 0.065 ms
-  per file, which is what makes `ImgSeqOrientation` non-empty for a jxl at all
-  ([11](11-jxl-direct.md)).
 - `mismatch=True` beside rotation, two ways to get a heterogeneous clip with
   only one of them a property a graph can read
   ([09](09-exif-orientation.md)).
