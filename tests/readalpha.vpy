@@ -1038,20 +1038,18 @@ def test_avif_extents() -> None:
 
 
 def test_avif_grid() -> None:
-    """A 2x2 grid avif is joined by libheif, which is who decodes it now.
+    """A 2x2 grid avif whose tiles are monochrome is joined by libheif.
 
     ``avif-grid.avif`` is written by ``avifenc -g 2x2`` from
     ``avif-grid-source.png``: four 128x128 squares of one sample each, so the
     grid's four cells are four distinct uniform values (top left 8, top right
     10, bottom left 15, bottom right 17).
 
-    This check was written to fail the moment the grid started decoding, as the
-    signal to turn it into this sample check. The plugin's own avif walker still
-    excludes a grid in ``Meta::native_eligible``; what reads it now is
-    ``libheif``, which is who a container this tree's walk refuses goes to
-    instead of the ``image`` decoder. That decoder failed here -- it has no
-    monochrome avif, and the grid's cells are monochrome, so it answered
-    ``Invalid argument``.
+    The plugin's own walk now joins a grid whose tiles it can place
+    (``test_avif_grid_colour``), but a monochrome avif has no path here at all,
+    so this one is described and decoded by ``libheif``, the library a container
+    this tree's walk leaves alone goes to. The ``image`` decoder failed here --
+    it has no monochrome avif either, and answered ``Invalid argument``.
 
     The samples are the ones ``avifdec`` reads back, and they are taken at the
     middle of each cell, so a wrong cell order or an offset wrong by a whole
@@ -1071,6 +1069,41 @@ def test_avif_grid() -> None:
     for x, y, value in ((64, 64, 8), (192, 64, 10), (64, 192, 15), (192, 192, 17)):
         got = luma[y * clip.width + x]
         check(got == value, f"grid: the cell at {x},{y} is {value} (got {got})")
+
+
+def test_avif_grid_colour() -> None:
+    """A colour grid avif is joined here rather than by libheif.
+
+    ``avif-grid-colour.avif`` is ``avif-grid-colour-source.png`` -- four 128x128
+    squares of one colour each -- encoded with ``avifenc -d 8 -y 420 --cicp
+    1/13/6 -r f -q 100 -g 2x2``, so its tiles are 4:2:0 yuv with a matrix the
+    frame properties can name. ``Meta::tiled`` is what joins one whose tiles it
+    can place, and this file is what proves the join: four tiles in ``dimg``
+    order, each into the plane the frame holds, at the offsets the grid
+    descriptor names.
+
+    The samples are the encoder's conversion of those four colours rather than a
+    formula, and they are taken at the middle of each cell, so a wrong order or
+    an offset wrong by a whole tile cannot pass.
+    """
+    clip = core.imgseqs.Read(files=[fixture("avif-grid-colour.avif")])
+    check(
+        clip.format.name == "YUV420P8",
+        f"grid colour: the clip is the tiles' own yuv (got {clip.format.name})",
+    )
+    check(
+        (clip.width, clip.height) == (256, 256),
+        f"grid colour: the clip is the grid joined, 256x256 (got {clip.width}x{clip.height})",
+    )
+    frame = clip.get_frame(0)
+    check(
+        frame.props.get("_Matrix") == 6,
+        f"grid colour: the matrix is the grid item's (got {frame.props.get('_Matrix')})",
+    )
+    luma = samples(frame, 0)
+    for x, y, value in ((64, 64, 87), (192, 64, 131), (64, 192, 52), (192, 192, 181)):
+        got = luma[y * clip.width + x]
+        check(got == value, f"grid colour: the cell at {x},{y} is {value} (got {got})")
 
 
 def test_alpha_demand() -> None:
@@ -3053,6 +3086,7 @@ def main() -> None:
         test_no_picture,
         test_avif_extents,
         test_avif_grid,
+        test_avif_grid_colour,
         test_alpha_demand,
         test_animation,
         test_source_indices,

@@ -777,13 +777,12 @@ decodes to a buffer by construction.
   ([11](11-jxl-direct.md)).
 - **`pclr`, `cdef`, `res`/`resc` and the `uuid` boxes of a jp2**
   ([06](06-jpeg-2000-backend.md)).
-- **the tiles of a grid avif, in this reader.** `dimg` names them and the probe
-  already reads that reference; what is missing is each tile's own coding record
-  and the placement of the decoded tiles into a picture of the grid's size. A grid
-  is read today by `libheif`, which the walk hands a container it refuses, and
-  `tests/readalpha.vpy`'s `test_avif_grid` checks the joined picture's four cells;
-  reading it here is what would remove that fallback, not what would make a grid
-  readable ([17](17-avif-container-robustness.md)).
+- **the grid avif this reader cannot join: a monochrome one.** A colour grid is
+  joined here now, from `dimg`, each tile's `av1C` and `ispe`, and the grid
+  item's own 8-byte tiling descriptor; what is left is the monochrome case,
+  whose missing piece is a monochrome avif path of this reader's, not the join.
+  `tests/readalpha.vpy`'s `test_avif_grid` still checks the picture `libheif`
+  joins ([17](17-avif-container-robustness.md)).
 - **a heic that stores av1**: the `ispe`/`av1C` read would apply to it and
   nothing in the corpus is one ([05](05-monochrome-heif.md)).
 

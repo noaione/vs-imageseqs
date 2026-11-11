@@ -242,8 +242,11 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   build aborts on a panic. `Meta::native_eligible` is what decides whether this
   reader decodes the primary item at all, and an item written as several extents
   is read rather than refused, because those extents are one payload split
-  across the container. A container it still refuses — a grid of tiles, a
-  construction method it does not follow — is described and decoded by `libheif`
+  across the container. A grid whose tiles this reader can place is joined here
+  too, into one picture of the grid item's size, at the depth and chroma the
+  tiles' own `av1C` states; a grid it will not join — the monochrome ones, whose
+  path is `libheif`'s, and a set whose coding records disagree — and a
+  construction method it does not follow are described and decoded by `libheif`
   instead, which reads both.
   `avif.rs` is the one module that decides which library owns an avif, and it
   decides it from the same walk the decode needs for the pixels: a container the
@@ -319,10 +322,15 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   itself: it checks the plugin's joined planes against the whole file's, plane by
   plane. its grid section reads `avif-grid.avif`, a 2x2 grid of tiles encoded
   once by hand from the `avif-grid-source.png` the same script writes
-  (`avifenc --lossless -g 2x2`, with the command in that script's header). A
-  grid is refused by the plugin's own walk and read by `libheif`, so that
-  section checks the joined picture's four cells -- 8, 10, 15 and 17, taken at
-  each cell's middle -- rather than a refusal. its orientation section reads the `tests/fixtures/orientation-*.png` files written by
+  (`avifenc --lossless -g 2x2`, with the command in that script's header). Its
+  tiles are monochrome, so `libheif` joins that one, and the section checks the
+  joined picture's four cells -- 8, 10, 15 and 17, taken at each cell's middle
+  -- rather than a refusal. `test_avif_grid_colour` reads
+  `avif-grid-colour.avif`, the same 2x2 of four colours encoded with `avifenc
+  -d 8 -y 420 --cicp 1/13/6 -r f -q 100 -g 2x2` from
+  `avif-grid-colour-source.png`, which this plugin joins itself: the check
+  pins the format, the size, the grid item's `_Matrix` and four luma samples.
+  its orientation section reads the `tests/fixtures/orientation-*.png` files written by
   `tests/make-orientation-fixtures.py`, plus `orientation-6.jxl`, which that
   script documents and `cjxl` makes, and its yuv orientation section reads the
   `orientation-{2,6,8}.webp` files that script cuts out of

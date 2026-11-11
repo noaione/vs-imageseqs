@@ -118,6 +118,13 @@ accident: a grid whose own properties state an `av1C` is now handed over rather
 than described as yuv and then refused. No file in any corpus here is one, and
 `avifenc` does not write one.
 
+*2026-11-11: the join landed.* `Meta::tiled` reads the grid item's own eight byte
+descriptor, the tiles `dimg` names in order, and each tile's own `av1C` and
+`ispe`; `decode` places the four decoded tiles into the plane the frame holds and
+clips them to the grid item's size. A monochrome grid, which is what
+`avif-grid.avif` holds, is still `libheif`'s, because a monochrome avif has no
+path here at all -- that is the piece left, and it is not the join.
+
 Validation:
 
 - `cargo test --locked`: **150 passed** (was 139). The eleven new ones are the

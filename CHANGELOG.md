@@ -4,6 +4,10 @@
 
 ### changed
 
+- A tiled avif whose tiles this plugin can place is joined by the plugin itself,
+  so the frame is the yuv its tiles hold instead of the r,g,b `libheif` builds:
+  each tile is decoded and placed at the offset the grid item names, and a grid
+  whose tiles are monochrome is still `libheif`'s.
 - A colour heif or heic whose container states no colour matrix, states
   `unspecified` or states the identity is handed out as its r,g,b samples
   instead of being refused, as is a page whose depth has no yuv format.

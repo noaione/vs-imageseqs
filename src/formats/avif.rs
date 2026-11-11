@@ -100,8 +100,27 @@ pub fn image_info(
     if !meta.native_eligible() {
         return super::heif::describe(path, apply_rotation, &mut *file);
     }
-    let header = AvifHeader::read(&meta.primary_properties()?)?;
-    let (width, height) = (header.width, header.height);
+    // A grid's own properties hold no coding record: what the picture is made of
+    // is the tiles' `av1C`, and how big it is comes from the item's payload. Its
+    // orientation and colour description stay the grid item's own, which is
+    // where a writer puts them.
+    let (header, width, height) = if meta.is_grid() {
+        let descriptor =
+            read_ranges(&mut *file, file_len as u64, &meta.primary_ranges(8).ok()?).ok()?;
+        let mut tiled = match meta.tiled(&descriptor) {
+            Some(tiled) => tiled,
+            // A grid this reader will not join is `libheif`'s, which joins any.
+            None => return super::heif::describe(path, apply_rotation, &mut *file),
+        };
+        let grid = meta.primary_properties()?;
+        tiled.header.orientation = orientation_of(&grid);
+        tiled.header.cicp = cicp_of(&grid).or(tiled.header.cicp);
+        (tiled.header, tiled.grid.width, tiled.grid.height)
+    } else {
+        let header = AvifHeader::read(&meta.primary_properties()?)?;
+        let (width, height) = (header.width, header.height);
+        (header, width, height)
+    };
     if width == 0 || height == 0 {
         return None;
     }
@@ -119,15 +138,21 @@ pub fn image_info(
     // and the sequence header of the coded image when the item has no box:
     // `avifenc` writes one, and a lot of other writers state the codes in the
     // bitstream alone.
-    let cicp = header.cicp.or_else(|| {
-        let payload = read_ranges(
-            &mut *file,
-            file_len as u64,
-            &meta.primary_ranges(SEQUENCE_HEADER_LIMIT).ok()?,
-        )
-        .ok()?;
-        sequence_header_cicp(&payload)
-    });
+    // A grid's payload is a tiling rather than a coded picture, so there is no
+    // sequence header in it to read a colour description out of.
+    let cicp = if meta.is_grid() {
+        header.cicp
+    } else {
+        header.cicp.or_else(|| {
+            let payload = read_ranges(
+                &mut *file,
+                file_len as u64,
+                &meta.primary_ranges(SEQUENCE_HEADER_LIMIT).ok()?,
+            )
+            .ok()?;
+            sequence_header_cicp(&payload)
+        })
+    };
 
     // A monochrome item holds one plane, and libheif hands that plane over as
     // the gray the container states. This reader has no monochrome avif path of
@@ -230,23 +255,48 @@ pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
     if info.format.color_family() != ColorFamily::YUV {
         return super::heif::decode(info, demand);
     }
-    let header = AvifHeader::read(&meta.primary_properties().ok_or_else(|| {
-        image_error(
-            "read the boxes of",
-            &info.path,
-            "no properties for the primary item",
-        )
-    })?)
-    .ok_or_else(|| image_error("read the boxes of", &info.path, "no coding record"))?;
-    let (width, height) = (header.width, header.height);
+    // A grid's picture is its tiles, so what it is made of comes from their
+    // coding record and how big it is from the item's own payload. The item has
+    // to be one this reader joins, which is the same call the probe made.
+    let tiled = if meta.is_grid() {
+        let descriptor = read_ranges(&mut file, file_len as u64, &meta.primary_ranges(8)?)
+            .map_err(|error| image_error("read", &info.path, error))?;
+        match meta.tiled(&descriptor) {
+            Some(tiled) => Some(tiled),
+            // A grid this reader will not join is `libheif`'s, and the probe
+            // named it as the same library's.
+            None => return super::heif::decode(info, demand),
+        }
+    } else {
+        None
+    };
+    let (width, height, chroma, depth) = match &tiled {
+        Some(tiled) => (
+            tiled.grid.width,
+            tiled.grid.height,
+            tiled.header.chroma,
+            tiled.header.depth,
+        ),
+        None => {
+            let header = AvifHeader::read(&meta.primary_properties().ok_or_else(|| {
+                image_error(
+                    "read the boxes of",
+                    &info.path,
+                    "no properties for the primary item",
+                )
+            })?)
+            .ok_or_else(|| image_error("read the boxes of", &info.path, "no coding record"))?;
+            (header.width, header.height, header.chroma, header.depth)
+        }
+    };
     // A picture whose own subsampling cannot fill a frame of its size is
     // libheif's, which upsamples it to 4:4:4; the probe routed it the same way,
     // so this is the library its description named.
-    if !yuv_format(header.chroma, header.depth).is_some_and(|format| format.fits(width, height)) {
+    if !yuv_format(chroma, depth).is_some_and(|format| format.fits(width, height)) {
         return super::heif::decode(info, demand);
     }
     if (width, height) != (info.width, info.height)
-        || yuv_format(header.chroma, header.depth) != Some(info.format)
+        || yuv_format(chroma, depth) != Some(info.format)
     {
         return Err(ImgSeqError::new(format!(
             "image '{}' changed after probing (was {}x{} {}, now {width}x{height} {:?})",
@@ -254,7 +304,7 @@ pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
             info.width,
             info.height,
             info.format.name(),
-            yuv_format(header.chroma, header.depth).map(PixelFormat::name),
+            yuv_format(chroma, depth).map(PixelFormat::name),
         )));
     }
     let coded = read_ranges(
@@ -297,6 +347,25 @@ pub fn decode(info: &ImageInfo, demand: Demand) -> Result<DecodedImage> {
     let buffer = buffer_started.elapsed();
 
     let read_started = Instant::now();
+    if let Some(tiled) = tiled.as_ref() {
+        join_tiles(&meta, &mut file, file_len, tiled, info, &mut planes)?;
+        return Ok(DecodedImage {
+            width: info.width,
+            height: info.height,
+            format: info.format,
+            transform: info.transform,
+            pixels: Pixels::Planar {
+                planes,
+                alpha: None,
+            },
+            timings: DecodeTimings {
+                open,
+                metadata,
+                buffer,
+                read: read_started.elapsed(),
+            },
+        });
+    }
     let picture = decode_item(&coded, info)?;
     check_picture(&picture, info, info.format.plane_count())?;
     for (index, target) in planes.iter_mut().enumerate() {
@@ -487,6 +556,104 @@ fn check_picture(picture: &dav1d::Picture, info: &ImageInfo, planes: usize) -> R
     Ok(())
 }
 
+/// Decodes each tile of a grid into the plane the frame holds.
+///
+/// The tiles are read in the order `dimg` lists them, which is the order they are
+/// placed in: left to right, then down. A tile whose right or bottom edge passes
+/// the joined picture is clipped to it, which is how a grid whose size is not a
+/// whole number of tiles is written.
+fn join_tiles(
+    meta: &Meta,
+    file: &mut File,
+    file_len: usize,
+    tiled: &Tiled,
+    info: &ImageInfo,
+    planes: &mut [Vec<u8>],
+) -> Result<()> {
+    let columns = tiled.grid.columns.max(1);
+    let tile_width = usize::try_from(tiled.header.width)
+        .map_err(|_| ImgSeqError::new("a tile is wider than an address"))?;
+    let tile_height = usize::try_from(tiled.header.height)
+        .map_err(|_| ImgSeqError::new("a tile is taller than an address"))?;
+    let frame_width = usize::try_from(info.width)
+        .map_err(|_| ImgSeqError::new("image width does not fit in memory"))?;
+    let frame_height = usize::try_from(info.height)
+        .map_err(|_| ImgSeqError::new("image height does not fit in memory"))?;
+    let sample = info.format.bytes_per_sample();
+    for (index, item) in meta.tiles.iter().enumerate() {
+        let coded = read_ranges(file, file_len as u64, &meta.tile_ranges(*item, usize::MAX)?)
+            .map_err(|error| image_error("read", &info.path, error))?;
+        let picture = decode_item(&coded, info)?;
+        check_tile(&picture, tiled, info, index)?;
+        let (column, row) = (index % columns, index / columns);
+        for (plane, target) in planes.iter_mut().enumerate() {
+            let component = [
+                PlanarImageComponent::Y,
+                PlanarImageComponent::U,
+                PlanarImageComponent::V,
+            ][plane.min(2)];
+            let (across, down) = match info.format.sub_sampling() {
+                _ if plane == 0 => (1usize, 1usize),
+                (across, down) => (1usize << across, 1usize << down),
+            };
+            let (plane_width, plane_height) =
+                info.format
+                    .plane_dimensions(plane, frame_width, frame_height);
+            let (tile_across, tile_down) =
+                info.format.plane_dimensions(plane, tile_width, tile_height);
+            let left = (column * tile_width) / across;
+            let top = (row * tile_height) / down;
+            let rows = tile_down.min(plane_height.saturating_sub(top));
+            let row_bytes = tile_across.min(plane_width.saturating_sub(left)) * sample;
+            let stride = usize::try_from(picture.stride(component))
+                .map_err(|_| ImgSeqError::new("the decoded stride does not fit in memory"))?;
+            let data = picture.plane(component);
+            for y in 0..rows {
+                let from = y * stride;
+                let to = ((top + y) * plane_width + left) * sample;
+                let source = data.as_ref().get(from..from + row_bytes).ok_or_else(|| {
+                    image_error("decode", &info.path, "a tile is shorter than its own rows")
+                })?;
+                target
+                    .get_mut(to..to + row_bytes)
+                    .ok_or_else(|| {
+                        image_error(
+                            "decode",
+                            &info.path,
+                            "a plane is smaller than its own tiles",
+                        )
+                    })?
+                    .copy_from_slice(source);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Checks one decoded tile against what the grid's coding record states.
+fn check_tile(
+    picture: &dav1d::Picture,
+    tiled: &Tiled,
+    info: &ImageInfo,
+    index: usize,
+) -> Result<()> {
+    let depth = picture.bits_per_component().map(|bits| bits.0);
+    let ok = (picture.width(), picture.height()) == (tiled.header.width, tiled.header.height)
+        && picture.pixel_layout() == expected_layout(info.format)
+        && depth == Some(nominal_depth(info.format));
+    if !ok {
+        return Err(ImgSeqError::new(format!(
+            "tile {index} of image '{}' is not the {} the grid describes (coded as {:?} {depth:?} bit {}x{})",
+            info.path.display(),
+            info.format.name(),
+            picture.pixel_layout(),
+            picture.width(),
+            picture.height(),
+        )));
+    }
+    Ok(())
+}
+
 /// Row bytes of one plane of the frame, and how many bytes the plane holds.
 fn plane_size(info: &ImageInfo, plane: usize) -> Result<(usize, usize, usize)> {
     let width = usize::try_from(info.width)
@@ -595,12 +762,16 @@ fn copy_rows(
 /// The layout dav1d reports for a format this module hands out.
 const fn expected_layout(format: PixelFormat) -> PixelLayout {
     match format {
-        PixelFormat::Yuv422P8 | PixelFormat::Yuv422P10 | PixelFormat::Yuv422P12 => {
-            PixelLayout::I422
-        }
-        PixelFormat::Yuv444P8 | PixelFormat::Yuv444P10 | PixelFormat::Yuv444P12 => {
-            PixelLayout::I444
-        }
+        PixelFormat::Yuv422P8
+        | PixelFormat::Yuv422P10
+        | PixelFormat::Yuv422P12
+        | PixelFormat::Yuv422P14
+        | PixelFormat::Yuv422P16 => PixelLayout::I422,
+        PixelFormat::Yuv444P8
+        | PixelFormat::Yuv444P10
+        | PixelFormat::Yuv444P12
+        | PixelFormat::Yuv444P14
+        | PixelFormat::Yuv444P16 => PixelLayout::I444,
         _ => PixelLayout::I420,
     }
 }
@@ -616,7 +787,15 @@ const fn nominal_depth(format: PixelFormat) -> usize {
         | PixelFormat::Yuv444P12
         | PixelFormat::Yuv420P12
         | PixelFormat::Yuv422P12 => 12,
-        PixelFormat::Gray16 | PixelFormat::Rgb16 => 16,
+        PixelFormat::Gray14
+        | PixelFormat::Yuv420P14
+        | PixelFormat::Yuv422P14
+        | PixelFormat::Yuv444P14 => 14,
+        PixelFormat::Gray16
+        | PixelFormat::Rgb16
+        | PixelFormat::Yuv420P16
+        | PixelFormat::Yuv422P16
+        | PixelFormat::Yuv444P16 => 16,
         _ => 8,
     }
 }
@@ -863,6 +1042,48 @@ type Extents = Vec<(u32, u8, Vec<(usize, usize)>)>;
 /// reference, the item it is from, and the items it is to.
 type References = Vec<([u8; 4], u32, Vec<u32>)>;
 
+/// The tiling a grid item's payload describes.
+///
+/// Eight bytes: a version and a set of flags, both zero, the row and column
+/// counts minus one, and the joined picture's width and height minus one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Grid {
+    columns: usize,
+    rows: usize,
+    width: u32,
+    height: u32,
+}
+
+impl Grid {
+    /// Reads the descriptor a grid item's payload holds.
+    fn read(payload: &[u8]) -> Option<Self> {
+        if payload.get(..2)? != [0, 0] {
+            return None;
+        }
+        let columns = usize::from(*payload.get(3)?) + 1;
+        let rows = usize::from(*payload.get(2)?) + 1;
+        let width = u32::from(u16::from_be_bytes(payload.get(4..6)?.try_into().ok()?)) + 1;
+        let height = u32::from(u16::from_be_bytes(payload.get(6..8)?.try_into().ok()?)) + 1;
+        Some(Self {
+            columns,
+            rows,
+            width,
+            height,
+        })
+    }
+
+    /// How many tiles the tiling names.
+    const fn count(&self) -> usize {
+        self.columns.saturating_mul(self.rows)
+    }
+}
+
+/// A grid this reader can join itself: how it is tiled, and what the tiles'
+/// own coding record states about the picture they make.
+struct Tiled {
+    grid: Grid,
+    header: AvifHeader,
+}
 /// Every range in here is an offset into the leading boxes buffer, which is a
 /// prefix of the file, so the same range reads from either.
 struct Meta {
@@ -886,9 +1107,9 @@ struct Meta {
     idat: Option<Range<usize>>,
     /// The item an `auxl` reference points at the primary item from.
     aux: Option<u32>,
-    /// Whether the primary item is a grid of tiles, whose payload describes the
-    /// tiling rather than holding a coded picture.
-    grid: bool,
+    /// The tiles the primary item is a grid of, in the order `dimg` lists them.
+    /// EMPTY for a file whose primary item is a coded picture itself.
+    tiles: Vec<u32>,
     /// The properties of the auxiliary item, which have to name alpha.
     aux_properties: Vec<Listed>,
 }
@@ -933,9 +1154,13 @@ impl Meta {
             .map(|(_, from, _)| *from);
         // A tiled avif is one item that references the tiles it is made of, and
         // its own payload describes the tiling rather than holding a picture.
-        let grid = references
+        // The reference order is the tile order: top left first, then across and
+        // down, which is what places them.
+        let tiles = references
             .iter()
-            .any(|(kind, from, _)| *kind == *b"dimg" && *from == primary);
+            .find(|(kind, from, _)| *kind == *b"dimg" && *from == primary)
+            .map(|(_, _, to)| to.clone())
+            .unwrap_or_default();
         let aux_properties = match aux {
             Some(item) => associations
                 .iter()
@@ -958,17 +1183,19 @@ impl Meta {
             extents,
             idat,
             aux,
-            grid,
+            tiles,
             aux_properties,
         })
     }
 
     /// The properties of the primary item.
     fn primary_properties(&self) -> Option<Vec<Property<'_>>> {
-        let (_, indices) = self
-            .associations
-            .iter()
-            .find(|(id, _)| *id == self.primary)?;
+        self.properties_of(self.primary)
+    }
+
+    /// The properties of one item, in the order its association lists them.
+    fn properties_of(&self, item: u32) -> Option<Vec<Property<'_>>> {
+        let (_, indices) = self.associations.iter().find(|(id, _)| *id == item)?;
         Some(
             indices
                 .iter()
@@ -979,6 +1206,51 @@ impl Meta {
                 })
                 .collect(),
         )
+    }
+
+    /// Whether the primary item is a grid of tiles rather than a coded picture.
+    fn is_grid(&self) -> bool {
+        !self.tiles.is_empty()
+    }
+
+    /// Checks a grid item against its tiles, from the payload that describes the
+    /// tiling.
+    ///
+    /// Returns `None` for a grid this reader will not join: a tile it cannot
+    /// locate or describe, a set whose coding records disagree about the size or
+    /// the samples, a monochrome one -- the monochrome avif path is `libheif`'s --
+    /// and a grid whose alpha is a second item, which would have to be a grid of
+    /// its own.
+    fn tiled(&self, descriptor: &[u8]) -> Option<Tiled> {
+        if self.tiles.is_empty() || self.has_alpha() {
+            return None;
+        }
+        let grid = Grid::read(descriptor)?;
+        if grid.count() != self.tiles.len() {
+            return None;
+        }
+        let mut header: Option<AvifHeader> = None;
+        for tile in &self.tiles {
+            let tile_header = AvifHeader::read(&self.properties_of(*tile)?)?;
+            if tile_header.monochrome {
+                return None;
+            }
+            match &header {
+                None => header = Some(tile_header),
+                Some(first) => {
+                    if (first.width, first.height) != (tile_header.width, tile_header.height)
+                        || first.chroma != tile_header.chroma
+                        || first.depth != tile_header.depth
+                    {
+                        return None;
+                    }
+                }
+            }
+        }
+        Some(Tiled {
+            grid,
+            header: header?,
+        })
     }
 
     /// Whether an auxiliary item that names alpha belongs to the primary item.
@@ -994,19 +1266,15 @@ impl Meta {
 
     /// Whether this module decodes the primary item of this container itself.
     ///
-    /// The `image` decoder joins a grid of tiles, an item split over several
-    /// extents and a construction method this reader does not follow, and this
-    /// one does none of them. A container laid out that way is therefore
-    /// described as the format that decoder hands back rather than as the yuv
-    /// its samples are, which is what keeps a probe from promising a frame a
-    /// decode would then refuse to produce.
-    ///
-    /// The item has to be locatable for the same reason: a range the file does
-    /// not hold is one this reader cannot read either.
+    /// An item split over several extents is read, because those extents are one
+    /// payload split across the container. A grid is [`Self::tiled`]'s question:
+    /// the probe and the decode ask it through the same call, so the two cannot
+    /// disagree about whether this reader joins one. A construction method this
+    /// reader does not follow is not eligible, and neither is a container whose
+    /// item or alpha cannot be located: a range the file does not hold is one
+    /// this reader cannot read either.
     fn native_eligible(&self) -> bool {
-        !self.grid
-            && self.primary_ranges(usize::MAX).is_ok()
-            && self.alpha_ranges(usize::MAX).is_ok()
+        self.primary_ranges(usize::MAX).is_ok() && self.alpha_ranges(usize::MAX).is_ok()
     }
 
     /// The extents of one item, and what their offsets are relative to.
@@ -1022,6 +1290,14 @@ impl Meta {
         let (method, ranges) = self
             .extents_of(self.primary)
             .ok_or_else(|| ImgSeqError::new("the container does not locate its primary item"))?;
+        self.data_ranges(method, ranges, limit)
+    }
+
+    /// The byte ranges of one tile's payload, up to `limit` of them.
+    fn tile_ranges(&self, tile: u32, limit: usize) -> Result<Vec<Range<usize>>> {
+        let (method, ranges) = self
+            .extents_of(tile)
+            .ok_or_else(|| ImgSeqError::new("the container does not locate a tile of its grid"))?;
         self.data_ranges(method, ranges, limit)
     }
 
@@ -1369,6 +1645,18 @@ fn nclx_cicp(payload: &[u8]) -> Option<Cicp> {
         matrix: code(8)?,
         full_range: (payload.get(10)? & FULL_RANGE) != 0,
     })
+}
+
+/// The colour description a set of item properties states, when one of them is a
+/// `colr` box holding `nclx` codes.
+///
+/// A grid item carries the colour of the picture it tiles and no `av1C` of its
+/// own, so this is the read [`AvifHeader::read`] cannot do for one.
+fn cicp_of(properties: &[Property<'_>]) -> Option<Cicp> {
+    properties
+        .iter()
+        .filter(|property| property.kind == b"colr")
+        .find_map(|property| nclx_cicp(property.payload))
 }
 
 /// The colour description the sequence header of a coded av1 item states.
@@ -2101,7 +2389,7 @@ mod tests {
         let meta = walked(&boxes).expect("the container is walked");
         assert_eq!(meta.primary, 1);
         assert!(!meta.has_alpha());
-        assert!(!meta.grid);
+        assert!(!meta.is_grid());
         let properties = meta.primary_properties().expect("the item has properties");
         let header = AvifHeader::read(&properties).expect("the properties describe it");
         assert_eq!((header.width, header.height), (3, 2));
@@ -2161,7 +2449,8 @@ mod tests {
     fn a_grid_of_tiles_is_not_the_picture_itself() {
         let boxes = container(&properties(), &[(b"dimg", 1, 2)], None);
         let meta = walked(&boxes).expect("the container is walked");
-        assert!(meta.grid);
+        assert!(meta.is_grid());
+        assert_eq!(meta.tiles, [2], "the reference names the tile");
     }
 
     #[test]
@@ -2402,16 +2691,22 @@ mod tests {
 
     /// A container this reader cannot decode is not described as the yuv its
     /// samples are: a grid of tiles, an item in several extents and a
-    /// construction method it does not follow are all layouts the `image`
-    /// decoder joins and this one does not, and a probe that promised a frame
-    /// this module would refuse to produce would be describing a file it cannot
-    /// read.
+    /// A grid this reader cannot join and a construction method it does not
+    /// follow are both not native, and a probe that promised a frame this module
+    /// would refuse to produce would be describing a file it cannot read. An
+    /// item in several extents is joined here, so it is native.
     #[test]
     fn a_container_this_reader_cannot_decode_is_not_native() {
         let grid = container(&properties(), &[(b"dimg", 1, 2)], None);
         let meta = walked(&grid).expect("the container is walked");
-        assert!(meta.grid);
-        assert!(!meta.native_eligible(), "a grid of tiles");
+        assert!(meta.is_grid());
+        assert!(
+            meta.native_eligible(),
+            "the grid item is located; joining one is `tiled`'s question"
+        );
+        // The tile this container implies has no properties of its own, so this
+        // reader will not join the grid and `libheif` is asked instead.
+        assert!(meta.tiled(&[0, 0, 0, 0, 0, 0, 0, 0]).is_none());
 
         let boxes = container(&properties(), &[], None);
         let mut meta = walked(&boxes).expect("the container is walked");
