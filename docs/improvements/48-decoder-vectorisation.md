@@ -729,10 +729,9 @@ changes they measure are landed, and re-deriving each before state is a
 rebuild of an old commit per step. Every number this round claims is two
 builds alternated inside one batch, which is the method the tables use.
 
-Two gaps remain: the sixteen bit apng corpus (`make-apng16-corpus.py`, which
-neither Pillow nor ImageMagick can write), and the animation rows themselves
-on x86, where only the compose row and the gif animation's `fetch` were
-measured.
+One gap remains: the sixteen bit apng corpus (`make-apng16-corpus.py`, which
+neither Pillow nor ImageMagick can write). The animation rows themselves are
+measured on this host now, in [BENCH.md](../BENCH.md#the-animation-rows-on-this-host).
 
 The gates on that host are the ones this page already lists: `cargo test
 --locked`, clippy with `-D warnings`, `cargo fmt --all -- --check`,
@@ -760,8 +759,8 @@ path by the test but is not dispatched, because it is 1.2x to 1.7x slower
 than the compiler's loop. The gif compose's x86-64 blocks were written and
 declined, and the shipping libraries have now been measured with the one pass;
 both are [above](#what-the-x86-64-host-found), as is the sixteen bit big-endian
-block. What that host leaves is the animation rows on x86 and the sixteen bit
-apng corpus, and neither is blocked on anything but time.
+block. What that host leaves is the sixteen bit apng corpus, which nothing on
+this machine can write, and that is the only item on the page still unmeasured.
 
 the sixteen bit apng blend is the one kernel whose arm half is a block smaller
 than it would like: a pixel is four samples, so the setup is half of it, and the

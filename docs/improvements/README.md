@@ -202,9 +202,9 @@ folded shapes read 1.59x to 1.78x faster on both libraries and the two
 plain-copy shapes do not move, every page byte identical. The per-format stage
 table is now measured on this host too, for both libraries, as a starting
 point rather than a comparison, because the same sets drift by up to 40%
-between sessions here. What is left is the animation rows on x86 and the
-sixteen bit apng corpus. The page's *what the x86-64 host found* section has
-the measurements and `docs/HANDOFF.md` has the commands.
+between sessions here, and the animation rows are on it as well. What is left
+is the sixteen bit apng corpus. The page's *what the x86-64 host found*
+section has the measurements and `docs/HANDOFF.md` has the commands.
 
 ### several frames in flight — 2026-11-09
 

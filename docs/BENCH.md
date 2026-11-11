@@ -448,6 +448,25 @@ for a full-canvas `Keep` frame and 0.912 to 0.425 to 0.188 ms for a `Background`
 one: the first step is the rectangle walk, the second the NEON select, and the
 x86-64 libraries keep the first and not the second.
 
+### the animation rows on this host
+
+The same corpora measured on the Windows host, both libraries, `prefetch=0`,
+`target/bench/plan48/measure.py`, three reps. One run each, so these are the
+other host's column rather than a comparison with the arm64 numbers above:
+they are three to five times the arm64 `fetch`, which is the `gif` crate's
+LZW and the four megabyte canvases rather than anything the compose does.
+
+| set | library | fetch | convert | total |
+| --- | --- | ---: | ---: | ---: |
+| apng, 1024x1024, 80 frames | baseline | 4.683 | 1.438 | 4.691 |
+| apng, 1024x1024, 80 frames | `x86-64-v4` | 4.057 | 0.839 | 4.065 |
+| gif animation, 31 frames | baseline | 6.012 | 1.543 | 6.020 |
+| gif animation, 31 frames | `x86-64-v4` | 5.214 | 0.914 | 5.222 |
+| gif still, 1024x1024 | baseline | 12.891 | 1.412 | 12.899 |
+| gif still, 1024x1024 | `x86-64-v4` | 11.131 | 0.888 | 11.138 |
+| webp animation, 31 frames | baseline | 7.841 | 1.535 | 7.849 |
+| webp animation, 31 frames | `x86-64-v4` | 7.245 | 0.958 | 7.253 |
+
 ### the compose row on x86-64
 
 `blend_row`'s AVX2 and AVX-512 blocks were written for the Windows host and are
