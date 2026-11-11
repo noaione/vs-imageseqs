@@ -36,8 +36,9 @@ use std::{
 use crate::layout::{ColorType, Orientation};
 use jxl::api::{
     Endianness, Event, ExtraChannel, JxlBitDepth, JxlColorEncoding, JxlColorProfile, JxlColorType,
-    JxlDataFormat, JxlDecoder, JxlDecoderOptions, JxlOutputBuffer, JxlPixelFormat, JxlPrimaries,
-    JxlTransferFunction, JxlWhitePoint, Orientation as JxlOrientation,
+    JxlDataFormat, JxlDecoder, JxlDecoderOptions, JxlOutputBuffer, JxlParallelRunner,
+    JxlParallelRunnerFun, JxlPixelFormat, JxlPrimaries, JxlTransferFunction, JxlWhitePoint,
+    Orientation as JxlOrientation,
 };
 
 use crate::{
@@ -618,6 +619,60 @@ fn to_frame(decoder: &mut JxlDecoder, input: &mut BufReader<File>, path: &Path) 
     }
 }
 
+/// Runs the decoder's tiles on more than one thread.
+///
+/// jxl's decoder takes a runner rather than making one, and given none it
+/// answers `SequentialRunner`, so a page is decoded a tile after another. The
+/// tasks it hands out do not wait on each other, which is what a scoped thread
+/// a worker and one counter serve.
+struct Threads(usize);
+
+impl JxlParallelRunner for Threads {
+    fn run(&mut self, num: usize, fun: &JxlParallelRunnerFun<'_>) -> jxl::error::Result<()> {
+        let workers = self.0.min(num);
+        if workers <= 1 {
+            return (0..num).try_for_each(fun);
+        }
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let failure = std::sync::Mutex::new(None);
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    loop {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if index >= num {
+                            break;
+                        }
+                        if let Err(error) = fun(index) {
+                            *failure.lock().expect("the lock is not poisoned") = Some(error);
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        match failure.into_inner().expect("the lock is not poisoned") {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    fn num_threads(&self) -> usize {
+        self.0
+    }
+}
+
+/// How many threads one decode is given.
+///
+/// The pages are a decoder's own work rather than a frame's, so the number is
+/// the processor's and not the reader's: four, which is where this host's
+/// measurement stops paying once the lookahead workers are also decoding (a
+/// single decode is 2.7x at four and 3.5x at eight, and with `prefetch=4` both
+/// are 1.6x). `docs/improvements/49-jxl-decode-threads.md` has the table.
+fn threads() -> usize {
+    std::thread::available_parallelism().map_or(1, |count| count.get().min(4))
+}
+
 /// Draws the pixels of a frame into `buffer`.
 ///
 /// The decoder fills what it can from the input it has and asks for more, which
@@ -632,9 +687,14 @@ fn draw(
     path: &Path,
 ) -> Result<()> {
     let mut output = JxlOutputBuffer::new(buffer, rows, row_bytes);
+    let mut runner = Threads(threads());
     loop {
         match decoder
-            .process(input, Some(std::slice::from_mut(&mut output)), None)
+            .process(
+                input,
+                Some(std::slice::from_mut(&mut output)),
+                Some(&mut runner),
+            )
             .map_err(|error| decode_error(path, error))?
         {
             Event::FrameComplete { .. } => return Ok(()),
@@ -1022,5 +1082,27 @@ mod tests {
             })
         );
         assert!(!gray.has_icc_profile);
+    }
+
+    /// The runner a decode is given runs every task once, whatever the count.
+    #[test]
+    fn a_runner_runs_every_task_once() {
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = AtomicUsize::new(0);
+        let seen: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+        let mut runner = Threads(4);
+        runner
+            .run(37, &|index| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                seen.lock().expect("the lock is not poisoned").push(index);
+                Ok(())
+            })
+            .expect("the tasks do not fail");
+        assert_eq!(calls.load(Ordering::Relaxed), 37);
+        let mut indexes = seen.into_inner().expect("the lock is not poisoned");
+        indexes.sort_unstable();
+        assert_eq!(indexes, (0..37).collect::<Vec<_>>());
     }
 }

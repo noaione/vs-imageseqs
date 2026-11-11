@@ -1,11 +1,11 @@
 # 33 - a musllinux wheel
 
-status: written and locally checked, 2026-10-03. The packaging suite passes 132
-checks, the workflow parses with both new jobs wired into publication, and every
-platform fact below was read from the artifact or policy it names. Nothing has
-run in the container: this machine has no musl host and its Docker daemon cannot
-be reached, so the first push that runs the musllinux job is the first proof of
-the toolchain, the wheel and its own validation.
+status: **implemented and closed** 2026-11-11. The paragraph that follows is
+the state before the first container run, kept as the record of what was
+written blind: the musllinux job builds and validates in CI now and the
+release carries the wheel it produces.
+
+written and locally checked 2026-10-03. The packaging suite passed 132 checks,
 
 ## why
 

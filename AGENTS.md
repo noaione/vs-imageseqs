@@ -158,7 +158,12 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   for every colour avif, which `dav1d` decodes and which also answers
   `decoder::probe` from the container boxes and the av1 sequence header so that
   probing an avif does not decode it, `jxl.rs` for every jpeg xl, which the `jxl`
-  crate decodes directly, `jp2.rs` for JPEG 2000 header probing and `hayro-jpeg2000`
+  crate decodes directly and which gives that decoder a runner of its own -- the
+  crate hands a page to one thread when it is given none, so a decode is
+  `available_parallelism().min(4)` scoped threads, which is 2.5x a serial page
+  and 1.6x one beside the reader's own workers
+  (`docs/improvements/49-jxl-decode-threads.md`) --
+  `jp2.rs` for JPEG 2000 header probing and `hayro-jpeg2000`
   decoding, `png.rs` for the `cICP` chunk and for the png files whose rows it
   walks straight into the frame instead of buffering the picture whole — which
   includes expanding a palette page's indices itself — and

@@ -10,6 +10,12 @@
 
 ### performance
 
+- A JPEG XL page is decoded on more than one thread. The `jxl` crate takes a
+  parallel runner and this plugin gave it none, so every page decoded a tile
+  after another: a 35-page corpus now reads 2.5x faster with the lookahead
+  off and 1.6x faster with it on, with identical pixels. A consumer that
+  keeps its own frame requests in flight gains the same 1.6x.
+
 - On the 35-page JPEG 2000 corpus, read time is effectively unchanged: 0.9% faster with the default four workers and 0.4% faster with `prefetch=0` than 0.4.1.
 - Improve `ReadAlpha` performance when doing async frame requests.
 - A 24-bit or 32-bit bitmap is read straight into the frame's planes instead of

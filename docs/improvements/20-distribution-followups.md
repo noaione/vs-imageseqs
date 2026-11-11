@@ -1,8 +1,11 @@
 # 20 — Finish portable packaging and source rebuild validation
 
-- status: partially implemented — **release metadata and repeatable staging**
-  and **macOS runtime portability** implemented; **source archives and rebuilds**
-  and exact macOS source provenance remain proposed
+- status: **closed** 2026-11-11 — **release metadata and repeatable staging**
+  and **macOS runtime portability** landed; **source archives and rebuilds** and
+  exact macOS source provenance are not being pursued, and the maintainer
+  closed the plan rather than leaving those two open. Their text stays below as
+  the record of what was considered, and so does every open question in *what
+  is left*: nothing here is waiting for work.
 - touches (landed slice): `tools/create-changelog.py`, `tools/build_output.py`
   (new), `tools/stage-native.py`, `tools/check-linux-wheel.py`,
   `tools/package-linux-wheel.py`, `tools/build-manylinux.sh`,

@@ -740,9 +740,12 @@ corpora were built for. `docs/HANDOFF.md` has the commands.
 
 ## what is left over
 
-the jxl decode path is 381 ms a frame serially and has never been profiled, and
-qoi has no `docs/BENCH.md` row at all. Both are measurements to take, not
-features to flip, and neither is in this plan. `target/bench/plan48/{blocks,
+the jxl decode path was 381 ms a frame serially and had never been profiled.
+It is [49](49-jxl-decode-threads.md) now, and the profile found the one
+mechanism this page's inventory had no row for: the decode was one thread
+because the `jxl` crate was given no runner, which is 2.5x the frame. qoi still
+has no `docs/BENCH.md` row at all, which is a measurement to take, not a
+feature to flip. `target/bench/plan48/{blocks,
 planes,animation,crates}.md` are the four read-only audits this page is written
 from, and they hold the per-loop inventory (anchors, costs, and the parity
 fixtures) that each step's implementation should start from.

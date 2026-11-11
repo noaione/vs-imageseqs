@@ -170,6 +170,33 @@ plugin places the rows itself instead of buffering the picture.
 | bestsource `VideoSource` | 4.328 s | 122.65 ms | 4.377 s | 8.706 s |
 | bestsource `VideoSource`, `threads=1` | 13.160 s | 379.85 ms | 13.551 s | 26.712 s |
 
+the `imgseqs` rows above are the build before [49](improvements/49-jxl-decode-threads.md):
+with the decode's runner the same set is 2.9 s at the default lookahead and
+4.7 s at `prefetch=0`.
+
+### the decode's threads
+
+`jxl`'s decoder takes a `JxlParallelRunner` and this tree passed it none, on all
+three `process` calls, which is the crate's `SequentialRunner`: one thread a
+page. [49](improvements/49-jxl-decode-threads.md) gives it one, and the
+build before it against the build that carries it, alternated over
+`sandbox/jxl` in three rounds and the best round each, whole-set wall clock
+(`target/bench/plan48/jxl-threads.py`, `jxl-async.py`):
+
+| set | before | after | change |
+| --- | ---: | ---: | ---: |
+| one decode at a time, `prefetch=0` | 335.4 | 134.6 | 2.49x |
+| the default lookahead, `prefetch=4` | 132.1 | 83.1 | 1.59x |
+| four `get_frame_async` requests, pool off | 134.4 | 82.8 | 1.62x |
+
+milliseconds a frame. The last row is the consumer that decodes on its own
+threads, which is the shape a per-decode budget has to survive: it does, by the
+same 1.6x. The width is `available_parallelism().min(4)`, and the four is the
+sweep rather than a taste -- with the pool decoding too, four and eight threads
+are 1.60x and 1.61x, so eight only buys contention. The stage split moves with
+it: `read` was 415 of a 437 ms frame and is 136 of a 155 ms one at four
+threads.
+
 ## avif
 
 35 files: 34 `YUV420P8` and one `Gray8`. bestsource cannot open the set.
@@ -466,6 +493,15 @@ LZW and the four megabyte canvases rather than anything the compose does.
 | gif still, 1024x1024 | `x86-64-v4` | 11.131 | 0.888 | 11.138 |
 | webp animation, 31 frames | baseline | 7.841 | 1.535 | 7.849 |
 | webp animation, 31 frames | `x86-64-v4` | 7.245 | 0.958 | 7.253 |
+| sixteen bit apng, 1024x900, 4 frames | baseline | 29.035 | 2.788 | 29.046 |
+| sixteen bit apng, 1024x900, 4 frames | `x86-64-v4` | 26.784 | 2.091 | 26.809 |
+
+the last two are `target/bench/apng16-corpus`, which
+`target/bench/make-apng16-corpus.py` writes by hand: nothing on this machine
+emits an APNG, so the container's `acTL`, `fcTL`/`IDAT` and `fdAT` chunks are
+assembled there. A frame is 29 ms against the arm64 round's 6.26, and the
+sixteen bit blend is the scalar loop on x86-64, which is why the arm kernel's
+3% has no x86-64 column to sit beside.
 
 ### the compose row on x86-64
 
