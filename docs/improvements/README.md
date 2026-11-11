@@ -195,14 +195,14 @@ bytes a pixel of traffic and the scalar walk already runs at that host's 19
 GB/s ceiling, so the wide builds' own loops match the blocks and the gif
 animation does not move. The one-pass write was confirmed on both x86-64
 libraries, 1.03x to 1.40x of the per-plane gather. The sixteen bit big-endian
-walk was found unvectorised there, so a `pshufb` half is the next thing to
-write, and the arm rows were not re-measured because their corpora and before
-builds are not in that checkout. The targa half was then re-measured with a
-corpus written for it: the two folded shapes read 1.59x to 1.78x faster on
-both libraries and the two plain-copy shapes do not move, every page byte
-identical. What is left is `place16be`'s `pshufb` half and the arm rows'
-re-measurement, in that order. The page's *what the x86-64 host found*
-section has the measurements and `docs/HANDOFF.md` has the commands.
+walk was found unvectorised there, so it gained an AVX2 block of its own: a
+farbfeld reads 1.34x faster and a gray16 page 1.16x, with identical pixels.
+The targa half was then re-measured with a corpus written for it: the two
+folded shapes read 1.59x to 1.78x faster on both libraries and the two
+plain-copy shapes do not move, every page byte identical. What is left is
+re-measuring the arm rounds' rows on this host, which needs their corpora and
+their before builds. The page's *what the x86-64 host found* section has the
+measurements and `docs/HANDOFF.md` has the commands.
 
 ### several frames in flight — 2026-11-09
 

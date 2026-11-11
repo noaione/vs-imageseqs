@@ -24,7 +24,9 @@
   1024x1024 page, with identical pixels.
 - A sixteen bit png or a farbfeld is taken apart into the frame's planes in one
   pass that swaps each sample as it goes: a 1200x900 sixteen bit png reads 3%
-  to 7% faster and a farbfeld 29% faster, with identical pixels. A png's
+  to 7% faster and a farbfeld 29% faster, with identical pixels. The x86-64
+  libraries fold that swap into an AVX2 block, which is 1.34x on a farbfeld
+  and 1.16x on a gray16 page there. A png's
   gray+alpha and rgba rows are placed the same way, in one pass rather than one
   per channel, which takes 7% to 9% off those pages.
 - A buffered decoder's picture is taken apart into the frame's planes in one

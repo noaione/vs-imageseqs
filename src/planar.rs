@@ -34,12 +34,16 @@
 //!   0.086 against the walk's 0.060 and 0.080, so the walk runs and the
 //!   kernel is only reached by name from the test.
 //! * sixteen bits, big endian: the compiler builds each sample from two
-//!   indexed bytes and copies it, so the swap defeats its vectoriser and the
-//!   kernel is 1.3x to 4.3x the walk. It runs for every channel count.
+//!   indexed bytes and copies it, so the swap defeats its vectoriser on both
+//!   architectures and a kernel wins. aarch64's covers every channel count
+//!   (1.3x to 4.3x the walk); x86-64's covers one, two and four, because
+//!   twenty-four bytes a pixel has no whole block, and it is 1.34x on a
+//!   farbfeld, 1.16x on a gray16 page and nothing visible on a page whose
+//!   inflate is most of the frame.
 //!
-//! The dispatch is a `#[cfg]` because NEON is in the aarch64 baseline: one
-//! library carries the kernel, nothing is probed, and every other target runs
-//! the scalar walk.
+//! The dispatch is a `#[cfg]` per architecture: NEON is in the aarch64
+//! baseline, so nothing is probed there, while x86-64 asks the processor for
+//! AVX2 and answers zero, which runs the whole-row walk, where it is missing.
 //!
 //! Both are held to a naive per-channel gather, sample for sample, by the test
 //! at the bottom of this file; the kernel is also reachable by name so the test
@@ -207,9 +211,13 @@ fn scalar16<const C: usize>(source: &[u8], planes: &mut [&mut [u8]]) {
 ///
 /// A frame holds a sample the way the machine reads it, so a big-endian source
 /// is one swap a sample. The swap rides on the same pass that takes the pixel
-/// apart rather than running over the picture afterwards, and on aarch64 it is
-/// part of the vector kernel: `ld4` gives four planes of eight samples and
-/// `rev16` puts every word the right way round before the store.
+/// A frame holds a sample the way the machine reads it, so a big-endian source
+/// is one swap a sample. The swap rides on the same pass that takes the pixel
+/// apart rather than running over the picture afterwards. aarch64 does it in
+/// its vector kernel (`ld4` gives four planes of eight samples and `rev16`
+/// puts every word the right way round before the store) and so does x86-64,
+/// where the compiler's own loop leaves the swap a byte load and a byte store
+/// a sample and a `pshufb` turns it into one shift pair over a block.
 pub fn place16be<const C: usize>(source: &[u8], planes: &mut [&mut [u8]]) {
     debug_assert!((1..=4).contains(&C), "a pixel has at most four channels");
     debug_assert!(planes.len() <= C, "more planes than the row has channels");
@@ -221,7 +229,20 @@ pub fn place16be<const C: usize>(source: &[u8], planes: &mut [&mut [u8]]) {
         let done = unsafe { neon::place16be::<C>(source, planes) };
         tail16be::<C>(source, planes, done);
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: a block is one load of `C` two-byte samples a pixel and one
+        // store to a plane, both of which the caller sized for the row.
+        let done = unsafe { x86::place16be::<C>(source, planes) };
+        if done == 0 {
+            // A channel count the block does not cover is the whole row, and
+            // the whole-row walk is the one the block was measured against.
+            scalar16be::<C>(source, planes);
+        } else {
+            tail16be::<C>(source, planes, done);
+        }
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     scalar16be::<C>(source, planes);
 }
 
@@ -250,7 +271,7 @@ fn tail8<const C: usize>(source: &[u8], planes: &mut [&mut [u8]], done: usize) {
 }
 
 /// The pixels a block of 8 could not cover, sixteen bit big endian.
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 #[inline]
 fn tail16be<const C: usize>(source: &[u8], planes: &mut [&mut [u8]], done: usize) {
     let pixels = row_pixels16(planes);
@@ -271,7 +292,7 @@ fn row_pixels8(planes: &[&mut [u8]]) -> usize {
 }
 
 /// Samples in one row of a sixteen bit plane.
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 #[inline]
 fn row_pixels16(planes: &[&mut [u8]]) -> usize {
     planes.first().map_or(0, |plane| plane.len() / 2)
@@ -421,15 +442,245 @@ mod neon {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+mod x86 {
+
+    #[cfg(test)]
+    use super::Kernel;
+    use super::row_pixels16;
+
+    /// The row through the widest block this processor has.
+    ///
+    /// A block is one thirty-two byte load: sixteen pixels of one channel,
+    /// eight of two and four of four, because a pixel is two, four or eight
+    /// bytes. Three channels has no whole block, so it answers zero and the
+    /// caller's tail walks the whole row.
+    ///
+    /// # Safety
+    ///
+    /// `source` holds `pixels * C * 2` bytes and every plane holds
+    /// `pixels * 2` bytes, where `pixels` is a row of `planes[0]`.
+    pub(super) unsafe fn place16be<const C: usize>(
+        source: &[u8],
+        planes: &mut [&mut [u8]],
+    ) -> usize {
+        // SAFETY: a kernel is entered only where the processor reports the
+        // feature it was built for, and each one reads and writes inside a
+        // row the caller sized in whole pixels.
+        unsafe {
+            if is_x86_feature_detected!("avx2") {
+                avx2::place16be::<C>(source, planes)
+            } else {
+                0
+            }
+        }
+    }
+
+    /// One kernel by name, for the module's test.
+    #[cfg(test)]
+    pub(super) unsafe fn forced<const C: usize>(
+        kernel: Kernel,
+        source: &[u8],
+        planes: &mut [&mut [u8]],
+    ) -> usize {
+        // SAFETY: the caller checks the feature of the kernel it names, and
+        // this is only reached from a test on the machine it is built for.
+        unsafe {
+            match kernel {
+                Kernel::Avx2 if is_x86_feature_detected!("avx2") => {
+                    avx2::place16be::<C>(source, planes)
+                }
+                _ => 0,
+            }
+        }
+    }
+
+    mod avx2 {
+        use std::arch::x86_64::*;
+
+        use super::row_pixels16;
+
+        /// The pixels one block covers, which is one thirty-two byte load.
+        #[inline]
+        const fn block<const C: usize>() -> usize {
+            match C {
+                1 => 16,
+                2 => 8,
+                _ => 4,
+            }
+        }
+
+        /// One channel's words out of a block, as a shuffle of the block's
+        /// own lanes.
+        ///
+        /// A pixel's channels sit side by side, so channel `c`'s word is two
+        /// bytes in, and a 128 bit lane holds a whole number of pixels: eight
+        /// of one channel, four of two and two of four. The bytes a lane
+        /// cannot supply stay zero, which the permute after the shuffle
+        /// drops.
+        const fn mask<const C: usize>(channel: usize) -> [i8; 32] {
+            let pixels = 16 / (C * 2);
+            let mut bytes = [-1i8; 32];
+            let mut pixel = 0;
+            while pixel < pixels {
+                let from = pixel * C * 2 + channel * 2;
+                bytes[pixel * 2] = from as i8;
+                bytes[pixel * 2 + 1] = (from + 1) as i8;
+                pixel += 1;
+            }
+            let mut at = 16;
+            while at < 32 {
+                bytes[at] = bytes[at - 16];
+                at += 1;
+            }
+            bytes
+        }
+
+        /// The dword a lane's words are joined at, which is what packs the two
+        /// lanes' halves of a plane together.
+        ///
+        /// A lane holds a whole number of pixels, so its words are one or two
+        /// dwords: four pixels of two channels make two, and a four channel
+        /// block makes one. The second lane's dwords start at four.
+        const fn join<const C: usize>() -> [i32; 8] {
+            let dwords = 16 / (C * 2) / 2;
+            let mut index = [0i32; 8];
+            let mut at = 0;
+            while at < dwords {
+                index[at] = at as i32;
+                at += 1;
+            }
+            let mut lane = 0;
+            while lane < dwords {
+                index[dwords + lane] = (4 + lane) as i32;
+                lane += 1;
+            }
+            index
+        }
+
+        /// # Safety
+        ///
+        /// The processor must have AVX2, and the row must be sized the way
+        /// [`place16be`](super::place16be) documents.
+        #[target_feature(enable = "avx2")]
+        pub(super) unsafe fn place16be<const C: usize>(
+            source: &[u8],
+            planes: &mut [&mut [u8]],
+        ) -> usize {
+            if !matches!(C, 1 | 2 | 4) {
+                return 0;
+            }
+            let pixels = row_pixels16(planes);
+            let block = block::<C>();
+            // SAFETY: SSE2 is in the x86-64 baseline, and every index is built
+            // from constants the compile time resolves.
+            let masks = unsafe {
+                [
+                    load(mask::<C>(0)),
+                    load(mask::<C>(1)),
+                    load(mask::<C>(2)),
+                    load(mask::<C>(3)),
+                ]
+            };
+            let join = unsafe { load_i32(join::<C>()) };
+            let mut index = 0usize;
+            while index + block <= pixels {
+                // SAFETY: the block reads `block * C * 2` bytes, which is the
+                // thirty-two the load takes, and writes `block * 2` to every
+                // plane the caller sized to `pixels` samples.
+                unsafe {
+                    let at = source.as_ptr().add(index * C * 2);
+                    let words = swap(_mm256_loadu_si256(at.cast()));
+                    if C == 1 {
+                        store::<32>(planes, 0, index, words);
+                    } else {
+                        for (channel, mask) in masks.iter().enumerate().take(planes.len().min(C)) {
+                            let plane = _mm256_permutevar8x32_epi32(
+                                _mm256_shuffle_epi8(words, *mask),
+                                join,
+                            );
+                            if C == 2 {
+                                store::<16>(planes, channel, index, plane);
+                            } else {
+                                store::<8>(planes, channel, index, plane);
+                            }
+                        }
+                    }
+                }
+                index += block;
+            }
+            index
+        }
+
+        /// The mask as a vector, which is a load from the constant the
+        /// compile time built.
+        #[target_feature(enable = "avx2")]
+        #[inline]
+        unsafe fn load(bytes: [i8; 32]) -> __m256i {
+            unsafe { _mm256_loadu_si256(bytes.as_ptr().cast()) }
+        }
+
+        /// As [`load`], for the join index.
+        #[target_feature(enable = "avx2")]
+        #[inline]
+        unsafe fn load_i32(index: [i32; 8]) -> __m256i {
+            unsafe { _mm256_loadu_si256(index.as_ptr().cast()) }
+        }
+
+        /// Puts every word the way the machine reads it. The source states
+        /// sixteen bit samples big endian, and a shift pair is that swap.
+        #[target_feature(enable = "avx2")]
+        #[inline]
+        unsafe fn swap(words: __m256i) -> __m256i {
+            _mm256_or_si256(_mm256_srli_epi16(words, 8), _mm256_slli_epi16(words, 8))
+        }
+
+        /// Writes one channel's block, skipping a channel the call hands out
+        /// no plane for.
+        ///
+        /// # Safety
+        ///
+        /// `planes[channel]` holds `BYTES` bytes from `index * 2`, or there is
+        /// no such plane.
+        #[target_feature(enable = "avx2")]
+        #[inline]
+        unsafe fn store<const BYTES: usize>(
+            planes: &mut [&mut [u8]],
+            channel: usize,
+            index: usize,
+            value: __m256i,
+        ) {
+            let Some(plane) = planes.get_mut(channel) else {
+                return;
+            };
+            let at = unsafe { plane.as_mut_ptr().add(index * 2) };
+            // SAFETY: the caller sized the plane to hold the word of every
+            // pixel of the row, and this block starts at `index`.
+            unsafe {
+                match BYTES {
+                    32 => _mm256_storeu_si256(at.cast(), value),
+                    16 => _mm_storeu_si128(at.cast(), _mm256_castsi256_si128(value)),
+                    _ => _mm_storel_epi64(at.cast(), _mm256_castsi256_si128(value)),
+                }
+            }
+        }
+    }
+}
+
 /// One kernel by name, which is what this module's test uses to run the kernel
 /// the dispatch on this machine would not pick.
-#[cfg(all(test, target_arch = "aarch64"))]
+#[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kernel {
+    #[cfg(target_arch = "x86_64")]
+    Avx2,
+    #[cfg(target_arch = "aarch64")]
     Neon,
 }
 
 /// Every kernel this architecture can be asked to run by name.
+#[cfg(all(test, target_arch = "x86_64"))]
+pub const KERNELS: &[(&str, Kernel)] = &[("avx2", Kernel::Avx2)];
 #[cfg(all(test, target_arch = "aarch64"))]
 pub const KERNELS: &[(&str, Kernel)] = &[("neon", Kernel::Neon)];
 
@@ -444,11 +695,18 @@ pub fn place8_forced<const C: usize>(source: &[u8], planes: &mut [&mut [u8]], ke
 }
 
 /// Runs the named sixteen bit big-endian kernel over the whole row.
-#[cfg(all(test, target_arch = "aarch64"))]
+#[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
 pub fn place16be_forced<const C: usize>(source: &[u8], planes: &mut [&mut [u8]], kernel: Kernel) {
-    let Kernel::Neon = kernel;
-    // SAFETY: as above.
-    let done = unsafe { neon::place16be::<C>(source, planes) };
+    // SAFETY: the test sizes `source` and every plane row the way `place16be`
+    // documents, and a kernel is entered only where the processor reports the
+    // feature it is built for.
+    #[cfg(target_arch = "aarch64")]
+    let done = {
+        let Kernel::Neon = kernel;
+        unsafe { neon::place16be::<C>(source, planes) }
+    };
+    #[cfg(target_arch = "x86_64")]
+    let done = unsafe { x86::forced::<C>(kernel, source, planes) };
     tail16be::<C>(source, planes, done);
 }
 
@@ -549,7 +807,7 @@ mod tests {
             }
             assert!(actual[..count] == expected[..count], "public path: {path}");
 
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             if matches!(kind, Kind::Eight | Kind::SixteenBe) {
                 for (name, kernel) in KERNELS {
                     let mut forced = vec![vec![0u8; row]; count];
@@ -558,7 +816,11 @@ mod tests {
                         .map(|plane| plane.as_mut_slice())
                         .collect();
                     match kind {
+                        // The eight bit kernel is aarch64's; x86 has none.
+                        #[cfg(target_arch = "aarch64")]
                         Kind::Eight => place8_forced::<C>(&source, &mut planes, *kernel),
+                        #[cfg(target_arch = "x86_64")]
+                        Kind::Eight => continue,
                         Kind::SixteenBe => place16be_forced::<C>(&source, &mut planes, *kernel),
                         Kind::Sixteen => unreachable!("no named kernel for native samples"),
                     }

@@ -247,8 +247,11 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   plane count at a time, which is the shape LLVM turns into `ld3`/`ld4` on its
   own; an aarch64 kernel carries the two shapes a hand block wins: sixteen bit
   big-endian samples, where `ldN` + `rev16` folds the swap into the store, and
-  two eight bit channels. NEON is in the aarch64 baseline, so the dispatch is a
-  `#[cfg]` and every other target runs the walk. both are held to a naive
+  two eight bit channels. NEON is in the aarch64 baseline, so that dispatch is a
+  `#[cfg]`; x86-64's kernel is the sixteen bit big-endian one alone, a `pshufb`
+  a channel over one load, for one, two and four channels (three has no whole
+  block), and it asks the processor for AVX2 and answers zero where it is
+  missing, which runs the whole-row walk. both are held to a naive
   per-channel gather sample for sample by the test beside them, which forces
   the kernel by name where the dispatch would not pick it.
 - `src/color.rs`: frame properties, the optional raw `ICCProfile`, and the

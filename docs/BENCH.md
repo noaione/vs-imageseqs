@@ -335,21 +335,40 @@ the one pass wins on both x86-64 libraries, by less than the arm64 round's
 
 ### the sixteen bit big-endian walk
 
-`place16be`'s swap is `#[cfg(target_arch = "aarch64")]`, so both x86-64
-libraries run `scalar16be`, and one look at the generated code says the
-compiler does not vectorise it there. In the `x86-64-v4` build,
-`formats::png::Rows::<RowStream>::fill`, which is where a sixteen bit page's
-row walk is inlined, contains no `pshufb` at all, while `planar::place8::<3>`
-and `<4>` carry 21 and 6 of them. The runtime plane count is what stops it: the
-walk iterates `planes`, and a slice whose length is only checked to be at most
-`C` is not unrolled.
+`place16be`'s swap was `#[cfg(target_arch = "aarch64")]`, so both x86-64
+libraries ran `scalar16be`, and the generated code says the compiler does not
+vectorise it there: in the `x86-64-v4` build
+`formats::png::Rows::<RowStream>::fill`, which is where a sixteen bit page's row
+walk is inlined, has no `pshufb` at all, while `planar::place8::<3>` and `<4>`
+carry 21 and 6. The runtime plane count is what stops it: the walk iterates
+`planes`, and a slice whose length is only checked to be at most `C` is not
+unrolled. The asm is one command, `cargo rustc --release --locked --target
+x86_64-pc-windows-msvc -- --emit asm -C target-cpu=x86-64-v4`; `cargo asm`
+itself will not read this crate, because the artifact it looks for is an rlib
+and this one is a cdylib.
 
-so a `pshufb` half is a candidate rather than a closed question, and the arm64
-numbers are its ceiling: 3% to 7% of a sixteen bit png frame and 29% of a
-farbfeld. It is not written. One `cargo rustc --release --locked --target
-x86_64-pc-windows-msvc -- --emit asm -C target-cpu=x86-64-v4` writes the
-assembly beside the artifacts; `cargo asm` itself will not read this crate,
-because the artifact it looks for is an rlib and this one is a cdylib.
+so it has a block now. A block is one thirty-two byte load: the swap is a
+shift pair, and a `pshufb` a channel reads that channel's words out of the
+load, with the two lanes joined by a dword permute. One, two and four channels
+are covered; three has no whole block and keeps the whole-row walk.
+
+| set | library | read before | read after | change |
+| --- | --- | ---: | ---: | ---: |
+| farbfeld, 8 pages | baseline | 6.188 | 4.614 | 1.34x faster |
+| farbfeld, 8 pages | `x86-64-v4` | 5.676 | 4.093 | 1.39x faster |
+| png gray16, 4 pages | baseline | 4.319 | 3.734 | 1.16x faster |
+| png la16, 4 pages | baseline | 14.441 | 13.724 | 1.05x faster |
+| png rgba16, 4 pages | baseline | 29.572 | 29.869 | unchanged |
+| png rgb16, 4 pages | baseline | 23.251 | 22.889 | unchanged |
+
+measured 2026-11-11 against a build of the same tree without the block, the two
+alternated inside one batch, best of five rounds, `prefetch=0`. The png pages
+are `target/bench/png-depth`, which `target/bench/make-png-depth-corpus.py`
+writes; they are 7 to 30 ms a frame because a sixteen bit png is inflate
+bound, which is why the 30% the block takes off a farbfeld is 5% to 14% of a
+page. Three channel pages are the control: the block declines them and they
+read unchanged. Every plane of every page of those sets, of `tests/fixtures`'
+png pages and of the eight farbfeld pages is byte identical.
 
 ## animation
 

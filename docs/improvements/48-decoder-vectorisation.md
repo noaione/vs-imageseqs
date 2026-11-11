@@ -24,10 +24,11 @@
   copy it removes was real but small) and is what lets a cached presentation be
   handed out without a copy at all. The Windows host round then answered the
   four questions this page left to it: the compose row's AVX2 and AVX-512
-  blocks were written, measured at the memory system's ceiling and **declined**,
+  blocks were written, measured at the memory system's ceiling and **declined**;
   the one-pass write was confirmed a win on both x86-64 libraries (1.03x to
-  1.40x of the per-plane gather), the sixteen bit big-endian walk was found to
-  be unvectorised there, and the arm rows were not re-measured. See [what the
+  1.40x of the per-plane gather); the sixteen bit big-endian walk was found
+  unvectorised there and given an AVX2 block, which is 1.34x on a farbfeld and
+  1.16x on a gray16 page; and the arm rows were not re-measured. See [what the
   x86-64 host found](#what-the-x86-64-host-found).
 - touches: `src/planar.rs` (new), `src/formats/{dds,bmp,tga,ico,pnm,farbfeld,hdr,png,exr,tiff}.rs`,
   `src/pixel.rs` (`write_planes`),
@@ -687,21 +688,29 @@ unchanged path). Every plane of every one of the 32 pages is byte identical.
 The numbers are in [BENCH.md, the buffered
 targa](../BENCH.md#the-buffered-targa).
 
-### 3. `place16be`'s x86-64 half: a candidate, not written
+### 3. `place16be`'s x86-64 half: written and landed
 
-The wide builds do not vectorise the swap. In the `x86-64-v4` build
+The wide builds did not vectorise the swap: in the `x86-64-v4` build
 `formats::png::Rows::<RowStream>::fill`, which is where a sixteen bit page's
-row walk is inlined, has no `pshufb` at all; `planar::place8::<3>` and `<4>`
-have 21 and 6. The runtime plane count is what stops it, which is exactly what
-a kernel would remove.
+row walk is inlined, had no `pshufb` at all, while `planar::place8::<3>` and
+`<4>` had 21 and 6. The runtime plane count was what stopped it, and that is
+what a block removes.
 
-It is not written, so the arm64 numbers stay its ceiling: 3% to 7% of a
-sixteen bit png frame and 29% of a farbfeld. It is the first thing a next round
-on this host should take, and the question is one command:
-`cargo rustc --release --locked --target x86_64-pc-windows-msvc -- --emit asm
--C target-cpu=x86-64-v4` writes the assembly beside the artifacts. `cargo asm
-` itself will not read this crate, because it looks for an rlib and this one
-is a cdylib.
+So `src/planar.rs`'s x86 module carries an AVX2 kernel for one, two and four
+channels: a block is one thirty-two byte load, the swap is a shift pair and a
+`pshufb` a channel reads that channel's words out with the two lanes joined by
+a dword permute. Three channels has no whole block and keeps the whole-row
+walk, which is why `place16be`'s x86 arm runs the full scalar walk when the
+kernel answers zero rather than the tail loop.
+
+Measured against a build of the same tree without it, best of five alternating
+rounds: farbfeld 6.188 to 4.614 ms a frame on the baseline library (1.34x) and
+5.676 to 4.093 on `.avx512` (1.39x); a gray16 page 4.319 to 3.734 (1.16x); a
+la16 page 1.05x; an rgba16 page unchanged, because a sixteen bit png is
+inflate bound; and rgb16, which the block declines, unchanged as the control.
+Every plane of every page of the png depth corpus, of the png fixtures and of
+the eight farbfeld pages is byte identical. [BENCH.md, the sixteen bit
+big-endian walk](../BENCH.md#the-sixteen-bit-big-endian-walk) has the table.
 
 ### 4. the rows the arm rounds moved: not re-measured
 
@@ -737,8 +746,9 @@ The eight bit three and four channel kernel is written and held to the scalar
 path by the test but is not dispatched, because it is 1.2x to 1.7x slower
 than the compiler's loop. The gif compose's x86-64 blocks were written and
 declined, and the shipping libraries have now been measured with the one pass;
-both are [above](#what-the-x86-64-host-found). What that host leaves is
-`place16be`'s `pshufb` half and the arm rows' re-measurement, in that order.
+both are [above](#what-the-x86-64-host-found). What that host leaves is item 4,
+re-measuring the arm rounds' rows on this one, which needs their corpora and
+their before builds and is the only thing on the page still unmeasured.
 
 the sixteen bit apng blend is the one kernel whose arm half is a block smaller
 than it would like: a pixel is four samples, so the setup is half of it, and the
