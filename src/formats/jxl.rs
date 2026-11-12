@@ -36,8 +36,9 @@ use std::{
 use crate::layout::{ColorType, Orientation};
 use jxl::api::{
     Endianness, Event, ExtraChannel, JxlBitDepth, JxlColorEncoding, JxlColorProfile, JxlColorType,
-    JxlDataFormat, JxlDecoder, JxlDecoderOptions, JxlOutputBuffer, JxlPixelFormat, JxlPrimaries,
-    JxlTransferFunction, JxlWhitePoint, Orientation as JxlOrientation,
+    JxlDataFormat, JxlDecoder, JxlDecoderOptions, JxlOutputBuffer, JxlParallelRunner,
+    JxlParallelRunnerFun, JxlPixelFormat, JxlPrimaries, JxlTransferFunction, JxlWhitePoint,
+    Orientation as JxlOrientation,
 };
 
 use crate::{
@@ -55,6 +56,30 @@ const CODESTREAM_SIGNATURE: [u8; 2] = [0xff, 0x0a];
 const CONTAINER_SIGNATURE: [u8; 12] = [
     0x00, 0x00, 0x00, 0x0c, b'J', b'X', b'L', b' ', 0x0d, 0x0a, 0x87, 0x0a,
 ];
+
+#[cfg(test)]
+thread_local! {
+    static HEADER_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many codestream headers this thread has read.
+#[cfg(test)]
+pub(crate) fn header_parses() -> usize {
+    HEADER_PARSES.with(std::cell::Cell::get)
+}
+
+/// Starts [`header_parses`] from zero.
+#[cfg(test)]
+pub(crate) fn reset_header_parses() {
+    HEADER_PARSES.with(|count| count.set(0));
+}
+
+/// Counts one read of the file header, which a probe pays for once and every
+/// caller that reads a header of its own pays for again.
+#[cfg(test)]
+pub(crate) fn count_parse() {
+    HEADER_PARSES.with(|count| count.set(count.get() + 1));
+}
 
 /// What the codestream of a jpeg xl file states about its image.
 ///
@@ -82,6 +107,11 @@ pub struct Header {
     depth: u32,
     /// Extra channels the requested layout has to account for, alpha included.
     extra_channels: usize,
+    /// Whether the codestream states that it holds a timeline.
+    ///
+    /// This is the question [`crate::animation::jxl`] asks before it scans a
+    /// file, and the header it is read from is the one a probe reads anyway.
+    pub animated: bool,
     /// Whether the file's embedded color profile is an icc profile rather than a
     /// set of primaries and a transfer function.
     ///
@@ -100,6 +130,8 @@ impl Header {
     /// Reads everything the codestream states, from a decoder that has read the
     /// file header and nothing else.
     pub fn read(decoder: &JxlDecoder, path: &Path) -> Result<Self> {
+        #[cfg(test)]
+        count_parse();
         let info = decoder
             .basic_info()
             .ok_or_else(|| image_error("decode", path, "the decoder holds no image info"))?;
@@ -135,6 +167,7 @@ impl Header {
             data_format,
             depth,
             extra_channels,
+            animated: info.animation.is_some(),
             has_icc_profile: matches!(profile, JxlColorProfile::Icc(_)),
             icc_profile: match profile {
                 JxlColorProfile::Icc(bytes) => Some(Arc::from(bytes.as_slice())),
@@ -340,43 +373,52 @@ const fn orientation_of(orientation: JxlOrientation) -> Orientation {
 /// Every jpeg xl file is this module's, so a file it cannot read is an error
 /// rather than a fall back to the `image` decoder, which has none for the
 /// format.
+///
+/// The same header states whether the file holds a timeline, and that answer
+/// comes back beside the description so that
+/// [`crate::animation::jxl::segment_info`] does not read the header a second
+/// time to ask: a still file is the common case, and one read of a codestream
+/// header is what describing one costs.
 pub fn image_info(
     path: &Path,
     apply_rotation: bool,
     file: &mut BufReader<File>,
-) -> Result<ImageInfo> {
+) -> Result<(ImageInfo, bool)> {
     let decoder = header_over(file, path)?;
     let header = Header::read(&decoder, path)?;
-    Ok(ImageInfo {
-        route: None,
-        subimage: None,
-        path: path.to_path_buf(),
-        width: header.width,
-        height: header.height,
-        color_type: header.color_type,
-        // The adapter this module replaces did not override the trait's own
-        // answer, which is the color type the decoder hands out turned into the
-        // extended one.
-        original_color_type: header.color_type.into(),
-        has_icc_profile: header.has_icc_profile,
-        icc_profile: header.icc_profile.clone(),
-        cicp: header.cicp,
-        // A jpeg xl codestream states no chroma sample position: its yuv planes
-        // are implied by its own upsampling filters.
-        chroma_location: None,
-        orientation: header.orientation,
-        // The decoder has already handed the picture out the way the file
-        // describes it, so the identity is what the caller asked for when
-        // rotation is on; turning it off means undoing it.
-        transform: if apply_rotation {
-            Transform::IDENTITY
-        } else {
-            Transform::from_orientation(inverse_orientation(header.orientation))
+    Ok((
+        ImageInfo {
+            route: None,
+            subimage: None,
+            path: path.to_path_buf(),
+            width: header.width,
+            height: header.height,
+            color_type: header.color_type,
+            // The adapter this module replaces did not override the trait's own
+            // answer, which is the color type the decoder hands out turned into the
+            // extended one.
+            original_color_type: header.color_type.into(),
+            has_icc_profile: header.has_icc_profile,
+            icc_profile: header.icc_profile.clone(),
+            cicp: header.cicp,
+            // A jpeg xl codestream states no chroma sample position: its yuv planes
+            // are implied by its own upsampling filters.
+            chroma_location: None,
+            orientation: header.orientation,
+            // The decoder has already handed the picture out the way the file
+            // describes it, so the identity is what the caller asked for when
+            // rotation is on; turning it off means undoing it.
+            transform: if apply_rotation {
+                Transform::IDENTITY
+            } else {
+                Transform::from_orientation(inverse_orientation(header.orientation))
+            },
+            format: header
+                .format()
+                .ok_or_else(|| unsupported(header.color_type, path))?,
         },
-        format: header
-            .format()
-            .ok_or_else(|| unsupported(header.color_type, path))?,
-    })
+        header.animated,
+    ))
 }
 
 /// The same, from an open of its own, which is what a caller that did not come
@@ -384,7 +426,7 @@ pub fn image_info(
 #[cfg(test)]
 pub fn image_info_at(path: &Path, apply_rotation: bool) -> Result<ImageInfo> {
     let file = File::open(path).map_err(|error| image_error("open", path, error))?;
-    image_info(path, apply_rotation, &mut BufReader::new(file))
+    image_info(path, apply_rotation, &mut BufReader::new(file)).map(|(info, _)| info)
 }
 
 /// Decodes one jpeg xl image into the interleaved buffer its color type needs.
@@ -474,7 +516,7 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
         transform: info.transform,
         pixels: Pixels::Interleaved {
             color_type: header.color_type,
-            buffer: pixels,
+            buffer: pixels.into(),
         },
         timings: DecodeTimings {
             open: opened.open,
@@ -618,6 +660,60 @@ fn to_frame(decoder: &mut JxlDecoder, input: &mut BufReader<File>, path: &Path) 
     }
 }
 
+/// Runs the decoder's tiles on more than one thread.
+///
+/// jxl's decoder takes a runner rather than making one, and given none it
+/// answers `SequentialRunner`, so a page is decoded a tile after another. The
+/// tasks it hands out do not wait on each other, which is what a scoped thread
+/// a worker and one counter serve.
+struct Threads(usize);
+
+impl JxlParallelRunner for Threads {
+    fn run(&mut self, num: usize, fun: &JxlParallelRunnerFun<'_>) -> jxl::error::Result<()> {
+        let workers = self.0.min(num);
+        if workers <= 1 {
+            return (0..num).try_for_each(fun);
+        }
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let failure = std::sync::Mutex::new(None);
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    loop {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if index >= num {
+                            break;
+                        }
+                        if let Err(error) = fun(index) {
+                            *failure.lock().expect("the lock is not poisoned") = Some(error);
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        match failure.into_inner().expect("the lock is not poisoned") {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    fn num_threads(&self) -> usize {
+        self.0
+    }
+}
+
+/// How many threads one decode is given.
+///
+/// The pages are a decoder's own work rather than a frame's, so the number is
+/// the processor's and not the reader's: four, which is where this host's
+/// measurement stops paying once the lookahead workers are also decoding (a
+/// single decode is 2.7x at four and 3.5x at eight, and with `prefetch=4` both
+/// are 1.6x). `docs/improvements/49-jxl-decode-threads.md` has the table.
+fn threads() -> usize {
+    std::thread::available_parallelism().map_or(1, |count| count.get().min(4))
+}
+
 /// Draws the pixels of a frame into `buffer`.
 ///
 /// The decoder fills what it can from the input it has and asks for more, which
@@ -632,9 +728,14 @@ fn draw(
     path: &Path,
 ) -> Result<()> {
     let mut output = JxlOutputBuffer::new(buffer, rows, row_bytes);
+    let mut runner = Threads(threads());
     loop {
         match decoder
-            .process(input, Some(std::slice::from_mut(&mut output)), None)
+            .process(
+                input,
+                Some(std::slice::from_mut(&mut output)),
+                Some(&mut runner),
+            )
             .map_err(|error| decode_error(path, error))?
         {
             Event::FrameComplete { .. } => return Ok(()),
@@ -1022,5 +1123,27 @@ mod tests {
             })
         );
         assert!(!gray.has_icc_profile);
+    }
+
+    /// The runner a decode is given runs every task once, whatever the count.
+    #[test]
+    fn a_runner_runs_every_task_once() {
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = AtomicUsize::new(0);
+        let seen: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+        let mut runner = Threads(4);
+        runner
+            .run(37, &|index| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                seen.lock().expect("the lock is not poisoned").push(index);
+                Ok(())
+            })
+            .expect("the tasks do not fail");
+        assert_eq!(calls.load(Ordering::Relaxed), 37);
+        let mut indexes = seen.into_inner().expect("the lock is not poisoned");
+        indexes.sort_unstable();
+        assert_eq!(indexes, (0..37).collect::<Vec<_>>());
     }
 }

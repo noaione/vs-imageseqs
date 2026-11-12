@@ -96,19 +96,58 @@ pub fn owns(path: &Path) -> bool {
     crate::formats::identify::owns(crate::formats::identify::Format::Bmp, path)
 }
 
-/// One channel of a bitfield: where its bits start and how many there are.
+/// One channel of a bitfield: where its bits start, how many there are, and
+/// the table a value in it widens through.
+///
+/// The table is what makes this cheaper than it reads. A bitfield's width is a
+/// run-time value, so widening a value with `expand` was a `u32` division per
+/// channel per pixel, and a lookup is not one. It is borrowed from the table
+/// built once per width below, so a `Bitfield` stays four words wide and copies
+/// the way it did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Bitfield {
     shift: u32,
     len: u32,
+    widen: &'static [u8; 256],
+}
+
+/// The widening table of every width a bitfield can have, built once.
+///
+/// `expand` is the rule, and it is evaluated here at compile time for each of the
+/// nine widths a mask can name. The table is read only, so a `Bitfield` holding a
+/// reference to it costs nothing to copy.
+static WIDEN: [[u8; 256]; 9] = widen_tables();
+
+const fn widen_tables() -> [[u8; 256]; 9] {
+    let mut tables = [[0u8; 256]; 9];
+    let mut len = 0usize;
+    while len < 9 {
+        let mut value = 0usize;
+        while value < 256 {
+            tables[len][value] = expand(value as u16, len as u32);
+            value += 1;
+        }
+        len += 1;
+    }
+    tables
 }
 
 impl Bitfield {
+    /// A field that stands for nothing, which is what a header that states no
+    /// mask for a channel gets: every value it reads is zero.
+    const fn empty() -> Self {
+        Self {
+            shift: 0,
+            len: 0,
+            widen: &WIDEN[0],
+        }
+    }
+
     /// A bitfield for `mask`, or `None` when the mask is not a contiguous run
     /// of at most eight bits inside `max_len`.
     fn from_mask(mask: u32, max_len: u32) -> Option<Self> {
         if mask == 0 {
-            return Some(Self { shift: 0, len: 0 });
+            return Some(Self::empty());
         }
         let mut shift = mask.trailing_zeros();
         let mut len = (!(mask >> shift)).trailing_zeros();
@@ -122,15 +161,16 @@ impl Bitfield {
             shift += len - 8;
             len = 8;
         }
-        Some(Self { shift, len })
+        Some(Self {
+            shift,
+            len,
+            widen: &WIDEN[len as usize],
+        })
     }
 
     /// The eight bit value this field of `data` stands for.
     fn read(self, data: u32) -> u8 {
-        expand(
-            ((data >> self.shift) & ((1 << self.len) - 1).max(1)) as u16,
-            self.len,
-        )
+        self.widen[(((data >> self.shift) & ((1 << self.len) - 1).max(1)) & 0xFF) as usize]
     }
 }
 
@@ -140,13 +180,16 @@ impl Bitfield {
 /// become `25` rather than the `24` a shift and or would give, and two bits of
 /// `1` become `85` rather than `85` from `0x55`. The tables were generated as
 /// `round(value * 255 / (2**len - 1))`, which is what this computes.
-pub fn expand(value: u16, len: u32) -> u8 {
+pub const fn expand(value: u16, len: u32) -> u8 {
     match len {
         0 => 0,
         8 => value as u8,
         _ => {
             let max = (1u32 << len) - 1;
-            let scaled = u32::from(value) * 255;
+            // `value as u32` rather than `u32::from`, because this is evaluated at
+            // compile time to build the widening tables below and `From` is not a
+            // const trait. The widening is the same one.
+            let scaled = value as u32 * 255;
             ((scaled + max / 2) / max) as u8
         }
     }
@@ -379,10 +422,10 @@ pub fn header(data: &[u8], start: usize, file_header: bool) -> Result<Header> {
         _ => None,
     };
     let (mut red, mut green, mut blue, mut alpha) = (
-        Bitfield { shift: 0, len: 0 },
-        Bitfield { shift: 0, len: 0 },
-        Bitfield { shift: 0, len: 0 },
-        Bitfield { shift: 0, len: 0 },
+        Bitfield::empty(),
+        Bitfield::empty(),
+        Bitfield::empty(),
+        Bitfield::empty(),
     );
     let mut has_alpha = false;
 
@@ -675,6 +718,17 @@ impl RowStream for Rows {
         let width = header.width as usize;
         let height = header.height as usize;
         let (row_bytes, _) = geometry(header)?;
+        // A twenty four or thirty two bit bitmap stores its colours in the order
+        // the sink's blue-first placement wants them in, so its row goes straight
+        // to the planes: `unpack_row` would copy it into a scratch row first, and
+        // that is a whole pass over the picture for a swap and a drop that
+        // `place_bgr8` and `place_rgba8` already do. Every other subtype (a
+        // palette, a sixteen bit field, a run) does need unpacking.
+        let direct = match header.image_type {
+            ImageType::Rgb24 => Some(3),
+            ImageType::Rgb32 if !header.has_alpha => Some(4),
+            _ => None,
+        };
         let mut source = vec![0u8; row_bytes];
         let mut line = vec![0u8; width * 3];
         for row in 0..height {
@@ -686,9 +740,15 @@ impl RowStream for Rows {
             } else {
                 height - 1 - row
             };
-            unpack_row(header, &source, &mut line, width, 3);
-            sink.place_rgb8(&line, target_row)
-                .ok_or_else(|| ImgSeqError::new("the frame holds no three colour planes"))?;
+            let placed = match direct {
+                Some(3) => sink.place_bgr8(&source[..width * 3], target_row),
+                Some(4) => sink.place_rgba8(&source[..width * 4], target_row),
+                _ => {
+                    unpack_row(header, &source, &mut line, width, 3);
+                    sink.place_rgb8(&line, target_row)
+                }
+            };
+            placed.ok_or_else(|| ImgSeqError::new("the frame holds no three colour planes"))?;
         }
         // A stream is read once. Letting the reader go here means a second fill
         // starts from the pixels again rather than from where this one stopped.
@@ -852,9 +912,9 @@ fn unpack_row(header: &Header, source: &[u8], target: &mut [u8], width: usize, c
         ImageType::Rgb16 => {
             let (r, g, b) = MASK_555;
             let (red, green, blue) = (
-                Bitfield::from_mask(r, 16).unwrap_or(Bitfield { shift: 0, len: 0 }),
-                Bitfield::from_mask(g, 16).unwrap_or(Bitfield { shift: 0, len: 0 }),
-                Bitfield::from_mask(b, 16).unwrap_or(Bitfield { shift: 0, len: 0 }),
+                Bitfield::from_mask(r, 16).unwrap_or(Bitfield::empty()),
+                Bitfield::from_mask(g, 16).unwrap_or(Bitfield::empty()),
+                Bitfield::from_mask(b, 16).unwrap_or(Bitfield::empty()),
             );
             for x in 0..width {
                 let at = x * 2;
@@ -1143,7 +1203,7 @@ pub(crate) fn decode_dib(
         transform: info.transform,
         pixels: Pixels::Interleaved {
             color_type: header.color_type(),
-            buffer,
+            buffer: buffer.into(),
         },
         timings: DecodeTimings {
             open,

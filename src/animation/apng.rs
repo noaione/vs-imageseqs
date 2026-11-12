@@ -513,7 +513,11 @@ impl PngSource {
                         continue;
                     }
                     if alpha < maximum {
-                        blend(target, source_pixel, alpha, maximum, sixteen_bit);
+                        if sixteen_bit {
+                            blend16(target, source_pixel, alpha);
+                        } else {
+                            blend8(target, source_pixel, alpha);
+                        }
                         continue;
                     }
                 }
@@ -554,7 +558,10 @@ impl PngSource {
             height: self.height,
             format: self.format,
             transform: self.transform,
-            pixels: Pixels::Interleaved { color_type, buffer },
+            pixels: Pixels::Interleaved {
+                color_type,
+                buffer: buffer.into(),
+            },
             timings: DecodeTimings {
                 open: std::time::Duration::ZERO,
                 metadata: std::time::Duration::ZERO,
@@ -639,23 +646,105 @@ const fn color_of(color_type: png::ColorType) -> Option<ColorType> {
 /// its coverage plus the destination scaled by what is left, rounded down. A
 /// channel order that differs between the two buffers is not possible here,
 /// because both are the file's own colour type.
-fn blend(target: &mut [u8], source: &[u8], alpha: u32, maximum: u32, sixteen_bit: bool) {
-    let inverse = maximum - alpha;
-    if sixteen_bit {
-        let (targets, _) = target.as_chunks_mut::<2>();
-        let (sources, _) = source.as_chunks::<2>();
-        for (target, source) in targets.iter_mut().zip(sources) {
-            let destination = u32::from(u16::from_be_bytes([target[0], target[1]]));
-            let value = u32::from(u16::from_be_bytes([source[0], source[1]]));
-            let mixed = (value * alpha + destination * inverse) / maximum;
-            let bytes = (mixed as u16).to_be_bytes();
-            target.copy_from_slice(&bytes);
+///
+/// The divisor is the depth's own instead of a value handed in, which is what
+/// makes it a multiply-high rather than a division: this runs once per pixel of
+/// every blended frame, and a `u32` division a channel is the one thing an
+/// animation of a large canvas could not afford.
+fn blend8(target: &mut [u8], source: &[u8], alpha: u32) {
+    let inverse = 255 - alpha;
+    for (target, &source) in target.iter_mut().zip(source) {
+        let mixed = (u32::from(source) * alpha + u32::from(*target) * inverse) / 255;
+        *target = mixed as u8;
+    }
+}
+
+/// The same for a sixteen bit page, whose samples are the file's big-endian
+/// ones on both sides.
+///
+/// A sixteen bit sample does not fit the eight bit kernel's lane: the products
+/// are thirty-two bits, so a block is four samples held as `u32` lanes and the
+/// division by `65535` is the multiply-high the divisor's own shape allows.
+/// The scalar loop is what every other target runs and what the kernel is held
+/// to, sample for sample, by the test beside it.
+fn blend16(target: &mut [u8], source: &[u8], alpha: u32) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let done = unsafe { neon16::blend(target, source, alpha) };
+        blend16_scalar(&mut target[done..], &source[done..], alpha);
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    blend16_scalar(target, source, alpha);
+}
+
+/// The rule the kernel is held to, one sample at a time.
+fn blend16_scalar(target: &mut [u8], source: &[u8], alpha: u32) {
+    let inverse = 65535 - alpha;
+    let (targets, _) = target.as_chunks_mut::<2>();
+    let (sources, _) = source.as_chunks::<2>();
+    for (target, source) in targets.iter_mut().zip(sources) {
+        let destination = u32::from(u16::from_be_bytes([target[0], target[1]]));
+        let value = u32::from(u16::from_be_bytes([source[0], source[1]]));
+        let mixed = (value * alpha + destination * inverse) / 65535;
+        let bytes = (mixed as u16).to_be_bytes();
+        target.copy_from_slice(&bytes);
+    }
+}
+
+/// The aarch64 half of [`blend16`], four samples in a `u32` lane.
+///
+/// The numerator is at most `65535 * 65535`, so it never reaches the top of a
+/// `u32` and `x + 1 + (x >> 16)` cannot carry out of one: that sum shifted down
+/// sixteen is `x / 65535` for every value the blend can produce, and it is the
+/// reason a `u32` division a sample is not needed anywhere in it.
+#[cfg(target_arch = "aarch64")]
+mod neon16 {
+    use core::arch::aarch64::*;
+
+    /// Mixes every whole block of four samples and answers how many bytes it
+    /// wrote, which the scalar loop finishes.
+    ///
+    /// # Safety
+    ///
+    /// The two slices cover the same bytes, and the caller passes an `alpha`
+    /// below `maximum`, which is what `blend16` is called with.
+    pub(super) unsafe fn blend(target: &mut [u8], source: &[u8], alpha: u32) -> usize {
+        // SAFETY: NEON is in the aarch64 baseline, so every intrinsic here is
+        // available without a probe, and every pointer below stays inside the
+        // slice the loop measured.
+        unsafe {
+            let inverse = vdup_n_u16((65535 - alpha) as u16);
+            let alpha = vdup_n_u16(alpha as u16);
+            let one = vdupq_n_u32(1);
+            let mut done = 0;
+            while done + 8 <= target.len() {
+                let sources = exchange(vld1_u16(source.as_ptr().add(done).cast()));
+                let destinations = exchange(vld1_u16(target.as_ptr().add(done).cast()));
+                let sum = vaddq_u32(vmull_u16(sources, alpha), vmull_u16(destinations, inverse));
+                let quotient =
+                    vshrq_n_u32(vaddq_u32(sum, vaddq_u32(one, vshrq_n_u32(sum, 16))), 16);
+                vst1_u16(
+                    target.as_mut_ptr().add(done).cast(),
+                    exchange(vmovn_u32(quotient)),
+                );
+                done += 8;
+            }
+            done
         }
-    } else {
-        for (target, &source) in target.iter_mut().zip(source) {
-            let mixed = (u32::from(source) * alpha + u32::from(*target) * inverse) / maximum;
-            *target = mixed as u8;
-        }
+    }
+
+    /// The same four samples, or the same four samples big-endian.
+    ///
+    /// A lane is native-endian, and a sixteen bit page states its samples the
+    /// other way round, so the load and the store each cross the order once and
+    /// the arithmetic in between sees the value the file states.
+    ///
+    /// # Safety
+    ///
+    /// The caller is a NEON kernel, which is the context the reinterpreting
+    /// intrinsics need.
+    unsafe fn exchange(samples: uint16x4_t) -> uint16x4_t {
+        unsafe { vreinterpret_u16_u8(vrev16_u8(vreinterpret_u8_u16(samples))) }
     }
 }
 
@@ -800,5 +889,40 @@ mod tests {
         assert_eq!(rate, Rate::new(1000, 1));
         assert_eq!(presentations[0].duration, Some(0));
         assert_eq!(presentations[0].timestamp, 0);
+    }
+}
+
+/// The kernel and the rule it stands for agree on every sample, at every
+/// coverage, and on the lengths a block cannot fill.
+#[cfg(all(test, target_arch = "aarch64"))]
+mod blend16_rule {
+    use super::*;
+
+    #[test]
+    fn a_sixteen_bit_blend_is_the_sample_for_sample_rule() {
+        let mut trials = 0;
+        for samples in 0..=17usize {
+            for alpha in [0u32, 1, 2, 255, 4096, 32767, 40000, 65534] {
+                let source: Vec<u8> = (0..samples * 2).map(|i| (i * 37 + 11) as u8).collect();
+                let target: Vec<u8> = (0..samples * 2).map(|i| (i * 53 + 29) as u8).collect();
+
+                let mut expected = target.clone();
+                blend16_scalar(&mut expected, &source, alpha);
+
+                // The dispatch picks the kernel on this target, and the forced
+                // form runs it beside the tail so a block that cannot fill is
+                // still the kernel's answer plus the rule's.
+                let mut dispatched = target.clone();
+                blend16(&mut dispatched, &source, alpha);
+                assert_eq!(dispatched, expected, "{samples} samples at {alpha}");
+
+                let mut forced = target.clone();
+                let done = unsafe { neon16::blend(&mut forced, &source, alpha) };
+                blend16_scalar(&mut forced[done..], &source[done..], alpha);
+                assert_eq!(forced, expected, "{samples} samples at {alpha}, forced");
+                trials += 1;
+            }
+        }
+        assert!(trials > 100, "{trials} trials");
     }
 }

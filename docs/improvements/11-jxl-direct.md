@@ -185,11 +185,11 @@ them:
 - **the probe stayed a header read**: 35 pages, `mismatch=True`, clip creation
   measured three times per row — before, 2.3 ms per clip (0.066 ms per file);
   after, 2.3 ms per clip (0.064 ms per file). A probe that decoded would have
-  been seconds across 35 pages. The `apply_rotation=False` row read 4.6 ms in
-  that batch, but a second batch of the same build put the whole set at 2.9 ms
-  and 3.4 ms, so the second header parse that path costs is worth fractions of a
-  millisecond per file rather than the doubling the first pair suggested — and it
-  is what makes `ImgSeqOrientation` non-empty for a jxl at all.
+    been seconds across 35 pages. The `apply_rotation=False` row read 4.6 ms in
+    that batch, but a second batch of the same build put the whole set at 2.9 ms
+    and 3.4 ms, so that pair was the machine rather than the code: the second
+    header parse every probe made — not only the rotation-off rows — was measured
+    afterwards, in the first bullet under "left over".
 - **no regression in the pipeline**: a same-batch interleaved A/B against a
   baseline DLL built from the pre-plan tree, twelve pages, `prefetch=0`,
   `apply_rotation=True`, minimum of three: decode 443.35 ms and 457.94 ms total
@@ -209,11 +209,19 @@ them:
 
 ## left over
 
-- **the probe reads the header twice when the rotation is off**: the code has to
-  be reported and the size the decoder hands out is the one it applied the code
-  to, so the stored size and the code can only be had from a second header parse.
-  It costs 0.065 ms per file and only when `apply_rotation=False`, and it is what
-  makes `ImgSeqOrientation` non-empty for a jxl at all.
+- **the probe read its codestream header twice, on every file, and now reads it
+  once.** The header states whether the file holds a timeline, and the animation
+  adapter asked that by parsing it again before it looked at the codestream at
+  all. `Header::animated` carries the answer, `decoder::describe` returns it
+  beside the description, and `animation::jxl::segment_info` reads it instead of
+  asking. Measured on 35 pages of `sandbox/jxl`, both builds alternated inside
+  one batch (`target/bench/plan48/probe-ab.py`, best of six rounds of five clip
+  creations): probe 2.556 ms before and 1.884 ms after, **0.74x**, and 2.710 →
+  2.001 ms with `apply_rotation=False`, which is 0.74x as well — the double read
+  was never the rotation's. Per file it is 0.073 → 0.054 ms. `decoder.rs`'s
+  `a_jpeg_xl_probe_reads_its_header_once` pins the count: one read for a still
+  page whichever way the rotation is set, two for an animated one, because the
+  scan that collects a timeline reads the header it needs again.
 - **`adjust_orientation` is honoured since `jxl 0.8.0`**: the option existed in
   0.7.4 and was read nowhere, so the render applied the codestream's code
   whatever it said. 0.8.0 reads it, and the option must stay `true`: asking for

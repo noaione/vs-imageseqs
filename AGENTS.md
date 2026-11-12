@@ -46,7 +46,14 @@ its subsampling, which the core checks when it creates one, so a picture whose
 width or height is not such a multiple is handed out the other way:
 `PixelFormat::fits` is the one question every reader asks, a lossy webp and a
 jpeg 2000 page come out as rgb, and an avif or heif is asked of `libheif` at
-4:4:4, which keeps the colour family and the depth.
+4:4:4, which keeps the colour family and the depth. the depths a yuv frame can
+be handed out at are eight, ten, twelve, fourteen and sixteen, at 4:2:0, 4:2:2
+and 4:4:4, because VapourSynth names every one of them. the fourteen bit pages
+are in `tests/fixtures` (`heic-yuv*p14.heic`, and one monochrome one), and
+a sixteen bit request is capped at fifteen bits, so those pages come out as the
+r,g,b the plugin builds: HEVC can carry sixteen, but the `hvcC` box cannot
+signal it and libheif refuses to hand one over
+(`docs/improvements/51-yuv-depth-arms.md`).
 
 a frame's depth is the one its container states, not the word the decoder hands
 over: a file that states nine to fifteen bits is handed out as the format that
@@ -108,7 +115,9 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   lookahead worker that has moved ahead of a consumer from making that
   consumer's next request replay the wrong picture.
 - `src/animation/`: one module per animated format. `apng.rs` composes APNG
-  frames at the file's own depth rather than at a fixed one. `gif.rs` reads the
+  frames at the file's own depth rather than at a fixed one, and blends a
+  sixteen bit frame with an arm multiply-high held to its own scalar loop, sample
+  for sample, by the test beside it. `gif.rs` reads the
   timeline with the frame decoding skipped and composes the canvas itself,
   keeping two deliberate departures from the specification: the background
   colour is never used, and `Any` disposal means `Keep`. `webp.rs`
@@ -146,6 +155,9 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   [`Pixels`] is what a buffered decode produced, and `RowStream` is the decode
   that has not read its picture yet because it can write each row into the frame;
   a format answers with one only when it can fill every frame of the call.
+  an interleaved picture's canvas is an `Arc<[u8]>`, because an animated file's
+  window hands the same picture to every output frame that displays it and the
+  clone that answers a held request must not copy it.
 - `src/formats/`: one module per container, chosen by `identify.rs` rather than
   by the file's name (`heif.rs`
   for monochrome heif/heic and for the colour pages of both containers, which are
@@ -153,7 +165,15 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   for every colour avif, which `dav1d` decodes and which also answers
   `decoder::probe` from the container boxes and the av1 sequence header so that
   probing an avif does not decode it, `jxl.rs` for every jpeg xl, which the `jxl`
-  crate decodes directly, `jp2.rs` for JPEG 2000 header probing and `hayro-jpeg2000`
+  crate decodes directly and which gives that decoder a runner of its own -- the
+  crate hands a page to one thread when it is given none, so a decode is
+  `available_parallelism().min(4)` scoped threads, which is 2.5x a serial page
+  and 1.6x one beside the reader's own workers
+  (`docs/improvements/49-jxl-decode-threads.md`) --
+  -- and whose probe reads a codestream header once: that header states whether
+  the file holds a timeline, so `animation/jxl.rs` is handed the answer beside
+  the description rather than parsing the header again --
+  `jp2.rs` for JPEG 2000 header probing and `hayro-jpeg2000`
   decoding, `png.rs` for the `cICP` chunk and for the png files whose rows it
   walks straight into the frame instead of buffering the picture whole — which
   includes expanding a palette page's indices itself — and
@@ -165,7 +185,8 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   its payload to `bmp.rs` or to the `png` crate,
   `tga.rs` for Truevision Targa, whose eleven image types, three run-length forms
   and two descriptor directions are a port of the `image` reader, and whose
-  thirty-two bit rule is the opposite of the bitmap one's, `dds.rs` for
+  thirty-two bit rule is the opposite of the bitmap one's, whose buffered path
+  writes each sample in the frame's order while it widens it, `dds.rs` for
   DirectDraw surfaces, whose DXT1, DXT3 and DXT5 blocks and their DX10
   equivalents are a port, and whose five and six bit channels widen by
   truncating division where the bitmap and targa readers round to nearest,
@@ -221,8 +242,11 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   build aborts on a panic. `Meta::native_eligible` is what decides whether this
   reader decodes the primary item at all, and an item written as several extents
   is read rather than refused, because those extents are one payload split
-  across the container. A container it still refuses — a grid of tiles, a
-  construction method it does not follow — is described and decoded by `libheif`
+  across the container. A grid whose tiles this reader can place is joined here
+  too, into one picture of the grid item's size, at the depth and chroma the
+  tiles' own `av1C` states; a grid it will not join — the monochrome ones, whose
+  path is `libheif`'s, and a set whose coding records disagree — and a
+  construction method it does not follow are described and decoded by `libheif`
   instead, which reads both.
   `avif.rs` is the one module that decides which library owns an avif, and it
   decides it from the same walk the decode needs for the pixels: a container the
@@ -231,7 +255,23 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   the same way, so the two cannot disagree about which library owns a file; a
   probe must never promise a frame a decode would refuse to produce.
 - `src/pixel.rs`: supported pixel formats, the format a nominal depth names, and
-  planar frame writes, which move a wider word down to the frame's own depth.
+  planar frame writes, which move a wider word down to the frame's own depth,
+  and the one pass that fills every plane of a non-transposed frame from one
+  read of an interleaved decoder buffer.
+- `src/planar.rs`: the one pass that takes an interleaved row apart into the
+  planes it belongs in, shared by `src/formats/png.rs`'s channel walk,
+  `src/decoder.rs`'s `RowSink::place_interleaved` and `src/pixel.rs`'s
+  `write_planes`. the scalar walk is a zip a
+  plane count at a time, which is the shape LLVM turns into `ld3`/`ld4` on its
+  own; an aarch64 kernel carries the two shapes a hand block wins: sixteen bit
+  big-endian samples, where `ldN` + `rev16` folds the swap into the store, and
+  two eight bit channels. NEON is in the aarch64 baseline, so that dispatch is a
+  `#[cfg]`; x86-64's kernel is the sixteen bit big-endian one alone, a `pshufb`
+  a channel over one load, for one, two and four channels (three has no whole
+  block), and it asks the processor for AVX2 and answers zero where it is
+  missing, which runs the whole-row walk. both are held to a naive
+  per-channel gather sample for sample by the test beside them, which forces
+  the kernel by name where the dispatch would not pick it.
 - `src/color.rs`: frame properties, the optional raw `ICCProfile`, and the
   container's color metadata mapped onto `_Primaries`, `_Transfer`, `_Matrix`
   and `_Range`.
@@ -282,10 +322,15 @@ and an rgb frame keeps `_Matrix=0`/`_Range=1` whatever the file says.
   itself: it checks the plugin's joined planes against the whole file's, plane by
   plane. its grid section reads `avif-grid.avif`, a 2x2 grid of tiles encoded
   once by hand from the `avif-grid-source.png` the same script writes
-  (`avifenc --lossless -g 2x2`, with the command in that script's header). A
-  grid is refused by the plugin's own walk and read by `libheif`, so that
-  section checks the joined picture's four cells -- 8, 10, 15 and 17, taken at
-  each cell's middle -- rather than a refusal. its orientation section reads the `tests/fixtures/orientation-*.png` files written by
+  (`avifenc --lossless -g 2x2`, with the command in that script's header). Its
+  tiles are monochrome, so `libheif` joins that one, and the section checks the
+  joined picture's four cells -- 8, 10, 15 and 17, taken at each cell's middle
+  -- rather than a refusal. `test_avif_grid_colour` reads
+  `avif-grid-colour.avif`, the same 2x2 of four colours encoded with `avifenc
+  -d 8 -y 420 --cicp 1/13/6 -r f -q 100 -g 2x2` from
+  `avif-grid-colour-source.png`, which this plugin joins itself: the check
+  pins the format, the size, the grid item's `_Matrix` and four luma samples.
+  its orientation section reads the `tests/fixtures/orientation-*.png` files written by
   `tests/make-orientation-fixtures.py`, plus `orientation-6.jxl`, which that
   script documents and `cjxl` makes, and its yuv orientation section reads the
   `orientation-{2,6,8}.webp` files that script cuts out of

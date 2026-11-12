@@ -403,7 +403,7 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
         transform: info.transform,
         pixels: Pixels::Interleaved {
             color_type: ColorType::Rgba8,
-            buffer,
+            buffer: buffer.into(),
         },
         timings: DecodeTimings {
             open,

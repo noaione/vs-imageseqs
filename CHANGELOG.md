@@ -4,14 +4,47 @@
 
 ### changed
 
+- A tiled avif whose tiles this plugin can place is joined by the plugin itself,
+  so the frame is the yuv its tiles hold instead of the r,g,b `libheif` builds:
+  each tile is decoded and placed at the offset the grid item names, and a grid
+  whose tiles are monochrome is still `libheif`'s.
+- A colour heif or heic whose container states no colour matrix, states
+  `unspecified` or states the identity is handed out as its r,g,b samples
+  instead of being refused, as is a page whose depth has no yuv format.
+- A colour heif page that states fourteen or sixteen bits at 4:2:0, 4:2:2 or
+  4:4:4 keeps its own yuv planes (`YUV420P14` and its siblings). Sixteen bits
+  is as far as `libheif` goes, so the two `P16` arms are held by tests alone.
 - Upgrade JPEG 2000 decoding to `hayro-jpeg2000` 0.5.0.
-- Bump `exr` to `1.74.3` and `wpd` to `6fa9de20df3eacc5259751573c220ea6a7b03e5b`.
-- Bump `vapoursynth4-rs` to `0.6.0`, which needs Rust 1.95 or newer.
+- Bump `exr` to `1.74.3`, `wpd` to `6fa9de20df3eacc5259751573c220ea6a7b03e5b`
+  and `vapoursynth4-rs` to `0.6.0`, which needs Rust 1.95 or newer.
 
 ### performance
 
-- On the 35-page JPEG 2000 corpus, read time is effectively unchanged: 0.9% faster with the default four workers and 0.4% faster with `prefetch=0` than 0.4.1.
-- Improve `ReadAlpha` performance when doing async frame requests.
+- A JPEG XL page is decoded on more than one thread, and creating a clip over
+  the set reads each codestream header once instead of twice. The 35-page
+  corpus reads 2.5x faster with the lookahead off and 1.6x with it on, and
+  clip creation is 1.36x faster (2.56 ms to 1.88 ms). A consumer that keeps
+  its own requests in flight gains the same 1.6x.
+- A buffered decoder's picture is taken apart into the frame's planes in one
+  pass rather than one a plane: 1.2x to 1.3x on a tiff or a qoi, 1.6x on an
+  APNG's write. A sixteen bit png or a farbfeld is that pass with the swap
+  folded in, 3% to 7% on the png and 29% on a farbfeld, and the x86-64
+  libraries fold it into an AVX2 block for 1.34x on a farbfeld and 1.16x on a
+  gray16 page. A png's gray+alpha and rgba rows are placed that way too, 7% to
+  9% off those pages.
+- A bitmap, a block compressed surface, a Radiance picture, a targa and a
+  one-picture GIF each decode faster: 1.33x to 1.40x on a 24 or 32 bit bitmap,
+  15% off the DXT5 decode stage, 15% to 18% off a `.hdr` frame, 2.2x on a
+  sixteen bit targa and 1.8x on a palette one, and 1.64x to 1.89x on the GIF,
+  which is decoded once instead of three times.
+- An animated file's decoded pictures are shared rather than copied for every
+  output frame that displays one, and its canvas work is reduced: a GIF
+  animation composes only the rectangle each frame states and reads 1.27x
+  faster (a still GIF 1.14x), a WebP's alpha blend looks its reciprocal up for
+  1.18x, a sixteen bit APNG blends with a NEON multiply-high for 3%, and
+  sharing is another 2% to 4% on all three.
+- `ReadAlpha` is faster for an async consumer. JPEG 2000 read time is
+  unchanged within a percent, and every pixel above is identical.
 
 ## [0.4.2] - 2026-10-28
 

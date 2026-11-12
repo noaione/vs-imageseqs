@@ -24,6 +24,15 @@ says otherwise.
 `p001` and `p002` hold colour (plus `p018`, which is grey content stored in a
 colour format). every set needs `mismatch=True`.
 
+`target/bench/qoi-corpus` is the same 35 pages in an eighth container, and it is
+not under `sandbox/` because qoi holds no grey: ImageMagick writes each page
+from the png set (`magick "snek - p000.png" "snek - p000.qoi"`, a page at a
+time), so a `Gray8` page becomes three channels of the same sample and the
+plugin hands the set out as `RGB24`. Every page was checked against its source
+before it was measured, twice: `magick compare -metric AE` finds 0 differing
+pixels on all 35, and `target/bench/qoi-parity.py` reads both sets through this
+plugin and finds 0 of 35 pages differing.
+
 | set | files | what imgseqs returns | decoded |
 | --- | --- | --- | --- |
 | webp | 35 | 35 `YUV420P8` | 964 MiB |
@@ -31,6 +40,7 @@ colour format). every set needs `mismatch=True`.
 | heic | 35 | 31 `Gray8` and 4 `YUV420P8` | 685 MiB |
 | jp2 | 35 | 32 `Gray8` and 3 `RGB24` | 748 MiB |
 | jpeg, png, jxl | 35 | 31 `Gray8` and 4 `RGB24` | 784 MiB |
+| qoi | 35 | 35 `RGB24` | 1929 MiB |
 
 ## fair comparison
 
@@ -74,6 +84,7 @@ against bestsource, default settings, frames only:
 | jp2 | 13.36 s | 13.12 s | bestsource 1.02x faster on frames, imgseqs 1.96x faster including the open |
 | avif | 1.88 s | cannot open | |
 | heic | 6.72 s | cannot open | |
+| qoi | 1.178 s | 1.381 s | imgseqs 1.17x faster, 1.78x including the open |
 
 bestsource now decodes jxl on this machine (it failed with `Video codec not
 found` before), so jxl has a real comparison for the first time.
@@ -170,6 +181,33 @@ plugin places the rows itself instead of buffering the picture.
 | bestsource `VideoSource` | 4.328 s | 122.65 ms | 4.377 s | 8.706 s |
 | bestsource `VideoSource`, `threads=1` | 13.160 s | 379.85 ms | 13.551 s | 26.712 s |
 
+the `imgseqs` rows above are the build before [49](improvements/49-jxl-decode-threads.md):
+with the decode's runner the same set is 2.9 s at the default lookahead and
+4.7 s at `prefetch=0`.
+
+### the decode's threads
+
+`jxl`'s decoder takes a `JxlParallelRunner` and this tree passed it none, on all
+three `process` calls, which is the crate's `SequentialRunner`: one thread a
+page. [49](improvements/49-jxl-decode-threads.md) gives it one, and the
+build before it against the build that carries it, alternated over
+`sandbox/jxl` in three rounds and the best round each, whole-set wall clock
+(`target/bench/plan48/jxl-threads.py`, `jxl-async.py`):
+
+| set | before | after | change |
+| --- | ---: | ---: | ---: |
+| one decode at a time, `prefetch=0` | 335.4 | 134.6 | 2.49x |
+| the default lookahead, `prefetch=4` | 132.1 | 83.1 | 1.59x |
+| four `get_frame_async` requests, pool off | 134.4 | 82.8 | 1.62x |
+
+milliseconds a frame. The last row is the consumer that decodes on its own
+threads, which is the shape a per-decode budget has to survive: it does, by the
+same 1.6x. The width is `available_parallelism().min(4)`, and the four is the
+sweep rather than a taste -- with the pool decoding too, four and eight threads
+are 1.60x and 1.61x, so eight only buys contention. The stage split moves with
+it: `read` was 415 of a 437 ms frame and is 136 of a 155 ms one at four
+threads.
+
 ## avif
 
 35 files: 34 `YUV420P8` and one `Gray8`. bestsource cannot open the set.
@@ -189,6 +227,376 @@ plugin places the rows itself instead of buffering the picture.
 | imgseqs `Read` | 6.716 s | 175.36 ms | 0.009 s | 6.725 s |
 | imgseqs `Read`, `prefetch=0` | 22.566 s | 661.55 ms | 0.010 s | 22.576 s |
 | imgseqs `Read`, `prefetch=16` | 4.524 s | 0.09 ms | 0.009 s | 4.533 s |
+
+## qoi
+
+35 files: 35 `RGB24` of 44.7 MiB (`p000`) and 55.4 MiB.
+
+| reading the set | frames | median frame | open | total |
+| --- | ---: | ---: | ---: | ---: |
+| imgseqs `Read` | 1.178 s | 30.39 ms | 0.003 s | 1.180 s |
+| imgseqs `Read`, `prefetch=0` | 2.645 s | 73.53 ms | 0.003 s | 2.648 s |
+| imgseqs `Read`, `prefetch=16` | 1.009 s | 0.10 ms | 0.003 s | 1.011 s |
+| bestsource `VideoSource` | 1.381 s | 36.14 ms | 0.714 s | 2.095 s |
+| bestsource `VideoSource`, `threads=1` | 3.266 s | 90.21 ms | 2.575 s | 5.841 s |
+
+qoi is the one set where the plugin adds nothing to the decode: the `qoi` crate
+unpacks a byte stream of runs and deltas into one buffer, so there is no row to
+walk into a frame and no transform to fuse. What this reader does pay for is the
+split of that buffer into three planes: a serial frame is 77.1 ms, of which the
+decode (`read`) is 35.0 ms and the split (`convert`) 21.2 ms, with `open` 3.8 ms
+(`target/bench/plan48/measure.py`, `prefetch=0`, three reps). The lookahead is
+what the set turns on: 2.645 s serial against 1.178 s at the default window, and
+`prefetch=16` adds a further 14%, because a page is 58 MB to decode and the four
+default workers leave the memory system room.
+
+bestsource reads the set too -- ffmpeg has a qoi decoder -- and loses by 1.17x
+on frames and 1.78x including the open, because it indexes all 35 files while
+creating the clip (714 ms) where the probe here reads fourteen bytes a file.
+Both plugins report `0x0` for the clip, which is what a variable size sequence
+does in this build; the alignment check the script runs confirms the 35 frames
+are the same pictures.
+
+## decoder
+
+[48](improvements/48-decoder-vectorisation.md) is the plan about the loops this
+tree owns in its own decoders rather than the scheduling around them. This is
+the aarch64 round of its interleave step: the pass that takes an interleaved
+row apart into planes, and the sixteen bit big-endian one a sixteen bit png and
+a farbfeld hand over.
+
+measured 2026-11-10 on macOS 27, rustc 1.99.1, one `Read` and one `ReadAlpha`
+clip, `prefetch=0`, the `debug=1` stage log, two builds of the same commit
+alternated inside one batch (`target/bench/plan48/ab.py`, best of five
+rounds). `before` is the commit without the change, so the table is the change
+and not the branch. Milliseconds a frame.
+
+| set | read before | read after | total before | total after | change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| png rgba16 | 16.56 | 15.38 | 16.65 | 15.47 | 0.93x faster |
+| png rgb16 | 15.48 | 14.50 | 15.57 | 14.59 | 0.94x faster |
+| png la16 | 8.84 | 8.56 | 8.90 | 8.62 | 0.97x faster |
+| png gray16 | 5.87 | 5.57 | 5.92 | 5.62 | 0.95x faster |
+| png rgba8 | 8.53 | 7.77 | 8.59 | 7.83 | 0.91x faster |
+| png la8 | 3.44 | 3.19 | 3.48 | 3.23 | 0.93x faster |
+| png rgb8 | 4.89 | 4.88 | 4.94 | 4.94 | unchanged |
+| png gray8 | 2.21 | 2.20 | 2.24 | 2.23 | unchanged |
+| farbfeld | 1.77 | 1.25 | 1.81 | 1.28 | 0.71x faster |
+
+the png set is `target/bench/png-depth`, eight 1200x900 pages of each colour
+type from `target/bench/make-png-depth-corpus.py`, because `step5-corpus` has
+no png page; farbfeld is `step5-corpus`'s eight `.ff` pages. A sixteen bit png
+spends most of its frame in inflate, so a loop 4x faster is 3% to 7% of the
+frame; farbfeld has nothing to inflate, so the same kernel is 29% of its
+frame. The untouched formats were swept the same way and none moved beyond
+this machine's noise (bmp 0.99x, dds 1.00x, ppm 0.99x, qoi 0.99x, tiff
+1.00x, exr 0.98x, hdr 1.00x, ico 1.03x at 0.12 ms a frame). Those rows are
+the arm64 machine's. The x86-64 libraries were measured afterwards, on the
+buffered write and on the loops that were still open, below.
+
+### the buffered targa
+
+`tga.rs`'s buffered path is the one the old corpus could not measure: its
+eight pages were top-down 24-bit, which the row sink takes. 32 pages of the
+four buffered shapes, 1200x900, `target/bench/tga-corpus`
+(`target/bench/make-tga-corpus.py`), three alternating rounds:
+
+| shape | read before | read after | change |
+| --- | ---: | ---: | ---: |
+| raw 24-bit, bottom-up | 0.542 | 0.542 | unchanged |
+| 24-bit RLE | 3.779 | 3.805 | unchanged (noise) |
+| 16-bit, five bits a channel | 0.575 | 0.257 | 2.24x faster |
+| 8-bit palette into a 24-bit map | 2.538 | 1.412 | 1.80x faster |
+| all four shapes | 1.852 | 1.496 | 1.24x faster |
+
+the two fast shapes now write each sample in the frame's order while they
+widen it, so the pass that exchanged blue and red is gone; the plain memcpy
+shapes keep it, because fusing the byte copy in beside the memcpy measured
+20% slower. Every page is byte identical, and so are the fifteen fixtures.
+
+measured again on the Windows host, `prefetch=0`, both x86-64 libraries
+alternating against a build of the same tree with the fold reverted (the
+`src/formats/tga.rs` of the commit before it), best of four rounds. The
+baseline library first, then the `.avx512` one:
+
+| shape | library | read before | read after | change |
+| --- | --- | ---: | ---: | ---: |
+| raw 24-bit, bottom-up | baseline | 2.528 | 2.632 | unchanged |
+| 24-bit RLE | baseline | 5.003 | 5.368 | unchanged |
+| 16-bit, five bits a channel | baseline | 1.979 | 1.243 | 1.59x faster |
+| 8-bit palette into a 24-bit map | baseline | 4.000 | 2.435 | 1.64x faster |
+| raw 24-bit, bottom-up | `x86-64-v4` | 2.626 | 2.524 | unchanged |
+| 24-bit RLE | `x86-64-v4` | 5.185 | 5.239 | unchanged |
+| 16-bit, five bits a channel | `x86-64-v4` | 1.526 | 0.931 | 1.64x faster |
+| 8-bit palette into a 24-bit map | `x86-64-v4` | 3.822 | 2.149 | 1.78x faster |
+
+the two plain-copy shapes are unchanged on both libraries: a second look at
+eight rounds read 1.02x on the RLE pages and 0.85x on the bottom-up ones,
+which is this machine's noise around an unchanged code path, and it is that
+second look the `unchanged` cells report. The two folded shapes still gain
+1.6x to 1.8x, less than the arm64 machine's 2.24x and 1.80x but the same
+direction. Every plane of every frame of the 32 pages is byte identical
+between the two builds.
+
+### the sixteen bit apng blend
+
+`apng.rs`'s `blend16` was the one blend loop LLVM left a sample at a time.
+`target/bench/apng16-corpus` is two 1024x900 sixteen bit RGBA pages of four
+frames, three `over` at a quarter, a half and three quarters coverage, written
+by `target/bench/make-apng16-corpus.py`; the row is `fetch`, three rounds:
+
+| build | fetch | change |
+| --- | ---: | ---: |
+| scalar sample at a time | 6.26 | |
+| `vmull_u16` block of four, multiply-high for `/ 65535` | 6.08 | 1.03x |
+
+the loop alone is 1.92 ms a page against a scalar 1.92 ms measured outside the
+plugin, which is why the frame moves only 3%: the blend is called a pixel at a
+time with that pixel's own alpha, so the setup is half of a block, and the
+whole blend is 9% of a presentation. Both pages, the 80 frame eight bit corpus
+and the 121 animation fixture frames are byte identical.
+
+the buffered write is the same pass. `src/pixel.rs`'s `write_planes` gathered
+one plane at a time from a decoder that buffers its picture; it now fills
+every plane a non-transposed frame asks for from one read, with the row
+mirrors and the alpha drop folded in, and stops at a transpose or a depth
+that needs a shift. Same method and build pairs as the table above:
+
+| set | convert before | convert after | total before | total after | change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| apng 1024x1024 rgba8, 8 frames | 0.264 | 0.164 | 1.782 | 1.688 | 0.62x on the write |
+| qoi 1200x900 rgb8, 8 pages | 0.240 | 0.197 | 3.831 | 3.809 | 0.82x on the write |
+| tiff 1200x900, 8 pages | 0.274 | 0.214 | 6.905 | 6.898 | 0.78x on the write |
+| pnm 1200x900, 8 pages | 0.000 | 0.000 | 0.600 | 0.593 | unchanged |
+
+the corpora are `target/bench/apng-corpus` and `target/bench/step5-corpus`
+(`target/bench/plan48/ab.py`, four alternating rounds). The read stage does
+not move, so a frame's total moves less than its write does; every plane of
+every frame of both clips, and of every format under `tests/fixtures`, is byte
+identical under the two builds, and both validators pass.
+
+### the buffered write on x86-64
+
+The one-pass `write_planes` was A/B'd on the Windows host against a build of
+the same tree that declines it (the walk then takes `write_channel` a plane at
+a time), alternating the two builds inside one batch with
+`target/bench/plan48/ab.py`, best of five rounds, `prefetch=0`. Milliseconds a
+frame; the `convert` stage is the whole of the difference, because the read
+stage is not touched.
+
+measured 2026-11-11 on Windows 11, i5-11400H, `x86-64-v4` is the `.avx512`
+library. The apng pages are 1024x1024 and the others are 1200x900.
+
+| set | build | convert, one pass | convert, per plane | change |
+| --- | --- | ---: | ---: | ---: |
+| qoi rgb8, 8 pages | baseline | 1.558 | 1.704 | 1.09x |
+| qoi rgb8, 8 pages | `x86-64-v4` | 0.893 | 1.251 | 1.40x |
+| tiff, 8 pages | baseline | 1.586 | 1.634 | 1.03x |
+| tiff, 8 pages | `x86-64-v4` | 0.913 | 1.114 | 1.22x |
+| apng rgba8, 8 frames | baseline | 1.398 | 1.526 | 1.09x |
+| apng rgba8, 8 frames | `x86-64-v4` | 0.849 | 1.030 | 1.21x |
+
+the one pass wins on both x86-64 libraries, by less than the arm64 round's
+1.2x to 1.6x and never by nothing, so it stays. A frame's total moves 1% to
+9% because the read is the larger stage.
+
+### the sixteen bit big-endian walk
+
+`place16be`'s swap was `#[cfg(target_arch = "aarch64")]`, so both x86-64
+libraries ran `scalar16be`, and the generated code says the compiler does not
+vectorise it there: in the `x86-64-v4` build
+`formats::png::Rows::<RowStream>::fill`, which is where a sixteen bit page's row
+walk is inlined, has no `pshufb` at all, while `planar::place8::<3>` and `<4>`
+carry 21 and 6. The runtime plane count is what stops it: the walk iterates
+`planes`, and a slice whose length is only checked to be at most `C` is not
+unrolled. The asm is one command, `cargo rustc --release --locked --target
+x86_64-pc-windows-msvc -- --emit asm -C target-cpu=x86-64-v4`; `cargo asm`
+itself will not read this crate, because the artifact it looks for is an rlib
+and this one is a cdylib.
+
+so it has a block now. A block is one thirty-two byte load: the swap is a
+shift pair, and a `pshufb` a channel reads that channel's words out of the
+load, with the two lanes joined by a dword permute. One, two and four channels
+are covered; three has no whole block and keeps the whole-row walk.
+
+| set | library | read before | read after | change |
+| --- | --- | ---: | ---: | ---: |
+| farbfeld, 8 pages | baseline | 6.188 | 4.614 | 1.34x faster |
+| farbfeld, 8 pages | `x86-64-v4` | 5.676 | 4.093 | 1.39x faster |
+| png gray16, 4 pages | baseline | 4.319 | 3.734 | 1.16x faster |
+| png la16, 4 pages | baseline | 14.441 | 13.724 | 1.05x faster |
+| png rgba16, 4 pages | baseline | 29.572 | 29.869 | unchanged |
+| png rgb16, 4 pages | baseline | 23.251 | 22.889 | unchanged |
+
+measured 2026-11-11 against a build of the same tree without the block, the two
+alternated inside one batch, best of five rounds, `prefetch=0`. The png pages
+are `target/bench/png-depth`, which `target/bench/make-png-depth-corpus.py`
+writes; they are 7 to 30 ms a frame because a sixteen bit png is inflate
+bound, which is why the 30% the block takes off a farbfeld is 5% to 14% of a
+page. Three channel pages are the control: the block declines them and they
+read unchanged. Every plane of every page of those sets, of `tests/fixtures`'
+png pages and of the eight farbfeld pages is byte identical.
+
+### the per-format stages on this host
+
+The plan's evidence table was measured on an x86-64 host before any of its
+steps landed. Re-running it on this one, with the tree as it stands and the
+same method (`target/bench/plan48/measure.py`, 1200x900 pages of
+`target/bench/step5-corpus`, `prefetch=0`, three reps):
+
+| set | decode base | decode `v4` | convert base | convert `v4` | total `v4` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| bmp 24-bit | 3.045 | 2.168 | — | — | 2.349 |
+| dds DXT5 | 3.114 | 3.385 | 1.597 | 1.040 | 7.029 |
+| tga 24-bit | 2.515 | 2.163 | — | — | 2.344 |
+| pnm `P6` | 2.908 | 1.872 | — | — | 2.030 |
+| qoi | 5.986 | 6.007 | 1.421 | 0.924 | 9.201 |
+| hdr | 9.827 | 7.602 | 3.444 | 3.610 | 13.804 |
+| farbfeld | 5.310 | 5.287 | — | — | 5.505 |
+| tiff | 6.617 | 6.177 | 1.426 | 0.888 | 9.123 |
+| exr | 21.543 | 19.207 | 4.187 | 3.852 | 24.253 |
+| ico | 0.182 | 0.183 | 0.076 | 0.044 | 0.535 |
+
+**this is a starting point, not a comparison.** the same sets measured hours
+apart on this machine differ by up to 40%, and the formats that read the whole
+file worst of all (`exr` carries its time in `open`), so a row here and a row
+in the evidence table differ by more than anything a landed step could have
+done. every claim this round makes is two builds alternated inside one batch,
+which is the method the tables above use.
+
+## animation
+
+the gif compositor is the `src/animation/gif.rs` section of
+[48](improvements/48-decoder-vectorisation.md). `Canvas::compose` walks the
+rectangle a frame states now, one `copy_from_slice` a row, and the per-sample
+`blend` became a row walk whose disposal branch is hoisted; on aarch64 the row
+is a `vbslq_u32` select four pixels a block. `place`, the still gif path, got
+the same rectangle row walk.
+
+measured 2026-11-10 on macOS 27, rustc 1.99.1, `prefetch=0`, the `debug=1`
+stage log, two builds of the same commit alternated (`target/bench/plan48/
+measure.py`, best of three alternating runs, five reps each). Milliseconds a
+frame; the animation cost is the `fetch` stage and the total includes the
+frame the worker builds. The gif and webp rows under this heading are the
+arm64 machine's; the x86-64 halves of the compose row were written, measured
+and declined afterwards, and that measurement is the subsection below.
+
+| set | fetch before | fetch after | total before | total after | change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| gif animation, 1024x1024, 16 frames | 2.00 | 1.57 | 2.05 | 1.60 | 0.78x faster |
+| gif still, 1024x1024 | 4.45 | 3.89 | 4.45 | 3.90 | 0.88x faster |
+| webp animation, 1024x1024, 16 frames | 1.92 | 1.64 | 1.92 | 1.64 | 0.85x faster |
+
+The gif rows compare this commit with the one before it; the webp row compares
+a build of the same tree with the reciprocal table and without it, because the
+write it sits beside had already moved.
+
+### the shared canvas
+
+`Pixels::Interleaved`'s buffer is an `Arc<[u8]>` now, so the presentation cache
+hands out a pointer rather than a canvas. Measured against a build of the
+previous commit, same corpus and method, three alternating rounds:
+
+| set | fetch before | fetch after | change |
+| --- | ---: | ---: | ---: |
+| gif animation, 1024x1024 | 1.50 | 1.47 | 2% faster |
+| webp animation, 1024x1024 | 1.58 | 1.55 | 2% faster |
+| apng, 1024x1024 | 1.59 | 1.53 | 4% faster |
+
+the copy removed is about 2 MB an output frame at these sizes, which memory
+bandwidth prices at about 0.05 ms. It is kept because it is a copy less and
+because sharing the canvas is what a later step builds on, not because it was
+the frame's cost. Every frame is byte identical.
+
+the corpus is `target/bench/plan48/anim-corpus`. Every plane of every frame
+of both clips is byte identical under the two builds, and `tests/readalpha.vpy`
+passes its 1034 checks. The compose loop itself went 0.897 to 0.424 to 0.237 ms
+for a full-canvas `Keep` frame and 0.912 to 0.425 to 0.188 ms for a `Background`
+one: the first step is the rectangle walk, the second the NEON select, and the
+x86-64 libraries keep the first and not the second.
+
+### the animation rows on this host
+
+The same corpora measured on the Windows host, both libraries, `prefetch=0`,
+`target/bench/plan48/measure.py`, three reps. One run each, so these are the
+other host's column rather than a comparison with the arm64 numbers above:
+they are three to five times the arm64 `fetch`, which is the `gif` crate's
+LZW and the four megabyte canvases rather than anything the compose does.
+
+| set | library | fetch | convert | total |
+| --- | --- | ---: | ---: | ---: |
+| apng, 1024x1024, 80 frames | baseline | 4.683 | 1.438 | 4.691 |
+| apng, 1024x1024, 80 frames | `x86-64-v4` | 4.057 | 0.839 | 4.065 |
+| gif animation, 31 frames | baseline | 6.012 | 1.543 | 6.020 |
+| gif animation, 31 frames | `x86-64-v4` | 5.214 | 0.914 | 5.222 |
+| gif still, 1024x1024 | baseline | 12.891 | 1.412 | 12.899 |
+| gif still, 1024x1024 | `x86-64-v4` | 11.131 | 0.888 | 11.138 |
+| webp animation, 31 frames | baseline | 7.841 | 1.535 | 7.849 |
+| webp animation, 31 frames | `x86-64-v4` | 7.245 | 0.958 | 7.253 |
+| sixteen bit apng, 1024x900, 4 frames | baseline | 29.035 | 2.788 | 29.046 |
+| sixteen bit apng, 1024x900, 4 frames | `x86-64-v4` | 26.784 | 2.091 | 26.809 |
+
+the last two are `target/bench/apng16-corpus`, which
+`target/bench/make-apng16-corpus.py` writes by hand: nothing on this machine
+emits an APNG, so the container's `acTL`, `fcTL`/`IDAT` and `fdAT` chunks are
+assembled there. A frame is 29 ms against the arm64 round's 6.26, and the
+sixteen bit blend is the scalar loop on x86-64, which is why the arm kernel's
+3% has no x86-64 column to sit beside.
+
+### the compose row on x86-64
+
+`blend_row`'s AVX2 and AVX-512 blocks were written for the Windows host and are
+**not landed**: on this machine the row already runs at the memory system's
+ceiling, so a block that makes its arithmetic cheaper moves nothing. This is
+the measurement that decided it, and `src/animation/gif.rs`'s ignored
+`the_compose_measured` test is how to ask again.
+
+The row alone, over a canvas `w` columns by `h` rows, best of 20 passes, one
+canvas a pass, one run each, `prefetch=0`. `scalar` is the walk both x86
+libraries run today, and the two blocks are named as the dispatch names them.
+This host's run-to-run spread on this loop is wide, up to 40% at the largest
+canvas, which is why the test alternates the paths round by round now and why
+the decision rests on the end-to-end table below rather than on any one cell.
+
+| canvas | build | scalar | avx2 | avx512 | scalar -> avx512 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 256x256 | baseline | 0.371 | 0.150 | 0.142 | 2.6x |
+| 256x256 | `x86-64-v3` | 0.195 | 0.145 | 0.116 | 1.7x |
+| 256x256 | `x86-64-v4` | 0.125 | 0.124 | 0.102 | 1.2x |
+| 1024x1024 | baseline | 1.291 | 0.749 | 0.647 | 2.0x |
+| 1024x1024 | `x86-64-v3` | 0.607 | 0.593 | 0.605 | 1.0x |
+| 1024x1024 | `x86-64-v4` | 0.709 | 0.629 | 0.795 | 0.9x |
+| 4096x4096 | baseline | 0.736 | 0.695 | 0.728 | 1.0x |
+| 4096x4096 | `x86-64-v3` | 0.721 | 0.707 | 0.723 | 1.0x |
+| 4096x4096 | `x86-64-v4` | 1.010 | 0.981 | 0.884 | 1.1x |
+
+nanoseconds a pixel. The two wide builds already vectorise this loop: at
+1024x1024 the baseline library's walk is 1.29 ns a pixel and theirs are 0.61
+and 0.71, which is what the best block costs there (0.59 to 0.63). So the only
+library where a hand block wins is the baseline one, which is step 0's result
+again, and the only canvas where it wins is one small enough to sit in a cache.
+
+The reason is the traffic rather than the arithmetic: a canvas is two four
+megabyte buffers read and written, twelve bytes a pixel, and 0.65 ms of that is
+19 GB/s, this host's single-core memory ceiling. A block removes work the
+memory system is already waiting on. It is the opposite of the arm64 machine,
+whose bandwidth per core left the scalar walk arithmetic bound and a NEON block
+worth 1.8x.
+
+End to end on the gif animation (31 output frames of 16 pictures, ten
+alternating rounds, the best round each, `target/bench/plan48/ab-fetch.py`):
+
+| library | fetch before | fetch after | change |
+| --- | ---: | ---: | ---: |
+| baseline | 4.922 | 4.930 | unchanged |
+| `x86-64-v3` | 4.367 | 4.396 | unchanged |
+| `x86-64-v4` | 4.365 | 4.338 | unchanged |
+
+and a control build whose `blend_row` returns at once, so the whole blend is
+skipped rather than its arithmetic, moves the same row from 4.716 to 4.400
+(0.93x): every read and write the blend does is 0.32 ms of a 4.7 ms frame. A
+block can only take the part of that which is arithmetic, and on this host that
+part is small enough that ten alternating rounds cannot see it.
 
 
 ## PNGWrite

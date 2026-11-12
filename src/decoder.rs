@@ -333,44 +333,68 @@ impl RowSink<'_> {
     /// Answers `None` when the sink does not hold three colour planes, which a
     /// caller reports its own way.
     pub fn place_rgba16(&mut self, source: &[u8], row: usize) -> Option<()> {
-        let (red, rest) = self.colour.split_first_mut()?;
-        let (green, rest) = rest.split_first_mut()?;
-        let (blue, _) = rest.split_first_mut()?;
-        let alpha = self.alpha.as_mut().and_then(|planes| planes.first_mut());
-        // One source row, read once. A pixel is four big-endian samples and each
-        // target takes one of them in the byte order the frame holds, which is what
-        // makes this the only pass over the row.
-        let sample = |pixel: &[u8], channel: usize| -> [u8; 2] {
-            u16::from_be_bytes([pixel[channel], pixel[channel + 1]]).to_ne_bytes()
-        };
-        let red_row = red.row(row);
-        let green_row = green.row(row);
-        let blue_row = blue.row(row);
-        let alpha_row = alpha.map(|plane| plane.row(row));
-        // A frame's row is a whole number of sixteen bit samples, so each plane
-        // splits into samples and the leftovers are the frame's own padding.
-        let (red_words, _) = red_row.as_chunks_mut::<2>();
-        let (green_words, _) = green_row.as_chunks_mut::<2>();
-        let (blue_words, _) = blue_row.as_chunks_mut::<2>();
-        let colour = red_words.iter_mut().zip(green_words).zip(blue_words);
-        let pixels = source.as_chunks::<8>().0.iter();
-        match alpha_row {
-            Some(alpha_row) => {
-                let (alpha_words, _) = alpha_row.as_chunks_mut::<2>();
-                for ((((r, g), b), a), pixel) in colour.zip(alpha_words.iter_mut()).zip(pixels) {
-                    r.copy_from_slice(&sample(pixel, 0));
-                    g.copy_from_slice(&sample(pixel, 2));
-                    b.copy_from_slice(&sample(pixel, 4));
-                    a.copy_from_slice(&sample(pixel, 6));
-                }
+        self.place_interleaved(source, row, 4, 2)
+    }
+
+    /// Writes one interleaved row into the planes a call hands out, reading
+    /// the row once.
+    ///
+    /// `channels` is samples a pixel and `sample_bytes` is one or two; a two
+    /// byte sample is read big endian, which is the order a png and a
+    /// farbfeld store it in. Channels go to the colour planes first and then
+    /// to the alpha planes, which is the order a container states them in; a
+    /// channel the call hands out no plane for is read and dropped.
+    ///
+    /// Answers `None` when the sink holds no colour plane, or for a shape no
+    /// reader asks for, which a caller reports its own way.
+    pub fn place_interleaved(
+        &mut self,
+        source: &[u8],
+        row: usize,
+        channels: usize,
+        sample_bytes: usize,
+    ) -> Option<()> {
+        if self.colour.is_empty() || !(1..=4).contains(&channels) {
+            return None;
+        }
+        match sample_bytes {
+            1 | 2 => {}
+            _ => return None,
+        }
+        // The planes a call hands out, in the order the row stores them.
+        let mut targets: [Option<&mut [u8]>; 4] = [None, None, None, None];
+        let mut count = 0usize;
+        for plane in self.colour.iter_mut() {
+            if count == channels {
+                break;
             }
-            None => {
-                for (((r, g), b), pixel) in colour.zip(pixels) {
-                    r.copy_from_slice(&sample(pixel, 0));
-                    g.copy_from_slice(&sample(pixel, 2));
-                    b.copy_from_slice(&sample(pixel, 4));
-                }
+            targets[count] = Some(plane.row(row));
+            count += 1;
+        }
+        for plane in self.alpha.iter_mut().flatten() {
+            if count == channels {
+                break;
             }
+            targets[count] = Some(plane.row(row));
+            count += 1;
+        }
+        let mut planes: [&mut [u8]; 4] = [&mut [], &mut [], &mut [], &mut []];
+        for (slot, target) in targets.into_iter().enumerate() {
+            if let Some(target) = target {
+                planes[slot] = target;
+            }
+        }
+        let planes = &mut planes[..count];
+        match (channels, sample_bytes) {
+            (1, 1) => crate::planar::place8::<1>(source, planes),
+            (2, 1) => crate::planar::place8::<2>(source, planes),
+            (3, 1) => crate::planar::place8::<3>(source, planes),
+            (4, 1) => crate::planar::place8::<4>(source, planes),
+            (1, 2) => crate::planar::place16be::<1>(source, planes),
+            (2, 2) => crate::planar::place16be::<2>(source, planes),
+            (3, 2) => crate::planar::place16be::<3>(source, planes),
+            (4, 2) => crate::planar::place16be::<4>(source, planes),
+            _ => return None,
         }
         Some(())
     }
@@ -415,7 +439,11 @@ pub enum Pixels {
     /// One buffer holding every channel of `color_type`, interleaved.
     Interleaved {
         color_type: ColorType,
-        buffer: Vec<u8>,
+        /// Shared, because an animated file's window hands the same picture to
+        /// every output frame that displays it, and a held picture can be
+        /// requested more than once: a clone of this buffer is a reference
+        /// count, not a copy of the canvas.
+        buffer: Arc<[u8]>,
     },
     /// One tightly packed buffer per plane of the frame format.
     ///
@@ -817,7 +845,7 @@ pub fn probe_segment(
     // of them reads the file is still each one's own choice, but it is opened here
     // once, and the adapters that used to open it again read this instead.
     let mut input = Input::open(path)?;
-    let mut info = describe(path, apply_rotation, &mut input)?;
+    let Described { mut info, timeline } = describe(path, apply_rotation, &mut input)?;
     keep_profile(&mut info, export_icc_profile);
     // An animated file is described by its own container: the delay of every
     // picture and how to replay it. Whether a file is one is the container's
@@ -835,10 +863,10 @@ pub fn probe_segment(
         Some(Format::Avif | Format::Heif) => {
             crate::animation::heif::segment_info(path, info.clone(), fps, input.reader()?)?
         }
-        // A jpeg xl's scan still opens for itself; the plan lists it with the rest
-        // of the modules that do.
+        // A jpeg xl's scan still reads the whole file when it holds a timeline,
+        // and the header the probe read already said whether it does.
         Some(Format::Jxl) => {
-            crate::animation::jxl::segment_info(path, info.clone(), fps, input.reader()?)?
+            crate::animation::jxl::segment_info(path, info.clone(), fps, input.reader()?, timeline)?
         }
         // A webp whose bitstream is a still image stays on the still path,
         // which is what hands a lossy file out as its own yuv planes. Only an
@@ -863,7 +891,7 @@ pub fn probe_segment(
 #[cfg(test)]
 pub fn probe(path: &Path, apply_rotation: bool, export_icc_profile: bool) -> Result<ImageInfo> {
     let mut input = Input::open(path)?;
-    let mut info = describe(path, apply_rotation, &mut input)?;
+    let mut info = describe(path, apply_rotation, &mut input)?.info;
     keep_profile(&mut info, export_icc_profile);
     Ok(info)
 }
@@ -878,12 +906,24 @@ fn keep_profile(info: &mut ImageInfo, export_icc_profile: bool) {
     }
 }
 
+/// A description, and the timeline answer the header it was read from gave.
+///
+/// A format whose own header states whether the file holds a timeline answers
+/// that too while describing the file, and the answer travels here rather than
+/// being read again: `jxl` is the one that does, because its header is the front
+/// of a codestream and the adapter that scans a timeline would otherwise parse
+/// it a second time. `None` means the container's adapter asks for itself.
+struct Described {
+    info: ImageInfo,
+    timeline: Option<bool>,
+}
+
 /// Describes one file through the open the caller holds.
 ///
 /// The route and the module that describes the file read one window out of it,
 /// and a caller that also wants a timeline reads that from the same open; see
 /// [`probe_segment`].
-fn describe(path: &Path, apply_rotation: bool, input: &mut Input) -> Result<ImageInfo> {
+fn describe(path: &Path, apply_rotation: bool, input: &mut Input) -> Result<Described> {
     // One read of the head answers which module can describe this file, and it
     // is the same call the decode makes: see [`identify::route`]. A module that
     // declines a file its own bytes name -- an openexr whose every layer is deep
@@ -894,6 +934,7 @@ fn describe(path: &Path, apply_rotation: bool, input: &mut Input) -> Result<Imag
     // the module below reads the window from the same input rather than opening the
     // file a second time. A module that reads past the window still opens for itself,
     // and those are listed in the plan as what is left.
+    let mut timeline = None;
     let route = {
         let head = input.head(crate::formats::identify::HEAD_BYTES)?;
         identify::route_from(head, path)
@@ -914,11 +955,11 @@ fn describe(path: &Path, apply_rotation: bool, input: &mut Input) -> Result<Imag
         // decoder for one, which it cannot: it has no jpeg xl format of its own.
         // These two answer with a description rather than with an option: the
         // route above is the check that used to come before the call.
-        Some(Format::Jxl) => Some(formats::jxl::image_info(
-            path,
-            apply_rotation,
-            input.reader()?,
-        )?),
+        Some(Format::Jxl) => {
+            let (info, animated) = formats::jxl::image_info(path, apply_rotation, input.reader()?)?;
+            timeline = Some(animated);
+            Some(info)
+        }
         Some(Format::Jp2) => Some(formats::jp2::image_info(
             path,
             apply_rotation,
@@ -1017,7 +1058,7 @@ fn describe(path: &Path, apply_rotation: bool, input: &mut Input) -> Result<Imag
     // The route is saved on the description so that the timeline decision and
     // the decode do not read the head again to reach the same answer.
     info.route = route;
-    Ok(info)
+    Ok(Described { info, timeline })
 }
 
 /// Decodes `info`.
@@ -1313,6 +1354,7 @@ mod tests {
 
         let jxl = fixture("alpha-rgba8.jxl");
         let info = crate::formats::jxl::image_info(&jxl, true, &mut moved(&jxl))
+            .map(|(info, _)| info)
             .expect("the codestream is described");
         assert!(
             info.width > 0 && info.height > 0,
@@ -1597,6 +1639,37 @@ mod tests {
                 .expect("the fixture probes");
             assert!(!segment.animated, "{name}");
             assert_eq!(segment.frame_count(), 1, "{name}");
+        }
+    }
+
+    /// A jxl probe reads the codestream header once.
+    ///
+    /// The header a probe reads states whether the file holds a timeline, so
+    /// the adapter that would otherwise ask that for itself is given the
+    /// answer. An animated file is read once more by the scan that collects its
+    /// delays, which is a read of its own.
+    #[test]
+    fn a_jpeg_xl_probe_reads_its_header_once() {
+        for (name, rotation, expected) in [
+            ("alpha-rgba8.jxl", true, 1),
+            ("alpha-rgba8.jxl", false, 1),
+            ("jxl-gray10.jxl", true, 1),
+            ("animation.jxl", true, 2),
+        ] {
+            crate::formats::jxl::reset_header_parses();
+            let segment = probe_segment(&fixture(name), Rate::from_fps(24, 1), rotation, false)
+                .expect("the fixture probes");
+            assert_eq!(
+                segment.info.route,
+                Some(crate::formats::identify::Format::Jxl),
+                "{name}"
+            );
+            assert_eq!(
+                crate::formats::jxl::header_parses(),
+                expected,
+                "{name}: rotation={rotation}, animated={}",
+                segment.animated
+            );
         }
     }
 

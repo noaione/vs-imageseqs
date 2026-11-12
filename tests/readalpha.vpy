@@ -1038,20 +1038,18 @@ def test_avif_extents() -> None:
 
 
 def test_avif_grid() -> None:
-    """A 2x2 grid avif is joined by libheif, which is who decodes it now.
+    """A 2x2 grid avif whose tiles are monochrome is joined by libheif.
 
     ``avif-grid.avif`` is written by ``avifenc -g 2x2`` from
     ``avif-grid-source.png``: four 128x128 squares of one sample each, so the
     grid's four cells are four distinct uniform values (top left 8, top right
     10, bottom left 15, bottom right 17).
 
-    This check was written to fail the moment the grid started decoding, as the
-    signal to turn it into this sample check. The plugin's own avif walker still
-    excludes a grid in ``Meta::native_eligible``; what reads it now is
-    ``libheif``, which is who a container this tree's walk refuses goes to
-    instead of the ``image`` decoder. That decoder failed here -- it has no
-    monochrome avif, and the grid's cells are monochrome, so it answered
-    ``Invalid argument``.
+    The plugin's own walk now joins a grid whose tiles it can place
+    (``test_avif_grid_colour``), but a monochrome avif has no path here at all,
+    so this one is described and decoded by ``libheif``, the library a container
+    this tree's walk leaves alone goes to. The ``image`` decoder failed here --
+    it has no monochrome avif either, and answered ``Invalid argument``.
 
     The samples are the ones ``avifdec`` reads back, and they are taken at the
     middle of each cell, so a wrong cell order or an offset wrong by a whole
@@ -1071,6 +1069,41 @@ def test_avif_grid() -> None:
     for x, y, value in ((64, 64, 8), (192, 64, 10), (64, 192, 15), (192, 192, 17)):
         got = luma[y * clip.width + x]
         check(got == value, f"grid: the cell at {x},{y} is {value} (got {got})")
+
+
+def test_avif_grid_colour() -> None:
+    """A colour grid avif is joined here rather than by libheif.
+
+    ``avif-grid-colour.avif`` is ``avif-grid-colour-source.png`` -- four 128x128
+    squares of one colour each -- encoded with ``avifenc -d 8 -y 420 --cicp
+    1/13/6 -r f -q 100 -g 2x2``, so its tiles are 4:2:0 yuv with a matrix the
+    frame properties can name. ``Meta::tiled`` is what joins one whose tiles it
+    can place, and this file is what proves the join: four tiles in ``dimg``
+    order, each into the plane the frame holds, at the offsets the grid
+    descriptor names.
+
+    The samples are the encoder's conversion of those four colours rather than a
+    formula, and they are taken at the middle of each cell, so a wrong order or
+    an offset wrong by a whole tile cannot pass.
+    """
+    clip = core.imgseqs.Read(files=[fixture("avif-grid-colour.avif")])
+    check(
+        clip.format.name == "YUV420P8",
+        f"grid colour: the clip is the tiles' own yuv (got {clip.format.name})",
+    )
+    check(
+        (clip.width, clip.height) == (256, 256),
+        f"grid colour: the clip is the grid joined, 256x256 (got {clip.width}x{clip.height})",
+    )
+    frame = clip.get_frame(0)
+    check(
+        frame.props.get("_Matrix") == 6,
+        f"grid colour: the matrix is the grid item's (got {frame.props.get('_Matrix')})",
+    )
+    luma = samples(frame, 0)
+    for x, y, value in ((64, 64, 87), (192, 64, 131), (64, 192, 52), (192, 192, 181)):
+        got = luma[y * clip.width + x]
+        check(got == value, f"grid colour: the cell at {x},{y} is {value} (got {got})")
 
 
 def test_alpha_demand() -> None:
@@ -2838,6 +2871,83 @@ def test_twelve_bit_pages() -> None:
     check(samples(frame, 2) == [2048] * 12, "heic-yuv420p12: the second chroma plane")
 
 
+def test_heic_depth_arms() -> None:
+    """The fourteen and fifteen bit colour pages a high depth x265 can write.
+
+    ``heic-yuv{400,420,422,444}p{14,16}.heic`` exist for the depth arms the
+    heif reader gained: every one is an eight by six ramp, states bt.709
+    primaries and transfer with full range, and carries no ICC profile. The
+    names say sixteen, but the encoder writes fifteen bits -- that is the depth
+    the container states, and VapourSynth names no fifteen bit yuv format, so
+    those three are handed out as the r,g,b the plugin builds. The samples are
+    the encoder's own conversion rather than a formula, so what is checked here
+    is the format, the geometry and the properties; the twelve bit sibling
+    above pins the decoder's values.
+
+    ``heic-yuv400p16.heic`` reaches 34976, past the 32767 a fifteen bit frame
+    holds, and that is libheif rather than the file: HEVC can carry sixteen bits
+    but the `hvcC` box cannot signal them, so libheif caps a page at fifteen and
+    says so in its README. The pages are checked as the declarations they are,
+    and no sample is pinned, because pinning one would pin that cap.
+    """
+    pages = [
+        ("heic-yuv400p14.heic", "Gray14", [8]),
+        ("heic-yuv400p16.heic", "Gray15", [8]),
+        ("heic-yuv420p14.heic", "YUV420P14", [8, 4, 4]),
+        ("heic-yuv422p14.heic", "YUV422P14", [8, 4, 4]),
+        ("heic-yuv444p14.heic", "YUV444P14", [8, 8, 8]),
+        ("heic-yuv420p16.heic", "RGB45", [8, 8, 8]),
+        ("heic-yuv422p16.heic", "RGB45", [8, 8, 8]),
+        ("heic-yuv444p16.heic", "RGB45", [8, 8, 8]),
+    ]
+    for name, format_name, row_lengths in pages:
+        clip, alpha_clip = read_alpha(files=[fixture(name)])
+        check(
+            clip.format.name == format_name,
+            f"{name}: the clip is {format_name} (got {clip.format.name})",
+        )
+        check(
+            (clip.width, clip.height) == (8, 6),
+            f"{name}: the clip is 8x6 (got {clip.width}x{clip.height})",
+        )
+        frame = clip.get_frame(0)
+        depth = clip.format.bits_per_sample
+        maximum = (1 << depth) - 1
+        for plane, row in enumerate(row_lengths):
+            values = samples(frame, plane)
+            down = (clip.format.subsampling_h or 0) if plane else 0
+            check(
+                len(values) == row * (6 >> down),
+                f"{name}: plane {plane} holds {row} samples a row (got {len(values)})",
+            )
+        check(
+            len(set(samples(frame))) > 1,
+            f"{name}: the page is the ramp rather than one value",
+        )
+        check(frame.props.get("_Primaries") == 1, f"{name}: bt.709 primaries")
+        check(frame.props.get("_Transfer") == 1, f"{name}: bt.709 transfer")
+        check(frame.props.get("_Range") == vs.RANGE_FULL, f"{name}: full range")
+        # A yuv page keeps the matrix its container states; an r,g,b one is
+        # written with zero, which is the property's own invariant for r,g,b.
+        matrix = 0 if format_name.startswith("RGB") else (
+            None if clip.format.num_planes == 1 else 1
+        )
+        check(
+            frame.props.get("_Matrix") == matrix,
+            f"{name}: _Matrix is {matrix} (got {frame.props.get('_Matrix')})",
+        )
+        check(frame.props["ImgSeqHasICC"] == 0, f"{name}: the page carries no profile")
+        alpha = alpha_clip.get_frame(0)
+        check(
+            alpha_clip.format.name == f"Gray{depth}",
+            f"{name}: the alpha clip is Gray{depth} (got {alpha_clip.format.name})",
+        )
+        check(
+            set(samples(alpha)) == {maximum},
+            f"{name}: the alpha plane is opaque at {maximum}",
+        )
+
+
 def test_heic_storing_av1() -> None:
     """A heic whose primary item is av1 is read, which was a path with no file.
 
@@ -2960,6 +3070,7 @@ def main() -> None:
         test_read_is_unchanged,
         test_monochrome_containers,
         test_jxl_depths,
+        test_heic_depth_arms,
         test_color_containers,
         test_yuv_containers,
         test_color_metadata,
@@ -2975,6 +3086,7 @@ def main() -> None:
         test_no_picture,
         test_avif_extents,
         test_avif_grid,
+        test_avif_grid_colour,
         test_alpha_demand,
         test_animation,
         test_source_indices,

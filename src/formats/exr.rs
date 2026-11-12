@@ -299,22 +299,25 @@ fn place(
     at: Vec2<usize>,
     values: &[f32],
     slots: usize,
-    stride: usize,
+    row_bytes: usize,
     plane_bytes: usize,
 ) {
+    // The offset a pixel sits at is the same for every channel, so it is worked
+    // out once; only the plane a channel owns is added per slot. `row_bytes` and
+    // `plane_bytes` were both checked against the buffer before the read, which
+    // is why this is an add rather than a chain of `checked_mul`s a sample.
+    let Some(row) = at.y().checked_mul(row_bytes) else {
+        return;
+    };
+    let Some(pixel) = at
+        .x()
+        .checked_mul(size_of::<f32>())
+        .and_then(|column| row.checked_add(column))
+    else {
+        return;
+    };
     for (slot, value) in values.iter().take(slots).enumerate() {
-        let from = at
-            .y()
-            .checked_mul(stride)
-            .and_then(|row| row.checked_add(at.x()))
-            .and_then(|pixel| {
-                plane_bytes
-                    .checked_mul(slot)
-                    .and_then(|plane| pixel.checked_mul(size_of::<f32>()).map(|at| plane + at))
-            });
-        let Some(from) = from else {
-            return;
-        };
+        let from = pixel + slot * plane_bytes;
         if let Some(target) = buffer.get_mut(from..from + size_of::<f32>()) {
             target.copy_from_slice(&value.to_ne_bytes());
         }
@@ -371,6 +374,10 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
     // One plane per channel, laid end to end: the frame writer takes each one
     // out of the buffer where it already is, so the picture is never interleaved
     // on the way and separated again on the way out.
+    // The distance between two rows of a plane, which is what `place` walks a
+    // picture by: a pixel is four bytes, so it is the sample stride scaled once
+    // rather than once a sample.
+    let row_bytes = stride * size_of::<f32>();
     let bytes = plane_bytes
         .checked_mul(slots)
         .ok_or_else(|| ImgSeqError::new("the layer is too large for a frame"))?;
@@ -402,7 +409,7 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
                     move |buffer: &mut Vec<u8>,
                           at: Vec2<usize>,
                           (r, g, b, a): (f32, f32, f32, f32)| {
-                        place(buffer, at, &[r, g, b, a], slots, stride, plane_bytes);
+                        place(buffer, at, &[r, g, b, a], slots, row_bytes, plane_bytes);
                     },
                 )
                 .first_valid_layer()
@@ -431,7 +438,7 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
                 .collect_pixels(
                     move |_: Vec2<usize>, _: &_| vec![0u8; bytes],
                     move |buffer: &mut Vec<u8>, at: Vec2<usize>, (y, a): (f32, f32)| {
-                        place(buffer, at, &[y, a], slots, stride, plane_bytes);
+                        place(buffer, at, &[y, a], slots, row_bytes, plane_bytes);
                     },
                 )
                 .first_valid_layer()

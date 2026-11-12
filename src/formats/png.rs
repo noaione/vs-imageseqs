@@ -589,7 +589,10 @@ pub fn decode(info: &ImageInfo) -> Result<Option<DecodedImage>> {
         height: info.height,
         format: info.format,
         transform: info.transform,
-        pixels: Pixels::Interleaved { color_type, buffer },
+        pixels: Pixels::Interleaved {
+            color_type,
+            buffer: buffer.into(),
+        },
         timings: DecodeTimings {
             open,
             metadata: Duration::ZERO,
@@ -736,47 +739,18 @@ impl<'a> Placer<'a> {
         Ok(())
     }
 
-    /// Writes `data` one channel at a time, into the plane that channel
-    /// belongs in.
+    /// Writes one row into the planes it belongs in, reading it once.
     ///
-    /// This is the general shape: one walk over the row for each plane, which
-    /// is a gather when the planes are interleaved and a contiguous copy when
-    /// they are not. [`Self::place_rgb`] is what the three channel eight bit
-    /// case uses instead.
+    /// The row is interleaved -- three or four samples a pixel -- and every
+    /// channel has a plane, so walking it once and writing each channel of the
+    /// pixel where it goes is one pass. This is [`RowSink::place_interleaved`],
+    /// which is where the sixteen bit big-endian swap the format stores lives
+    /// as well; [`Self::place_rgb`] is the three channel eight bit case, which
+    /// has a walk of its own.
     fn place_by_channel(&mut self, data: &[u8], row: usize) -> Result<()> {
-        let channels = self.layout.channels;
-        let sample_bytes = self.layout.sample_bytes;
-        let colour_channels = self.layout.colour_channels;
-        for channel in 0..channels {
-            let target = if channel < colour_channels {
-                self.sink.colour.get_mut(channel)
-            } else {
-                self.sink
-                    .alpha
-                    .as_mut()
-                    .and_then(|planes| planes.get_mut(channel - colour_channels))
-            };
-            // A channel the call hands out nowhere is read and dropped, which
-            // is what a colour-only read of a file with alpha does.
-            let Some(target) = target else {
-                continue;
-            };
-            let out = target.row(row);
-            if sample_bytes == 1 {
-                for (index, byte) in out.iter_mut().enumerate() {
-                    *byte = data[index * channels + channel];
-                }
-            } else {
-                for (index, sample) in out.as_chunks_mut::<2>().0.iter_mut().enumerate() {
-                    let at = (index * channels + channel) * 2;
-                    // A png stores a sixteen bit sample big endian and the
-                    // frame keeps the byte order of the machine, which is the
-                    // swap `image` makes over the whole buffer.
-                    sample.copy_from_slice(&[data[at + 1], data[at]]);
-                }
-            }
-        }
-        Ok(())
+        self.sink
+            .place_interleaved(data, row, self.layout.channels, self.layout.sample_bytes)
+            .ok_or_else(missing_colour_planes)
     }
 }
 

@@ -28,6 +28,16 @@ pub enum PixelFormat {
     Yuv444P8,
     Yuv444P10,
     Yuv444P12,
+    /// Planar 4:2:0, 4:2:2 and 4:4:4 at fourteen and sixteen bits, which no
+    /// libheif build here can be asked for but a container can state: x265 is
+    /// built for eight, ten and twelve bits only, so the fixtures in
+    /// `tests/fixtures` stop at twelve. A page that states one of these keeps
+    /// its own planes rather than being converted to r,g,b.
+    Yuv420P14,
+    Yuv422P14,
+    Yuv444P14,
+    Yuv420P16,
+    Yuv422P16,
     Yuv444P16,
     /// Gray or r,g,b at the depth a container states, for the four depths
     /// between the eight bits and the sixteen bits a decoder's colour type
@@ -119,9 +129,13 @@ impl PixelFormat {
                 Self::Gray12
             }
             Self::Gray13 | Self::Rgb13 => Self::Gray13,
-            Self::Gray14 | Self::Rgb14 => Self::Gray14,
+            Self::Gray14 | Self::Rgb14 | Self::Yuv420P14 | Self::Yuv422P14 | Self::Yuv444P14 => {
+                Self::Gray14
+            }
             Self::Gray15 | Self::Rgb15 => Self::Gray15,
-            Self::Gray16 | Self::Rgb16 | Self::Yuv444P16 => Self::Gray16,
+            Self::Gray16 | Self::Rgb16 | Self::Yuv420P16 | Self::Yuv422P16 | Self::Yuv444P16 => {
+                Self::Gray16
+            }
             Self::Gray32F | Self::Rgb32F => Self::Gray32F,
         }
     }
@@ -157,6 +171,11 @@ impl PixelFormat {
             | Self::Yuv444P8
             | Self::Yuv444P10
             | Self::Yuv444P12
+            | Self::Yuv420P14
+            | Self::Yuv422P14
+            | Self::Yuv444P14
+            | Self::Yuv420P16
+            | Self::Yuv422P16
             | Self::Yuv444P16 => ColorFamily::YUV,
         }
     }
@@ -176,9 +195,9 @@ impl PixelFormat {
             Self::Gray11 | Self::Rgb11 => 11,
             Self::Gray12 | Self::Rgb12 | Self::Yuv444P12 | Self::Yuv420P12 | Self::Yuv422P12 => 12,
             Self::Gray13 | Self::Rgb13 => 13,
-            Self::Gray14 | Self::Rgb14 => 14,
+            Self::Gray14 | Self::Rgb14 | Self::Yuv420P14 | Self::Yuv422P14 | Self::Yuv444P14 => 14,
             Self::Gray15 | Self::Rgb15 => 15,
-            Self::Gray16 | Self::Rgb16 | Self::Yuv444P16 => 16,
+            Self::Gray16 | Self::Rgb16 | Self::Yuv420P16 | Self::Yuv422P16 | Self::Yuv444P16 => 16,
             Self::Gray32F | Self::Rgb32F => 32,
         }
     }
@@ -227,8 +246,16 @@ impl PixelFormat {
     /// Chroma subsampling of this format, as VapourSynth reports it.
     pub const fn sub_sampling(self) -> (i32, i32) {
         match self {
-            Self::Yuv420P8 | Self::Yuv420P10 | Self::Yuv420P12 => (1, 1),
-            Self::Yuv422P8 | Self::Yuv422P10 | Self::Yuv422P12 => (1, 0),
+            Self::Yuv420P8
+            | Self::Yuv420P10
+            | Self::Yuv420P12
+            | Self::Yuv420P14
+            | Self::Yuv420P16 => (1, 1),
+            Self::Yuv422P8
+            | Self::Yuv422P10
+            | Self::Yuv422P12
+            | Self::Yuv422P14
+            | Self::Yuv422P16 => (1, 0),
             _ => (0, 0),
         }
     }
@@ -328,6 +355,11 @@ impl PixelFormat {
             Self::Yuv444P8 => "YUV444P8",
             Self::Yuv444P10 => "YUV444P10",
             Self::Yuv444P12 => "YUV444P12",
+            Self::Yuv420P14 => "YUV420P14",
+            Self::Yuv422P14 => "YUV422P14",
+            Self::Yuv444P14 => "YUV444P14",
+            Self::Yuv420P16 => "YUV420P16",
+            Self::Yuv422P16 => "YUV422P16",
             Self::Yuv444P16 => "YUV444P16",
         }
     }
@@ -1058,6 +1090,22 @@ fn write_planes<T: Sample, const CHANNELS: usize>(
             shift,
         );
     }
+    // A row that is not transposed is written along the row it reads, and a
+    // sample the decoder already holds in the frame's own word needs no move:
+    // one pass fills every plane the frame asks for, reading the buffer once
+    // instead of once a plane. The mirrors only pick the source row and
+    // reverse the destination row, which the same walk does.
+    if !transform.transposes() && shift == 0 && planes > 0 && matches!(T::SIZE, 1 | 2) {
+        return write_interleaved::<T, CHANNELS>(
+            frame,
+            layout,
+            planes,
+            pixels,
+            transform,
+            plane_row_bytes,
+            output_height,
+        );
+    }
     for plane in 0..planes {
         let target = plane_target(frame, plane, plane_row_bytes, output_height)?;
         match plane {
@@ -1067,6 +1115,56 @@ fn write_planes<T: Sample, const CHANNELS: usize>(
         }
     }
 
+    Ok(())
+}
+
+/// Fills every plane of a non-transposed frame from one walk over the buffer.
+///
+/// This is [`crate::planar`]'s pass with the frame's own planes as its
+/// destination, so the decoder's buffer is read once rather than once per
+/// plane. A plane count below the channel count is the leading channels only,
+/// which is how a call that hands out no alpha drops the fourth channel
+/// without a second read.
+fn write_interleaved<T: Sample, const CHANNELS: usize>(
+    frame: &mut VideoFrameMut,
+    layout: &ImageLayout,
+    planes: usize,
+    pixels: &[u8],
+    transform: Transform,
+    plane_row_bytes: usize,
+    output_height: usize,
+) -> Result<()> {
+    let mut targets = [None; 4];
+    for (index, slot) in targets.iter_mut().take(planes).enumerate() {
+        *slot = Some(plane_target(frame, index, plane_row_bytes, output_height)?);
+    }
+    for row in 0..output_height {
+        let source_row = if transform.flip_y {
+            output_height - 1 - row
+        } else {
+            row
+        };
+        let start = source_row * layout.row_bytes;
+        let source = &pixels[start..start + layout.row_bytes];
+        let mut rows: [&mut [u8]; 4] = [&mut [], &mut [], &mut [], &mut []];
+        for (slot, target) in rows.iter_mut().zip(targets.iter()).take(planes) {
+            let target = target.expect("every plane was given a target");
+            // Safety: `plane_target` checked this plane's stride against the
+            // row size, so every row of it fits, and no two targets are the
+            // same plane.
+            *slot = unsafe { slice::from_raw_parts_mut(target.row_start(row), plane_row_bytes) };
+        }
+        match T::SIZE {
+            1 => crate::planar::place8::<CHANNELS>(source, &mut rows[..planes]),
+            2 => crate::planar::place16::<CHANNELS>(source, &mut rows[..planes]),
+            _ => unreachable!("the caller takes this path for one and two byte samples"),
+        }
+        if transform.flip_x {
+            for destination in rows[..planes].iter_mut() {
+                reverse_samples(destination, T::SIZE);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2036,6 +2134,52 @@ mod tests {
             sorted.sort_unstable();
             assert_eq!(*rows, sorted, "column block {block} goes back over rows");
             assert_eq!(rows.len(), 70, "column block {block}");
+        }
+    }
+
+    /// A planar yuv format says the depth its samples carry and the
+    /// subsampling its chroma planes hold, at every depth VapourSynth names.
+    ///
+    /// The fourteen and sixteen bit arms have no fixture: x265 is built for
+    /// eight, ten and twelve bits, so `heif-enc` refuses to write one. What
+    /// this holds is the table itself, which is what a page from a
+    /// multi-depth encoder is read through.
+    #[test]
+    fn the_yuv_formats_name_their_depth_and_subsampling() {
+        for (format, depth, subsampling) in [
+            (PixelFormat::Yuv420P8, 8, (1, 1)),
+            (PixelFormat::Yuv420P10, 10, (1, 1)),
+            (PixelFormat::Yuv420P12, 12, (1, 1)),
+            (PixelFormat::Yuv420P14, 14, (1, 1)),
+            (PixelFormat::Yuv420P16, 16, (1, 1)),
+            (PixelFormat::Yuv422P8, 8, (1, 0)),
+            (PixelFormat::Yuv422P14, 14, (1, 0)),
+            (PixelFormat::Yuv422P16, 16, (1, 0)),
+            (PixelFormat::Yuv444P8, 8, (0, 0)),
+            (PixelFormat::Yuv444P14, 14, (0, 0)),
+            (PixelFormat::Yuv444P16, 16, (0, 0)),
+        ] {
+            let name = format.name();
+            assert_eq!(format.bits_per_sample(), depth, "{name}");
+            assert_eq!(format.sub_sampling(), subsampling, "{name}");
+            assert_eq!(format.color_family(), ColorFamily::YUV, "{name}");
+            assert_eq!(format.plane_count(), 3, "{name}");
+            // Only the eight bit formats are stored in a byte.
+            let word = if depth == 8 { 1 } else { 2 };
+            assert_eq!(format.bytes_per_sample(), word, "{name}");
+            assert_eq!(format.integer_max(), ((1u32 << depth) - 1) as u16, "{name}");
+            assert_eq!(format.alpha_format().bits_per_sample(), depth, "{name}");
+            assert_eq!(
+                format.alpha_format().color_family(),
+                ColorFamily::Gray,
+                "{name}"
+            );
+            let family = match subsampling {
+                (1, 1) => "420",
+                (1, 0) => "422",
+                _ => "444",
+            };
+            assert_eq!(format.name(), format!("YUV{family}P{depth}"), "{name}");
         }
     }
 }

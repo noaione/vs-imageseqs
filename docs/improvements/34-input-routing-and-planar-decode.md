@@ -761,6 +761,19 @@ target. The acceptance is byte equality against the scalar kernel over the
 fixtures and a run of synthetic blocks, and the measurement needs a quiet
 machine: repeated runs of one unchanged binary swung threefold while this was written.
 
+**what the generated code says, asked again 2026-11-11.** `cargo asm` cannot
+answer it directly, because the crate is a cdylib and the tool wants an rlib:
+`cargo rustc --release --target x86_64-pc-windows-msvc -- --emit asm -C
+target-cpu=x86-64-v4` writes the assembly, and in that build `colour_block`,
+`widen`, `from_565`, `blocks` and `write_block` are not functions at all -- every
+one of them is inlined into `formats::dds::decode`, which is the only symbol the
+module leaves (2230 lines, 2126 instructions). That body is already partly
+vector: six `vpshufb`, five `vpmullw`, twelve `vpaddw`, five `vpsrlw` and two
+`vpunpck`. So the question is no longer "does the compiler vectorise the
+block" -- it does, in places -- but "is what it produced worse than a hand
+kernel", which is the measurement the paragraph above still owes, and it still
+needs a machine that stops moving.
+
 What the references say, now that DirectXTex is available: this reader's colour
 decode differs from `texconv`'s and from Pillow's by at most one channel step,
 and those two differ from each other as well (`target/bench/dds-rounding.txt`).

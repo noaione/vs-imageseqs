@@ -216,7 +216,7 @@ pub fn decode(info: &ImageInfo) -> Result<DecodedImage> {
         transform: info.transform,
         pixels: Pixels::Interleaved {
             color_type: header.color_type,
-            buffer: pixels,
+            buffer: pixels.into(),
         },
         timings: DecodeTimings {
             open,

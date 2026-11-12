@@ -1025,7 +1025,7 @@ impl Buffers {
                 }
                 Ok(Pixels::Interleaved {
                     color_type: still.color_type,
-                    buffer,
+                    buffer: buffer.into(),
                 })
             }
         }
@@ -1177,7 +1177,7 @@ mod tests {
     fn interleaved(color_type: ColorType, buffer: &[u8]) -> Pixels {
         Pixels::Interleaved {
             color_type,
-            buffer: buffer.to_vec(),
+            buffer: buffer.to_vec().into(),
         }
     }
 
@@ -1391,7 +1391,7 @@ mod tests {
             interleaved(ColorType::Rgb8, &RGB),
             Pixels::Interleaved {
                 color_type: ColorType::Rgb8,
-                buffer: RGB.to_vec(),
+                buffer: RGB.to_vec().into(),
             }
         );
     }

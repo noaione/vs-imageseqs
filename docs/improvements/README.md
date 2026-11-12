@@ -144,6 +144,108 @@ open plus frames to 4.99 s.
 
 ## plans
 
+### jxl decode threads — 2026-11-11
+
+[49 a jpeg xl page decoded on more than one thread](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/49-jxl-decode-threads.md)
+gives the `jxl` crate the parallel runner it has always accepted: the decoder
+answers one thread when it is given none, so a page decoded a tile after
+another, and `read` was 415 of a 437 ms frame. A 35-page corpus is 2.5x
+faster with the lookahead off and 1.6x with it on, and 1.6x for a consumer
+that keeps its own frame requests in flight. The width is
+`available_parallelism().min(4)`, which is where the gain stops once the
+reader's workers are also decoding (four and eight threads are 1.60x and
+1.61x). What is left is the thread count belonging to the reader rather than
+the decoder, and the same question for the avif path, which is one item one
+thread for the same reason.
+
+### dds row stream — 2026-11-11
+
+[50 a dds row stream](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/50-dds-row-stream.md)
+is **decided against**, and the page exists because the four attempts and their
+numbers lived only in this index. DirectDraw's reader decodes into a 4.3 MB
+`Vec` the plugin then copies into the frame, about 0.86 ms a file, against a
+1.15 ms gap to the reader it replaced -- and four streams that would have
+removed that copy all measured slower than keeping it (67.1, 62.5, 66.1 and
+57.7 ms against 60.7 and 55.3). A DXT block is four by four pixels of a
+surface, so every stream trades one bulk copy for per-pixel work, which is the
+rule `ppm`'s 21% win established from the other side. The `dds` row is closed;
+the DXT colour kernel in [34](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/34-input-routing-and-planar-decode.md)
+is the separate proposal that is still open.
+
+### yuv depth arms — 2026-11-11
+
+[51 a colour page at fourteen or sixteen bits keeps its planes](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/51-yuv-depth-arms.md)
+fills the one hole left in the yuv mapping: `heif.rs`'s `yuv_format` armed
+8/10/12 at every chroma and 16 only at 4:4:4, so a colour page stating
+fourteen or sixteen bits was converted to r,g,b. VapourSynth names
+`YUV420P14`, `YUV422P14`, `YUV444P14`, `YUV420P16` and `YUV422P16`, so the
+plugin only had to name the right one. There is no fixture and the page says
+why: `heif-enc --bit-depth 14` answers "Bit depth not supported by x265", and
+AV1 stops at twelve, so the arms are held by two table tests until an encoder
+built for sixteen bits writes a file.
+
+### decoder vectorisation — 2026-11-10
+
+[48 a faster decode path](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/48-decoder-vectorisation.md)
+is the first plan here that is about the decoders rather than about the
+scheduling around them. Its evidence is a per-format stage table measured on
+both x86-64 builds, and it finds three things: the `.avx512` library the wheel
+ships is 22% *slower* than the baseline library on a DirectDraw surface; the
+interleave that every row stream and every buffered reader performs in
+`src/decoder.rs` and `src/pixel.rs` is the same loop written five times, worth
+4.0x in a prototype kernel at 3 channels and 3.5x at 4; and a DXT5 surface's
+current shape costs about 1.8x the same arithmetic written plainly, before any
+kernel at all. It proposes one shared kernel in a new `src/planar.rs` plus five
+algorithmic changes, no new dependency, and no byte of output changed. The
+crate question is answered in the page and ruled out: every decoder already
+runs the widest SIMD path its crate offers, and the extractions that are legal
+are not faster, which is why `qoi` is left as a crate.
+
+The question was asked again on aarch64, and the answer narrowed: the eight
+bit vector loses to the compiler's own `ld3`/`ld4` for three and four
+channels, but the sixteen bit big-endian one wins 1.3x to 4.3x on the loop
+and the two channel eight bit one 1.5x. `src/planar.rs` now carries that
+interleave for `png`'s channel walk and farbfeld's rows, which is 3% to 7%
+off a sixteen bit png, 7% to 9% off a png's gray+alpha and rgba pages, and
+29% off a farbfeld. The x86-64 libraries were not re-measured in that round,
+and the page says so.
+
+The gif compose and its arm blend landed in the same round: the rectangle walk
+and a NEON select took 1.27x off a 1024x1024 animation and 1.14x off a still
+gif, and the apng and webp vector halves are still open.
+The buffered write landed last: `src/pixel.rs`'s `write_planes` fills every
+plane a non-transposed frame asks for from one read of the decoder's picture,
+which is 0.62x to 0.82x on the `convert` stage and identical pixels.
+The animated webp's blend looks its reciprocal up in a table rather than dividing
+a pixel, which is 1.18x on a 1024x1024 animation; the vector halves of that
+blend and of the apng one are still open.
+The shared canvas landed too: an animated file's interleaved picture is held
+in an `Arc<[u8]>`, so the presentation cache hands a pointer out rather than
+copying a canvas per output frame (2% to 4% on an animation's `fetch`).
+The targa half landed with a corpus of its own
+(`target/bench/make-tga-corpus.py`): the buffered 16-bit and palette pages
+now write r,g,b while they widen, which is 2.24x and 1.80x the read, and the
+plain-copy shapes are unchanged.
+The sixteen bit apng blend is a NEON multiply-high now, 3% on a
+`target/bench/apng16-corpus` page; the eight bit one was already vector, and the
+webp reciprocal has no vector form at all (a 41 bit product and a table gather).
+The Windows host then answered the four questions the page left it. The compose
+row's AVX2 and AVX-512 blocks were written and declined: the row is twelve
+bytes a pixel of traffic and the scalar walk already runs at that host's 19
+GB/s ceiling, so the wide builds' own loops match the blocks and the gif
+animation does not move. The one-pass write was confirmed on both x86-64
+libraries, 1.03x to 1.40x of the per-plane gather. The sixteen bit big-endian
+walk was found unvectorised there, so it gained an AVX2 block of its own: a
+farbfeld reads 1.34x faster and a gray16 page 1.16x, with identical pixels.
+The targa half was then re-measured with a corpus written for it: the two
+folded shapes read 1.59x to 1.78x faster on both libraries and the two
+plain-copy shapes do not move, every page byte identical. The per-format stage
+table is now measured on this host too, for both libraries, as a starting
+point rather than a comparison, because the same sets drift by up to 40%
+between sessions here, and the animation rows are on it as well. What is left
+is the sixteen bit apng corpus. The page's *what the x86-64 host found*
+section has the measurements and `docs/HANDOFF.md` has the commands.
+
 ### several frames in flight — 2026-11-09
 
 [45 the second clip of a call](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/45-async-request-cache.md),
@@ -364,16 +466,16 @@ and a backward walk of a long animation costs 1.3x to 2.4x a forward one.
 [16](16-container-orientation.md),
 [17](17-avif-container-robustness.md) and
 [18](18-demand-aware-decoding.md) have landed, and so has
-[20](20-distribution-followups.md)'s release-metadata slice. Address that plan's
-**source-build consistency** next, which needs a container and a network the
-machine this was written on does not have, then its macOS portability and source
-provenance. [19](19-avif-thread-budget.md) has been measured and decided against;
-it needs no further work.
+[20](20-distribution-followups.md) is **closed**: its release-metadata slice and
+macOS runtime portability are what it keeps, and its source-build consistency
+and macOS provenance are not being pursued (the maintainer's decision,
+2026-11-11). [19](19-avif-thread-budget.md) has been measured and decided
+against; it needs no further work.
 
 | plan | evidence | priority | status |
 | --- | --- | --- | --- |
 | [19 AVIF thread budget](19-avif-thread-budget.md) | default native decoder threading runs inside the prefetch pool | medium | measured and decided against: the default already uses 8.8 of ten cores, and dividing them by the worker count costs 20% |
-| [20 distribution follow-ups](20-distribution-followups.md) | sdist input mismatch, untested archive rebuilds, macOS dependencies and release metadata | high for source builds | release metadata, repeatable staging and macOS runtime portability implemented; source rebuilds and macOS provenance remain open |
+| [20 distribution follow-ups](20-distribution-followups.md) | sdist input mismatch, untested archive rebuilds, macOS dependencies and release metadata | high for source builds | **closed**: release metadata, repeatable staging and macOS runtime portability landed; source rebuilds and macOS provenance are not being pursued |
 | [21 animated images](21-animated-images.md) | GIF, APNG, WebP, JXL and AVIF/HEIF sequence tracks need timeline expansion, composition, delay sampling and bounded random access | medium to high | implemented for every format it names, with the regression and playback benchmarks recorded |
 | [25 decode column parity](25-decode-column-parity.md) | Pillow's `decode` stops at `L` while the plugin's ends at the file's own format, so on a palette corpus the two columns are 12 MB against 36 MB per frame | medium for how the suites are read | measured, not implemented: after 22 the plugin is ahead on all three sets measured, so what is left is how the suites report the format they compared |
 
@@ -398,7 +500,7 @@ second Linux wheel, built in the Alpine pypa image.
 | plan | touches | expected | risk | status |
 | --- | --- | --- | --- | --- |
 | [37 Linux build caching](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/37-linux-build-caching.md) | Linux wheel CI, build/setup scripts, native cache checker, source packaging | reuse compiled codecs and Cargo dependencies, plus musl Rust and Python downloads | low: exact native keys and complete-install checks, repair and clean-container validation still run | implemented; local checks pass, CI cache reuse and timings pending |
-| [33 musllinux wheel](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/33-musllinux-wheel.md) | `tools/build-musllinux.sh`, `tools/make-linux-source-bundle.sh`, `tools/check-linux-wheel.py`, CI, notices, `tests/check-packaging-tools.py` | a `musllinux_1_2_x86_64` wheel beside the manylinux one, with the same three plugin libraries and the C++ runtime the musl policy does not promise the host | low: it adds a wheel, and no frame, format, property or argument changes | written and locally checked; the container build and its validation run in CI |
+| [33 musllinux wheel](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/33-musllinux-wheel.md) | `tools/build-musllinux.sh`, `tools/make-linux-source-bundle.sh`, `tools/check-linux-wheel.py`, CI, notices, `tests/check-packaging-tools.py` | a `musllinux_1_2_x86_64` wheel beside the manylinux one, with the same three plugin libraries and the C++ runtime the musl policy does not promise the host | low: it adds a wheel, and no frame, format, property or argument changes | **implemented and closed**: the container build and its validation run in CI, and the release carries the wheel |
 | [32 host-safe CPU variant builds](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/32-host-safe-cpu-variant-builds.md) | `hatch_build.py`, `tests/check-packaging-tools.py` | an explicit Cargo target keeps AVX2/AVX512 flags out of build scripts and procedural macros that run on CI | low: target dependencies keep their CPU flags, wheel layout unchanged | implemented, Windows wheel, all variants and Cargo isolation validated |
 | [31 stage bundled runtime libraries](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/31-stage-bundled-runtime-libraries.md) | `tools/stage-native.py`, `tests/check-packaging-tools.py` | macOS/Linux runtime dependencies under `imageseqs/lib/` stage without being mistaken for plugin variants | low: plugin validation stays at the manifest directory, wheel contents unchanged | implemented, local platform-layout regression checks |
 | [30 Windows AVIF sequence decoder](https://github.com/noaione/vs-imageseqs/blob/master/docs/improvements/30-windows-avif-sequence-decoder.md) | `vcpkg.json`, `tools/vcpkg-ports/libheif/`, wheel/source packaging, CI, notices, `tests/check-autoload.py` | `animation.avif` decodes through libheif's built-in dav1d backend instead of failing with no matching decoder | low: enables the existing decoder, keeps libheif default features disabled | implemented, Windows release and installed-wheel validation |
@@ -406,7 +508,7 @@ second Linux wheel, built in the Alpine pypa image.
 | [24 avx512 variant](24-cpu-variant-avx512.md) | `hatch_build.py` | the same, with the `x86-64-v4` library and the `avx512` suffix | low: it needs avx512f/bw/cd/dq/vl, and the core only picks it on a host that has them | implemented |
 | [22 png decode path](22-png-decode-path.md) | `src/formats/png.rs`, `src/decoder.rs`, `src/clip.rs`, `target/bench/decode/` | a png this module can walk fills the frame from the decoder's own rows, and a palette page is expanded here rather than by the decoder: 1.36x on `sandbox/posterize-check` and 1.23x on `sandbox/png`, which puts the plugin ahead of Pillow's decode column on every set measured (`0.689x`, `0.891x`, `0.906x`) | medium: it moves where every sample is written, so it ships with a 245 line parity check and a per-file refusal report | implemented |
 | [18 demand-aware decoding](18-demand-aware-decoding.md) | `src/decoder.rs`, `src/clip.rs`, `src/prefetch.rs`, `src/formats/avif.rs`, `src/formats/heif.rs`, fixtures, `tests/readalpha.vpy` | a call that hands out no alpha clip does not decode an avif alpha item, and a call that does not export an ICC profile does not keep its bytes | low to medium, a colour-only read stops failing on a broken alpha item | implemented |
-| [20 distribution follow-ups](20-distribution-followups.md) | `tools/`, `tests/check-packaging-tools.py`, CI, `.gitignore`, `pyproject.toml` | a release cannot be published from a tag whose version, `pyproject.toml`, `Cargo.toml` and changelog do not agree, and a second build in one checkout starts from what it built | low, release tooling and CI only | release metadata and repeatable staging implemented; source rebuilds, macOS portability and provenance proposed |
+| [20 distribution follow-ups](20-distribution-followups.md) | `tools/`, `tests/check-packaging-tools.py`, CI, `.gitignore`, `pyproject.toml` | a release cannot be published from a tag whose version, `pyproject.toml`, `Cargo.toml` and changelog do not agree, and a second build in one checkout starts from what it built | low, release tooling and CI only | **closed**: release metadata, repeatable staging and macOS runtime portability landed; source rebuilds and provenance are not being pursued |
 | [17 AVIF container robustness](17-avif-container-robustness.md) | `src/formats/avif.rs`, `tests/make-alpha-fixtures.py`, fixtures, `tests/readalpha.vpy` | a malformed avif container is refused instead of panicking, allocating gigabytes or answering wrongly, and a container this reader will not decode is described as the format the fallback decoder produces | low to medium, it changes what an unsupported container is described as | implemented |
 | [16 container orientation](16-container-orientation.md) | `src/formats/avif.rs`, `src/formats/heif.rs`, `src/decoder.rs`, fixtures, `tests/readalpha.vpy` | an avif or heif that states `irot`/`imir` is handed out the way the file describes it, `apply_rotation=False` gives the stored picture back, and `ImgSeqOrientation` reports the code | medium, it moves the size of every file whose container states a transform | implemented |
 | [15 AVIF decoder progress](15-avif-decoder-progress.md) | `src/formats/avif.rs`, fixtures, `tests/readalpha.vpy` | a frame request on an item that holds no picture errors instead of hanging, and the item decoder runs at low latency | low, an error path and decoder settings | implemented |
@@ -638,17 +740,21 @@ decodes to a buffer by construction.
 - **a sixteen bit file whose decoder does not fill the range**, which the format
   claims anyway, as every other reader here does
   ([10](10-nominal-bit-depth.md)).
-- **`YUV420P14` and its siblings.** libheif can report fourteen bits for a page
-  whose samples it decodes itself and `yuv_format` has no arm for it, so such a
-  page falls back to rgb ([10](10-nominal-bit-depth.md),
-  [12](12-heif-avif-yuv-output.md)).
+- **`YUV420P14` and its siblings are landed** ([51](51-yuv-depth-arms.md)): a
+  colour page that states fourteen or sixteen bits at 4:2:0, 4:2:2 or 4:4:4
+  keeps its own planes instead of falling back to rgb. There is no fixture --
+  this machine's x265 stops at twelve bits -- so two table tests are what hold
+  it, and a `-b 14` pass on any encoder built for sixteen bits would close
+  that.
 - **twelve bit heic, tiled (grid) avif, gain maps, ten bit PQ/HDR avif**: read
   nowhere and absent from the sandbox ([12](12-heif-avif-yuv-output.md)).
-- **a ten bit monochrome heic has no fixture.** the heif row of
-  [10](10-nominal-bit-depth.md) is implemented and unverified: the fixture needs
-  `heif-enc`, which is not installed on the machine the plan was built on, and a
-  `heif-enc` pass over `tests/make-alpha-fixtures.py`'s ten bit gray source is
-  what would close it.
+- **the ten bit monochrome heic is checked now, not deferred.**
+  `tests/fixtures/mono-10.heic` and `mono-12.heic` are encoded with the
+  commands `tests/make-alpha-fixtures.py` documents, and `tests/readalpha.vpy`'s
+  `test_variable_depth` reads them as `Gray10` and `Gray12`, compares every
+  sample against the source png's own and requires an opaque alpha plane, so
+  the heif row of [10](10-nominal-bit-depth.md) is verified rather than
+  unverified.
 
 **what a file states and the plugin does not read**
 
@@ -671,13 +777,12 @@ decodes to a buffer by construction.
   ([11](11-jxl-direct.md)).
 - **`pclr`, `cdef`, `res`/`resc` and the `uuid` boxes of a jp2**
   ([06](06-jpeg-2000-backend.md)).
-- **the tiles of a grid avif, in this reader.** `dimg` names them and the probe
-  already reads that reference; what is missing is each tile's own coding record
-  and the placement of the decoded tiles into a picture of the grid's size. A grid
-  is read today by `libheif`, which the walk hands a container it refuses, and
-  `tests/readalpha.vpy`'s `test_avif_grid` checks the joined picture's four cells;
-  reading it here is what would remove that fallback, not what would make a grid
-  readable ([17](17-avif-container-robustness.md)).
+- **the grid avif this reader cannot join: a monochrome one.** A colour grid is
+  joined here now, from `dimg`, each tile's `av1C` and `ispe`, and the grid
+  item's own 8-byte tiling descriptor; what is left is the monochrome case,
+  whose missing piece is a monochrome avif path of this reader's, not the join.
+  `tests/readalpha.vpy`'s `test_avif_grid` still checks the picture `libheif`
+  joins ([17](17-avif-container-robustness.md)).
 - **a heic that stores av1**: the `ispe`/`av1C` read would apply to it and
   nothing in the corpus is one ([05](05-monochrome-heif.md)).
 
@@ -700,9 +805,6 @@ decodes to a buffer by construction.
 - the heif and heic hook probe's 5 ms for all 35 pages, and libheif parsing a
   monochrome page a second time when it decodes it
   ([05](05-monochrome-heif.md)).
-- the jxl probe parsing the header twice when `apply_rotation=False`, 0.065 ms
-  per file, which is what makes `ImgSeqOrientation` non-empty for a jxl at all
-  ([11](11-jxl-direct.md)).
 - `mismatch=True` beside rotation, two ways to get a heterogeneous clip with
   only one of them a property a graph can read
   ([09](09-exif-orientation.md)).
